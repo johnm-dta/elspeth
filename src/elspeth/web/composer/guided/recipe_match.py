@@ -57,6 +57,7 @@ from typing import Any
 
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.composer.guided.state_machine import SinkResolved, SourceResolved
+from elspeth.web.composer.recipes import SlotSpec, get_recipe
 
 # ---------------------------------------------------------------------------
 # Type aliases for the predicate registry
@@ -79,13 +80,20 @@ class RecipeMatch:
     state are populated. The route handler emits a ``recipe_offer`` turn
     that asks the operator to fill the remaining required slots before
     ``_execute_apply_pipeline_recipe`` is invoked (see Errata C2).
+
+    ``unsatisfied_slots`` is the schema for the required slots NOT covered by
+    ``slots`` — the emitter projects these to a wire-friendly shape so the
+    frontend can render an editable form for them.  Only *required* slots are
+    included; optional slots with declared defaults are auto-filled by
+    ``validate_slots`` at apply time and are not surfaced to the operator.
     """
 
     recipe_name: str
     slots: Mapping[str, Any]
+    unsatisfied_slots: Mapping[str, SlotSpec]
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "slots")
+        freeze_fields(self, "slots", "unsatisfied_slots")
 
 
 # ---------------------------------------------------------------------------
@@ -236,8 +244,19 @@ def match_recipe(
     """
     for predicate, recipe_name, slot_resolver in _RECIPE_PREDICATES:
         if predicate(source, sink):
+            resolved_slots = slot_resolver(source, sink)
+            # Look up the recipe to derive the unsatisfied required-slot
+            # schema. The predicate registry's recipe_name MUST be registered
+            # — if not, that's an invariant violation, crash loudly.
+            recipe = get_recipe(recipe_name)
+            if recipe is None:
+                raise ValueError(f"Recipe '{recipe_name}' is in _RECIPE_PREDICATES but not registered in recipes.py — invariant violation.")
+            unsatisfied: dict[str, SlotSpec] = {
+                name: spec for name, spec in recipe.slots.items() if spec.required and name not in resolved_slots
+            }
             return RecipeMatch(
                 recipe_name=recipe_name,
-                slots=slot_resolver(source, sink),
+                slots=resolved_slots,
+                unsatisfied_slots=unsatisfied,
             )
     return None

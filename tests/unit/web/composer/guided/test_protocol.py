@@ -82,8 +82,50 @@ class TestPayloadShapes:
             "recipe_name": "classify-rows-llm-jsonl",
             "slots": {},
             "alternatives": [],
+            "unsatisfied_slots": [],
         }
         assert payload["recipe_name"] == "classify-rows-llm-jsonl"
+
+    def test_recipe_offer_payload_with_unsatisfied_slots(self) -> None:
+        """unsatisfied_slots carries the editable schema for unfilled required slots."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        payload: RecipeOfferPayload = {
+            "recipe_name": "classify-rows-llm-jsonl",
+            "slots": {"source_blob_id": "abc-uuid", "output_path": "out.jsonl"},
+            "alternatives": ["build_manually"],
+            "unsatisfied_slots": [
+                {
+                    "name": "classifier_template",
+                    "slot_type": "str",
+                    "description": "Jinja2 template",
+                    "required": True,
+                },
+                {
+                    "name": "model",
+                    "slot_type": "str",
+                    "description": "LLM model identifier",
+                    "required": True,
+                },
+            ],
+        }
+        assert validate_payload(TurnType.RECIPE_OFFER, payload) is None
+        assert payload["unsatisfied_slots"][0]["name"] == "classifier_template"
+
+    def test_recipe_offer_payload_missing_unsatisfied_slots_rejected(self) -> None:
+        """A payload missing the new required key surfaces a validation error."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.RECIPE_OFFER,
+            {  # type: ignore[arg-type]
+                "recipe_name": "x",
+                "slots": {},
+                "alternatives": [],
+            },
+        )
+        assert err is not None
+        assert "unsatisfied_slots" in err
 
 
 class TestTurnResponse:

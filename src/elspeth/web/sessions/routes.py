@@ -1993,7 +1993,12 @@ async def _dispatch_guided_respond(
 
             recipe_name = str(edited.get("recipe_name", ""))
             slots = dict(edited.get("slots", {}))
-            match = _RecipeMatch(recipe_name=recipe_name, slots=slots)
+            # The "accept" reconstruction is post-acceptance: the operator has
+            # supplied the slot values (merged into ``edited.slots`` by the
+            # widget).  ``unsatisfied_slots`` was a property of the *offer*;
+            # at apply time ``handle_step_2_5_recipe_apply`` consumes only
+            # ``recipe_name`` and ``slots``, so an empty mapping is correct.
+            match = _RecipeMatch(recipe_name=recipe_name, slots=slots, unsatisfied_slots={})
 
             handler_result = handle_step_2_5_recipe_apply(
                 state=state,

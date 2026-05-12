@@ -1,6 +1,7 @@
 // src/components/chat/guided/RecipeOfferTurn.tsx
 //
-// Guided-mode widget for the recipe_offer turn type (Task 7.7).
+// Guided-mode widget for the recipe_offer turn type (Task 7.7, extended for
+// Gap 6 / Task 10.0 — editable inputs for unsatisfied required slots).
 // Conventions inherited from SingleSelectTurn (Task 7.2 template),
 // InspectAndConfirmTurn (Task 7.3), MultiSelectWithCustomTurn (Task 7.4),
 // SchemaFormTurn (Task 7.5), and ProposeChainTurn (Task 7.6).
@@ -24,23 +25,17 @@
 // The .guided-propose-step-card rule (App.css:4285-4290) provides:
 //   background-color: surface-elevated, border: border-strong, border-radius: radius-lg,
 //   padding: space-md.
-// This is pure card chrome with zero step-list-specific styling.  The step-list
-// scaffolding (guided-propose-steps <ol>, guided-propose-step-header badge row)
-// is step-list-specific and is NOT applied here.  RecipeOfferTurn uses a single
-// <div class="guided-propose-step-card"> as the card shell.  New rules added
-// for this widget live in the guided-recipe-* namespace.  See App.css section
-// header at ~line 4420 for the reuse documentation.
+// This is pure card chrome with zero step-list-specific styling.  New rules added
+// for this widget live in the guided-recipe-* namespace.
 //
-// SCOPE -- submit paths (verified against routes.py:1943-2023 and
-//          state_machine.py:_advance_step_2_5):
+// SCOPE -- submit paths:
 //
 //   WIRED: "Apply recipe" -> chosen: ["accept"]
-//          IMPORTANT: The backend (routes.py:1965-1967) reads edited_values to
-//          reconstruct the RecipeMatch.  This widget MUST echo payload.recipe_name
-//          and payload.slots in edited_values.  Sending edited_values: null causes
-//          the backend to fall back to RecipeMatch(recipe_name="", slots={}) and
-//          fail.  This differs from the plan-body spec which stated null -- the
-//          plan body was incomplete.
+//          The backend reconstructs the RecipeMatch from edited_values; the
+//          widget MUST send the merged slot map (pre-filled + operator-supplied).
+//          Disabled until every required unsatisfied slot has a non-empty
+//          trimmed value (offensive UX: the same constraint the backend will
+//          enforce, surfaced earlier).
 //
 //   WIRED: "Build manually" -> chosen: ["build_manually"]
 //          Backend only reads chosen on this path; edited_values: null is correct.
@@ -48,13 +43,12 @@
 //   NOT WIRED: alternatives-based alternative recipe selection.  The current
 //          backend only accepts ["accept"] or ["build_manually"]; any other chosen
 //          value returns HTTP 400.  The alternatives list is displayed for user
-//          information only.  If the user wants an alternative, Build Manually
-//          advances to Step 3 for manual construction.
+//          information only.
 //
 // WIRE-SHAPE:
 //   Apply recipe:   { chosen: ["accept"],
 //                     edited_values: { recipe_name: payload.recipe_name,
-//                                      slots: payload.slots },
+//                                      slots: { ...payload.slots, ...inputs } },
 //                     custom_inputs: null, accepted_step_index: null,
 //                     edit_step_index: null, control_signal: null }
 //   Build manually: { chosen: ["build_manually"],
@@ -62,18 +56,25 @@
 //                     accepted_step_index: null, edit_step_index: null,
 //                     control_signal: null }
 //
-// STATE:
-//   Zero widget-side state.  Each button is a pure click -> submit; no
-//   intermediate state is accumulated.  The firstRunRef focus-skip pattern is
-//   not needed (no view transitions).
+// SECURITY -- api_key_secret and other slot_type="str" inputs:
+//   "api_key_secret" carries the NAME of an inventory secret_ref, not a literal
+//   credential.  All str slots render with <input type="text">.  Using
+//   type="password" would suggest pasting a raw key, which the audit trail would
+//   then record verbatim through edited_values — that is the exact thing the
+//   secret_ref indirection exists to prevent.
 //
-// FOCUS MANAGEMENT:
-//   No programmatic focus on mount or interaction.  No view transitions or
-//   collapsible regions that would trigger the focus management patterns used in
-//   InspectAndConfirmTurn and SchemaFormTurn.
+// NUMERIC slots (slot_type="int" / "float"):
+//   Rendered with <input type="number">.  The backend recipe coercion accepts
+//   string forms ("42" → 42), so the input value is submitted as the raw string;
+//   no per-type coercion in the widget.
+//
+// STATE:
+//   Local state holds one string per unsatisfied slot, keyed by slot name.
+//   Initialised to "" for each entry.  Inputs are controlled.  Typing into
+//   inputs is not a "click" for the demo SLA budget.
 
-import { useId } from "react";
-import type { GuidedRespondRequest, RecipeOfferPayload } from "@/types/guided";
+import { useId, useMemo, useState } from "react";
+import type { GuidedRespondRequest, RecipeOfferPayload, RecipeSlotInput } from "@/types/guided";
 
 interface RecipeOfferTurnProps {
   payload: RecipeOfferPayload;
@@ -86,9 +87,6 @@ interface RecipeOfferTurnProps {
  * Scalars (string, number, boolean) are coerced to string.  Null/undefined
  * render as "null".  Arrays and objects are JSON-stringified so the user sees
  * the structure without a full JSON editor component.
- *
- * Mirrors formatOptionValue in ProposeChainTurn.  Not extracted to a shared
- * helper: two call sites do not meet the rule-of-three extraction threshold.
  */
 function formatSlotValue(value: unknown): string {
   if (value === null || value === undefined) return "null";
@@ -99,6 +97,20 @@ function formatSlotValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * Map a slot_type to the appropriate <input type="..."> value.
+ *
+ * "str" / "blob_id" / "str_list" all render as type="text".  Critically,
+ * type="password" is NEVER returned — api_key_secret carries the NAME of an
+ * inventory secret_ref, not the credential itself; the audit trail records
+ * edited_values verbatim, so masking the input would mislead the operator
+ * into pasting raw credentials.
+ */
+function inputTypeForSlot(slotType: RecipeSlotInput["slot_type"]): "text" | "number" {
+  if (slotType === "int" || slotType === "float") return "number";
+  return "text";
+}
+
 export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
   // useId scopes DOM IDs per-instance so multiple RecipeOfferTurns rendered
   // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
@@ -106,16 +118,48 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
   const reactId = useId();
   const slotsId = `${reactId}-slots`;
   const alternativesId = `${reactId}-alts`;
+  const inputsId = `${reactId}-inputs`;
+
+  // Controlled inputs for each unsatisfied slot, keyed by slot name.
+  // Initial value is "" — the disabled-state check below treats trimmed empty
+  // as "not filled", so the Apply button stays disabled until the operator
+  // supplies every required value.
+  const initialInputs = useMemo<Record<string, string>>(() => {
+    const seed: Record<string, string> = {};
+    for (const slot of payload.unsatisfied_slots) {
+      seed[slot.name] = "";
+    }
+    return seed;
+  }, [payload.unsatisfied_slots]);
+  const [slotInputs, setSlotInputs] = useState<Record<string, string>>(initialInputs);
+
+  function setSlotInput(name: string, value: string) {
+    setSlotInputs((prev) => ({ ...prev, [name]: value }));
+  }
+
+  // Apply is disabled until every required unsatisfied slot has a non-empty
+  // trimmed value.  This mirrors the backend's validate_slots check — fail
+  // fast at the UI rather than burn a round-trip on an HTTP 400.
+  const applyDisabled = payload.unsatisfied_slots.some((slot) => {
+    if (!slot.required) return false;
+    const value = slotInputs[slot.name] ?? "";
+    return value.trim() === "";
+  });
 
   function handleApply() {
-    // MUST echo recipe_name and slots in edited_values.
-    // Backend (routes.py:1965-1967) reads these to reconstruct the RecipeMatch.
-    // edited_values: null would silently produce RecipeMatch("", {}) and fail.
+    // Merge pre-filled slots with operator inputs.  Operator inputs take
+    // precedence in collisions, though the backend resolver only writes the
+    // pre-filled slots it can derive and the unsatisfied list is by definition
+    // disjoint from those — collision is not expected in practice.
+    const mergedSlots: Record<string, unknown> = {
+      ...payload.slots,
+      ...slotInputs,
+    };
     onSubmit({
       chosen: ["accept"],
       edited_values: {
         recipe_name: payload.recipe_name,
-        slots: payload.slots,
+        slots: mergedSlots,
       },
       custom_inputs: null,
       accepted_step_index: null,
@@ -125,8 +169,6 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
   }
 
   function handleBuildManually() {
-    // Backend only reads chosen on this path (routes.py:1988-2018).
-    // edited_values: null is correct here.
     onSubmit({
       chosen: ["build_manually"],
       edited_values: null,
@@ -141,18 +183,9 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
 
   return (
     <div className="guided-turn guided-recipe-offer">
-      {/* Single card: recipe name + slot summary + alternatives + actions */}
       <div className="guided-propose-step-card guided-recipe-card">
-        {/* Recipe name as <h3> for screen-reader landmark navigation.
-            Same convention as ProposeChainTurn's step plugin headings (Task 7.6 M3).
-            Font-size is pinned to --font-size-base via .guided-recipe-name in App.css
-            so the browser's default <h3> sizing does not bleed through. */}
         <h3 className="guided-recipe-name">{payload.recipe_name}</h3>
 
-        {/* Slot summary as a key-value definition list.
-            <dl> is used because (key, value) pairs form a description/definition
-            relationship -- <dt> for key, <dd> for value.  Mirrors ProposeChainTurn's
-            options rendering pattern. */}
         {slotKeys.length > 0 && (
           <dl id={slotsId} className="guided-recipe-slots">
             {slotKeys.map((key) => (
@@ -166,10 +199,49 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
           </dl>
         )}
 
-        {/* Alternatives list -- only rendered when non-empty (negative-space pin).
-            Displayed for user information; no submit path for alternatives exists
-            in the current backend (only ["accept"] and ["build_manually"] are
-            valid).  See SCOPE NOTE in the file header. */}
+        {/* Unsatisfied required slots: inline editable form fields.
+            Rendered between the pre-filled slot summary and the action row so
+            the operator sees the partial state then fills the gaps. */}
+        {payload.unsatisfied_slots.length > 0 && (
+          <fieldset id={inputsId} className="guided-recipe-inputs">
+            <legend className="guided-recipe-inputs-legend">
+              Additional values required
+            </legend>
+            {payload.unsatisfied_slots.map((slot) => {
+              const inputId = `${reactId}-input-${slot.name}`;
+              const descriptionId = `${reactId}-desc-${slot.name}`;
+              const inputType = inputTypeForSlot(slot.slot_type);
+              return (
+                <div key={slot.name} className="guided-recipe-input-row">
+                  <label htmlFor={inputId} className="guided-recipe-input-label">
+                    {slot.name}
+                    {slot.required && (
+                      <span className="guided-recipe-input-required" aria-hidden="true">
+                        {" *"}
+                      </span>
+                    )}
+                  </label>
+                  <input
+                    id={inputId}
+                    type={inputType}
+                    className="guided-recipe-input-field"
+                    value={slotInputs[slot.name] ?? ""}
+                    onChange={(event) => setSlotInput(slot.name, event.target.value)}
+                    required={slot.required}
+                    aria-describedby={slot.description ? descriptionId : undefined}
+                    aria-required={slot.required}
+                  />
+                  {slot.description && (
+                    <p id={descriptionId} className="guided-recipe-input-hint">
+                      {slot.description}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </fieldset>
+        )}
+
         {payload.alternatives.length > 0 && (
           <div className="guided-recipe-alternatives">
             <p className="guided-recipe-alternatives-heading">Alternatives:</p>
@@ -183,16 +255,12 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
           </div>
         )}
 
-        {/* Action row: Apply recipe + Build manually.
-            Two separate handlers; each constructs its own body literal.
-            No "construct chosen body" helper extracted: rule of three requires
-            a third widget before justifying extraction (ProposeChainTurn + this
-            widget = 2 sites). */}
         <div className="guided-recipe-actions">
           <button
             type="button"
             className="guided-recipe-apply-btn"
             onClick={handleApply}
+            disabled={applyDisabled}
           >
             Apply recipe
           </button>

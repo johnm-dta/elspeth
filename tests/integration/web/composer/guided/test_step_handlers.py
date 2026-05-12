@@ -269,6 +269,7 @@ class TestStep25Handler:
                 "api_key_secret": "OPENROUTER_API_KEY",
                 "required_input_fields": ["text"],
             },
+            unsatisfied_slots={},
         )
 
         result = handle_step_2_5_recipe_apply(
@@ -300,6 +301,7 @@ class TestStep25Handler:
             match=RecipeMatch(
                 recipe_name="this-recipe-does-not-exist",
                 slots={},
+                unsatisfied_slots={},
             ),
             catalog=create_catalog_service(),
         )

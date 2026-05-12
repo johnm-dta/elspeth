@@ -335,6 +335,20 @@ class TestStep2IntraStep:
         payload = body["next_turn"]["payload"]
         assert "recipe_name" in payload
         assert payload["recipe_name"] == "classify-rows-llm-jsonl"
+        # Gap 6 wire-shape: payload exposes the unsatisfied required slots
+        # so the frontend can render an editable form for them.  classify-rows
+        # has three required slots not derivable from (source, sink):
+        # classifier_template, model, api_key_secret.
+        assert "unsatisfied_slots" in payload
+        unsatisfied_names = {entry["name"] for entry in payload["unsatisfied_slots"]}
+        assert unsatisfied_names == {
+            "classifier_template",
+            "model",
+            "api_key_secret",
+        }
+        for entry in payload["unsatisfied_slots"]:
+            assert set(entry.keys()) == {"name", "slot_type", "description", "required"}
+            assert entry["required"] is True
 
     def test_multi_select_response_commits_sink_to_state(self, composer_test_client: TestClient) -> None:
         """M1: MULTI_SELECT_WITH_CUSTOM → step 2.5 transition commits sink to composition_state.outputs.

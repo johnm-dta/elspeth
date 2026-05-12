@@ -1,5 +1,5 @@
 allow_hits:
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=1c7c9f6e216882eb
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=b5b1d34b5d81a046
   owner: composer-guided
   reason: Protocol boundary validator — isinstance(turn_type, TurnType) at Tier 3 entry point where untrusted payloads arrive
     from client, distinguishes valid TurnType enum member from arbitrary string to reject malformed protocol messages early
@@ -2271,27 +2271,27 @@ allow_hits:
     step_1_result is stored unchanged. The enrichment is opportunistic — absence of path leaves recipe match in the correct
     no-blob_ref state.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_classify_slot_resolver:fp=3b92b7e07cfd1037
+- key: web/composer/guided/recipe_match.py:R1:_classify_slot_resolver:fp=c9e0d4caec92d135
   owner: composer-guided
   reason: Tier-3 boundary coercion in slot resolver — sink.outputs[0].options is user/LLM-supplied external data (Tier 3).
     .get("path", default) is the documented coercion at this boundary; default path propagates to the recipe_offer turn for
-    operator confirmation. FP rotated from a6c6f31ab3c80323 by blob_id→blob_ref conversion (classify resolver rewrite).
+    operator confirmation. FP rotated from 3b92b7e07cfd1037 by Gap 6 unsatisfied_slots threading (Task 10.0).
   safety: Default path value matches the registered SlotSpec default in _RECIPE1_SLOTS["output_path"]; operator confirms or
     overrides via recipe_offer turn.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=aceba16af59b73b5
+- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=c9fd2f14c6c34847
   owner: composer-guided
   reason: Tier-3 boundary coercion in slot resolver — sink.outputs[0].options is user/LLM-supplied external data (Tier 3).
     .get("path", default) is the documented coercion at this boundary; default path propagates to the recipe_offer turn for
-    operator confirmation. FP rotated from 04eea8af1e9b234a by blob_id→blob_ref conversion (threshold resolver rewrite).
+    operator confirmation. FP rotated from aceba16af59b73b5 by Gap 6 unsatisfied_slots threading (Task 10.0).
   safety: Default path value matches the registered SlotSpec default in _RECIPE2_SLOTS["above_output_path"]; operator confirms
     or overrides via recipe_offer turn.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=3e175261cb3f249d
+- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=c2b794bf9adad12d
   owner: composer-guided
   reason: Tier-3 boundary coercion in slot resolver — sink.outputs[1].options is user/LLM-supplied external data (Tier 3).
     .get("path", default) is the documented coercion at this boundary; default path propagates to the recipe_offer turn for
-    operator confirmation. FP rotated from 6c8bcb44b83e0e72 by blob_id→blob_ref conversion (threshold resolver rewrite).
+    operator confirmation. FP rotated from 3e175261cb3f249d by Gap 6 unsatisfied_slots threading (Task 10.0).
   safety: Default path value matches the registered SlotSpec default in _RECIPE2_SLOTS["below_output_path"]; operator confirms
     or overrides via recipe_offer turn.
   expires: null

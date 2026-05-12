@@ -1,103 +1,24 @@
 // E2E spec: guided-mode wizard recipe-match happy path.
 //
 // Targets the demo SLA defined in §10.3 of the implementation plan
-// (2026-05-11-composer-guided-mode.md:4619-4621, corrected at df5306cf):
+// (2026-05-11-composer-guided-mode.md):
 //   ≤9 user clicks to reach CompletionSummary via the recipe-match path.
 //   <30s wall-clock (recipe match is deterministic — zero LLM calls).
 //
-// ── Gap 5 fixed (2026-05-12, commit 74ea68eb) ────────────────────────────────
+// ── Gap 6 RESOLVED in this dispatch (Task 10.0) ──────────────────────────────
 //
-// This spec was previously blocked by Gap 5 (recipe-match path unreachable via
-// SchemaForm).  The fix uses a combined approach (options a + b):
+// RecipeOfferPayload now carries `unsatisfied_slots` — the schema for each
+// required slot the resolver could not pre-fill (slot_type, description,
+// required).  RecipeOfferTurn renders an inline editable form for these
+// entries; the Apply button is disabled until every required slot has a
+// non-empty value, and the typed values are merged into edited_values.slots
+// before submission.  Filling those inputs is typing, not clicks — the SLA
+// click budget is unchanged.
 //
-//   (a) recipe_match.py: _classify_slot_resolver / _split_threshold_slot_resolver
-//       now read source.options["blob_ref"] (composer-canonical) instead of
-//       source.options.get("blob_id", ""). Missing blob_ref → offensive crash
-//       (state-machine invariant: resolver is only reached for blob-backed sources).
-//
-//   (b) steps.py / tools.py: handle_step_1_source now accepts session_engine +
-//       session_id, looks up the blob by storage_path after _execute_set_source
-//       commits, and injects blob_ref into SourceResolved.options when found.
-//       This lets the guided SchemaForm path (where the user types the blob's
-//       file path) populate blob_ref without switching to set_source_from_blob.
-//
-// Gap 5 VERIFIED FIXED: Playwright page snapshot after clicking "Apply recipe"
-// shows source_blob_id: f2852ea6-9e19-4db1-a03d-4dba2b92b9da (real UUID) in
-// the recipe_offer card. Steps 1–5 now return HTTP 200. The 400 is downstream.
-//
-// ── Gap 6 — recipe_offer missing unsatisfied-slot UX (blocks Apply recipe) ───
-//
-// The recipe_offer step still returns HTTP 400 at Apply recipe time.  This is a
-// NEW blocker revealed after Gap 5 was fixed.
-//
-// Root cause: RecipeOfferPayload.slots carries only the pre-filled slots
-// {source_blob_id, output_path, label_field}.  The RecipeOfferTurn widget echoes
-// payload.slots unchanged in edited_values when "Apply recipe" is clicked.  But
-// classify-rows-llm-jsonl declares three required slots without defaults:
-//   - classifier_template (str)
-//   - model (str)
-//   - api_key_secret (str)
-// validate_slots raises RecipeValidationError for each missing required slot →
-// _execute_apply_pipeline_recipe returns failure → HTTP 400.
-//
-// The RecipeOfferPayload type (guided.ts:240-244) carries no slot-schema, so the
-// frontend cannot know which slots need user input.  Both layers need changes:
-//   (a) backend: include the recipe's slot specs (type, required, description) in
-//       RecipeOfferPayload so the frontend can distinguish pre-filled from empty.
-//   (b) frontend: RecipeOfferTurn renders editable form fields for unsatisfied
-//       required slots (using payload.slot_specs[name].required + value absent).
-//
-// Gaps discovered during Phase 9 Task 9.1 (in order encountered):
-//
-//   Gap 1 — startGuided not wired to any UI entry point:
-//     sessionStore.createSession and selectSession both set guidedSession: null.
-//     startGuided() is implemented in the store but never called from any
-//     component. ChatPanel's guided-mode discriminator never fires. Fix applied
-//     in sessionStore.ts (both createSession and selectSession now call
-//     void get().startGuided(id)) — this is the minimum needed for the wizard
-//     to render. See observation filed as elspeth-obs-d3d0d7fa70.
-//
-//   Gap 2 — S2 path allowlist blocks raw /tmp paths:
-//     _validate_source_path (tools.py:2086) rejects paths outside data_dir/blobs/.
-//     Test must use the blob's storage path (service.py:207-211 format:
-//     data_dir/blobs/{session_id}/{blob_id}_{filename}).  Worked around in spec
-//     by constructing the path from known session_id and blob.id.
-//
-//   Gap 3 — on_validation_failure is required in source SchemaForm:
-//     SourceDataConfig.on_validation_failure (config_base.py:358) has no default
-//     and appears in the REQUIRED section of the SchemaForm.  The test must fill
-//     it with "discard" to enable Continue.
-//
-//   Gap 4 — collision_policy required in composer mode but hidden behind
-//     Show advanced:
-//     validate_composer_file_sink_collision_policy (tools.py:2317) rejects null
-//     collision_policy when data_dir is not None.  The field is optional in the
-//     JSON schema (default null) and rendered behind "Show advanced".  The test
-//     must expand the section and set "auto_increment".  Adds 1 to click budget.
-//
-//   Gap 5 — recipe-match structurally unreachable (blocks Apply recipe → 400):
-//     FIXED in commit 74ea68eb (Phase 9 dispatch).
-//
-//   Gap 6 — recipe_offer missing unsatisfied-slot UX (blocks Apply recipe → 400):
-//     See root cause above.  THIS IS THE CURRENT HARD BLOCKER.
-//     Filed as elspeth-obs-<gap6-id> (see Observations section).
-//
-// ── Observations filed ───────────────────────────────────────────────────────
-//
-//   elspeth-obs-d3d0d7fa70: startGuided not wired to UI entry point (Gap 1)
-//     Fixed in sessionStore.ts (createSession + selectSession now call startGuided).
-//   elspeth-obs-a8a9bc010a: recipe-match unreachable via SchemaForm path (Gap 5)
-//     Fixed in 74ea68eb (this Phase 9 dispatch).
-//   elspeth-obs-f626607b13: RecipeOfferTurn missing editable form for
-//     unsatisfied required slots; RecipeOfferPayload missing slot-schema (Gap 6).
-//
-// ── What the spec verifies today ─────────────────────────────────────────────
-//
-// Steps 1–5 (csv chip → source schema → json chip → sink schema → required
-// fields → recipe_offer render) now return HTTP 200 (verified in this dispatch).
-// The test is marked fixme because Apply recipe still returns HTTP 400 (Gap 6).
-// All step-by-step logic is preserved so whoever fixes Gap 6 can un-fixme in
-// one step without reconstructing the test.
+// For prior gap history (Gap 1 startGuided wiring, Gap 2 S2 path allowlist,
+// Gap 3 on_validation_failure, Gap 4 collision_policy, Gap 5 blob_ref
+// resolver) see git log on this file plus elspeth-obs-d3d0d7fa70 /
+// elspeth-obs-a8a9bc010a / elspeth-obs-f626607b13.
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,20 +59,6 @@ function blobStoragePath(sessionId: string, blobId: string): string {
 const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-output.json");
 
 test.describe("composer-guided — recipe-match happy path", () => {
-  test.fixme(
-    true,
-    "BLOCKED: Apply recipe → HTTP 400 (Gap 6) — recipe_offer payload contains " +
-    "only the pre-filled slots {source_blob_id, output_path, label_field}; the " +
-    "RecipeOfferTurn widget echoes payload.slots unchanged; missing required slots " +
-    "classifier_template / model / api_key_secret cause RecipeValidationError at " +
-    "apply time.  Gap 5 (blob_ref lookup) is VERIFIED FIXED (page snapshot shows " +
-    "source_blob_id: f2852ea6-...) — the recipe_offer now renders correctly. " +
-    "Fix requires: (a) backend to include slot-schema in RecipeOfferPayload so the " +
-    "frontend knows which slots need user input, and (b) RecipeOfferTurn editable " +
-    "form fields for unsatisfied required slots. " +
-    "Full analysis in spec file header."
-  );
-
   test(
     "guided demo path: CSV → classify-rows-llm-jsonl (≤9 clicks, <30s)",
     async ({ page }) => {
@@ -249,15 +156,27 @@ test.describe("composer-guided — recipe-match happy path", () => {
         await page.getByRole("button", { name: "Continue", exact: true }).click();
         clicks++;
 
-        // ── Step 2.5 RECIPE_OFFER — Apply recipe ──────────────────────────
-        // Gap 5 FIXED: recipe_offer now renders with correct source_blob_id.
-        // Apply recipe still returns HTTP 400 (Gap 6): required slots
-        // classifier_template / model / api_key_secret are not pre-filled and
-        // the RecipeOfferTurn widget has no editable form to supply them.
-        // This assertion is expected to fail until Gap 6 is fixed.
+        // ── Step 2.5 RECIPE_OFFER — fill unsatisfied slots, Apply recipe ──
+        // The classify-rows-llm-jsonl recipe declares three required slots
+        // that the resolver cannot pre-fill: classifier_template, model,
+        // api_key_secret.  RecipeOfferTurn (Task 10.0 / Gap 6) renders an
+        // inline editable form for these; Apply is disabled until every
+        // required value is filled.  Typing into inputs is NOT counted as
+        // clicks in the SLA budget.
         await expect(
           page.getByRole("button", { name: "Apply recipe", exact: true }),
         ).toBeVisible();
+        await expect(page.getByLabel(/classifier_template/i)).toBeVisible();
+        await page
+          .getByLabel(/classifier_template/i)
+          .fill("Classify {{ row['name'] }} as widget or gadget.");
+        await page.getByLabel(/^model\b/i).fill("anthropic/claude-3-5-sonnet");
+        // api_key_secret carries the NAME of an inventory secret_ref, not a
+        // raw credential.  The input is type="text" (not password) by design.
+        await page.getByLabel(/api_key_secret/i).fill("openrouter-api-key");
+        await expect(
+          page.getByRole("button", { name: "Apply recipe", exact: true }),
+        ).toBeEnabled();
         await page.getByRole("button", { name: "Apply recipe", exact: true }).click();
         clicks++;
 

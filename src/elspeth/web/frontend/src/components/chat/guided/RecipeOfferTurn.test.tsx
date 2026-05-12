@@ -36,12 +36,14 @@ const BASIC_PAYLOAD: RecipeOfferPayload = {
   recipe_name: "csv_to_jsonl",
   slots: { delimiter: ",", encoding: "utf-8" },
   alternatives: ["build_manually"],
+  unsatisfied_slots: [],
 };
 
 const NO_ALTERNATIVES_PAYLOAD: RecipeOfferPayload = {
   recipe_name: "parquet_to_csv",
   slots: { compression: "snappy" },
   alternatives: [],
+  unsatisfied_slots: [],
 };
 
 const COMPLEX_SLOTS_PAYLOAD: RecipeOfferPayload = {
@@ -53,6 +55,61 @@ const COMPLEX_SLOTS_PAYLOAD: RecipeOfferPayload = {
     arr_val: ["x", "y"],
   },
   alternatives: ["build_manually"],
+  unsatisfied_slots: [],
+};
+
+// Task 10.0 / Gap 6 — classify-rows-llm-jsonl with three unsatisfied required
+// slots (classifier_template, model, api_key_secret).  Mirrors the real
+// backend wire shape after the matcher pre-fills source_blob_id /
+// output_path / label_field and surfaces the rest as editable inputs.
+const UNSATISFIED_PAYLOAD: RecipeOfferPayload = {
+  recipe_name: "classify-rows-llm-jsonl",
+  slots: {
+    source_blob_id: "abc-1234",
+    output_path: "outputs/classified.jsonl",
+    label_field: "category",
+  },
+  alternatives: ["build_manually"],
+  unsatisfied_slots: [
+    {
+      name: "classifier_template",
+      slot_type: "str",
+      description: "Jinja2 template",
+      required: true,
+    },
+    {
+      name: "model",
+      slot_type: "str",
+      description: "LLM model identifier",
+      required: true,
+    },
+    {
+      name: "api_key_secret",
+      slot_type: "str",
+      description: "Name of an inventory secret_ref",
+      required: true,
+    },
+  ],
+};
+
+const NUMERIC_UNSATISFIED_PAYLOAD: RecipeOfferPayload = {
+  recipe_name: "split-by-numeric-threshold",
+  slots: { source_blob_id: "blob-x" },
+  alternatives: ["build_manually"],
+  unsatisfied_slots: [
+    {
+      name: "field",
+      slot_type: "str",
+      description: "Field to threshold",
+      required: true,
+    },
+    {
+      name: "threshold",
+      slot_type: "float",
+      description: "Numeric threshold",
+      required: true,
+    },
+  ],
 };
 
 // ---------------------------------------------------------------------------
@@ -318,5 +375,141 @@ describe("RecipeOfferTurn — focus management", () => {
     // programmatic focus on mount (per Task 7.2 template convention).
     renderWidget(BASIC_PAYLOAD);
     expect(document.activeElement).toBe(document.body);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Unsatisfied-slot editable inputs (Task 10.0 / Gap 6)
+// ---------------------------------------------------------------------------
+
+describe("RecipeOfferTurn — unsatisfied_slots editable form", () => {
+  it("renders NO fieldset when unsatisfied_slots is empty", () => {
+    renderWidget(BASIC_PAYLOAD);
+    // The form fieldset only appears when there are required slots to collect.
+    expect(
+      screen.queryByText(/additional values required/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders one labelled input per unsatisfied entry", () => {
+    renderWidget(UNSATISFIED_PAYLOAD);
+    // Each slot.name becomes a <label> string that resolves the <input> via getByLabelText.
+    expect(screen.getByLabelText(/classifier_template/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/model/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/api_key_secret/i)).toBeInTheDocument();
+  });
+
+  it("Apply button starts DISABLED when any required slot is unfilled", () => {
+    renderWidget(UNSATISFIED_PAYLOAD);
+    const applyBtn = screen.getByRole("button", { name: /apply recipe/i });
+    expect(applyBtn).toBeDisabled();
+  });
+
+  it("Apply button enables once every required slot has a non-empty value", async () => {
+    const user = userEvent.setup();
+    renderWidget(UNSATISFIED_PAYLOAD);
+    const applyBtn = screen.getByRole("button", { name: /apply recipe/i });
+
+    // userEvent.type treats "{" and "[" as key-descriptor sigils; use the
+    // .keyboardOptions skip mechanism or .clear+.paste; simplest is to
+    // configure user with delay:0 and use fireEvent.change-style direct value
+    // assignment via getByLabelText + .focus + paste.  Cleaner: use
+    // userEvent.click+keyboard with escaped sequences via the documented
+    // `{{ }}` escape — but for plain alphanumeric values we don't need that.
+    await user.type(
+      screen.getByLabelText(/classifier_template/i),
+      "classify-this",
+    );
+    await user.type(screen.getByLabelText(/model/i), "anthropic-claude");
+    expect(applyBtn).toBeDisabled(); // still missing api_key_secret
+    await user.type(screen.getByLabelText(/api_key_secret/i), "openrouter-key");
+    expect(applyBtn).toBeEnabled();
+  });
+
+  it("Apply merges typed values into edited_values.slots alongside pre-filled slots", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    renderWidget(UNSATISFIED_PAYLOAD, onSubmit);
+
+    // Plain alphanumeric values: avoid userEvent key-descriptor sigils.
+    // Template variables ({{ row[...] }}) are exercised at the e2e layer
+    // where Playwright's fill() does not interpret sigils.
+    await user.type(screen.getByLabelText(/classifier_template/i), "classify-this");
+    await user.type(screen.getByLabelText(/model/i), "anthropic-claude");
+    await user.type(
+      screen.getByLabelText(/api_key_secret/i),
+      "OPENROUTER_API_KEY",
+    );
+
+    await user.click(screen.getByRole("button", { name: /apply recipe/i }));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const body = onSubmit.mock.calls[0][0];
+    expect(body.chosen).toEqual(["accept"]);
+    expect(body.edited_values).toEqual({
+      recipe_name: "classify-rows-llm-jsonl",
+      slots: {
+        // Pre-filled by the resolver
+        source_blob_id: "abc-1234",
+        output_path: "outputs/classified.jsonl",
+        label_field: "category",
+        // Operator inputs
+        classifier_template: "classify-this",
+        model: "anthropic-claude",
+        api_key_secret: "OPENROUTER_API_KEY",
+      },
+    });
+  });
+
+  it("renders numeric slot inputs with type='number'", () => {
+    renderWidget(NUMERIC_UNSATISFIED_PAYLOAD);
+    const thresholdInput = screen.getByLabelText(/threshold/i);
+    expect(thresholdInput).toHaveAttribute("type", "number");
+  });
+
+  it("renders str slot inputs with type='text' (NEVER type='password')", () => {
+    // SECURITY-CRITICAL: api_key_secret carries the NAME of an inventory
+    // secret_ref, not a credential.  Using type='password' would mislead
+    // operators into pasting raw credentials, which the audit trail would
+    // then record via edited_values.  Pin both: positive (type='text') and
+    // negative (NOT type='password') so a future drift can't slip through.
+    renderWidget(UNSATISFIED_PAYLOAD);
+    const apiKeyInput = screen.getByLabelText(/api_key_secret/i);
+    expect(apiKeyInput).toHaveAttribute("type", "text");
+    expect(apiKeyInput).not.toHaveAttribute("type", "password");
+
+    // Same guarantee applies to every other str slot.
+    const templateInput = screen.getByLabelText(/classifier_template/i);
+    expect(templateInput).toHaveAttribute("type", "text");
+    const modelInput = screen.getByLabelText(/model/i);
+    expect(modelInput).toHaveAttribute("type", "text");
+  });
+
+  it("renders slot description as hint text", () => {
+    renderWidget(UNSATISFIED_PAYLOAD);
+    expect(screen.getByText(/jinja2 template/i)).toBeInTheDocument();
+    expect(screen.getByText(/llm model identifier/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/name of an inventory secret_ref/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Apply with empty unsatisfied_slots keeps existing wire shape (no operator inputs to merge)", async () => {
+    // Regression pin: the empty-unsatisfied case is the common path for
+    // recipes whose resolver covers every required slot.  Apply must still
+    // echo recipe_name + payload.slots verbatim.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    renderWidget(BASIC_PAYLOAD, onSubmit);
+    await user.click(screen.getByRole("button", { name: /apply recipe/i }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
+      chosen: ["accept"],
+      custom_inputs: null,
+      edited_values: {
+        recipe_name: "csv_to_jsonl",
+        slots: { delimiter: ",", encoding: "utf-8" },
+      },
+    });
   });
 });

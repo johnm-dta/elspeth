@@ -73,14 +73,28 @@ class TestRecipeMatch:
         match = RecipeMatch(
             recipe_name="test-recipe",
             slots={"source_blob_id": "blob-abc"},
+            unsatisfied_slots={},
         )
         with pytest.raises((AttributeError, TypeError)):
             match.slots["source_blob_id"] = "mutated"  # type: ignore[index]
 
     def test_recipe_match_name_is_frozen(self) -> None:
-        match = RecipeMatch(recipe_name="test-recipe", slots={})
+        match = RecipeMatch(recipe_name="test-recipe", slots={}, unsatisfied_slots={})
         with pytest.raises(AttributeError):
             match.recipe_name = "other"  # type: ignore[misc]
+
+    def test_recipe_match_unsatisfied_slots_are_frozen(self) -> None:
+        from elspeth.web.composer.recipes import SlotSpec
+
+        match = RecipeMatch(
+            recipe_name="test-recipe",
+            slots={},
+            unsatisfied_slots={
+                "model": SlotSpec(slot_type="str", description="LLM model"),
+            },
+        )
+        with pytest.raises((AttributeError, TypeError)):
+            match.unsatisfied_slots["model"] = SlotSpec(slot_type="str")  # type: ignore[index]
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +299,80 @@ class TestMissingBlobRef:
         sink = _make_two_json_sink()
         with pytest.raises(ValueError, match="blob_ref"):
             match_recipe(source, sink)
+
+
+# ---------------------------------------------------------------------------
+# Unsatisfied required-slot schema (Task 10.0 — Gap 6)
+# ---------------------------------------------------------------------------
+
+
+class TestUnsatisfiedSlots:
+    """match_recipe populates RecipeMatch.unsatisfied_slots with the required
+    slots the resolver could NOT pre-fill.
+
+    The frontend renders editable inputs for these so the operator can supply
+    the values before Apply.  Optional slots with declared defaults are NOT
+    surfaced — ``validate_slots`` auto-fills them at apply time.
+    """
+
+    def test_classify_unsatisfied_lists_three_required_slots(self) -> None:
+        """classify-rows-llm-jsonl: classifier_template, model, api_key_secret."""
+        source = _make_csv_source()
+        sink = _make_single_json_sink(required_fields=("category",))
+        match = match_recipe(source, sink)
+        assert match is not None
+        unsatisfied_names = set(match.unsatisfied_slots.keys())
+        assert unsatisfied_names == {
+            "classifier_template",
+            "model",
+            "api_key_secret",
+        }
+
+    def test_classify_unsatisfied_excludes_resolver_filled_slots(self) -> None:
+        """Resolver fills source_blob_id / output_path / label_field — these
+        must NOT appear in unsatisfied_slots."""
+        source = _make_csv_source()
+        sink = _make_single_json_sink(required_fields=("label",))
+        match = match_recipe(source, sink)
+        assert match is not None
+        for name in ("source_blob_id", "output_path", "label_field"):
+            assert name not in match.unsatisfied_slots, f"resolver-filled slot {name!r} leaked into unsatisfied_slots"
+
+    def test_classify_unsatisfied_excludes_optional_slots_with_defaults(self) -> None:
+        """Optional slots (provider, required_input_fields) have declared
+        defaults and must NOT appear in unsatisfied_slots."""
+        source = _make_csv_source()
+        sink = _make_single_json_sink(required_fields=("tag",))
+        match = match_recipe(source, sink)
+        assert match is not None
+        for name in ("provider", "required_input_fields"):
+            assert name not in match.unsatisfied_slots, f"optional slot {name!r} surfaced as unsatisfied"
+
+    def test_classify_unsatisfied_carries_slot_specs(self) -> None:
+        """Each unsatisfied entry is a SlotSpec with the recipe's declared
+        metadata — slot_type, description, required=True."""
+        source = _make_csv_source()
+        sink = _make_single_json_sink(required_fields=("classification",))
+        match = match_recipe(source, sink)
+        assert match is not None
+        spec = match.unsatisfied_slots["model"]
+        assert spec.slot_type == "str"
+        assert spec.required is True
+        assert spec.description  # non-empty hint
+
+    def test_split_threshold_unsatisfied_lists_field_and_threshold(self) -> None:
+        """split-by-numeric-threshold: field, threshold are the only required
+        slots the resolver does not pre-fill."""
+        source = _make_csv_source()
+        sink = _make_two_json_sink()
+        match = match_recipe(source, sink)
+        assert match is not None
+        unsatisfied_names = set(match.unsatisfied_slots.keys())
+        assert unsatisfied_names == {"field", "threshold"}
+
+    def test_split_threshold_unsatisfied_threshold_slot_type_is_float(self) -> None:
+        source = _make_csv_source()
+        sink = _make_two_json_sink()
+        match = match_recipe(source, sink)
+        assert match is not None
+        assert match.unsatisfied_slots["threshold"].slot_type == "float"

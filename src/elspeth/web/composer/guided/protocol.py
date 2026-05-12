@@ -68,10 +68,25 @@ class ProposeChainPayload(TypedDict):
     blockers: Sequence[str]
 
 
+class _RecipeSlotInput(TypedDict):
+    """Wire shape for one unsatisfied required slot in a recipe_offer turn.
+
+    ``slot_type`` mirrors :data:`elspeth.web.composer.recipes.SlotType`.
+    The frontend renders an editable input keyed by ``name`` and submits the
+    typed value back as part of ``edited_values.slots``.
+    """
+
+    name: str
+    slot_type: str  # one of recipes.SlotType: "blob_id"/"str"/"float"/"int"/"str_list"
+    description: str
+    required: bool
+
+
 class RecipeOfferPayload(TypedDict):
     recipe_name: str
     slots: Mapping[str, Any]
     alternatives: Sequence[str]
+    unsatisfied_slots: Sequence[_RecipeSlotInput]
 
 
 class ControlSignal(StrEnum):
@@ -153,7 +168,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
     ),
     TurnType.SCHEMA_FORM: frozenset({"plugin", "schema_block", "prefilled"}),
     TurnType.PROPOSE_CHAIN: frozenset({"steps", "why", "blockers"}),
-    TurnType.RECIPE_OFFER: frozenset({"recipe_name", "slots", "alternatives"}),
+    TurnType.RECIPE_OFFER: frozenset({"recipe_name", "slots", "alternatives", "unsatisfied_slots"}),
 }
 
 

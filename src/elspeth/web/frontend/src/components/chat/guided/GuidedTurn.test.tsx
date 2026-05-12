@@ -93,6 +93,7 @@ const RECIPE_OFFER_PAYLOAD: RecipeOfferPayload = {
   recipe_name: "csv_to_json",
   slots: {},
   alternatives: ["build_manually"],
+  unsatisfied_slots: [],
 };
 
 /** Build a TurnPayload with the given type and typed payload. */

@@ -36,6 +36,7 @@ from elspeth.web.composer.guided.protocol import (
     TurnType,
     _Observed,
     _Option,
+    _RecipeSlotInput,
 )
 
 if TYPE_CHECKING:
@@ -220,10 +221,20 @@ def build_step_2_5_recipe_offer_turn(
     """
     from elspeth.contracts.freeze import deep_thaw
 
+    unsatisfied: list[_RecipeSlotInput] = [
+        _RecipeSlotInput(
+            name=name,
+            slot_type=spec.slot_type,
+            description=spec.description,
+            required=spec.required,
+        )
+        for name, spec in match.unsatisfied_slots.items()
+    ]
     payload: RecipeOfferPayload = {
         "recipe_name": match.recipe_name,
         "slots": dict(deep_thaw(match.slots)),
         "alternatives": ["build_manually"],
+        "unsatisfied_slots": unsatisfied,
     }
     return Turn(
         type=TurnType.RECIPE_OFFER.value,

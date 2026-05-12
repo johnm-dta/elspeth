@@ -7193,6 +7193,15 @@ class TestUpdateBlobTypeGuard:
     The fixture is deliberately copy-pasted from TestCreateBlobTypeGuard
     rather than factored into a shared helper: the two guards are
     independent raise sites and one should be moveable without the other.
+
+    Post Task 13 (Wave 2 — ``update_blob`` manifest promotion): the
+    Tier-3 type guard now lives in :class:`UpdateBlobArgumentsModel`
+    via Pydantic's strict ``content: str`` validation.  Identical
+    discipline to :class:`TestCreateBlobTypeGuard` — the same locked-in
+    legacy assertion (``"'content' must be a string, got int"``) is
+    updated to the new ToolArgumentError shape; the file-mutation
+    critical section is never entered on a pure argument-validation
+    failure (handler docstring pins this precedence).
     """
 
     @pytest.fixture(autouse=True)
@@ -7229,6 +7238,8 @@ class TestUpdateBlobTypeGuard:
             )
 
     def test_non_string_content_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
@@ -7249,7 +7260,13 @@ class TestUpdateBlobTypeGuard:
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
 
-        with pytest.raises(ToolArgumentError, match=r"'content' must be a string, got int"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value is not echoed (the
+        # full Pydantic detail survives on __cause__ for auditors).
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'update_blob arguments' must be object conforming to UpdateBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "update_blob",
                 {"blob_id": blob_id, "content": 42},
@@ -7259,6 +7276,8 @@ class TestUpdateBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail.
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------

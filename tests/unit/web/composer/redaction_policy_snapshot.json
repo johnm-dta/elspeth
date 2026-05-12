@@ -8,5 +8,10 @@
     "hash": "1dab572ac60198108d065fac6a27e270b320d80a07e3624fd820ac8ff3b05586",
     "sensitive_path_count": 1,
     "shape": "type_driven"
+  },
+  "update_blob": {
+    "hash": "3f642aeebd8e082f2f2a19ff34d2a3c6167be908e59e9a1f874f8c43ce6040f0",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
   }
 }

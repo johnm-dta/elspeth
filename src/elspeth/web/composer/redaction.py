@@ -750,6 +750,31 @@ def _summarize_inline_blob_content(content: str) -> str:
     return f"<inline-blob:{len(content.encode('utf-8'))}-bytes>"
 
 
+class UpdateBlobArgumentsModel(BaseModel):
+    """Redaction-bearing argument model for the ``update_blob`` tool.
+
+    Mirrors the JSON schema declared at ``tools.py:1398-1415`` for the
+    ``update_blob`` definition and its required-paths (``blob_id``,
+    ``content``).  The ``Annotated`` on ``content`` substitutes a
+    length-disclosing scalar at the persistence boundary so the raw blob
+    payload never enters ``chat_messages.tool_calls`` (rev-2 M.10).
+    Identical summarizer to :class:`CreateBlobArgumentsModel.content` —
+    both blob-mutation tools accept the same payload shape and the
+    audit-side redaction must be uniform across them.
+
+    ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
+    neighbouring tools (``filename``, ``mime_type``, ``description`` —
+    those are on ``create_blob``; ``plugin``, ``on_success``, ``options``
+    — those are on ``set_source*``) are intentionally absent so
+    ``extra="forbid"`` rejects misrouted argument shapes early.
+    """
+
+    blob_id: str
+    content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class CreateBlobArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``create_blob`` tool.
 
@@ -1008,6 +1033,7 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
     {
         "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel),
         "create_blob": ToolRedaction(argument_model=CreateBlobArgumentsModel),
+        "update_blob": ToolRedaction(argument_model=UpdateBlobArgumentsModel),
     }
 )
 

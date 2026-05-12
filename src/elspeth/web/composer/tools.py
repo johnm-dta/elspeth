@@ -41,7 +41,12 @@ from elspeth.web.composer.recipes import (
     apply_recipe,
     list_recipes,
 )
-from elspeth.web.composer.redaction import CreateBlobArgumentsModel, SetSourceArgumentsModel, redact_source_storage_path
+from elspeth.web.composer.redaction import (
+    CreateBlobArgumentsModel,
+    SetSourceArgumentsModel,
+    UpdateBlobArgumentsModel,
+    redact_source_storage_path,
+)
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
     facts_to_dict,
@@ -3162,37 +3167,47 @@ def _execute_update_blob(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> ToolResult:
-    """Update the content of an existing blob."""
+    """Update the content of an existing blob.
+
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`UpdateBlobArgumentsModel` (the single source of truth
+    for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["update_blob"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).  On :class:`pydantic.ValidationError` we
+    re-raise as :class:`ToolArgumentError` so the compose loop's
+    ARG_ERROR routing at ``service.py:2480`` receives the right
+    exception class (Task 13 / Wave 2; mirrors Task 4 pattern at
+    ``tools.py:2320-2327``).
+
+    Validation precedence (file/lock safety).  ``model_validate`` MUST
+    run BEFORE :func:`_session_blob_lock` is acquired and BEFORE any
+    filesystem read/write.  The prior in-handler ``isinstance(content,
+    str)`` guard documented this requirement at length — the same
+    discipline still applies, now expressed structurally: Pydantic
+    rejects a non-str ``content`` (or a missing ``blob_id``) before the
+    handler reaches the tempfile/replace critical section, so the
+    rollback-on-divergence path (which would otherwise issue an
+    unnecessary filesystem write over an unmodified file) is never
+    entered on a pure argument-validation failure.  ``_execute_create_blob``'s
+    cleanup is ``unlink(missing_ok=True)`` (a genuine no-op); ``_execute_update_blob``'s
+    is ``write_bytes(old_content)`` (a real filesystem mutation) — hence
+    the validation MUST precede lock acquisition here, not merely
+    precede the begin-transaction block.
+    """
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
 
-    blob_id = arguments["blob_id"]
-    content = arguments["content"]
-
-    # Tier 3 boundary: LLM can pass wrong types (e.g. int for content).
-    # ToolArgumentError (not TypeError) so the compose loop can distinguish
-    # this LLM-side error from plugin-internal type errors.
-    #
-    # IMPORTANT: this guard MUST remain BEFORE the ``content.encode()`` call
-    # that produces ``content_bytes`` and BEFORE the
-    # ``storage_path.read_bytes()`` / ``storage_path.write_bytes()`` pair
-    # that snapshots ``old_content`` and overwrites the backing file. If it
-    # moved after, the file would be overwritten with garbage before
-    # validation fails. It MUST also remain BEFORE the
-    # ``try: with session_engine.begin()`` block below: that block's
-    # ``except Exception`` branch restores ``old_content`` via
-    # ``storage_path.write_bytes(old_content)`` — running that rollback on a
-    # pure argument-validation failure would issue an unnecessary filesystem
-    # write over a file that was never modified on this call path. (This
-    # failure mode differs from ``_execute_create_blob``, whose cleanup is
-    # ``unlink(missing_ok=True)`` — a genuine no-op — so the precise
-    # rationale does not transfer by back-reference.)
-    if not isinstance(content, str):
+    try:
+        validated = UpdateBlobArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
         raise ToolArgumentError(
-            argument="content",
-            expected="a string",
-            actual_type=type(content).__name__,
-        )
+            argument="update_blob arguments",
+            expected="object conforming to UpdateBlobArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    blob_id = validated.blob_id
+    content = validated.content
 
     # Serialise the read→write→commit critical section across concurrent
     # composer-tool callers on this session.  See ``_session_blob_lock``'s

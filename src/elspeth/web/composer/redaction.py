@@ -86,12 +86,22 @@ class TraversalNode:
       freeze_fields() call here AND a deep_freeze() of `metadata` - do not
       rely on the type signature alone, which `tuple[Any, ...]` does not
       constrain.
+
+    ``substitute_provider`` (Task 8): when ``with_values=True``, a sibling
+    closure to ``value_provider`` that performs in-place substitution at
+    every reachable leaf for this node's path. Signature:
+    ``(root: dict, transform: Callable[[Any], Any]) -> None``. The closure
+    walks the root dict by the same path steps as ``value_provider`` and
+    replaces each leaf value with ``transform(old_value)``. Raises from
+    ``transform`` propagate; the caller is responsible for atomicity (build
+    on a local; only return on success).
     """
 
     path: str
     field_type: Any
     metadata: tuple[Any, ...]
     value_provider: Callable[[dict[str, Any]], Any] | None = None
+    substitute_provider: Callable[[dict[str, Any], Callable[[Any], Any]], None] | None = None
 
 
 def _unwrap_annotated(field_type: Any, metadata: tuple[Any, ...]) -> tuple[Any, tuple[Any, ...]]:
@@ -185,6 +195,64 @@ def _build_value_provider(
     return provider
 
 
+def _build_substitute_provider(
+    steps: tuple[_PathStep, ...],
+) -> Callable[[dict[str, Any], Callable[[Any], Any]], None]:
+    """Compile a path-step list into an in-place substitute closure (Task 8).
+
+    Sibling to ``_build_value_provider``: walks the root dict by the same
+    container-aware path and replaces every reachable leaf with
+    ``transform(old_value)``.  Mutates the input dict in place.
+
+    Path semantics mirror the walker:
+      - ``("attr", name)`` steps descend dict-by-name.
+      - ``("list",)`` and ``("dict",)`` steps iterate every element/value.
+
+    The final step is always ``("attr", name)`` (every TraversalNode lives
+    inside a named field).  At the final attr step, the dict at the current
+    descent point has the leaf assigned at the name slot.
+
+    Caller atomicity: when ``transform`` raises mid-walk, the in-progress
+    dict has been partially mutated.  The walker MUST be invoked on a local
+    variable that is only returned/exposed on full success — the response
+    walker pattern (rev-3 W8b).  The closure does not catch ``transform``
+    exceptions; that is by design.
+
+    No-op for empty input (e.g., empty list/dict containers): the frontier
+    is exhausted before reaching the leaf and ``transform`` is never called.
+    """
+    if not steps:
+        raise AssertionError("substitute_provider requires at least one step (the field-level attr).")
+    if steps[-1][0] != "attr":
+        # walk_model_schema always emits TraversalNodes for a named field
+        # (the last step is always ('attr', field_name)); a non-attr final
+        # step would mean we're trying to substitute INTO an iteration step
+        # itself, which has no destination semantics.
+        raise AssertionError(f"substitute_provider requires final attr step; got steps={steps!r}.")
+    prefix_steps = steps[:-1]
+    leaf_name = steps[-1][1]
+
+    def provider(root: dict[str, Any], transform: Callable[[Any], Any]) -> None:
+        # frontier holds dict references whose ``leaf_name`` slot is the
+        # final substitution target.  Container steps fan the frontier out.
+        frontier: list[Any] = [root]
+        for step in prefix_steps:
+            kind = step[0]
+            if kind == "attr":
+                name = step[1]
+                frontier = [current[name] for current in frontier]
+            elif kind == "list":
+                frontier = [item for current in frontier for item in current]
+            elif kind == "dict":
+                frontier = [item for current in frontier for item in current.values()]
+            else:
+                raise AssertionError(f"unknown path step kind: {kind!r}")
+        for container in frontier:
+            container[leaf_name] = transform(container[leaf_name])
+
+    return provider
+
+
 def walk_model_schema(
     model: Any,
     *,
@@ -269,6 +337,7 @@ def _walk_type(
             field_type=field_type,
             metadata=metadata,
             value_provider=_build_value_provider(steps) if with_values else None,
+            substitute_provider=_build_substitute_provider(steps) if with_values else None,
         )
         return
 
@@ -359,6 +428,7 @@ def _walk_type(
         field_type=field_type,
         metadata=metadata,
         value_provider=_build_value_provider(steps) if with_values else None,
+        substitute_provider=_build_substitute_provider(steps) if with_values else None,
     )
 
 
@@ -643,53 +713,135 @@ def _redact_via_schema(
     Summarizer failures fire ``telemetry.summarizer_error(tool_name=...)``
     BEFORE raising ``AuditIntegrityError`` (rev-2 M.8 discipline).
 
-    Scope (Task 7): top-level paths only.  Nested-path substitution
-    (containers, BaseModel descent) requires the value_provider-driven
-    path-walker added in Task 8; nested paths raise ``NotImplementedError``
-    to preserve the staging boundary.
+    Path coverage (Task 8 generalisation): top-level, nested-BaseModel,
+    list-element, dict-element, and tuple-element paths are all supported
+    via the per-node ``substitute_provider`` closure built alongside
+    ``value_provider`` in ``walk_model_schema(with_values=True)``.
+
+    Walker atomicity (rev-3 W8b / rev-4 W8b): substitutions mutate a local
+    ``dumped`` dict.  When ``transform`` raises mid-walk, the partial dict
+    is discarded by the unwind; only a fully successful walk returns it to
+    the caller.
     """
     dumped = copy.deepcopy(validated.model_dump())
     for node in walk_model_schema(model_cls, with_values=True):
         marker = next((m for m in node.metadata if isinstance(m, _SensitiveMarker)), None)
         if marker is None:
             continue
-        if marker.summarizer is None:
-            # No summarizer: substitute the no-summarizer sentinel.
-            # Declarative sensitive keys always use this path; type-driven
-            # Sensitive() fields without a summarizer keyword also land here.
-            dumped[node.path] = REDACTED_SENSITIVE_NO_SUMMARIZER
-            continue
-        # Tracer-bullet scope: top-level paths only.  Nested-path
-        # substitution requires the value_provider-driven path-walker
-        # added in Task 8.
-        if "." in node.path or "[" in node.path or "{" in node.path:
-            raise NotImplementedError(f"Nested-path Sensitive field at path {node.path!r}; Task 8 implements the general path walker.")
-        if node.value_provider is None:
-            # walk_model_schema(with_values=True) guarantees value_provider
-            # is not None; a None here is a walker bug, not external input.
+        if node.substitute_provider is None:
+            # walk_model_schema(with_values=True) guarantees substitute_provider
+            # is populated; a None here is a walker bug, not external input.
             raise AuditIntegrityError(
                 f"walk_model_schema yielded TraversalNode at {node.path!r} "
-                "with value_provider=None despite with_values=True. "
+                "with substitute_provider=None despite with_values=True. "
                 "This is an internal walker contract violation."
             )
-        raw_value = node.value_provider(dumped)
+        if marker.summarizer is None:
+            # No summarizer: substitute the no-summarizer sentinel at every
+            # reachable leaf for this path (top-level, nested, or container).
+            # Declarative sensitive keys always use this path; type-driven
+            # Sensitive() fields without a summarizer keyword also land here.
+            node.substitute_provider(dumped, lambda _v: REDACTED_SENSITIVE_NO_SUMMARIZER)
+            continue
+        # Narrow marker.summarizer from `Callable | None` to `Callable` by
+        # rebinding to a local before forming the closure (the early
+        # `continue` on `marker.summarizer is None` above does not propagate
+        # through the loop body's closure-default position).
+        summarizer: Callable[[Any], str] = marker.summarizer
+
+        # Bind summarizer, tool_name, and node.path into the closure via
+        # default-argument captures (B023): the loop reassigns these names
+        # on each iteration, so capturing through the enclosing scope would
+        # have every closure see the LAST iteration's values.
+        def _apply(
+            raw_value: Any,
+            *,
+            _summarizer: Callable[[Any], str] = summarizer,
+            _tool_name: str = tool_name,
+            _path: str = node.path,
+        ) -> Any:
+            try:
+                summary = _summarizer(raw_value)
+            except Exception as exc:
+                telemetry.summarizer_error(tool_name=_tool_name)  # BEFORE raise (rev-2 M.8)
+                raise AuditIntegrityError(f"Summarizer for {_tool_name!r} path {_path!r} raised {type(exc).__name__}: {exc}") from exc
+            if not isinstance(summary, str):
+                # _SensitiveMarker.summarizer is typed as Callable[[Any], str]; mypy
+                # considers this branch unreachable after isinstance narrowing.  We
+                # keep it as an offensive invariant guard: a misconfigured or mocked
+                # summarizer may violate the return-type contract at runtime
+                # (spec §4.2.6 M.8).  type: ignore suppresses the false-positive.
+                telemetry.summarizer_error(tool_name=_tool_name)  # type: ignore[unreachable]  # BEFORE raise (rev-2 M.8)
+                raise AuditIntegrityError(
+                    f"Summarizer for {_tool_name!r} path {_path!r} returned {type(summary).__name__}, expected str (spec §4.2.6)."
+                )
+            return summary
+
+        node.substitute_provider(dumped, _apply)
+    return dumped
+
+
+def _redact_via_policy(
+    tool_name: str,
+    arguments: dict[str, Any],
+    policy: ToolRedactionPolicy,
+    *,
+    telemetry: RedactionTelemetry,
+) -> dict[str, Any]:
+    """Walk ``arguments`` against a declarative policy (Task 8).
+
+    Spec §4.2.6 disposition table:
+      * Argument summarizer key declared but argument key absent in input →
+        no-op (key absence is not a fault; Tier-3 input may omit any key).
+      * Argument summarizer key declared AND present in input AND a summarizer
+        is registered for it → summarizer output substitutes the value.
+      * Argument summarizer key declared AND present in input AND no summarizer
+        is registered → REDACTED_SENSITIVE_NO_SUMMARIZER substitutes the value
+        (spec §4.3 line 1073: "Plain sensitive key → value replaced by literal
+        string '<redacted>'.").
+      * Argument key NOT in sensitive_argument_keys → passthrough (the
+        declarative argument walker, unlike the response walker, does not
+        sentinelise unknown keys; the manifest enumerates the sensitive
+        surface explicitly).
+
+    Walker atomicity (rev-3 W8b / rev-4 W8b): the output dict is built in a
+    local variable and only returned on success.  A mid-walk raise leaves no
+    partial dict observable to the caller.
+    """
+    # Build the output dict by shallow-copying the input, then substituting
+    # values for every sensitive key present.  Atomicity comes from the fact
+    # that any raise during summarization aborts before we hand the dict back.
+    # Non-sensitive keys are passthrough (the argument walker does not
+    # sentinelise unknown keys — see the docstring).
+    redacted: dict[str, Any] = dict(arguments)
+    summarizers = policy.argument_summarizers
+    for key in policy.sensitive_argument_keys:
+        if key not in arguments:
+            # Key absence is not a fault (Tier-3 input).
+            continue
+        if key not in summarizers:
+            # Plain sensitive key, no summarizer registered → no-summarizer sentinel.
+            redacted[key] = REDACTED_SENSITIVE_NO_SUMMARIZER
+            continue
+        summarizer = summarizers[key]
+        raw_value = arguments[key]
         try:
-            summary = marker.summarizer(raw_value)
+            summary = summarizer(raw_value)
         except Exception as exc:
             telemetry.summarizer_error(tool_name=tool_name)  # BEFORE raise (rev-2 M.8)
-            raise AuditIntegrityError(f"Summarizer for {tool_name!r} path {node.path!r} raised {type(exc).__name__}: {exc}") from exc
+            raise AuditIntegrityError(f"Summarizer for {tool_name!r} argument key {key!r} raised {type(exc).__name__}: {exc}") from exc
         if not isinstance(summary, str):
-            # _SensitiveMarker.summarizer is typed as Callable[[Any], str]; mypy
-            # considers this branch unreachable after isinstance narrowing.  We
-            # keep it as an offensive invariant guard: a misconfigured or mocked
-            # summarizer may violate the return-type contract at runtime
-            # (spec §4.2.6 M.8).  type: ignore suppresses the false-positive.
+            # ToolRedactionPolicy.argument_summarizers is typed as Mapping[str,
+            # Callable[[Any], str]]; mypy considers this branch unreachable
+            # after the isinstance narrowing.  We keep it as an offensive
+            # invariant guard: a misconfigured or mocked summarizer may
+            # violate the return-type contract at runtime (spec §4.2.6 M.8).
             telemetry.summarizer_error(tool_name=tool_name)  # type: ignore[unreachable]  # BEFORE raise (rev-2 M.8)
             raise AuditIntegrityError(
-                f"Summarizer for {tool_name!r} path {node.path!r} returned {type(summary).__name__}, expected str (spec §4.2.6)."
+                f"Summarizer for {tool_name!r} argument key {key!r} returned {type(summary).__name__}, expected str (spec §4.2.6)."
             )
-        dumped[node.path] = summary
-    return dumped
+        redacted[key] = summary
+    return redacted
 
 
 def redact_tool_call_arguments(
@@ -698,26 +850,70 @@ def redact_tool_call_arguments(
     *,
     telemetry: RedactionTelemetry,
 ) -> dict[str, Any]:
-    """Minimal tracer-bullet impl (spec §4.2.6).
+    """Produce the redacted arguments dict that lands in
+    ``chat_messages.tool_calls`` JSON (spec §4.2.6).
 
-    Generalised in Task 8 to cover the declarative manifest branch and
-    full path-walker substitution.  In this commit only the type-driven
-    branch is wired and only the ``set_source`` manifest entry exists.
+    Disposition by manifest-entry shape:
 
-    The handler MUST catch :class:`pydantic.ValidationError` raised here
-    and re-raise as :class:`ToolArgumentError` so the compose loop's
-    ARG_ERROR routing at ``service.py:2480`` receives the right exception
-    class.  A bare ``ValidationError`` escaping the handler hits the
-    catch-all and becomes :class:`ComposerPluginCrashError` → HTTP 500 —
-    the wrong disposition for Tier-3 input.
+    **Type-driven entry (``argument_model`` set):**
+      Emit the ``manifest_dispatch`` beacon (BEFORE ``model_validate`` so a
+      Tier-3 ``ValidationError`` still records the dispatch); validate the
+      raw arguments against ``argument_model``; walk via
+      :func:`_redact_via_schema`. ``Sensitive[T]`` fields at any path
+      (top-level, nested, list-element, dict-element, tuple-element) are
+      substituted with the summarizer output or
+      ``REDACTED_SENSITIVE_NO_SUMMARIZER`` when no summarizer is declared.
+
+      The handler MUST catch :class:`pydantic.ValidationError` raised here
+      and re-raise as :class:`ToolArgumentError` so the compose loop's
+      ARG_ERROR routing at ``service.py:2480`` receives the right exception
+      class.  A bare ``ValidationError`` escaping the handler hits the
+      catch-all and becomes :class:`ComposerPluginCrashError` → HTTP 500 —
+      the wrong disposition for Tier-3 input.
+
+    **Declarative entry (``policy`` set):**
+      Emit the ``manifest_dispatch`` beacon; walk ``arguments`` by
+      ``policy.sensitive_argument_keys``.  Missing keys are no-ops; present
+      keys are summarized (via ``policy.argument_summarizers[key]``) or
+      sentinel-substituted (``REDACTED_SENSITIVE_NO_SUMMARIZER``).  Keys
+      not in ``sensitive_argument_keys`` are passthrough.
+
+    **Failure modes (all raise AuditIntegrityError):**
+      - Manifest entry missing for ``tool_name`` (registry-consistency
+        invariant; distinct from Tier-3 LLM-hallucinated tool name which is
+        caught earlier in the dispatcher).
+      - Summarizer raises → ``telemetry.summarizer_error(tool_name=...)``
+        BEFORE raise; ``AuditIntegrityError`` chained from the underlying
+        exception (M.8).
+      - Summarizer returns non-str → ``telemetry.summarizer_error(...)``
+        BEFORE raise; ``AuditIntegrityError`` with a typed message.
+
+    **Walker atomicity:** the output dict is built in a local variable and
+    only returned on success.  A mid-walk raise leaves no partial dict
+    observable to the caller (rev-3 W8b / rev-4 W8b).
     """
+    if tool_name not in MANIFEST:
+        raise AuditIntegrityError(
+            f"redact_tool_call_arguments called for unknown tool {tool_name!r}; "
+            "the manifest is the source of truth for the registry/redaction "
+            "set-equality invariant.  Add a manifest entry for this tool or "
+            "verify that the dispatch path passes the correct tool name."
+        )
     entry = MANIFEST[tool_name]
     if entry.argument_model is not None:
+        # Emit BEFORE model_validate: dispatch happened regardless of Tier-3
+        # validation outcome.  A ValidationError escapes here and the handler
+        # wraps it as ToolArgumentError; the dispatch beacon must not depend on
+        # validation success.
         telemetry.manifest_dispatch(tool_name=tool_name, shape="type_driven")
         validated = entry.argument_model.model_validate(arguments)
         return _redact_via_schema(tool_name, validated, entry.argument_model, telemetry=telemetry)
-    # Declarative branch added in Task 8.
-    raise NotImplementedError(f"Declarative manifest entry for {tool_name!r} — see Task 8.")
+    # Declarative branch (entry.policy is not None — ToolRedaction.__post_init__
+    # guarantees exactly one of {argument_model, policy} is set).
+    telemetry.manifest_dispatch(tool_name=tool_name, shape="declarative")
+    policy = entry.policy
+    assert policy is not None  # offensive: satisfies the type-checker contract
+    return _redact_via_policy(tool_name, arguments, policy, telemetry=telemetry)
 
 
 # Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The

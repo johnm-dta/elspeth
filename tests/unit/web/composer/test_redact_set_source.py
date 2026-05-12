@@ -208,28 +208,26 @@ def test_redact_via_schema_substitutes_sentinel_for_sensitive_field_without_summ
     assert "CANARY" not in str(result.values())
 
 
-def test_redact_via_schema_raises_for_nested_sensitive_path() -> None:
-    """Task-8 staging boundary: nested-path Sensitive field raises NotImplementedError.
+def test_redact_via_schema_substitutes_nested_sensitive_path() -> None:
+    """Task-8 generalisation: nested-path Sensitive field is substituted in-place.
 
-    _redact_via_schema supports only top-level paths (Task 7 scope).  When a
-    Sensitive marker is encountered at a NESTED path — e.g., a nested BaseModel
-    field whose subfield carries ``Sensitive(summarizer=...)`` — ``walk_model_schema``
-    yields a node with path ``"payload.inner_secret"`` (containing a dot).  The
-    impl raises ``NotImplementedError`` rather than silently performing a shallow
-    substitution.  Task 8 generalises; this test pins the staging boundary.
-
-    The inner field MUST carry a summarizer so that the no-summarizer sentinel
-    substitution (top-level case) does not fire first — i.e., we reach the
-    nested-path guard cleanly.
+    Task 4's tracer-bullet raised ``NotImplementedError`` for any path
+    containing ``.``, ``[``, or ``{``; Task 8 supersedes that boundary by
+    implementing the per-path substitute closure on ``TraversalNode``. The
+    inner field's summarizer output replaces the value at the nested location
+    while the surrounding structure is preserved.
     """
 
     class _InnerModel(BaseModel):
-        inner_secret: Annotated[str, Sensitive(summarizer=lambda v: "<redacted>")]
+        inner_secret: Annotated[str, Sensitive(summarizer=lambda v: "<fixed-sum>")]
+        public_field: str
 
     class _OuterModel(BaseModel):
         payload: _InnerModel
 
-    validated = _OuterModel.model_validate({"payload": {"inner_secret": "x"}})
+    validated = _OuterModel.model_validate({"payload": {"inner_secret": "RAW_SECRET", "public_field": "shown"}})
     tel = NoopRedactionTelemetry()
-    with pytest.raises(NotImplementedError):
-        _redact_via_schema("stub_tool", validated, _OuterModel, telemetry=tel)
+    result = _redact_via_schema("stub_tool", validated, _OuterModel, telemetry=tel)
+    assert result["payload"]["inner_secret"] == "<fixed-sum>"
+    assert result["payload"]["public_field"] == "shown"
+    assert "RAW_SECRET" not in str(result)

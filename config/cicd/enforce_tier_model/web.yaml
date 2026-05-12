@@ -1427,14 +1427,14 @@ allow_hits:
     skill always loads (crash on missing). Only the deployment overlay is optional.
     Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=fdba27918c4c19cf
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=84521f914395fd1e
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=05156dc4d02f8f87
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=1b9366321bd5703b
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
@@ -1459,7 +1459,7 @@ allow_hits:
   safety: Returns int >= 0; downstream consumer raises on count > 1 with field
     name in the error message.
   expires: null
-- key: web/composer/redaction.py:R5:walk_model_schema:fp=2cac9f07818be842
+- key: web/composer/redaction.py:R5:walk_model_schema:fp=59b5b8548b68bd37
   owner: web-composer
   reason: Reflection over Python typing — isinstance(model, type) and issubclass(model,
     BaseModel) verify that the input is a pydantic schema class. There is no other
@@ -1468,7 +1468,7 @@ allow_hits:
   safety: Raises TypeError with descriptive message if a non-BaseModel is passed.
     No silent default; no coercion.
   expires: null
-- key: web/composer/redaction.py:R5:_walk_type:fp=1a8f475e0295aacd
+- key: web/composer/redaction.py:R5:_walk_type:fp=1c1358e437d69675
   owner: web-composer
   reason: Reflection over Python typing — isinstance(field_type, type) and issubclass(field_type,
     BaseModel) tests whether a Union/container element is a nested model that
@@ -1477,7 +1477,7 @@ allow_hits:
   safety: If neither container nor BaseModel, falls through to the scalar-leaf
     emission branch. No silent error suppression.
   expires: null
-- key: web/composer/redaction.py:R5:_is_descendable:fp=9b25b049e82eae87
+- key: web/composer/redaction.py:R5:_is_descendable:fp=c80a2f0ff0ed6d52
   owner: web-composer
   reason: Reflection helper used during Union-arm fan-out — same BaseModel detection
     primitive as the surrounding walker. Decides whether a Union arm carries
@@ -1486,7 +1486,7 @@ allow_hits:
     routes Annotated[scalar, Sensitive()] arms through _has_sensitive instead so
     Sensitive markers on scalar Union arms still emit a node.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=ea92b1fcd03687a2
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=c190f098bd28cc56
   owner: web-composer
   reason: Marker-class discrimination over Annotated metadata tuple — identical to
     _has_sensitive/_count_sensitive (spec §4.2.5). _SensitiveMarker is a sentinel
@@ -1496,16 +1496,31 @@ allow_hits:
     never from external input. Mismatched metadata entries fall through to the
     skip branch.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=d40c19a01a491c77
+- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=e4278fe816cc5277
   owner: web-composer
   reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
     the summarizer contract (spec §4.2.6) requires str return; a non-str return
     means a summarizer is misimplemented and the audit record would be poisoned.
     Offensive programming pattern per CLAUDE.md (Defensive Forbidden / Offensive
     Encouraged) decision-test row "Can I detect an invalid state and throw a
-    meaningful error?".
+    meaningful error?". The Task-8 refactor moved this check into a per-node
+    closure (``_apply``) so the same Sensitive-field summarizer contract applies
+    at top-level, nested-BaseModel, list-element, dict-element, and tuple-element
+    paths uniformly.
   safety: Raises AuditIntegrityError with the path and the offending type name so
     the operator can identify the misbehaving summarizer.
+  expires: null
+- key: web/composer/redaction.py:R5:_redact_via_policy:fp=2ecd1259b3a117e7
+  owner: web-composer
+  reason: Tier-1 invariant guard immediately before raising AuditIntegrityError —
+    declarative-branch counterpart of the _redact_via_schema._apply isinstance
+    guard. The summarizer contract (spec §4.2.6) requires str return for both
+    type-driven and declarative entries; a non-str return means a summarizer
+    registered in ToolRedactionPolicy.argument_summarizers is misimplemented and
+    the audit record would be poisoned. Offensive programming pattern per
+    CLAUDE.md (Defensive Forbidden / Offensive Encouraged).
+  safety: Raises AuditIntegrityError naming the tool, the argument key, and the
+    offending return type so the operator can identify the misbehaving summarizer.
   expires: null
 - key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=5b5a0d95b7682fd0
   owner: web-sessions

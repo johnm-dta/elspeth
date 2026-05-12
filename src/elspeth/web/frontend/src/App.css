@@ -4531,6 +4531,43 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   ExitToFreeformButton (Task 7.8)
+   Class: guided-exit-button.
+
+   Secondary / tertiary visual weight -- deliberately quieter than the primary
+   action buttons (accent background) used by individual widgets.  The button
+   must be visible but not compete with the widget's own call-to-action.
+
+   Sized to WCAG 2.5.8 minimum target (min-height: 44px).  Focus ring and
+   hover match the guided-* family convention.
+   --------------------------------------------------------------------------- */
+
+.guided-exit-button {
+  padding: var(--space-sm) var(--space-md);
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease,
+    color 0.1s ease;
+}
+
+.guided-exit-button:hover {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.guided-exit-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
@@ -4549,7 +4586,8 @@ summary:focus-visible {
   .guided-schema-continue-btn,
   .guided-propose-accept-btn,
   .guided-recipe-apply-btn,
-  .guided-recipe-build-btn {
+  .guided-recipe-build-btn,
+  .guided-exit-button {
     transition: none;
   }
 }

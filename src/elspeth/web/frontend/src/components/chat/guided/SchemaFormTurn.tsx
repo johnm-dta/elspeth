@@ -74,12 +74,18 @@
 //   Same pattern as InspectAndConfirmTurn (Task 7.3).
 //
 // Wire-response shape:
-//   Continue: { chosen: null, custom_inputs: null, edited_values: <full dict>,
+//   Continue: { chosen: null, custom_inputs: null, edited_values: <structured dict>,
 //               accepted_step_index: null, edit_step_index: null, control_signal: null }
-//   edited_values is a flat dict with every property from schema_block.properties.
-//   Server (state_machine.py:_advance_step_1) currently treats schema_form as an
-//   intra-step turn and returns early without consuming edited_values -- the full
-//   dict is pre-wired for when the intra-step flow is connected (Tasks 2.2+).
+//   edited_values has the shape { plugin, options, observed_columns, sample_rows }:
+//     - plugin: payload.plugin (the plugin name chosen in the preceding SINGLE_SELECT)
+//     - options: { ...allFormValues } — every property from schema_block.properties
+//     - observed_columns: [] (empty at source step; populated by backend after run)
+//     - sample_rows: [] (empty at source step; populated by backend after run)
+//   The backend's SCHEMA_FORM dispatcher (_dispatch_guided_respond, SCHEMA_FORM branch
+//   at STEP_1_SOURCE) requires "plugin" in edited_values to construct SourceResolved.
+//   The backend's SCHEMA_FORM dispatcher at STEP_2_SINK currently ignores edited_values
+//   (it just emits MULTI_SELECT_WITH_CUSTOM), but the same wire shape is used for
+//   shape conformance and future compatibility.
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { GuidedRespondRequest, SchemaFormPayload } from "@/types/guided";
@@ -379,7 +385,8 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
     // defensive programming.
     if (!canSubmit) return;
 
-    // Build edited_values: EVERY property, using current state for the value.
+    // Build the options dict: EVERY property from the schema, using the
+    // current field state (prefilled value, schema default, or user input).
     // JSON-fallback fields are re-parsed here; any parse error would have
     // already been caught by hasParseErrors and canSubmit would be false, so
     // this parse is guaranteed to succeed at submit time.
@@ -389,22 +396,19 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
     // type contract -- the schema declares int/float and the widget owes the
     // declared type at the trust boundary). Required-empty numerics are
     // already blocked by canSubmit and never reach this branch.
-    // Rationale: null preserves the "edited_values includes EVERY property"
-    // invariant documented in the file header, while letting the server
-    // distinguish "user explicitly cleared" from "field was never offered."
-    const edited_values: Record<string, unknown> = {};
+    const options: Record<string, unknown> = {};
     for (const name of propertyNames) {
       const ft = inferFieldType(properties[name]);
       const raw = formState.values[name];
       if (ft === "json-fallback") {
         // raw is the textarea string; parse it back to the structured value.
         // canSubmit guarantees no parse errors here.
-        edited_values[name] = JSON.parse(raw as string);
+        options[name] = JSON.parse(raw as string);
       } else if (ft === "number-int" || ft === "number-float") {
         // Empty -> null (Tier 2 type contract). Otherwise parse to number.
         // canSubmit guarantees required numerics are non-empty.
         if ((raw as string) === "") {
-          edited_values[name] = null;
+          options[name] = null;
         } else {
           const n =
             ft === "number-int"
@@ -413,19 +417,30 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
           // NaN means the user typed something the input accepted but isn't a
           // number (e.g. "1e" mid-typing). Submit null to honour the type
           // contract -- an unparseable string would corrupt the audit trail.
-          edited_values[name] = isNaN(n) ? null : n;
+          options[name] = isNaN(n) ? null : n;
         }
       } else if (ft === "checkbox") {
-        edited_values[name] = raw as boolean;
+        options[name] = raw as boolean;
       } else {
         // text / enum
-        edited_values[name] = raw as string;
+        options[name] = raw as string;
       }
     }
 
+    // The backend's SCHEMA_FORM dispatcher requires the structured shape:
+    // { plugin, options, observed_columns, sample_rows }. "plugin" is the key
+    // the backend uses to resolve the plugin and construct SourceResolved (or
+    // SinkResolved). observed_columns and sample_rows are populated by the
+    // backend after the source runs; this widget submits empty lists as
+    // shape-conformant placeholders.
     onSubmit({
       chosen: null,
-      edited_values,
+      edited_values: {
+        plugin: payload.plugin,
+        options,
+        observed_columns: [],
+        sample_rows: [],
+      },
       custom_inputs: null,
       accepted_step_index: null,
       edit_step_index: null,

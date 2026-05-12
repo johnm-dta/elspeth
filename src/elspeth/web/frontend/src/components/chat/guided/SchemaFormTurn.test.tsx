@@ -427,9 +427,17 @@ describe("prefill vs default precedence", () => {
 });
 
 // ── 4. Submit wire shape ──────────────────────────────────────────────────────
+//
+// The backend's SCHEMA_FORM dispatcher requires:
+//   { plugin, options, observed_columns, sample_rows }
+// where options contains every property from schema_block.properties.
+// The five "all-null" sibling fields on GuidedRespondRequest are also checked.
 
 describe("submit wire shape", () => {
-  it("fires onSubmit with all-null fields except edited_values on Continue", async () => {
+  it("fires onSubmit with the structured {plugin,options,observed_columns,sample_rows} shape", async () => {
+    // Core regression pin: the backend SCHEMA_FORM dispatcher at STEP_1_SOURCE
+    // requires "plugin" in edited_values. The flat-dict shape (direct field names
+    // at the top level) produces HTTP 422. This test pins the correct structure.
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<SchemaFormTurn payload={CSV_PAYLOAD} onSubmit={onSubmit} />);
@@ -439,15 +447,34 @@ describe("submit wire shape", () => {
 
     expect(onSubmit).toHaveBeenCalledOnce();
     const body = onSubmit.mock.calls[0][0];
+    // All six GuidedRespondRequest fields must be explicitly set.
     expect(body).toEqual({
       ...nullResponse(),
       chosen: null,
       custom_inputs: null,
-      edited_values: expect.objectContaining({ path: "/data/file.csv" }),
+      edited_values: {
+        plugin: "csv",
+        options: expect.objectContaining({ path: "/data/file.csv" }),
+        observed_columns: [],
+        sample_rows: [],
+      },
     });
   });
 
-  it("includes EVERY schema property in edited_values (touched and untouched)", async () => {
+  it("includes plugin from payload.plugin regardless of form content", async () => {
+    // plugin is sourced from payload.plugin (the SINGLE_SELECT choice), never
+    // from the form fields themselves.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<SchemaFormTurn payload={NUMERIC_PAYLOAD} onSubmit={onSubmit} />);
+
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    expect(edited_values["plugin"]).toBe("database");
+  });
+
+  it("includes EVERY schema property in edited_values.options (touched and untouched)", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<SchemaFormTurn payload={CSV_PAYLOAD} onSubmit={onSubmit} />);
@@ -455,15 +482,40 @@ describe("submit wire shape", () => {
     await user.type(screen.getByRole("textbox", { name: /path/i }), "/data/file.csv");
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const { edited_values } = onSubmit.mock.calls[0][0];
-    // All four properties must be present; optional ones at their defaults
-    expect(edited_values).toHaveProperty("path", "/data/file.csv");
-    expect(edited_values).toHaveProperty("delimiter", ",");
-    expect(edited_values).toHaveProperty("has_header", true);
-    expect(edited_values).toHaveProperty("encoding", "utf-8");
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    const options = edited_values["options"] as Record<string, unknown>;
+    // All four properties must be present in options; optional ones at their defaults
+    expect(options).toHaveProperty("path", "/data/file.csv");
+    expect(options).toHaveProperty("delimiter", ",");
+    expect(options).toHaveProperty("has_header", true);
+    expect(options).toHaveProperty("encoding", "utf-8");
   });
 
-  it("uses prefilled value in edited_values for untouched prefilled fields", async () => {
+  it("observed_columns is always [] (backend populates after source run)", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<SchemaFormTurn payload={CSV_PAYLOAD} onSubmit={onSubmit} />);
+
+    await user.type(screen.getByRole("textbox", { name: /path/i }), "/data");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    expect(edited_values["observed_columns"]).toEqual([]);
+  });
+
+  it("sample_rows is always [] (backend populates after source run)", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<SchemaFormTurn payload={CSV_PAYLOAD} onSubmit={onSubmit} />);
+
+    await user.type(screen.getByRole("textbox", { name: /path/i }), "/data");
+    await user.click(screen.getByRole("button", { name: /continue/i }));
+
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    expect(edited_values["sample_rows"]).toEqual([]);
+  });
+
+  it("uses prefilled value in options for untouched prefilled fields", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<SchemaFormTurn payload={NUMERIC_PAYLOAD} onSubmit={onSubmit} />);
@@ -471,14 +523,15 @@ describe("submit wire shape", () => {
     // mode is required and already prefilled -- just continue
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const { edited_values } = onSubmit.mock.calls[0][0];
-    expect(edited_values).toHaveProperty("mode", "read");
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    const options = edited_values["options"] as Record<string, unknown>;
+    expect(options).toHaveProperty("mode", "read");
     // optional fields at their defaults
-    expect(edited_values).toHaveProperty("batch_size", 1000);
-    expect(edited_values).toHaveProperty("timeout", 30.0);
+    expect(options).toHaveProperty("batch_size", 1000);
+    expect(options).toHaveProperty("timeout", 30.0);
   });
 
-  it("emits {} edited_values and enables Continue for a schema with no fields", async () => {
+  it("emits empty options {} for a schema with no fields", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<SchemaFormTurn payload={EMPTY_SCHEMA_PAYLOAD} onSubmit={onSubmit} />);
@@ -488,10 +541,14 @@ describe("submit wire shape", () => {
     await user.click(continueBtn);
 
     expect(onSubmit).toHaveBeenCalledOnce();
-    expect(onSubmit.mock.calls[0][0].edited_values).toEqual({});
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    expect(edited_values["plugin"]).toBe("passthrough");
+    expect(edited_values["options"]).toEqual({});
+    expect(edited_values["observed_columns"]).toEqual([]);
+    expect(edited_values["sample_rows"]).toEqual([]);
   });
 
-  it("includes parsed JSON value for a JSON-fallback field in edited_values", async () => {
+  it("includes parsed JSON value for a JSON-fallback field in options", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<SchemaFormTurn payload={FALLBACK_PAYLOAD} onSubmit={onSubmit} />);
@@ -500,13 +557,14 @@ describe("submit wire shape", () => {
     await user.type(screen.getByRole("textbox", { name: /name/i }), "my-transform");
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const { edited_values } = onSubmit.mock.calls[0][0];
-    // tags was prefilled as ["alpha","beta"] -- should appear parsed
-    expect(edited_values).toHaveProperty("tags");
-    expect((edited_values as Record<string, unknown>)["tags"]).toEqual(["alpha", "beta"]);
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    const options = edited_values["options"] as Record<string, unknown>;
+    // tags was prefilled as ["alpha","beta"] -- should appear parsed in options
+    expect(options).toHaveProperty("tags");
+    expect(options["tags"]).toEqual(["alpha", "beta"]);
   });
 
-  it("optional numeric field left blank submits as null, NOT empty string", async () => {
+  it("optional numeric field left blank submits as null in options, NOT empty string", async () => {
     // Tier 2 type contract: a numeric-typed slot must not receive a string.
     // The widget owes the schema-declared type at the trust boundary.
     const blankNumericPayload: SchemaFormPayload = {
@@ -530,11 +588,12 @@ describe("submit wire shape", () => {
     await user.type(screen.getByRole("textbox", { name: /name/i }), "x");
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const { edited_values } = onSubmit.mock.calls[0][0];
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    const options = edited_values["options"] as Record<string, unknown>;
     // batch_size MUST appear (every-property invariant) but as null, not ""
-    expect(edited_values).toHaveProperty("batch_size");
-    expect((edited_values as Record<string, unknown>)["batch_size"]).toBeNull();
-    expect((edited_values as Record<string, unknown>)["batch_size"]).not.toBe("");
+    expect(options).toHaveProperty("batch_size");
+    expect(options["batch_size"]).toBeNull();
+    expect(options["batch_size"]).not.toBe("");
   });
 });
 
@@ -787,7 +846,7 @@ describe("edge cases", () => {
     expect(btn.textContent).toMatch(/3/);
   });
 
-  it("parses valid JSON in a fallback textarea and includes it in submit", async () => {
+  it("parses valid JSON in a fallback textarea and includes it in options", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<SchemaFormTurn payload={FALLBACK_PAYLOAD} onSubmit={onSubmit} />);
@@ -800,7 +859,8 @@ describe("edge cases", () => {
     fireEvent.change(tagsTextarea, { target: { value: '["x","y"]' } });
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const { edited_values } = onSubmit.mock.calls[0][0];
-    expect((edited_values as Record<string, unknown>)["tags"]).toEqual(["x", "y"]);
+    const { edited_values } = onSubmit.mock.calls[0][0] as { edited_values: Record<string, unknown> };
+    const options = edited_values["options"] as Record<string, unknown>;
+    expect(options["tags"]).toEqual(["x", "y"]);
   });
 });

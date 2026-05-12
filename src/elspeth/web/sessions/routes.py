@@ -4338,10 +4338,14 @@ def create_session_router() -> APIRouter:
             )
 
             # Run step_advance (pure — no I/O).
-            # InvariantError from step_advance or the downstream dispatcher
-            # indicates a server-side bug — propagate as HTTP 500 with a
-            # "Server invariant violated" prefix so it's distinguishable from
-            # client-fault HTTP 400s in dashboards and on-call runbooks.
+            # InvariantError indicates a server-side bug (e.g. stamped an
+            # invalid turn type on a history record) — propagate as HTTP 500
+            # with a "Server invariant violated" prefix so it's distinguishable
+            # from client-fault HTTP 400s in dashboards and on-call runbooks.
+            # ValueError indicates a client-supplied payload violated the
+            # guided-mode protocol contract (e.g. unexpected chosen value on a
+            # recipe_offer turn, or null edited_values on inspect_and_confirm)
+            # — propagate as HTTP 400 so the caller can correct the request.
             try:
                 new_guided, _next_turn_from_advance, terminal_from_advance, directives = step_advance(
                     guided,
@@ -4352,6 +4356,11 @@ def create_session_router() -> APIRouter:
                 raise HTTPException(
                     status_code=500,
                     detail=f"Server invariant violated: {exc}",
+                ) from exc
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Guided-mode protocol error: {exc}",
                 ) from exc
 
             # Fan directives to emit_* helpers.
@@ -4408,6 +4417,16 @@ def create_session_router() -> APIRouter:
                     raise HTTPException(
                         status_code=500,
                         detail=f"Server invariant violated: {exc}",
+                    ) from exc
+                except ValueError as exc:
+                    # ValueError from inside the dispatcher indicates a
+                    # client-supplied payload violated the guided-mode protocol
+                    # contract (e.g. unknown plugin name from chosen, null
+                    # edited_values) — propagate as HTTP 400. See Codex #8,
+                    # #11, #15 and commit message for full context.
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Guided-mode protocol error: {exc}",
                     ) from exc
                 terminal = guided.terminal
 

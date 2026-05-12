@@ -719,7 +719,10 @@ def _advance_step_3(
       The handler interprets the response and either re-emits propose_chain
       or asks another question.
 
-    Any other turn type is a protocol violation — raises ValueError.
+    Any other turn type is a server-side invariant violation: Step 3 only ever
+    emits PROPOSE_CHAIN or SINGLE_SELECT turns, so a different turn type in
+    ``current_turn_type`` means the emitter stamped an invalid type on the
+    history record — raises InvariantError (server bug, not client fault).
     """
     if turn_type is TurnType.PROPOSE_CHAIN:
         return (session, None, None, [])
@@ -727,7 +730,11 @@ def _advance_step_3(
         # Clarifying question answered — no step change. The handler interprets
         # the response and either re-emits propose_chain or asks another question.
         return (session, None, None, [])
-    raise ValueError(f"unexpected turn_type at step 3: {turn_type}")
+    raise InvariantError(
+        f"_advance_step_3: unexpected turn_type {turn_type!r} — Step 3 only "
+        "emits PROPOSE_CHAIN and SINGLE_SELECT turns; any other type in the "
+        "history record indicates a server-side emitter bug."
+    )
 
 
 # ---------------------------------------------------------------------------

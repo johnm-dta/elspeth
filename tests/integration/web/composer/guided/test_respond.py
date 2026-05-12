@@ -1161,3 +1161,148 @@ class TestRespondErrorPaths:
             json={"chosen": ["csv"]},
         )
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Codex #8, #11, #15 — ValueError → HTTP 400 mapping in guided dispatcher
+#
+# S3 (commit f2478b6b) added `except InvariantError → 500` to distinguish
+# server bugs from client faults.  The symmetric `except ValueError → 400`
+# was missing; these tests verify it is now present at both catch sites.
+#
+# Site A: step_advance() ValueError — unexpected ``chosen`` on recipe_offer
+#   turn (state_machine._advance_step_2_5 line 700).  Fires at the
+#   step_advance try/except in post_guided_respond.
+#
+# Site B: solve_chain() — chain_solver raises only InvariantError (server
+#   bugs); no client-fault ValueError path exists there.  The new catch
+#   provides defence-in-depth but has no direct client trigger.
+#
+# Site C: build_step_1/2_schema_form_turn() — catalog.get_schema() raises
+#   ValueError for unknown plugin names (service.py line 114).  Fires inside
+#   _dispatch_guided_respond, caught by the dispatcher try/except.
+# ---------------------------------------------------------------------------
+
+
+class TestValueErrorMappedTo400:
+    """ValueError from step_advance or the dispatcher maps to HTTP 400 (Codex #8, #15)."""
+
+    def _drive_to_recipe_offer(self, client: TestClient, session_id: str) -> None:
+        """Drive session to the RECIPE_OFFER state (step 2.5)."""
+        _blob_id, storage_path = _seed_blob(client, session_id)
+        output_path = _outputs_path(client, "out_ve400.jsonl")
+
+        _get_guided(client, session_id)
+        _respond(client, session_id, chosen=["csv"])
+        _respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                "observed_columns": ["text", "category"],
+                "sample_rows": [{"text": "Hello", "category": "greeting"}],
+            },
+        )
+        _respond(client, session_id, chosen=["json"])
+        _respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+        _respond(client, session_id, chosen=["text", "category"], custom_inputs=[])
+
+    def test_site_a_unexpected_chosen_on_recipe_offer_returns_400(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """Site A (Codex #8): unexpected ``chosen`` on recipe_offer maps to HTTP 400.
+
+        state_machine._advance_step_2_5 raises ValueError for any chosen value
+        other than ``["accept"]`` or ``["build_manually"]``.  The step_advance
+        try/except must catch this and re-raise as HTTPException(400), not let
+        the framework return 500.
+
+        Asymmetry probe: this test is the one used to verify the catch is
+        load-bearing — see task report for revert evidence.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_recipe_offer(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["not_a_valid_choice"]},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        # Detail must cite the guided-mode protocol contract (not a naked traceback).
+        assert "Guided-mode protocol error" in detail
+        assert "not_a_valid_choice" in detail
+
+    def test_site_c_unknown_source_plugin_returns_400(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """Site C (Codex #15): unknown source plugin name in chosen maps to HTTP 400.
+
+        The step-1 SINGLE_SELECT handler calls build_step_1_schema_form_turn,
+        which calls catalog.get_schema("source", plugin_name).  For an unknown
+        plugin name that raises ValueError (service.py line 114).  The
+        dispatcher try/except must catch this and re-raise as HTTPException(400).
+        """
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["nonexistent_source_plugin_xyz"]},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "Guided-mode protocol error" in detail
+        assert "nonexistent_source_plugin_xyz" in detail
+
+    def test_site_c_unknown_sink_plugin_returns_400(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """Site C mirror (Codex #15): unknown sink plugin name in chosen maps to HTTP 400.
+
+        The step-2 SINGLE_SELECT handler calls build_step_2_schema_form_turn,
+        which calls catalog.get_schema("sink", plugin_name).  For an unknown
+        plugin name that raises ValueError (service.py line 114).  The
+        dispatcher try/except must catch this and re-raise as HTTPException(400).
+        """
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+
+        _get_guided(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["csv"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                "observed_columns": ["text"],
+                "sample_rows": [],
+            },
+        )
+        # Now at step 2 SINGLE_SELECT — send a bogus sink plugin name.
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["nonexistent_sink_plugin_xyz"]},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "Guided-mode protocol error" in detail
+        assert "nonexistent_sink_plugin_xyz" in detail

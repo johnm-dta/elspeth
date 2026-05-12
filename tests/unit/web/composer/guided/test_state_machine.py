@@ -561,7 +561,13 @@ class TestStepAdvance:
         assert directives == []
 
     def test_step_3_unexpected_turn_type_raises(self) -> None:
-        """Any turn type other than PROPOSE_CHAIN or SINGLE_SELECT at Step 3 is a ValueError."""
+        """Any turn type other than PROPOSE_CHAIN or SINGLE_SELECT at Step 3 is an InvariantError.
+
+        Step 3 only ever emits PROPOSE_CHAIN and SINGLE_SELECT turns from the
+        server.  A different turn type in the history record means the emitter
+        stamped an invalid type — that is a server-side bug (InvariantError),
+        not a client protocol violation (ValueError).  Maps to HTTP 500, not 400.
+        """
         sess = GuidedSession(
             step=GuidedStep.STEP_3_TRANSFORMS,
             history=(),
@@ -576,7 +582,7 @@ class TestStepAdvance:
             terminal=None,
         )
         response = _make_response()
-        with pytest.raises(ValueError, match="unexpected turn_type at step 3"):
+        with pytest.raises(InvariantError, match="_advance_step_3"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
 
 

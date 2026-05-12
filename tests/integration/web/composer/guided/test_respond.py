@@ -1377,3 +1377,98 @@ class TestValueErrorMappedTo400:
         detail = resp.json()["detail"]
         assert "Guided-mode protocol error" in detail
         assert "nonexistent_sink_plugin_xyz" in detail
+
+
+# ---------------------------------------------------------------------------
+# Wire-validation tests — Codex #12 (control_signal enum validation)
+# ---------------------------------------------------------------------------
+
+
+class TestCodex12ControlSignalValidation:
+    """Codex #12: control_signal validated against the ControlSignal enum at
+    the wire boundary.
+
+    ``GuidedRespondRequest`` stores control_signal as str | None
+    intentionally; this guard is the route handler's enforcement point.
+    """
+
+    def test_unknown_control_signal_returns_400(self, composer_test_client: TestClient) -> None:
+        """An unknown string value for control_signal -> 400 with valid-values message."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"], "control_signal": "invalid_value"},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "Unknown control_signal" in detail
+        assert "invalid_value" in detail
+        assert "exit_to_freeform" in detail  # valid values listed
+
+    def test_null_control_signal_passes_through(self, composer_test_client: TestClient) -> None:
+        """control_signal=null is the normal path -- guard must not reject it."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        # null control_signal + valid chosen -> normal step-1 advance -> 200
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"], "control_signal": None},
+        )
+        assert resp.status_code == 200, resp.json()
+
+    def test_exit_to_freeform_is_accepted(self, composer_test_client: TestClient) -> None:
+        """exit_to_freeform is a valid ControlSignal value -> guard passes, step_advance runs."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"], "control_signal": "exit_to_freeform"},
+        )
+        # step_advance handles exit_to_freeform by dropping to freeform terminal.
+        # The guard must not reject it; the response may be 200 or 4xx depending on
+        # the step_advance / dispatcher logic, but not due to our validation guard.
+        # We only assert it is NOT a 400 caused by "Unknown control_signal".
+        if resp.status_code == 400:
+            assert "Unknown control_signal" not in resp.json().get("detail", "")
+
+    def test_reject_signal_is_accepted(self, composer_test_client: TestClient) -> None:
+        """reject is a valid ControlSignal value -> guard passes."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"], "control_signal": "reject"},
+        )
+        # Guard must not return "Unknown control_signal".
+        if resp.status_code == 400:
+            assert "Unknown control_signal" not in resp.json().get("detail", "")
+
+    def test_request_advisor_signal_is_accepted(self, composer_test_client: TestClient) -> None:
+        """request_advisor is a valid ControlSignal value -> guard passes."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"], "control_signal": "request_advisor"},
+        )
+        if resp.status_code == 400:
+            assert "Unknown control_signal" not in resp.json().get("detail", "")
+
+    def test_typo_in_known_signal_returns_400(self, composer_test_client: TestClient) -> None:
+        """Asymmetry probe: a near-miss typo is rejected -- exact-value matching only."""
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"], "control_signal": "exit_to_freeform_"},
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "Unknown control_signal" in detail

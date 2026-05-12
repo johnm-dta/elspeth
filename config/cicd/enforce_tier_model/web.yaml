@@ -1201,77 +1201,68 @@ allow_hits:
     which is raw JSON from the DB. Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=d48a5a2d814e4af5
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=1be1c129fa92774d
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['plugin'] must be a non-empty string per
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values plugin must be a non-empty string per
     the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the offending
-    value in the detail), not error suppression. Replaces the previous silent str(edited['plugin']) coercion that masked
-    contract drift.
+    value in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper inserted before
+    _dispatch_guided_respond.
   safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=b4b49b523cc3a013
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=2a0fea9e6ceb3e51
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['options'] must be a Mapping per the
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values options must be a Mapping per the
     SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type
-    in the detail), not error suppression. Replaces the previous silent dict(edited.get("options", {})) default which would
-    have collapsed null/list/scalar payloads into an empty dict and fabricated upstream contract conformance.
+    in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=1fe3412bcd84bd85
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=69411a55206a1442
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['observed_columns'] must be a list per
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values observed_columns must be a list per
     the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual
-    type in the detail), not error suppression. Replaces the previous silent tuple(edited.get("observed_columns", [])) default
-    which would have silently accepted scalars and yielded character-wise tuples (e.g. tuple("abc") → ('a','b','c')).
+    type in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=1d46f8b9f9d4684f
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=98a6c55320ec0c28
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values['sample_rows'] must be a list per the
+  reason: HTTP-boundary trust-boundary validation — Step-1 SCHEMA_FORM edited_values sample_rows must be a list per the
     SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type
-    in the detail), not error suppression. Replaces the previous silent tuple(dict(r) for r in edited.get("sample_rows", []))
-    pattern which would have crashed deep in the comprehension on a non-iterable.
+    in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=4d81c5e48f62089b
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=c91cf38fd80079d8
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values['columns'] must be a list
+  reason: HTTP-boundary trust-boundary validation — post-advance INSPECT_AND_CONFIRM edited_values columns must be a list
     per the narrow wire contract (Pair 5a); isinstance here is offensive validation (raises HTTPException 400 with the actual
-    type in the detail), not error suppression. The guard is HTTP-reachable as 400 because _advance_step_1's
-    ``tuple(str(c) for c in columns_raw)`` coercion would silently accept a scalar string (iterating its characters), so the
-    dispatcher catches non-list here before that coercion runs. Resolves elspeth-obs-57451bbaa6.
+    type in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=7ab395b1d9772442
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=15014ebb01dd4f1f
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — Step-2 SCHEMA_FORM edited_values['plugin'] must be a non-empty string per
+  reason: HTTP-boundary trust-boundary validation — Step-2 SCHEMA_FORM edited_values plugin must be a non-empty string per
     the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the offending
-    value in the detail), not error suppression. Replaces the previous str(edited['plugin']) coercion that would have stringified
-    any payload (including None).
+    value in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=d43305a68bd1dcd9
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=bed58ea3edf7011d
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — Step-2 SCHEMA_FORM edited_values['options'] must be a Mapping per the
+  reason: HTTP-boundary trust-boundary validation — Step-2 SCHEMA_FORM edited_values options must be a Mapping per the
     SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type
-    in the detail), not error suppression. Replaces the previous dict(edited['options']) call which would have crashed deep
-    on non-mappings.
+    in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=c866e7dc93d93ee7
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=35ed7971402f2bc8
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — recipe_offer ['accept'] edited_values['recipe_name'] must be a non-empty
+  reason: HTTP-boundary trust-boundary validation — recipe_offer accept edited_values recipe_name must be a non-empty
     string per the RecipeOfferTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with
-    contract-citing detail), not error suppression. Replaces the previous silent str(edited.get("recipe_name", "")) default
-    which masked protocol drift as a downstream "unknown recipe ''" error.
+    contract-citing detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=2e558c1507b6f496
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=075a3c0199d8228d
   owner: web-sessions
-  reason: HTTP-boundary trust-boundary validation — recipe_offer ['accept'] edited_values['slots'] must be a Mapping per
+  reason: HTTP-boundary trust-boundary validation — recipe_offer accept edited_values slots must be a Mapping per
     the RecipeOfferTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual
-    type in the detail), not error suppression. Replaces the previous silent dict(edited.get("slots", {})) default which
-    would have collapsed null/list/scalar payloads into an empty dict.
+    type in the detail), not error suppression. FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
 - key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=0a36998f74801109
@@ -1468,88 +1459,88 @@ allow_hits:
     and cancellation now also drains the shielded future's eventual exception via add_done_callback so asyncio's GC handler
     cannot fire a misleading 'Future exception was never retrieved' traceback.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=d66e00138da0f0c4
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=08507e15a67e9819
   owner: web-sessions
-  reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps shielded cancelled-LLM-call
-    audit persistence; FP rotated by Task 5.2 (progressive-disclosure transition prompt) adding transition_consumed flip logic
-    before the CancelledError handler in send_message.
-  safety: Same as the prior entry — shielded persistence is best-effort; explicit raise preserves cancellation chain.
+  reason: Same as the prior send_message R7 entry; contextlib.suppress(asyncio.CancelledError) wraps shielded
+    cancelled-LLM-call audit persistence. FP rotated by Codex 12 _validate_control_signal helper insertion.
+  safety: Same as the prior entry; shielded persistence is best-effort; explicit raise preserves cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=9bda8dca88eb99ca
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=4bf21bb63e3513fa
   owner: web-sessions
-  reason: Same as the prior send_message R7 entry — contextlib.suppress(asyncio.CancelledError) wraps the shielded progress
-    publish in the cancellation handler; FP rotated by Task 5.2 (progressive-disclosure transition prompt) adding transition_consumed
-    flip logic before the CancelledError handler in send_message.
-  safety: Same as the prior entry — shielded publish completes; explicit raise restores cancellation chain.
+  reason: Same as the prior send_message R7 entry; contextlib.suppress(asyncio.CancelledError) wraps the shielded
+    progress publish. FP rotated by Codex 12 _validate_control_signal helper insertion.
+  safety: Same as the prior entry; shielded publish completes; explicit raise restores cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=72252eb1a66e6d8a
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=7707cb6ca62307e6
   owner: web-sessions
-  reason: Same as the prior recompose R7 entry — mirror of cancelled-LLM-call audit persistence suppress in recompose; FP
-    rotated by guided_terminal / _post_compose_guided block insertion (Task 5.2 fix).
+  reason: Same as the prior recompose R7 entry; mirror of cancelled-LLM-call audit persistence suppress.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Same as the prior entry.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=38896944bced28f6
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=ac0f5a5738328c42
   owner: web-sessions
-  reason: Same as the prior recompose R7 entry — mirror of shielded-publish suppress in recompose; FP rotated by guided_terminal
-    / _post_compose_guided block insertion (Task 5.2 fix).
+  reason: Same as the prior recompose R7 entry; mirror of shielded-publish suppress.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Same as the prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=cda3ae2175a3a50f
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=4f6cd12f991f1575
   owner: web-sessions
-  reason: isinstance check on deserialized composition state source — Tier 3 boundary; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted
-    routes.py when post_guided_respond was added.
+  reason: isinstance check on deserialized composition state source; Tier 3 boundary.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Validates structure from persisted state; same as prior fork_from_message R5 entry.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=a27644806d428952
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=93517ea08146d4bb
   owner: web-sessions
-  reason: source_dict.get("options") on Tier 3 composition state — optional source options; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted
-    routes.py when post_guided_respond was added.
+  reason: source_dict.get("options") on Tier 3 composition state; optional source options.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Returns None on miss, blob rewrite path is skipped; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=303f527b72cfef63
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=431b4edc07c31793
   owner: web-sessions
-  reason: isinstance(options, dict) validates persisted source.options before mutating nested fields during fork blob rewrite;
-    FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
+  reason: isinstance(options, dict) validates persisted source.options before mutating nested fields.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Non-dict raises AuditIntegrityError; no silent skip or coercion.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=f810695c334095c6
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=bdda27355a72c072
   owner: web-sessions
-  reason: options.get("blob_ref") on Tier 3 state source — blob_ref is optional; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish) reformatted
-    routes.py when post_guided_respond was added.
+  reason: options.get("blob_ref") on Tier 3 state source; blob_ref is optional.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Returns None on miss, handled by conditional below; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=0fea32bcbafc94be
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=8602354191c100ec
   owner: web-sessions
-  reason: isinstance(old_ref, str) — blob_ref may be str or UUID from persisted state; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
-  safety: Tier 3 boundary — persisted blob_ref type is not guaranteed.
+  reason: isinstance(old_ref, str); blob_ref may be str or UUID from persisted state.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
+  safety: Tier 3 boundary; persisted blob_ref type is not guaranteed.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=91d7ce27c2701fc9
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=2a8e1609b0a8e349
   owner: web-sessions
-  reason: blob_map.get(old_uuid) — not every source reference is guaranteed to have a copied blob target; FP changed after
-    ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
+  reason: blob_map.get(old_uuid); not every source reference is guaranteed to have a copied blob target.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: None result only triggers secondary path/file rewrite probe; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=c5ad0fd939b93a58
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=7c2e2a4eb5a02d69
   owner: web-sessions
-  reason: options.get(path_key) on persisted source options — path/file keys are optional; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
+  reason: options.get(path_key) on persisted source options; path/file keys are optional.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: None result skips that key; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=bd60cb85fb591735
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=910f1cff92369aea
   owner: web-sessions
-  reason: isinstance(path_value, str) guards source_blob_path_map lookup against non-string persisted path/file values; FP
-    changed after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
+  reason: isinstance(path_value, str) guards source_blob_path_map lookup against non-string persisted values.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Only string values participate in fallback rewrite; same as prior entry.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=5632eb606c04d1bc
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=e960860608dc63ed
   owner: web-sessions
-  reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the BlobQuotaExceededError path; FP changed
-    after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
+  reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the BlobQuotaExceededError path.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Same as prior fork_from_message R6 entry.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=d1306e4027bed96c
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=b801a89e19a756ae
   owner: web-sessions
-  reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the generic except Exception path; FP
-    changed after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish).
+  reason: Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the generic except Exception path.
+    FP rotated by Codex 12 _validate_control_signal helper insertion.
   safety: Same as prior fork_from_message R6 entry.
   expires: null
 - key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=edd58c4a70f20c34

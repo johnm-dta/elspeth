@@ -54,7 +54,7 @@ from elspeth.web.composer.guided.emitters import (
     build_step_3_propose_chain_turn,
 )
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
@@ -1557,6 +1557,29 @@ def _initial_composition_state_with_guided_session() -> CompositionState:
         version=1,
         guided_session=GuidedSession.initial(),
     )
+
+
+def _validate_control_signal(raw: str | None) -> None:
+    """Validate ``control_signal`` against the closed :class:`ControlSignal` enum.
+
+    Raises :class:`HTTPException` (400) when *raw* is non-None and not a
+    recognised enum value.  Null passes through — omitting the signal is
+    the normal (non-control) path.
+
+    The ``GuidedRespondRequest`` schema keeps this field as ``str | None``
+    intentionally (see schemas.py docstring) so that stale clients carrying
+    an unknown signal value receive a clear protocol error from this guard
+    rather than a Pydantic deserialization crash.  This function is the
+    matching enforcement point on the route handler side.
+    """
+    if raw is None:
+        return
+    valid = [e.value for e in ControlSignal]
+    if raw not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unknown control_signal: {raw!r}. Valid values: {valid}"),
+        )
 
 
 async def _dispatch_guided_respond(
@@ -4454,6 +4477,14 @@ def create_session_router() -> APIRouter:
                 )
 
             current_turn_type = existing_record.turn_type
+
+            # --- Wire-boundary validation (Codex #12) -----------------------
+            # Validates before the TurnResponse dict is assembled so that
+            # invalid requests are rejected before response_hash is computed or
+            # guided_turn_answered is emitted.
+
+            # Codex #12: validate control_signal against the ControlSignal enum.
+            _validate_control_signal(body.control_signal)
 
             # Build the TurnResponse dict from the request body.
             from dataclasses import replace as _replace

@@ -25,25 +25,33 @@ Pydantic argument models with ``extra="forbid"``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Literal, get_origin
+from pathlib import Path
+from typing import Annotated, Any, Literal, get_origin
 from uuid import UUID
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from elspeth.web.composer.redaction import (
     MANIFEST,
     HandlesNoSensitiveDataReason,
+    Sensitive,
     ToolRedaction,
     ToolRedactionPolicy,
     _SensitiveMarker,
     walk_model_schema,
 )
 
-from ._adequacy_helpers import collect_registry_names
+from ._adequacy_helpers import (
+    _entry_hash,
+    collect_registry_names,
+    compute_manifest_snapshot,
+)
 
 # Closed list of non-redaction-eligible scalar types (spec §4.4.2 disposition).
 #
@@ -565,4 +573,212 @@ def test_mass_copy_uniqueness_allows_identical_sensitive_data_locations() -> Non
         "Expected zero collisions when only sensitive_data_locations is shared "
         "(identical locations are allowed by spec §4.4.4); "
         f"got {collisions!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Assertion 4 (§4.4.3, Task 12). Policy-hash snapshot equality.
+# ---------------------------------------------------------------------------
+
+
+def test_redaction_policy_snapshot_matches_live_manifest() -> None:
+    """The committed snapshot file must match the live MANIFEST hash.
+
+    Bootstrap the snapshot via:
+        .venv/bin/python scripts/cicd/bootstrap_redaction_snapshot.py --write
+
+    Whenever a manifest entry changes (Tasks 13-16 add new entries; Task 19
+    is the gate), this test will fail until the snapshot is regenerated and
+    the diff is reviewed.
+
+    The snapshot includes a ``sensitive_path_count`` field per entry so the
+    Task 18 label gate can read it without a live Python run.
+    """
+    snapshot_path = Path(__file__).parent / "redaction_policy_snapshot.json"
+    expected = json.loads(snapshot_path.read_text())
+    actual = compute_manifest_snapshot(MANIFEST)
+    assert actual == expected, (
+        "Redaction policy snapshot drift. Run "
+        "'scripts/cicd/bootstrap_redaction_snapshot.py --write' to regenerate, "
+        "and review the diff against your manifest changes before merging."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hash-semantics tests (rev-2 BLOCKER_C, §4.4.3). These exercise the four
+# properties of _entry_hash: removed Sensitive flips hash, renamed declarative
+# key flips hash, replaced summarizer flips hash, closure-state mutation does
+# NOT flip hash (documented false negative).
+# ---------------------------------------------------------------------------
+
+
+def _make_type_driven_entry_with_sensitive() -> ToolRedaction:
+    """Minimal type-driven manifest entry with one Sensitive-annotated field."""
+
+    class _ModelWithSensitive(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        name: str
+        secret: Annotated[str, Sensitive()]
+
+    return ToolRedaction(argument_model=_ModelWithSensitive)
+
+
+def _make_type_driven_entry_without_sensitive() -> ToolRedaction:
+    """Identical model shape but WITHOUT the Sensitive annotation on ``secret``."""
+
+    class _ModelWithoutSensitive(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        name: str
+        secret: str  # same field name, same type, no Sensitive annotation
+
+    return ToolRedaction(argument_model=_ModelWithoutSensitive)
+
+
+def test_removed_sensitive_annotation_flips_hash_for_type_driven_entry() -> None:
+    """Removing a ``Sensitive()`` annotation flips the snapshot hash (spec §4.4.3).
+
+    Construct two type-driven manifest entries that are identical in structure
+    except that one has ``secret: Annotated[str, Sensitive()]`` and the other
+    has ``secret: str``.  The ``_entry_hash`` result must differ between the
+    two entries so that a PR that removes a Sensitive marker is detected and
+    triggers the label-gate CI step (Task 18).
+    """
+    entry_with = _make_type_driven_entry_with_sensitive()
+    entry_without = _make_type_driven_entry_without_sensitive()
+
+    hash_with = _entry_hash("_test_with_sensitive", entry_with)
+    hash_without = _entry_hash("_test_without_sensitive", entry_without)
+
+    assert hash_with["hash"] != hash_without["hash"], (
+        "Expected _entry_hash to produce different hashes when the Sensitive() "
+        "annotation is present vs absent; got identical hashes. This means "
+        "_canonicalise_node is not encoding marker presence — the snapshot "
+        "would miss Sensitive() removals and BLOCKER_C is not closed."
+    )
+    assert hash_with["sensitive_path_count"] == 1
+    assert hash_without["sensitive_path_count"] == 0
+
+
+def _make_declarative_entry_with_key(key: str) -> ToolRedaction:
+    """Minimal declarative manifest entry with one sensitive argument key."""
+    policy = ToolRedactionPolicy(
+        sensitive_argument_keys=(key,),
+        known_response_keys=("ok",),
+    )
+    return ToolRedaction(policy=policy)
+
+
+def test_renamed_key_in_sensitive_argument_keys_flips_hash_for_declarative_entry() -> None:
+    """Renaming a key in ``sensitive_argument_keys`` flips the snapshot hash (§4.4.3).
+
+    A policy with ``sensitive_argument_keys=("storage_path",)`` and one with
+    ``sensitive_argument_keys=("connection_string",)`` must produce different
+    hashes.  This ensures that renaming a key in the declarative policy surface
+    — which changes what data is redacted — is detectable via the snapshot.
+    """
+    entry_original = _make_declarative_entry_with_key("storage_path")
+    entry_renamed = _make_declarative_entry_with_key("connection_string")
+
+    hash_original = _entry_hash("_test_original_key", entry_original)
+    hash_renamed = _entry_hash("_test_renamed_key", entry_renamed)
+
+    assert hash_original["hash"] != hash_renamed["hash"], (
+        "Expected _entry_hash to produce different hashes when "
+        "sensitive_argument_keys differs; got identical hashes. "
+        "Renaming a sensitive key changes the redaction surface and must be "
+        "visible in the snapshot."
+    )
+
+
+def _summarizer_alpha(v: Any) -> str:
+    """First summarizer — distinct from _summarizer_beta."""
+    return f"alpha:{v!r}"
+
+
+def _summarizer_beta(v: Any) -> str:
+    """Second summarizer — distinct from _summarizer_alpha."""
+    return f"beta:{v!r}"
+
+
+def _make_type_driven_entry_with_summarizer(
+    summarizer_func: Any,
+) -> ToolRedaction:
+    """Type-driven entry whose Sensitive field carries the given summarizer."""
+
+    class _ModelWithSummarizer(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        payload: Annotated[str, Sensitive(summarizer=summarizer_func)]
+
+    return ToolRedaction(argument_model=_ModelWithSummarizer)
+
+
+def test_replacing_summarizer_with_new_function_flips_hash() -> None:
+    """Replacing the summarizer callable with a different function flips the hash (§4.4.3).
+
+    ``_entry_hash`` encodes summarizer identity by fully-qualified name
+    (``f"{func.__module__}.{func.__qualname__}"``), not by function ``id()``.
+    Two distinct function objects at different fully-qualified names MUST
+    produce different hashes so that registering a new summarizer in place of
+    an existing one is detectable.
+    """
+    entry_alpha = _make_type_driven_entry_with_summarizer(_summarizer_alpha)
+    entry_beta = _make_type_driven_entry_with_summarizer(_summarizer_beta)
+
+    hash_alpha = _entry_hash("_test_alpha_summarizer", entry_alpha)
+    hash_beta = _entry_hash("_test_beta_summarizer", entry_beta)
+
+    assert hash_alpha["hash"] != hash_beta["hash"], (
+        "Expected _entry_hash to produce different hashes when the summarizer "
+        "function differs; got identical hashes. Replacing a summarizer is a "
+        "policy change that must be visible in the snapshot (§4.4.3 / BLOCKER_C)."
+    )
+
+
+def test_closure_state_mutation_false_negative() -> None:
+    """DOCUMENTED FALSE-NEGATIVE: closure-state mutation does NOT flip the hash.
+
+    This is a known false-negative class; see spec §4.2.3 / §4.4.3.
+    In-place mutation of closure-captured state does not flip the hash.
+
+    A summarizer that closes over a module-level mutable variable (here
+    simulated via a mutable container) will produce an unchanged snapshot
+    hash even if the closure's effective behaviour changes.  The hash
+    captures the summarizer's fully-qualified name; it cannot detect
+    mutations to captured objects without inspecting bytecode or executing
+    the function — neither of which the snapshot mechanism does.
+
+    The ELSPETH no-legacy-code + offensive-programming disciplines make
+    module-level mutable state a code smell that MUST be caught in review.
+    Implementers MUST NOT introduce module-level state that summarizers
+    close over (spec §4.4.3, §4.2.3).
+
+    This test pins the false-negative explicitly so future reviewers
+    understand the limitation and do not rely on the snapshot to catch
+    this class of behavioural drift.
+    """
+    # Use a mutable container to simulate a closed-over module-level variable.
+    _closed_state: dict[str, str] = {"prefix": "v1"}
+
+    def _closure_summarizer(v: Any) -> str:
+        return f"{_closed_state['prefix']}:{v!r}"
+
+    class _ModelWithClosure(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        data: Annotated[str, Sensitive(summarizer=_closure_summarizer)]
+
+    entry = ToolRedaction(argument_model=_ModelWithClosure)
+
+    hash_before = _entry_hash("_test_closure", entry)
+
+    # Mutate the closed-over state — _closure_summarizer now behaves differently.
+    _closed_state["prefix"] = "v2"
+
+    hash_after = _entry_hash("_test_closure", entry)
+
+    # The hash is UNCHANGED — this is the documented false-negative.
+    assert hash_before["hash"] == hash_after["hash"], (
+        "hash_before and hash_after should be identical because in-place "
+        "mutation of the closed-over state does not change _closure_summarizer's "
+        "fully-qualified name. If they differ, the hash mechanism has changed "
+        "and this documented false-negative must be re-evaluated against §4.4.3."
     )

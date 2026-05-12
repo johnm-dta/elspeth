@@ -178,8 +178,8 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
         aria-label="Guided composer"
       >
         {/*
-          aria-live region scope (mirrors the freeform body's chat-panel-messages
-          region; see ChatPanel.tsx around line 218-225 of post-Task-8.1 state).
+          aria-live region scope (mirrors the freeform body's
+          `<div className="chat-panel-messages">` region below).
 
           Only the live turn surface (<GuidedTurn>) lives inside the role="log"
           region.  Rationale:

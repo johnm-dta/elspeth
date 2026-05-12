@@ -38,8 +38,10 @@
 //
 // Warnings accessibility (convention for 7.4-7.7 widgets with passive regions):
 //   The warnings <aside> does NOT declare its own aria-live region. The parent
-//   ChatPanel wraps turn content in role="log" aria-live="polite"
-//   (see ChatPanel.tsx:161-163), which announces the warnings on widget mount.
+//   ChatPanel's guided-active branch wraps the turn surface in a
+//   `<div className="chat-panel-guided-log" role="log" aria-live="polite">`
+//   region (see `ChatPanel.tsx` — search for `chat-panel-guided-log`), which
+//   announces the warnings on widget mount.
 //   ComposingIndicator follows the same "don't nest live regions" convention
 //   (see ComposingIndicator.test.tsx:99-103). If a future maintainer removes
 //   the parent live region, warnings will be silent — the contract is documented

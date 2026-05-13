@@ -419,6 +419,119 @@ A reality-check review pass on this document was dispatched via `axiom-planning:
 
 ---
 
+## 11. Rev-4 amendment — reality re-verification + rev-3 correction (2026-05-13)
+
+**Trigger:** RC5.2 advanced from `3e46a976` (rev-2 reference) to `ff46b809` (Merge PR #37: composer guided-mode wizard + 30 post-merge fixes). The advance changes the conflict surface (5 → 9 textual conflicts) but does NOT change the substantive merge picture: Phase 1A/1B/1C/2 remain unique to this branch, replacement-shape deletion `2c043a11` still holds on RC5.2.
+
+**Rev-3 retraction.** This section's predecessor (commit `626a5e4f docs(notes): merge analysis rev-3 — reality re-verification against post-guided-mode RC5.2 (ff46b809)`) was reverted by commit `996f56b7 Revert "docs(notes): merge analysis rev-3 …"` 2026-05-13. The rev-3 amendment claimed Phase 1A was already on RC5.2 in a rev-4 form via commit `11fc0ce4d`. **That claim was wrong** — `11fc0ce4d` is on `feat/composer-progress-persistence-1a`, NOT on RC5.2. The verification that purported to prove otherwise was a working-tree contamination artefact (the main checkout's working tree contained stale composer-progress-1a content, and `git blame` against that working tree returned the branch's commit as if it were on RC5.2). The §11.7 methodology caveat in rev-3 warned about exactly this trap; the author of rev-3 then fell into it anyway.
+
+Rev-4 below uses only `git show origin/RC5.2:<path>` reads. Every claim is verifiable by running the cited command.
+
+### 11.1 What's actually on RC5.2 (authoritative)
+
+`origin/RC5.2` at `ff46b809` is at a clean pre-Phase-1 state for the composer-persistence work. Per-file verification:
+
+| Surface | Command | Result | Conclusion |
+|---|---|---|---|
+| `chat_messages.tool_call_id` column | `git show origin/RC5.2:src/elspeth/web/sessions/models.py \| grep -c "tool_call_id"` | 0 | Absent |
+| `chat_messages.sequence_no` column | `... grep -c "sequence_no"` | 0 | Absent |
+| `chat_messages.writer_principal` column | `... grep -c "writer_principal"` | 0 | Absent |
+| `chat_messages.parent_assistant_id` column | `... grep -c "parent_assistant_id"` | 0 | Absent |
+| `composition_states.provenance` column | `... grep -c "provenance"` | 0 | Absent |
+| `audit_access_log_table` definition | `... grep -c "audit_access_log_table"` | 0 | Absent |
+| `ChatMessageRole "audit"` enum value | `... \| grep "role IN"` | `role IN ('user', 'assistant', 'system', 'tool')` | "audit" absent |
+| `add_message(writer_principal=...)` signature | `git show origin/RC5.2:src/elspeth/web/sessions/service.py \| awk '/def add_message/,/"""/'` | `(session_id, role, content, tool_calls, composition_state_id, raw_content)` | No writer_principal kwarg |
+| `save_composition_state(..., provenance=...)` signature | `... grep -A4 "def save_composition_state"` | `(session_id, state)` | No provenance kwarg |
+| `save_composition_state` call sites in routes.py | `git show origin/RC5.2:src/elspeth/web/sessions/routes.py \| grep -n "service.save_composition_state("` | 4 sites (L1131, L1265, L1488, L3163), all positional | 4 sites, none take provenance |
+| `persist_compose_turn` protocol method | `git show origin/RC5.2:src/elspeth/web/sessions/protocol.py \| grep -c "persist_compose_turn"` | 0 | Absent |
+| `_persist_payload.py` | `git show origin/RC5.2:src/elspeth/web/sessions/_persist_payload.py \| wc -l` | 1 (stub) | Effectively absent |
+| `redaction.py` walker | `git show origin/RC5.2:src/elspeth/web/composer/redaction.py \| wc -l` | 42 | Stub only — no Phase 2 walker |
+| Replacement-shape symbols (4) | `git show origin/RC5.2:src/elspeth/web/composer/service.py \| grep -cE "_runtime_preflight_failure_message\|_enforce_replacement_non_prefix_invariant\|_ReplacementBranch"` | 0 | Deleted by `2c043a11` and stayed deleted |
+| `_INTERCEPTED_ASSISTANT_HISTORY_PREFIX` in routes.py | `git show origin/RC5.2:src/elspeth/web/sessions/routes.py \| grep -c "_INTERCEPTED_ASSISTANT_HISTORY_PREFIX"` | 0 | Same |
+
+### 11.2 What's only on the branch
+
+Every Phase 1A column, every Phase 1B DTO, the full Phase 2 redaction walker, the Phase 1C testcontainer marker, and the replacement-shape machinery are present only on `feat/composer-progress-persistence-1a`. The branch's 6-site `provenance=` threading IS Phase 1A — it lands via the merge, not as separate post-merge work.
+
+### 11.3 Conflict surface — 9 textual conflicts (rev-2's 5 plus 4 new)
+
+`git merge-tree --write-tree feat/composer-progress-persistence-1a origin/RC5.2` reports:
+
+```
+CONFLICT (content): config/cicd/enforce_tier_model/web.yaml     [rev-2 carry-over]
+CONFLICT (content): src/elspeth/contracts/audit.py              [NEW — guided-mode]
+CONFLICT (content): src/elspeth/plugins/transforms/batch_data_quality_report.py [NEW — guided-mode]
+CONFLICT (content): src/elspeth/web/composer/tools.py           [NEW — was auto-merge in rev-2; flipped due to guided-mode tool changes]
+CONFLICT (content): src/elspeth/web/execution/fanout_guard.py   [NEW — guided-mode]
+CONFLICT (content): src/elspeth/web/execution/routes.py          [rev-2 carry-over]
+CONFLICT (content): tests/unit/web/sessions/test_models.py       [rev-2 carry-over]
+CONFLICT (content): tests/unit/web/sessions/test_routes.py       [rev-2 carry-over]
+CONFLICT (content): uv.lock                                      [rev-2 carry-over]
+```
+
+The most consequential new conflict is `src/elspeth/web/composer/tools.py` — Phase 2 promotion-wave region (L5250-5314 on branch) now textually collides with guided-mode's tool-handler changes. Highest-care resolution required.
+
+### 11.4 What rev-2 framing is still correct
+
+- §1 Prerequisite ("reconcile replacement-shape against `2c043a11`") — **VALID.** Symbols still alive on branch, dead on RC5.2.
+- §5.1 Quoted commit body of `2c043a11` — **VALID.** All 7 deleted tests confirmed.
+- §6 Phase 1+2 in good shape framing — **VALID.** Schema additions land via merge; primitives stay dormant; redaction walker stays uncalled until Phase 3.
+- §9 step 3 enumeration of 7 tests to delete — **VALID.** Each test at the cited file:line.
+- §7 Resolution options — **VALID.** Option 1 (pre-merge reconciliation) remains the recommended path.
+
+### 11.5 What the pre-task rev-3 dispatch (operator-shared analysis) got right and wrong
+
+The pre-task dispatch was an analysis session run before the rev-4 plan was authored. It is NOT the rev-3 doc commit (`626a5e4f`); it is the conversational analysis the operator shared at the top of the planning session.
+
+| Claim | Verdict |
+|---|---|
+| Cost has grown to "HIGH but still bounded, one-to-two days" | **Substantially correct.** ~1.5 days, dominated by 9 conflicts (not 5) and the post-merge gate suite. |
+| 99/185 ahead/behind | **Correct.** Verified. |
+| 22 overlapping files | **Correct.** Verified. |
+| 9 textual conflicts (4 new) | **Correct.** Verified by `git merge-tree`. |
+| 6 `save_composition_state` new call sites need provenance threading post-merge | **WRONG.** RC5.2 has 4 call sites (not 6), the service signature doesn't take provenance, and the schema doesn't have provenance — Phase 1A as a whole lands via the merge, no separate threading work needed. |
+| `composer/tools.py` flipped from auto-merge to conflict | **Correct.** Verified. |
+| Replacement-shape deletion holds on RC5.2 | **Correct.** Verified (0 matches). |
+| RC5.2's 30 post-merge fixes establish an InvariantError pattern for Phase 3 | **Plausible (deferred to Phase 3 rev-3 plan refresh).** Not a merge concern. |
+
+### 11.6 Strategy decision — Option 1 (pre-merge reconciliation), operator re-affirmed 2026-05-13
+
+The original rev-2 Option 1 strategy applies. Concretely:
+
+- Step 0: dedicated merge worktree at `.worktrees/rc5-2-merge-from-1a` with worktree-local venv (per `feedback_uv_venv_leak`)
+- Step 1: this §11 rev-4 amendment + commit on branch
+- Step 2A: delete replacement-shape machinery on branch (4 symbols + 5 call sites + 7 tests) per rev-2 §9 step 3. **NOTE:** rev-3 also called for a "Phase 1A column-position alignment" substep; that substep is **unnecessary and removed** — RC5.2 has no Phase 1A to align against.
+- Step 2B: full pre-merge gate suite on branch
+- Step 3: execute merge into the merge worktree
+- Step 4: resolve 9 textual conflicts (mechanical → semantic; `composer/tools.py` highest-care, last)
+- Step 5: full post-merge gate suite
+- Step 6: merge commit + operator-gated push
+- Step 7: operator staging redeploy (per `project_db_migration_policy`)
+- Step 8: re-baseline Phase 3 (rebase `composer-progress-1a` onto post-merge RC5.2; refresh plan Appendix A.4 line numbers)
+
+The merge plan file `/home/john/.claude/plans/please-plan-this-merge-eager-meerkat.md` is updated in place to reflect this rev-4 framing.
+
+### 11.7 Methodology — `git show <ref>:<path>` discipline (now mechanically enforced)
+
+Three contamination incidents during the rev-3 → rev-4 sequence:
+
+1. **`models.py` schema grep:** the main checkout's working tree contained stale composer-progress-1a content; `git grep` against the working tree returned `provenance` matches at lines 242-243 as if they were on RC5.2. Authoritative `git show origin/RC5.2:src/elspeth/web/sessions/models.py | grep -c "provenance"` returns 0.
+2. **`redaction.py` line-count read:** working tree showed 2752 lines; `git show origin/RC5.2:` returned 42.
+3. **`routes.py` `M` flag:** `git status --short` flagged `routes.py` as modified; `git diff` returned empty. `git update-index --refresh` cleared the stat-only flag without changing content.
+
+**Rule for future revisions of this document and adjacent merge work:** never trust working-tree greps for cross-branch queries when multiple worktrees exist. Use `git show <ref>:<path>` exclusively. The rev-3 §11.7 caveat warned about this trap; rev-4 adds the operational rule.
+
+### 11.8 Disposition
+
+- This rev-4 amendment supersedes the rev-2 §2 conflict count (5 → 9) and the rev-2 §4 conflict table (5 → 9 rows; see §11.3).
+- All other rev-2 framings remain load-bearing.
+- The rev-3 commit `626a5e4f` is RETRACTED via `996f56b7` revert. Future readers should treat rev-3's §11 as "wrong, retained in git history for audit-trail transparency."
+- The merge plan at `/home/john/.claude/plans/please-plan-this-merge-eager-meerkat.md` is updated to remove the rev-4 reconciliation substep and align with rev-4-of-this-document.
+
+**Operator action at rev-4:** execute per the updated merge plan. If discrepancies surface during execution, fold corrections back as rev-5. Critical surfaces to re-verify before each substep: Step 4 conflict 9 resolution (`composer/tools.py` L5250-5314 region), Step 5 adequacy guard (`test_adequacy_guard.py` manifest drift). The rev-3 "Step 2A Phase 1A schema diff inspection" substep is removed — it was authored to defend against a hallucinated rev-4-Phase-1A on RC5.2 that does not exist.
+
+---
+
 ## Appendix A — Raw merge-tree output
 
 ```

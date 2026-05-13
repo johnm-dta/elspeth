@@ -398,6 +398,7 @@ def _seed_guided_session(client: TestClient, session_id: str, guided_session_dic
     intra-step positions without driving the full wizard sequence.
     """
     from elspeth.contracts.freeze import deep_thaw
+    from elspeth.web.composer.guided.state_machine import GuidedSession
     from elspeth.web.sessions.converters import state_from_record
     from elspeth.web.sessions.protocol import CompositionStateData
     from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
@@ -413,7 +414,10 @@ def _seed_guided_session(client: TestClient, session_id: str, guided_session_dic
         state = state_from_record(state_record)
         existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
 
-    new_composer_meta = {**existing_meta, "guided_session": guided_session_dict}
+    current_guided_shape = GuidedSession.initial().to_dict()
+    current_guided_shape.update(guided_session_dict)
+
+    new_composer_meta = {**existing_meta, "guided_session": current_guided_shape}
     state_d = state.to_dict()
     state_data = CompositionStateData(
         source=state_d["source"],

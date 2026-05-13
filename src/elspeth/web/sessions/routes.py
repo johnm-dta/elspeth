@@ -1956,9 +1956,10 @@ def _summarize_guided_response(
 ) -> str | None:
     """Return a UI-safe summary for a completed guided turn.
 
-    Summaries are denormalized display text for GuidedHistory. They deliberately
-    avoid option values and slot values because schema forms and recipe slots may
-    carry secret references or operator-provided sensitive text.
+    Summaries are denormalized display text for GuidedHistory. They may include
+    user-chosen option identifiers and column names, but never raw schema-form
+    options or recipe slot values because those may carry secret references or
+    operator-provided sensitive text.
     """
     control_signal = response["control_signal"]
     if control_signal is ControlSignal.REJECT:

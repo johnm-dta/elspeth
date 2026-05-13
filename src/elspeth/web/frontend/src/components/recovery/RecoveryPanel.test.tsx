@@ -117,6 +117,23 @@ describe("RecoveryPanel", () => {
     expect(onApply).not.toHaveBeenCalled();
   });
 
+  it("does not consume Escape without a close action", () => {
+    const onDiscard = vi.fn();
+    renderPanel({ onDiscard });
+
+    const escapeEvent = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+
+    const eventWasNotCancelled = screen.getByRole("dialog").dispatchEvent(escapeEvent);
+
+    expect(eventWasNotCancelled).toBe(true);
+    expect(escapeEvent.defaultPrevented).toBe(false);
+    expect(onDiscard).not.toHaveBeenCalled();
+  });
+
   it("opens inline confirmation when apply reports a concurrent edit", async () => {
     const user = userEvent.setup();
     const onApply = vi

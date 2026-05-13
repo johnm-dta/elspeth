@@ -78,9 +78,6 @@ export function RecoveryPanel({
         className="recovery-panel"
         tabIndex={-1}
         onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-          }
           if (event.key === "Enter" && event.target === event.currentTarget) {
             event.preventDefault();
           }

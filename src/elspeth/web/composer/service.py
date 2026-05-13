@@ -1841,6 +1841,24 @@ class ComposerServiceImpl:
                 recorder=recorder,
             )
             assistant_message = response.choices[0].message
+            assistant_tool_calls = assistant_message.tool_calls or ()
+            if len(assistant_tool_calls) > self._max_tool_calls_per_turn:  # type: ignore[attr-defined]
+                telemetry = self._telemetry  # type: ignore[attr-defined]
+                if telemetry is not None:
+                    telemetry.tool_call_cap_exceeded_total.add(1)
+                raise ComposerConvergenceError.capture(
+                    max_turns=composition_turns_used + discovery_turns_used,
+                    budget_exhausted="composition",
+                    state=state,
+                    initial_version=initial_version,
+                    tool_invocations=recorder.invocations,
+                    llm_calls=recorder.llm_calls,
+                    reason="tool_call_cap_exceeded",
+                    evidence={
+                        "observed": len(assistant_tool_calls),
+                        "cap": self._max_tool_calls_per_turn,  # type: ignore[attr-defined]
+                    },
+                )
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
@@ -3913,7 +3931,6 @@ ComposerServiceImpl._require_sessions_service = _phase3_require_sessions_service
 ComposerServiceImpl._run_one_turn_for_test = _phase3_run_one_turn_for_test  # type: ignore[attr-defined]
 
 _PHASE3_ORIGINAL_COMPOSER_INIT = ComposerServiceImpl.__init__
-_PHASE3_ORIGINAL_CALL_LLM_WITH_AUDIT = ComposerServiceImpl._call_llm_with_audit
 
 
 def _phase3_composer_init(self: ComposerServiceImpl, *args: Any, **kwargs: Any) -> None:
@@ -3924,40 +3941,7 @@ def _phase3_composer_init(self: ComposerServiceImpl, *args: Any, **kwargs: Any) 
         self._max_tool_calls_per_turn = self._settings.composer_max_tool_calls_per_turn  # type: ignore[attr-defined]
     except AttributeError:
         self._max_tool_calls_per_turn = 16  # type: ignore[attr-defined]
-
-
-async def _phase3_call_llm_with_tool_cap(
-    self: ComposerServiceImpl,
-    messages: Any,
-    tools: Any,
-    *,
-    timeout: float,
-    recorder: BufferingRecorder | None,
-) -> Any:
-    """Apply the Phase 3 per-turn tool-call cap before tool dispatch."""
-
-    response = await _PHASE3_ORIGINAL_CALL_LLM_WITH_AUDIT(
-        self,
-        messages,
-        tools,
-        timeout=timeout,
-        recorder=recorder,
-    )
-    tool_calls = response.choices[0].message.tool_calls or ()
-    observed = len(tool_calls)
-    cap = self._max_tool_calls_per_turn  # type: ignore[attr-defined]
-    if observed > cap:
-        try:  # noqa: SIM105 - AttributeError is the explicit "telemetry not wired" shape.
-            self._telemetry.tool_call_cap_exceeded_total.add(1)  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-        raise ComposerConvergenceError(
-            0,
-            reason="tool_call_cap_exceeded",
-            evidence={"observed": observed, "cap": cap},
-        )
-    return response
+    self._telemetry = None  # type: ignore[attr-defined]
 
 
 ComposerServiceImpl.__init__ = _phase3_composer_init  # type: ignore[method-assign]
-ComposerServiceImpl._call_llm_with_audit = _phase3_call_llm_with_tool_cap  # type: ignore[method-assign]

@@ -1929,14 +1929,14 @@ allow_hits:
     result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=56be0a864241f3d2
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=d14d0386a2252949
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as bounded tool
     results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=c6bab4340b7384cb
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=2b21aa4333928c94
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.

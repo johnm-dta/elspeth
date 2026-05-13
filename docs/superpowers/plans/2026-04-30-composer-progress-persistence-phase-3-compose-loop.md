@@ -364,11 +364,11 @@ Implement Step 0 of the §5.2.1 loop body inside `_compose_loop`. The check runs
 **Files:**
 - Modify: `src/elspeth/web/composer/service.py` (`_compose_loop` method body, after the LLM call returns)
 
-- [ ] **Step 1: Read the current `_compose_loop` body.**
+- [x] **Step 1: Read the current `_compose_loop` body.**
 
 Read `web/composer/service.py` at the `async def _compose_loop` definition. Identify where `assistant_message` becomes available after the LLM call and where the existing per-tool for-loop begins. Step 0 sits between them.
 
-- [ ] **Step 2: Insert the Step 0 check.**
+- [x] **Step 2: Insert the Step 0 check.**
 
 Immediately after `assistant_message` is bound and before any iteration over `assistant_message.tool_calls` begins, insert:
 
@@ -393,7 +393,7 @@ if len(assistant_message.tool_calls) > self._max_tool_calls_per_turn:
 
 Telemetry increments BEFORE the raise so the counter is incremented even if the exception path is later caught and re-raised differently by `_handle_convergence_error`.
 
-- [ ] **Step 3: Re-run Task 2's tests.**
+- [x] **Step 3: Re-run Task 2's tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_tool_call_cap.py -v
@@ -401,7 +401,7 @@ Telemetry increments BEFORE the raise so the counter is incremented even if the 
 
 Expected: PASS (this fully closes the cap-exceeded surface).
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 0 — enforce per-turn tool-call cap (composer-progress-persistence phase 3)"

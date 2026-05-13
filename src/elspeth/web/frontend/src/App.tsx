@@ -9,6 +9,7 @@ import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
 import { SessionSidebar } from "./components/sessions/SessionSidebar";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { InspectorPanel, OPEN_CATALOG_EVENT } from "./components/inspector/InspectorPanel";
+import { RecoveryPanel } from "./components/recovery/RecoveryPanel";
 import { SecretsPanel } from "./components/settings/SecretsPanel";
 import { initStoreSubscriptions } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
@@ -46,6 +47,9 @@ function App() {
   const createSession = useSessionStore((s) => s.createSession);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const compositionState = useSessionStore((s) => s.compositionState);
+  const recoveryError = useSessionStore((s) => s.recoveryError);
+  const applyRecoveredState = useSessionStore((s) => s.applyRecoveredState);
+  const discardRecovery = useSessionStore((s) => s.discardRecovery);
   const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
 
   const openSecrets = useCallback(() => setShowSecrets(true), []);
@@ -248,6 +252,13 @@ function App() {
         {showShortcuts && (
           <ShortcutsHelp onClose={() => setShowShortcuts(false)} />
         )}
+        <RecoveryPanel
+          activeSessionId={activeSessionId}
+          currentState={compositionState}
+          recoveryError={recoveryError}
+          onApply={applyRecoveredState}
+          onDiscard={discardRecovery}
+        />
         {pendingFanoutGuard && (
           <ConfirmDialog
             title="Review LLM provider calls"

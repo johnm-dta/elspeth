@@ -1,15 +1,37 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import App from "./App";
 import * as api from "./api/client";
-import type { SystemStatus, UserProfile } from "./types/index";
+import { resetStore } from "@/test/store-helpers";
+import { useSessionStore } from "./stores/sessionStore";
+import type {
+  ChatMessage,
+  CompositionState,
+  SystemStatus,
+  UserProfile,
+} from "./types/index";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
 // App renders many heavy children (Layout, SessionSidebar, ChatPanel, …).
 // Stub them out so the test focuses solely on App's own banner DOM.
 
 vi.mock("./components/common/Layout", () => ({
-  Layout: () => <div data-testid="layout-stub" />,
+  Layout: ({
+    sidebar,
+    chat,
+    inspector,
+  }: {
+    sidebar: React.ReactNode;
+    chat: React.ReactNode;
+    inspector: React.ReactNode;
+  }) => (
+    <div data-testid="layout-stub">
+      {sidebar}
+      {chat}
+      {inspector}
+    </div>
+  ),
 }));
 
 vi.mock("./components/sessions/SessionSidebar", () => ({
@@ -17,7 +39,18 @@ vi.mock("./components/sessions/SessionSidebar", () => ({
 }));
 
 vi.mock("./components/chat/ChatPanel", () => ({
-  ChatPanel: () => <div data-testid="chat-panel-stub" />,
+  ChatPanel: () => {
+    const sendMessage = useSessionStore((state) => state.sendMessage);
+    const error = useSessionStore((state) => state.error);
+    return (
+      <div data-testid="chat-panel-stub">
+        <button type="button" onClick={() => void sendMessage("compose")}>
+          Send compose
+        </button>
+        {error ? <div role="alert">{error}</div> : null}
+      </div>
+    );
+  },
 }));
 
 vi.mock("./components/inspector/InspectorPanel", () => ({
@@ -76,6 +109,11 @@ vi.mock("./api/client", () => ({
     composer_reason: null,
     composer_missing_keys: [],
   } satisfies SystemStatus),
+  fetchComposerProgress: vi.fn().mockResolvedValue({ phase: "idle" }),
+  fetchRecoveryTranscript: vi.fn().mockResolvedValue([]),
+  sendMessage: vi.fn(),
+  recompose: vi.fn(),
+  fetchMessages: vi.fn(),
 }));
 
 // ── Store subscriptions ──────────────────────────────────────────────────────
@@ -85,6 +123,7 @@ vi.mock("./api/client", () => ({
 describe("App banner roles", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetStore(useSessionStore);
     // Restore the default (backend up, composer available) after any
     // per-test override.
     vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
@@ -153,5 +192,175 @@ describe("App banner roles", () => {
 
     expect(onOpenCatalog).toHaveBeenCalledTimes(1);
     window.removeEventListener("open-catalog", onOpenCatalog);
+  });
+});
+
+function makeState(version: number): CompositionState {
+  return {
+    id: `state-${version}`,
+    version,
+    source: null,
+    nodes: [],
+    edges: [],
+    outputs: [],
+    metadata: { name: null, description: null },
+  };
+}
+
+function makeAssistantMessage(): ChatMessage {
+  return {
+    id: "assistant-1",
+    session_id: "session-1",
+    role: "assistant",
+    content: "done",
+    tool_calls: null,
+    created_at: "2026-05-14T00:00:00Z",
+  };
+}
+
+describe("App composer recovery panel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(useSessionStore);
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    } satisfies SystemStatus);
+    vi.spyOn(api, "fetchRecoveryTranscript").mockResolvedValue([
+      {
+        id: "assistant-failed",
+        session_id: "session-1",
+        role: "assistant",
+        content: "calling tools",
+        raw_content: null,
+        tool_calls: null,
+        created_at: "2026-05-14T00:00:00Z",
+        composition_state_id: null,
+        tool_call_id: null,
+        parent_assistant_id: null,
+        sequence_no: 1,
+      },
+    ]);
+  });
+
+  it("opens the recovery panel for recovery-shaped send failures", async () => {
+    const recovered = makeState(2);
+    vi.spyOn(api, "sendMessage").mockRejectedValue({
+      status: 500,
+      detail: "compose failed",
+      error_type: "composer_plugin_crash",
+      partial_state: recovered,
+      failed_turn: {
+        assistant_message_id: "assistant-failed",
+        tool_calls_attempted: 1,
+        tool_responses_persisted: 1,
+        transcript_url: null,
+      },
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1),
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Send compose" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Recover partial composer draft" }),
+    ).toBeInTheDocument();
+  });
+
+  it("applies and discards recovery locally without compose retries", async () => {
+    const user = userEvent.setup();
+    const recovered = makeState(3);
+    const original = makeState(1);
+    vi.spyOn(api, "sendMessage").mockRejectedValue({
+      status: 500,
+      detail: "compose failed",
+      error_type: "composer_plugin_crash",
+      partial_state: recovered,
+      failed_turn: {
+        assistant_message_id: "assistant-failed",
+        tool_calls_attempted: 1,
+        tool_responses_persisted: 1,
+        transcript_url: null,
+      },
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: original,
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "Send compose" }));
+    await screen.findByRole("dialog", { name: "Recover partial composer draft" });
+    await user.click(screen.getByRole("button", { name: "Apply partial draft" }));
+
+    expect(useSessionStore.getState().compositionState).toBe(recovered);
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(api.recompose).not.toHaveBeenCalled();
+    expect(api.fetchMessages).not.toHaveBeenCalled();
+
+    vi.mocked(api.sendMessage).mockRejectedValueOnce({
+      status: 500,
+      detail: "compose failed again",
+      error_type: "composer_plugin_crash",
+      partial_state: makeState(4),
+      failed_turn: {
+        assistant_message_id: "assistant-failed",
+        tool_calls_attempted: 1,
+        tool_responses_persisted: 1,
+        transcript_url: null,
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Send compose" }));
+    await screen.findByRole("dialog", { name: "Recover partial composer draft" });
+    await user.click(screen.getByRole("button", { name: "Discard recovery" }));
+
+    expect(useSessionStore.getState().compositionState).toBe(recovered);
+    expect(api.sendMessage).toHaveBeenCalledTimes(2);
+    expect(api.recompose).not.toHaveBeenCalled();
+    expect(api.fetchMessages).not.toHaveBeenCalled();
+  });
+
+  it("keeps non-recovery convergence errors on the existing chat error path", async () => {
+    vi.spyOn(api, "sendMessage").mockRejectedValue({
+      status: 422,
+      error_type: "convergence",
+      detail: "ignored",
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1),
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Send compose" }));
+
+    expect(
+      await screen.findByText(/couldn't complete the composition/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("does not open recovery for successful sends", async () => {
+    vi.spyOn(api, "sendMessage").mockResolvedValue({
+      message: makeAssistantMessage(),
+      state: makeState(2),
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(1),
+    });
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "Send compose" }));
+
+    await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(useSessionStore.getState().compositionState?.version).toBe(2);
   });
 });

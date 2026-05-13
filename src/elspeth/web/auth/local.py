@@ -142,7 +142,7 @@ class LocalAuthProvider:
         token: str = jwt.encode(payload, self._secret_key, algorithm="HS256")
         return token
 
-    async def refresh(self, user_id: str, username: str, *, original_iat: int | None = None) -> str:
+    async def refresh(self, user_id: str, username: str, *, original_iat: int) -> str:
         """Issue a new JWT for an already-authenticated user.
 
         Verifies the user still exists in the database — a deleted
@@ -156,7 +156,7 @@ class LocalAuthProvider:
         """
         return await run_sync_in_worker(self._refresh_sync, user_id, username, original_iat)
 
-    def _refresh_sync(self, user_id: str, username: str, original_iat: int | None = None) -> str:
+    def _refresh_sync(self, user_id: str, username: str, original_iat: int | None) -> str:
         """Synchronous refresh — called via run_sync_in_worker."""
         now = int(time.time())
 
@@ -164,10 +164,11 @@ class LocalAuthProvider:
         # long ago.  This bounds how long a stolen token can be refreshed
         # indefinitely without re-authentication.  Without a session DB
         # (Sub-2c/2d), this is the only revocation-like mechanism.
-        if original_iat is not None:
-            chain_age_hours = (now - original_iat) / 3600
-            if chain_age_hours > self._max_refresh_chain_hours:
-                raise AuthenticationError("Token refresh chain expired — please re-authenticate")
+        if original_iat is None:
+            raise AuthenticationError("Token missing iat — please re-authenticate")
+        chain_age_hours = (now - original_iat) / 3600
+        if chain_age_hours > self._max_refresh_chain_hours:
+            raise AuthenticationError("Token refresh chain expired — please re-authenticate")
 
         with self._get_conn() as conn:
             row = conn.execute(
@@ -179,11 +180,10 @@ class LocalAuthProvider:
 
         # Carry forward the original iat so the chain age accumulates.
         # New logins get a fresh iat; refreshes preserve the original.
-        token_iat = original_iat if original_iat is not None else now
         payload = {
             "sub": user_id,
             "username": username,
-            "iat": token_iat,
+            "iat": original_iat,
             "exp": now + self._token_expiry_hours * 3600,
         }
         token: str = jwt.encode(payload, self._secret_key, algorithm="HS256")

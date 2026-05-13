@@ -308,12 +308,12 @@ class TestRefresh:
         with sqlite3.connect(str(provider._db_path)) as conn:
             conn.execute("DELETE FROM users WHERE user_id = ?", ("alice",))
         with pytest.raises(AuthenticationError, match="User not found"):
-            await provider.refresh("alice", "alice")
+            await provider.refresh("alice", "alice", original_iat=int(time.time()))
 
     @pytest.mark.asyncio
     async def test_refresh_valid_user_returns_jwt(self, provider) -> None:
         provider.create_user("alice", "pw", display_name="Alice")
-        token = await provider.refresh("alice", "alice")
+        token = await provider.refresh("alice", "alice", original_iat=int(time.time()))
         assert isinstance(token, str)
         assert len(token.split(".")) == 3
 
@@ -347,12 +347,8 @@ class TestRefresh:
         assert claims["iat"] == original_iat
 
     @pytest.mark.asyncio
-    async def test_refresh_without_iat_gets_fresh_timestamp(self, provider) -> None:
-        """Refresh with no original_iat (legacy token) gets a current iat."""
-        import jwt
-
+    async def test_refresh_without_iat_raises(self, provider) -> None:
+        """Refresh without original_iat must not start a fresh chain."""
         provider.create_user("alice", "pw", display_name="Alice")
-        before = int(time.time())
-        token = await provider.refresh("alice", "alice", original_iat=None)
-        claims = jwt.decode(token, "test-secret-key-for-unit-tests", algorithms=["HS256"])
-        assert claims["iat"] >= before
+        with pytest.raises(AuthenticationError, match="Token missing iat"):
+            await provider.refresh("alice", "alice", original_iat=None)

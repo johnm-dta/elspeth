@@ -2314,29 +2314,29 @@ The overview at `docs/superpowers/plans/2026-04-30-composer-progress-persistence
 **Files:**
 - Modify: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md`
 
-- [ ] **Step 1: Update the spec-revision pointer.**
+- [x] **Step 1: Update the spec-revision pointer.**
 
 Line 5: "revision 4, 2481 lines" → "revision 5, 3608 lines (manifest-keyed redaction)".
 
-- [ ] **Step 2: Update the architecture summary.**
+- [x] **Step 2: Update the architecture summary.**
 
 Line 9: "Phase 2 adds the type-driven redaction primitive (`Sensitive[T]`) plus the legacy declarative escape valve" → "Phase 2 adds the manifest-keyed redaction primitive (`ToolRedaction` dataclass + module-level `MANIFEST`), promotes ~6–8 sensitive-touching tools to type-driven `argument_model` entries via `Sensitive[T]` annotations, and retains the declarative `ToolRedactionPolicy` shape for the remaining ~29–31 tools.".
 
-- [ ] **Step 3: Update the Phase 2 row in the phase plans table.**
+- [x] **Step 3: Update the Phase 2 row in the phase plans table.**
 
 Line 20: rewrite to "`ToolRedaction` manifest dataclass, module-level `MANIFEST` keyed by tool name, `Sensitive[T]` promotion wave for ~6–8 tools, declarative `ToolRedactionPolicy` + `HandlesNoSensitiveDataReason` for the remaining ~29–31 tools, shared traversal iterator, `RedactionTelemetry` Protocol, four-assertion adequacy guard, broadened policy-hash snapshot, label-gate CI step.".
 
-- [ ] **Step 4: Update the Phase 3 row.**
+- [x] **Step 4: Update the Phase 3 row.**
 
 Line 21: keep largely as-is; the existing description is rev-5-correct (compose-loop integration, tool-call cap, failed_turn, include_tool_rows). No edit required — confirm and move on.
 
-- [ ] **Step 5: Update the cross-phase dependencies.**
+- [x] **Step 5: Update the cross-phase dependencies.**
 
 Line 27: "Phase 3 depends on Phase 2's redaction primitives (the compose loop uses `redact_tool_call` and `lookup_tool_class`)." → "Phase 3 depends on Phase 2's redaction primitives (the compose loop uses `redact_tool_call_arguments`, `redact_tool_call_response`, and the module-level `MANIFEST`; the rev-4 `lookup_tool_class` helper is removed per rev-5 §5.7.5).".
 
 Line 29: drop the rev-4 supersession-list bullets that referred to fictional rev-4 symbols (`_StatePayload.version`, etc.); they're already handled in the spec body and the Phase 1A/1B/1C plans.
 
-- [ ] **Step 6: Commit outside the engineering PR.**
+- [x] **Step 6: Commit outside the engineering PR.**
 
 ```bash
 git commit -am "docs(plan): overview reflects rev-5 manifest-keyed framing + Phase 3 plan landing (composer-progress-persistence phase 3)"

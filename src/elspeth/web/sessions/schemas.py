@@ -296,6 +296,53 @@ class GuidedRespondResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
+class GuidedChatRequest(_RequestModel):
+    """Request body for POST /api/sessions/{id}/guided/chat.
+
+    Carries a free-text chat message scoped to the user's current wizard
+    step. **Not** a turn-answer — chat does not advance step state. The
+    backend invokes the per-step chat solver with a step-scoped skill
+    briefing and returns the LLM's advisory reply.
+
+    ``step_index`` is a plain string (not the ``GuidedStep`` enum) so a
+    stale client that sends an unknown step value fails with a 400 from
+    the route handler carrying a clear message, rather than a Pydantic
+    422. This mirrors the ``control_signal`` convention in
+    ``GuidedRespondRequest``.
+
+    Length cap of 4096 is enforced at the boundary; ``solve_step_chat``
+    contains a redundant inner empty-check as a defense-in-depth guard
+    against route handler misuse, but length is checked here only.
+    """
+
+    message: str = pydantic.Field(min_length=1, max_length=4096)
+    step_index: str
+
+    @field_validator("message")
+    @classmethod
+    def _validate_message(cls, value: str) -> str:
+        return _require_visible_content(value, field_label="Chat message")
+
+
+class GuidedChatResponse(_StrictResponse):
+    """Response for POST /api/sessions/{id}/guided/chat.
+
+    ``assistant_message`` is the LLM's reply (or, on transient LLM
+    failure, a synthetic "I'm unavailable" message — Phase A does not yet
+    distinguish the two on the wire; slice 5's ``ComposerChatTurn`` audit
+    record adds that discriminator).
+
+    ``guided_session`` is echoed verbatim in Phase A — chat does not
+    mutate session state, but the frontend store keeps a single object
+    so we return it to keep the client/server contract symmetric with
+    ``/respond``. Slice 5 makes ``chat_history`` an additive field that
+    will carry incremental turns.
+    """
+
+    assistant_message: str
+    guided_session: GuidedSessionResponse
+
+
 # Forward reference resolution
 MessageWithStateResponse.model_rebuild()
 ForkSessionResponse.model_rebuild()

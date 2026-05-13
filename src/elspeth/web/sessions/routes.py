@@ -96,6 +96,7 @@ from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, Vali
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
+from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -114,6 +115,8 @@ from elspeth.web.sessions.schemas import (
     ForkSessionRequest,
     ForkSessionResponse,
     GetGuidedResponse,
+    GuidedChatRequest,
+    GuidedChatResponse,
     GuidedRespondRequest,
     GuidedRespondResponse,
     GuidedSessionResponse,
@@ -5177,6 +5180,124 @@ def create_session_router() -> APIRouter:
                         exc_class=type(persist_exc).__name__,
                         frames=_safe_frame_strings(persist_exc),
                     )
+
+    @router.post("/{session_id}/guided/chat", response_model=GuidedChatResponse)
+    async def post_guided_chat(
+        session_id: UUID,
+        body: GuidedChatRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> GuidedChatResponse:
+        """Submit a free-text chat message scoped to the user's current wizard step.
+
+        **Not** a turn-answer — chat does not advance step state. The
+        backend resolves the per-step skill briefing via
+        :func:`elspeth.web.composer.guided.chat_solver.solve_step_chat`
+        and returns the LLM's advisory reply. The frontend renders the
+        reply inline in the guided history (slice 6's
+        ``GuidedChatHistory`` component).
+
+        Phase A is advisory-only; no tool palette, no state mutation.
+        Slice 5 introduces ``ComposerChatTurn`` audit + ``chat_history``
+        persistence on the ``GuidedSession``.
+
+        Raises 400 if the session has no ``guided_session`` attached.
+        Raises 400 if ``step_index`` is not a known ``GuidedStep`` value.
+        Raises 409 if the guided session is already in a terminal state.
+        Raises 409 if ``step_index`` does not match the session's current
+        step (the wizard advanced under the user — client must re-fetch
+        ``GET /guided`` and retry).
+        Raises 404 if the session does not exist or belong to the user.
+
+        Empty / oversize messages are rejected at the Pydantic boundary
+        (HTTP 422). The route never reaches ``solve_step_chat`` with an
+        invalid message; the solver's empty-string guard is a redundant
+        defense-in-depth invariant, not the boundary check.
+
+        Transient LLM failures (LiteLLM API/auth/bad-request, asyncio
+        timeout, malformed response shape) return 200 with a synthetic
+        unavailable message; the session is **not** terminated. This is
+        intentional: chat is a non-load-bearing helper. Wizard widgets
+        remain functional even when chat is offline.
+        """
+        await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+
+        # Tier-3 → Tier-2 coercion at the step_index boundary. A stale
+        # client sending an unknown value gets a 400 with a clear message
+        # rather than a Pydantic 422; the typed ``GuidedStep`` then flows
+        # into the equality check and the solver call site.
+        try:
+            requested_step = GuidedStep(body.step_index)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown step_index {body.step_index!r}. Valid values: {sorted(s.value for s in GuidedStep)}.",
+            ) from exc
+
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+        async with compose_lock:
+            state_record = await service.get_current_state(session_id)
+            if state_record is None:
+                state = _initial_composition_state_with_guided_session()
+            else:
+                state = _state_from_record(state_record)
+
+            if state.guided_session is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                )
+
+            guided = state.guided_session
+
+            if guided.terminal is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Guided session is already in a terminal state. No further chat accepted.",
+                )
+
+            # Step-mismatch is a state-conflict (the wizard advanced under
+            # the user between client read and write), not a malformed
+            # request — 409 mirrors the ``terminal`` case. The detail
+            # carries both values so the client can re-fetch the right
+            # step without a separate round-trip.
+            if requested_step is not guided.step:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"step_index {requested_step.value!r} does not match the session's current step "
+                        f"{guided.step.value!r}. Re-fetch GET /api/sessions/{{id}}/guided and retry."
+                    ),
+                )
+
+            settings = request.app.state.settings
+            assistant_message = await solve_step_chat_with_auto_drop(
+                site="post_guided_chat",
+                session_id=str(session_id),
+                user_id=user.user_id,
+                model=settings.composer_model,
+                step=guided.step,
+                user_message=body.message,
+            )
+
+            return GuidedChatResponse(
+                assistant_message=assistant_message,
+                guided_session=GuidedSessionResponse(
+                    step=guided.step.value,
+                    history=[
+                        TurnRecordResponse(
+                            step=r.step.value,
+                            turn_type=r.turn_type.value,
+                            payload_hash=r.payload_hash,
+                            response_hash=r.response_hash,
+                            emitter=r.emitter,
+                        )
+                        for r in guided.history
+                    ],
+                    terminal=None,
+                ),
+            )
 
     return router
 

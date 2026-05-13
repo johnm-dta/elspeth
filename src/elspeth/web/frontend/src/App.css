@@ -88,7 +88,7 @@
 
   /* ── Interactive / accent ────────────────────────────────────────────────── */
   --color-accent:            #1a7a52;
-  --color-focus-ring:        #c390f9;
+  --color-focus-ring:        #ffffff;
   --color-btn-primary-bg:    #16664a;
   --color-btn-primary-bg-hover: #1a5840;
   --color-link:              #61daff;
@@ -1423,7 +1423,7 @@ summary:focus-visible {
 
   /* ── Interactive / accent ────────────────────────────────────────────────── */
   --color-accent:            #156048;
-  --color-focus-ring:        #8a5ac0;
+  --color-focus-ring:        #0f2d35;
   --color-btn-primary-bg:    #1a7a5a;
   --color-btn-primary-bg-hover: #156048;
   --color-link:              #2890b8;

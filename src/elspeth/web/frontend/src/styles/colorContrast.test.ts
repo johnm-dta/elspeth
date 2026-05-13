@@ -4,15 +4,28 @@ import { describe, expect, it } from "vitest";
 
 const appCss = readFileSync("src/App.css", "utf8");
 
+function extractRootToken(tokenName: string): string {
+  const blockMatch = /^:root\s*\{([\s\S]*?)\n\}/m.exec(appCss);
+  if (!blockMatch) {
+    throw new Error("Could not find root token block in App.css");
+  }
+
+  return extractTokenFromBlock(tokenName, blockMatch[1], "root");
+}
+
 function extractLightThemeToken(tokenName: string): string {
   const blockMatch = /\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/.exec(appCss);
   if (!blockMatch) {
     throw new Error("Could not find light theme token block in App.css");
   }
 
-  const tokenMatch = new RegExp(`${tokenName}:\\s*(#[0-9a-fA-F]{6})\\s*;`).exec(blockMatch[1]);
+  return extractTokenFromBlock(tokenName, blockMatch[1], "light theme");
+}
+
+function extractTokenFromBlock(tokenName: string, block: string, blockName: string): string {
+  const tokenMatch = new RegExp(`${tokenName}:\\s*(#[0-9a-fA-F]{6})\\s*;`).exec(block);
   if (!tokenMatch) {
-    throw new Error(`Could not find ${tokenName} in light theme token block`);
+    throw new Error(`Could not find ${tokenName} in ${blockName} token block`);
   }
 
   return tokenMatch[1];
@@ -52,5 +65,25 @@ describe("light theme colour contrast", () => {
     const mutedText = extractLightThemeToken("--color-text-muted");
 
     expect(contrastRatio(mutedText, background)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps the dark theme focus ring distinct from gate badges", () => {
+    const background = extractRootToken("--color-bg");
+    const gateBadge = extractRootToken("--color-badge-gate");
+    const focusRing = extractRootToken("--color-focus-ring");
+
+    expect(focusRing).not.toBe(gateBadge);
+    expect(contrastRatio(focusRing, gateBadge)).toBeGreaterThanOrEqual(2);
+    expect(contrastRatio(focusRing, background)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps the light theme focus ring distinct from gate badges", () => {
+    const background = extractLightThemeToken("--color-bg");
+    const gateBadge = extractLightThemeToken("--color-badge-gate");
+    const focusRing = extractLightThemeToken("--color-focus-ring");
+
+    expect(focusRing).not.toBe(gateBadge);
+    expect(contrastRatio(focusRing, gateBadge)).toBeGreaterThanOrEqual(2);
+    expect(contrastRatio(focusRing, background)).toBeGreaterThanOrEqual(3);
   });
 });

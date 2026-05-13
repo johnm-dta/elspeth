@@ -143,6 +143,14 @@ def create_auth_router() -> APIRouter:
             user_id=body.username,
             username=body.username,
         )
+        recorder.record_token_issued(
+            request,
+            provider=settings.auth_provider,
+            user_id=body.username,
+            username=body.username,
+            access_token=token,
+            issuance_path="login",
+        )
         _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
@@ -185,6 +193,15 @@ def create_auth_router() -> APIRouter:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         token = await provider.login(body.username, body.password)
+        recorder = _auth_audit_recorder(request)
+        recorder.record_token_issued(
+            request,
+            provider=settings.auth_provider,
+            user_id=body.username,
+            username=body.username,
+            access_token=token,
+            issuance_path="register",
+        )
         _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
@@ -225,6 +242,15 @@ def create_auth_router() -> APIRouter:
             new_token = await provider.refresh(user.user_id, user.username, original_iat=original_iat)
         except AuthenticationError as exc:
             raise HTTPException(status_code=401, detail=exc.detail) from exc
+        recorder = _auth_audit_recorder(request)
+        recorder.record_token_issued(
+            request,
+            provider=settings.auth_provider,
+            user_id=user.user_id,
+            username=user.username,
+            access_token=new_token,
+            issuance_path="refresh",
+        )
         _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=new_token)
 

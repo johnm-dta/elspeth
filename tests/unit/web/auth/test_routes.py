@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock
 
 import jwt as pyjwt
@@ -32,6 +33,9 @@ class _NoopAuthAuditRecorder:
         return None
 
     def record_login_failure(self, *args, **kwargs) -> None:
+        return None
+
+    def record_token_issued(self, *args, **kwargs) -> None:
         return None
 
 
@@ -71,6 +75,19 @@ def _enable_auth_audit(app: FastAPI) -> None:
 def _read_auth_event_rows(audit_url: str):
     with LandscapeDB.from_url(audit_url) as db, db.read_only_connection() as conn:
         return conn.execute(select(auth_events_table).order_by(auth_events_table.c.occurred_at)).fetchall()
+
+
+def _only_auth_event(rows, event_type: str, *, issuance_path: str | None = None):
+    matches = []
+    for row in rows:
+        if row.event_type != event_type:
+            continue
+        metadata = json.loads(row.metadata_json)
+        if issuance_path is not None and metadata["issuance_path"] != issuance_path:
+            continue
+        matches.append(row)
+    assert len(matches) == 1
+    return matches[0]
 
 
 def _assert_token_response_uncacheable(response: Response) -> None:
@@ -124,8 +141,8 @@ class TestLoginEndpoint:
         assert response.status_code == 200
         token = response.json()["access_token"]
         rows = _read_auth_event_rows(audit_url)
-        assert len(rows) == 1
-        event = rows[0]
+        assert len(rows) == 2
+        event = _only_auth_event(rows, "login")
         assert event.event_type == "login"
         assert event.outcome == "success"
         assert event.provider == "local"
@@ -137,6 +154,40 @@ class TestLoginEndpoint:
         serialized = repr(dict(event._mapping))
         assert "password123" not in serialized
         assert token not in serialized
+
+    async def test_login_valid_credentials_records_token_issuance_without_jwt(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        provider.create_user("alice", "password123", display_name="Alice")
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": "alice", "password": "password123"},
+                headers={"user-agent": "pytest-client", "x-request-id": "login-token-1"},
+            )
+
+        assert response.status_code == 200
+        token = response.json()["access_token"]
+        claims = pyjwt.decode(token, options={"verify_signature": False})
+        rows = _read_auth_event_rows(audit_url)
+        event = _only_auth_event(rows, "token_issued", issuance_path="login")
+        metadata = json.loads(event.metadata_json)
+        assert event.outcome == "success"
+        assert event.provider == "local"
+        assert event.user_id == "alice"
+        assert event.username == "alice"
+        assert metadata["token_type"] == "bearer"
+        assert metadata["issued_at"] == claims["iat"]
+        assert metadata["expires_at"] == claims["exp"]
+        serialized = repr(dict(event._mapping))
+        assert token not in serialized
+        assert "password123" not in serialized
 
     async def test_login_invalid_credentials(self, tmp_path) -> None:
         provider = LocalAuthProvider(
@@ -249,6 +300,40 @@ class TestRegisterEndpoint:
                 },
             )
         assert response.status_code == 200
+
+    async def test_register_open_mode_records_token_issuance_without_jwt(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="open", landscape_url=audit_url)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/register",
+                json={"username": "bob", "password": "pw123", "display_name": "Bob"},
+                headers={"user-agent": "pytest-client", "x-request-id": "register-token-1"},
+            )
+
+        assert response.status_code == 200
+        token = response.json()["access_token"]
+        claims = pyjwt.decode(token, options={"verify_signature": False})
+        rows = _read_auth_event_rows(audit_url)
+        assert len(rows) == 1
+        event = _only_auth_event(rows, "token_issued", issuance_path="register")
+        metadata = json.loads(event.metadata_json)
+        assert event.outcome == "success"
+        assert event.provider == "local"
+        assert event.user_id == "bob"
+        assert event.username == "bob"
+        assert metadata["token_type"] == "bearer"
+        assert metadata["issued_at"] == claims["iat"]
+        assert metadata["expires_at"] == claims["exp"]
+        serialized = repr(dict(event._mapping))
+        assert token not in serialized
+        assert "pw123" not in serialized
 
     async def test_register_closed_mode_returns_404(self, tmp_path) -> None:
         provider = LocalAuthProvider(
@@ -369,6 +454,49 @@ class TestTokenRefreshEndpoint:
         new_body = refresh_resp.json()
         assert "access_token" in new_body
         assert new_body["token_type"] == "bearer"
+
+    async def test_token_refresh_records_token_issuance_without_jwt(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        provider.create_user("alice", "pw", display_name="Alice")
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            login_resp = await client.post(
+                "/api/auth/login",
+                json={"username": "alice", "password": "pw"},
+                headers={"x-request-id": "refresh-login-1"},
+            )
+            old_token = login_resp.json()["access_token"]
+            response = await client.post(
+                "/api/auth/token",
+                headers={
+                    "Authorization": f"Bearer {old_token}",
+                    "x-request-id": "refresh-token-1",
+                },
+            )
+
+        assert response.status_code == 200
+        new_token = response.json()["access_token"]
+        claims = pyjwt.decode(new_token, options={"verify_signature": False})
+        rows = _read_auth_event_rows(audit_url)
+        event = _only_auth_event(rows, "token_issued", issuance_path="refresh")
+        metadata = json.loads(event.metadata_json)
+        assert event.outcome == "success"
+        assert event.provider == "local"
+        assert event.user_id == "alice"
+        assert event.username == "alice"
+        assert event.request_id == "refresh-token-1"
+        assert metadata["token_type"] == "bearer"
+        assert metadata["issued_at"] == claims["iat"]
+        assert metadata["expires_at"] == claims["exp"]
+        serialized = repr(dict(event._mapping))
+        assert old_token not in serialized
+        assert new_token not in serialized
 
     async def test_token_refresh_unparseable_claims_rejected(self, tmp_path) -> None:
         """Refresh must fail if pre-verification claim decode failed.

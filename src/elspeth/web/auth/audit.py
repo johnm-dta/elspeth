@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
+import jwt as pyjwt
 from fastapi import Request
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 
@@ -38,6 +40,17 @@ class AuthAuditWriter(Protocol):
         provider: AuthProviderType,
         username: str,
         failure_category: str,
+    ) -> None: ...
+
+    def record_token_issued(
+        self,
+        request: Request,
+        *,
+        provider: AuthProviderType,
+        user_id: str,
+        username: str,
+        access_token: str,
+        issuance_path: str,
     ) -> None: ...
 
 
@@ -74,6 +87,33 @@ def _request_metadata(request: Request) -> dict[str, object]:
     }
 
 
+def _issued_token_claims(access_token: str) -> dict[str, object]:
+    try:
+        decoded = pyjwt.decode(access_token, options={"verify_signature": False})
+    except pyjwt.PyJWTError as exc:
+        raise AuditIntegrityError("Issued access token could not be decoded for auth audit metadata") from exc
+    return cast(dict[str, object], decoded)
+
+
+def _required_int_claim(claims: dict[str, object], claim_name: str) -> int:
+    if claim_name not in claims:
+        raise AuditIntegrityError(f"Issued access token missing {claim_name!r} claim for auth audit metadata")
+    value = claims[claim_name]
+    if type(value) is not int:
+        raise AuditIntegrityError(f"Issued access token {claim_name!r} claim must be int for auth audit metadata")
+    return value
+
+
+def _token_issued_metadata(request: Request, *, access_token: str, issuance_path: str) -> dict[str, object]:
+    claims = _issued_token_claims(access_token)
+    metadata = _request_metadata(request)
+    metadata["issuance_path"] = issuance_path
+    metadata["token_type"] = "bearer"
+    metadata["issued_at"] = _required_int_claim(claims, "iat")
+    metadata["expires_at"] = _required_int_claim(claims, "exp")
+    return metadata
+
+
 @dataclass(frozen=True)
 class AuthAuditRecorder:
     """Synchronous Landscape writer for web authentication events."""
@@ -107,6 +147,31 @@ class AuthAuditRecorder:
                 client_host=_client_host(request),
                 user_agent=_bounded_text(_optional_header(request, "user-agent")),
                 metadata=_request_metadata(request),
+            )
+
+    def record_token_issued(
+        self,
+        request: Request,
+        *,
+        provider: AuthProviderType,
+        user_id: str,
+        username: str,
+        access_token: str,
+        issuance_path: str,
+    ) -> None:
+        with LandscapeDB.from_url(self.landscape_url, passphrase=self.landscape_passphrase) as db:
+            RecorderFactory(db).auth_audit.record_token_issued(
+                provider=provider,
+                user_id=user_id,
+                username=username,
+                request_id=_request_id(request),
+                client_host=_client_host(request),
+                user_agent=_bounded_text(_optional_header(request, "user-agent")),
+                metadata=_token_issued_metadata(
+                    request,
+                    access_token=access_token,
+                    issuance_path=issuance_path,
+                ),
             )
 
     def record_login_failure(

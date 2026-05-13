@@ -2099,6 +2099,39 @@ class TestMessageRoutes:
 
         assert send_resp.status_code == 500
 
+    def test_guided_respond_tool_invocation_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
+        """Guided turn audit sidecar failures must not be swallowed after a successful state write."""
+        app, service = _make_app(tmp_path)
+        catalog = MagicMock()
+        catalog.list_sources.return_value = []
+        app.state.catalog_service = catalog
+        app.state.session_engine = service._engine
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Guided"})
+        session_id = uuid.UUID(resp.json()["id"])
+
+        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
+        assert guided_resp.status_code == 200
+
+        original_add_message = service.add_message
+
+        async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
+            role = args[1]
+            tool_calls = kwargs.get("tool_calls")
+            if role == "audit" and tool_calls and tool_calls[0].get("_kind") == "audit":
+                raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
+            return await original_add_message(*args, **kwargs)
+
+        service.add_message = flaky_add_message  # type: ignore[method-assign]
+
+        send_resp = client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"control_signal": "exit_to_freeform"},
+        )
+
+        assert send_resp.status_code == 500
+
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:
         """Concurrent sends must not compose against an in-flight partial transcript."""

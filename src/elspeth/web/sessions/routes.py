@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as _replace
@@ -4917,17 +4918,19 @@ def create_session_router() -> APIRouter:
                 # starts with an empty invocations list and
                 # ``_persist_tool_invocations`` iterates an empty tuple).
                 #
-                # The inner ``try`` prevents an audit-persist failure from
-                # masking the in-flight HTTPException — Python's default
-                # behaviour is to let a ``finally``-block exception replace
-                # the original, which would surface a generic 500 instead
-                # of the intended 400/409.  Per CLAUDE.md telemetry/logging
-                # primacy, audit-system failures during exception handling
-                # are the one exemption where ``slog`` is the correct
-                # channel.  The log payload follows the B1 convention:
-                # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
-                # ``exc_info`` (frames are bounded and value-free; the
-                # exception message can carry Tier-bearing strings).
+                # The suppress-and-log path is only for exception unwinds:
+                # Python's default behaviour is to let a ``finally``-block
+                # exception replace the original, which would surface a generic
+                # 500 instead of the intended 400/409.  On a successful return,
+                # audit persist failures must propagate — otherwise a state
+                # write can succeed while the guided audit row silently
+                # disappears.  Per CLAUDE.md telemetry/logging primacy,
+                # audit-system failures during exception handling are the one
+                # exemption where ``slog`` is the correct channel.  The log
+                # payload follows the B1 convention: ``exc_class`` + ``frames``
+                # only, never ``str(exc)`` or ``exc_info`` (frames are bounded
+                # and value-free; the exception message can carry Tier-bearing
+                # strings).
                 #
                 # The two recorder channels (tool invocations and LLM calls)
                 # drain through TWO separate try blocks so that a failure
@@ -4936,7 +4939,8 @@ def create_session_router() -> APIRouter:
                 # buffers during guided Step 3 (chain solver) invocations.
                 # Without the second drain the LLM-call audit would be
                 # garbage-collected with the recorder at function exit.
-                try:
+                primary_exc = sys.exception()
+                if primary_exc is None:
                     await _persist_tool_invocations(
                         service,
                         session_id,
@@ -4948,19 +4952,6 @@ def create_session_router() -> APIRouter:
                         # made this keyword-only with no default, exposing the gap.
                         plugin_crash_pending=False,
                     )
-                except Exception as persist_exc:
-                    # Terminal logger-of-last-resort: no safer channel exists if structlog itself raises here.
-                    with contextlib.suppress(Exception):
-                        slog.error(
-                            "guided.audit_persist_failed_during_exception_handling",
-                            session_id=str(session_id),
-                            user_id=user.user_id,
-                            site="get_guided",
-                            channel="tool_invocations",
-                            exc_class=type(persist_exc).__name__,
-                            frames=_safe_frame_strings(persist_exc),
-                        )
-                try:
                     await _persist_llm_calls(
                         service,
                         session_id,
@@ -4968,17 +4959,50 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                         plugin_crash_pending=False,
                     )
-                except Exception as persist_exc:
-                    with contextlib.suppress(Exception):
-                        slog.error(
-                            "guided.audit_persist_failed_during_exception_handling",
-                            session_id=str(session_id),
-                            user_id=user.user_id,
-                            site="get_guided",
-                            channel="llm_calls",
-                            exc_class=type(persist_exc).__name__,
-                            frames=_safe_frame_strings(persist_exc),
+                else:
+                    try:
+                        await _persist_tool_invocations(
+                            service,
+                            session_id,
+                            recorder.invocations,
+                            state_record_out.id if state_record_out is not None else None,
+                            # Guided endpoints don't dispatch tools that can plugin-crash;
+                            # auto-drop on solver exhaustion is a separate channel that
+                            # doesn't surface through this audit path. Phase 1B/rev-4
+                            # made this keyword-only with no default, exposing the gap.
+                            plugin_crash_pending=False,
                         )
+                    except Exception as persist_exc:
+                        # Terminal logger-of-last-resort: no safer channel exists if structlog itself raises here.
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.audit_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="get_guided",
+                                channel="tool_invocations",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
+                    try:
+                        await _persist_llm_calls(
+                            service,
+                            session_id,
+                            recorder.llm_calls,
+                            state_record_out.id if state_record_out is not None else None,
+                            plugin_crash_pending=False,
+                        )
+                    except Exception as persist_exc:
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.audit_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="get_guided",
+                                channel="llm_calls",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
 
     @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)
     async def post_guided_respond(
@@ -5483,17 +5507,19 @@ def create_session_router() -> APIRouter:
                 # starts with an empty invocations list and
                 # ``_persist_tool_invocations`` iterates an empty tuple).
                 #
-                # The inner ``try`` prevents an audit-persist failure from
-                # masking the in-flight HTTPException — Python's default
-                # behaviour is to let a ``finally``-block exception replace
-                # the original, which would surface a generic 500 instead
-                # of the intended 400/409.  Per CLAUDE.md telemetry/logging
-                # primacy, audit-system failures during exception handling
-                # are the one exemption where ``slog`` is the correct
-                # channel.  The log payload follows the B1 convention:
-                # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
-                # ``exc_info`` (frames are bounded and value-free; the
-                # exception message can carry Tier-bearing strings).
+                # The suppress-and-log path is only for exception unwinds:
+                # Python's default behaviour is to let a ``finally``-block
+                # exception replace the original, which would surface a generic
+                # 500 instead of the intended 400/409.  On a successful return,
+                # audit persist failures must propagate — otherwise a state
+                # write can succeed while the guided audit row silently
+                # disappears.  Per CLAUDE.md telemetry/logging primacy,
+                # audit-system failures during exception handling are the one
+                # exemption where ``slog`` is the correct channel.  The log
+                # payload follows the B1 convention: ``exc_class`` + ``frames``
+                # only, never ``str(exc)`` or ``exc_info`` (frames are bounded
+                # and value-free; the exception message can carry Tier-bearing
+                # strings).
                 #
                 # The two recorder channels (tool invocations and LLM calls)
                 # drain through TWO separate try blocks so that a failure
@@ -5502,7 +5528,8 @@ def create_session_router() -> APIRouter:
                 # buffers during guided Step 3 (chain solver) invocations.
                 # Without the second drain the LLM-call audit would be
                 # garbage-collected with the recorder at function exit.
-                try:
+                primary_exc = sys.exception()
+                if primary_exc is None:
                     await _persist_tool_invocations(
                         service,
                         session_id,
@@ -5514,18 +5541,6 @@ def create_session_router() -> APIRouter:
                         # made this keyword-only with no default, exposing the gap.
                         plugin_crash_pending=False,
                     )
-                except Exception as persist_exc:
-                    with contextlib.suppress(Exception):
-                        slog.error(
-                            "guided.audit_persist_failed_during_exception_handling",
-                            session_id=str(session_id),
-                            user_id=user.user_id,
-                            site="post_guided_respond",
-                            channel="tool_invocations",
-                            exc_class=type(persist_exc).__name__,
-                            frames=_safe_frame_strings(persist_exc),
-                        )
-                try:
                     await _persist_llm_calls(
                         service,
                         session_id,
@@ -5533,17 +5548,45 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                         plugin_crash_pending=False,
                     )
-                except Exception as persist_exc:
-                    with contextlib.suppress(Exception):
-                        slog.error(
-                            "guided.audit_persist_failed_during_exception_handling",
-                            session_id=str(session_id),
-                            user_id=user.user_id,
-                            site="post_guided_respond",
-                            channel="llm_calls",
-                            exc_class=type(persist_exc).__name__,
-                            frames=_safe_frame_strings(persist_exc),
+                else:
+                    try:
+                        await _persist_tool_invocations(
+                            service,
+                            session_id,
+                            recorder.invocations,
+                            state_record_out.id if state_record_out is not None else None,
+                            plugin_crash_pending=False,
                         )
+                    except Exception as persist_exc:
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.audit_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="post_guided_respond",
+                                channel="tool_invocations",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
+                    try:
+                        await _persist_llm_calls(
+                            service,
+                            session_id,
+                            recorder.llm_calls,
+                            state_record_out.id if state_record_out is not None else None,
+                            plugin_crash_pending=False,
+                        )
+                    except Exception as persist_exc:
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.audit_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="post_guided_respond",
+                                channel="llm_calls",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
 
     @router.post("/{session_id}/guided/chat", response_model=GuidedChatResponse)
     async def post_guided_chat(

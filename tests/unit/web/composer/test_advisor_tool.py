@@ -309,6 +309,21 @@ def test_skill_wiring_examples_include_duplicate_consumer_fork_repair() -> None:
     assert '"fork_to": ["classified_rows_to_fraud_filter", "classified_rows_to_regular_filter"]' in skill_text
 
 
+def test_skill_fork_coalesce_critical_guidance_does_not_teach_branch_node_ids() -> None:
+    """Recipe #10's critical guidance must teach connection names, not node IDs."""
+    from importlib.resources import files
+
+    skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
+    critical_section = skill_text.split("#### Critical: `fork_to` vs `routes` on a gate", 1)[1].split(
+        "#### Connection naming",
+        1,
+    )[0]
+
+    assert "fork_to: [path_a, path_b]" not in critical_section
+    assert "fork_to: [path_a_in, path_b_in]" in critical_section
+    assert "The `gate.fork_to` list names the **inputs** to the path-transforms" in critical_section
+
+
 # --- 4. Compose-loop happy path (advisor returns guidance) ---
 
 

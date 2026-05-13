@@ -30,6 +30,15 @@ if TYPE_CHECKING:
     from elspeth.contracts.coalesce_metadata import CoalesceMetadata
 
 
+@dataclass(frozen=True, slots=True)
+class FailedTurnMetadata:
+    """Route-visible metadata for a compose turn whose audit path failed."""
+
+    assistant_message_id: str | None
+    tool_calls_attempted: int
+    tool_responses_persisted: int | None = None
+
+
 # TIER-2: Frozen audit DTO (not a raiseable exception) — records structured error payloads to the Landscape audit trail.
 @dataclass(frozen=True, slots=True)
 class ExecutionError:
@@ -697,7 +706,13 @@ class AuditIntegrityError(Exception):
     and the database must be investigated for corruption or tampering.
     """
 
-    pass
+    def __init__(
+        self,
+        *args: object,
+        failed_turn: FailedTurnMetadata | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.failed_turn = failed_turn
 
 
 # TIER-2: Config-elected enforcement failure (union collision policy = fail). Not a system corruption; pipeline author chose fail-fast on merge conflicts.

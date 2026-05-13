@@ -21,6 +21,7 @@ from opentelemetry import metrics
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
@@ -49,7 +50,7 @@ from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.protocol import RunAlreadyActiveError
+from elspeth.web.sessions.protocol import RunAlreadyActiveError, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -308,6 +309,43 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
 
     app = FastAPI(title="ELSPETH Web", version="0.1.0", lifespan=lifespan)
 
+    @app.exception_handler(AuditIntegrityError)
+    async def _audit_integrity_error_handler(_request: Request, exc: AuditIntegrityError) -> JSONResponse:
+        failed_turn = exc.failed_turn
+        if failed_turn is None:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error_type": "audit_integrity_error",
+                    "detail": "Audit persistence failed; no audit-grade data returned.",
+                    "diagnostic": "no_failed_turn_metadata",
+                    "reason": "originated outside compose-loop annotation scope",
+                },
+            )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "audit_integrity_error",
+                "detail": "Audit persistence failed; no audit-grade data returned.",
+                "failed_turn": {
+                    "assistant_message_id": failed_turn.assistant_message_id,
+                    "tool_calls_attempted": failed_turn.tool_calls_attempted,
+                    "tool_responses_persisted": failed_turn.tool_responses_persisted,
+                    "transcript_url": None,
+                },
+            },
+        )
+
+    @app.exception_handler(StaleComposeStateError)
+    async def _stale_compose_state_error_handler(_request: Request, _exc: StaleComposeStateError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error_type": "stale_compose_state",
+                "detail": "The session changed while the compose turn was running.",
+            },
+        )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -420,6 +458,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.state.composer_service = ComposerServiceImpl(
         catalog=app.state.catalog_service,
         settings=settings,
+        sessions_service=session_service,
         session_engine=session_engine,
         secret_service=app.state.scoped_secret_resolver,
         runtime_preflight_coordinator=runtime_preflight_coordinator,

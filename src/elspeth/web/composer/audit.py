@@ -185,10 +185,12 @@ def build_canonicalization_sentinel(
 class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder, ComposerChatTurnRecorder):
     """Append-only in-memory buffer for composer audit records.
 
-    Used inside :meth:`ComposerServiceImpl._compose_loop`. The buffer is
-    surfaced on :class:`ComposerResult` and on the partial-state-carrier
-    exceptions so the route handler always has the per-tool-call decision
-    trail and per-LLM-call operational trail.
+    Used inside :meth:`ComposerServiceImpl._compose_loop`. After Phase 3,
+    compose-loop tool rows are committed by
+    ``SessionServiceProtocol.persist_compose_turn_async`` inside the loop;
+    the route-layer ``tool_invocations`` drain is retained only for older
+    non-loop carriers. LLM call and guided chat-turn sidecars still use this
+    buffer as their route-persisted staging area.
 
     Threading: ``record()`` is safe to call from any thread. The compose
     loop dispatches synchronously to a worker via ``run_sync_in_worker``

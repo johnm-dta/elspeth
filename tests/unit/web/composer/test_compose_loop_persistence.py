@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 from sqlalchemy import text
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_tool_call_response
 from elspeth.web.composer.service import ComposerServiceImpl
@@ -153,3 +154,114 @@ async def test_step2_redacts_response_with_summarizer(
         telemetry=composer_service_with_real_sessions._redaction_telemetry,  # type: ignore[attr-defined]
     )
     assert json.loads(result.persisted_tool_row_content[0]) == expected_content
+
+
+@pytest.mark.asyncio
+async def test_step2_preserves_absent_raw_content_as_none(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_tool_call_with_no_content: Any,
+    result_session_id: str,
+) -> None:
+    """Missing assistant content remains NULL in raw_content."""
+
+    await _run_one_turn(
+        composer_service_with_real_sessions,
+        llm=fake_llm_tool_call_with_no_content,
+        session_id=result_session_id,
+    )
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    audit_outcome = composer_service_with_real_sessions._phase3_last_audit_outcome  # type: ignore[attr-defined]
+    with sessions_service._engine.connect() as conn:  # type: ignore[attr-defined]
+        row = conn.execute(
+            text("SELECT raw_content FROM chat_messages WHERE id = :id"),
+            {"id": audit_outcome.assistant_id},
+        ).one()
+    assert row.raw_content is None
+
+
+@pytest.mark.asyncio
+async def test_step2_dispatches_one_persist_compose_turn_async_per_turn(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_two_tool_calls: Any,
+    result_session_id: str,
+    sqlalchemy_event_listener: Any,
+) -> None:
+    """One tool-call turn is committed by one persist_compose_turn_async call."""
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    counts = sqlalchemy_event_listener(sessions_service._engine)  # type: ignore[attr-defined]
+
+    await _run_one_turn(
+        composer_service_with_real_sessions,
+        llm=fake_llm_two_tool_calls,
+        session_id=result_session_id,
+    )
+
+    assert counts["begin"] == 1
+    assert counts["commit"] == 1
+    assert counts["rollback"] == 0
+
+
+@pytest.mark.asyncio
+async def test_step2_does_not_call_legacy_add_message_inside_loop(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_two_tool_calls: Any,
+    result_session_id: str,
+    add_message_spy: list[str],
+) -> None:
+    """The compose loop does not use SessionService.add_message for tool rows."""
+
+    await _run_one_turn(
+        composer_service_with_real_sessions,
+        llm=fake_llm_two_tool_calls,
+        session_id=result_session_id,
+    )
+
+    assert not any(frame.endswith(":_compose_loop") for frame in add_message_spy)
+
+
+@pytest.mark.asyncio
+async def test_step2_plugin_crash_carries_failed_turn_metadata(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_runtime_error_on_second: Any,
+    result_session_id: str,
+) -> None:
+    """Plugin crashes raised after dispatch expose the persisted assistant id."""
+
+    with pytest.raises(ComposerPluginCrashError) as excinfo:
+        await _run_one_turn(
+            composer_service_with_real_sessions,
+            llm=fake_llm_runtime_error_on_second,
+            session_id=result_session_id,
+        )
+
+    failed_turn = excinfo.value.failed_turn
+    assert failed_turn is not None
+    assert failed_turn.assistant_message_id is not None
+    assert failed_turn.tool_calls_attempted == 3
+
+
+@pytest.mark.asyncio
+async def test_step2_audit_integrity_error_carries_failed_turn_metadata(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_two_tool_calls: Any,
+    result_session_id: str,
+    inject_commit_OperationalError: Any,
+) -> None:
+    """Audit failures from the single dispatch keep route-visible turn context."""
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    inject_commit_OperationalError(sessions_service._engine)  # type: ignore[attr-defined]
+
+    with pytest.raises(AuditIntegrityError) as excinfo:
+        await _run_one_turn(
+            composer_service_with_real_sessions,
+            llm=fake_llm_two_tool_calls,
+            session_id=result_session_id,
+        )
+
+    assert excinfo.value.failed_turn is not None
+    assert excinfo.value.failed_turn.assistant_message_id is None
+    assert excinfo.value.failed_turn.tool_calls_attempted == 2
+    assert excinfo.value.failed_turn.tool_responses_persisted == 0

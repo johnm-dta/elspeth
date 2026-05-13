@@ -801,7 +801,7 @@ Replace route-layer persistence of compose-loop tool rows with a single sentinel
 - Modify: `src/elspeth/web/composer/audit.py` (`BufferingRecorder` docstring/comment updated: post-Phase-3 tool rows must not use this route-layer drain path; LLM/chat-turn audit buffers remain valid)
 - Modify: `src/elspeth/web/sessions/routes.py` (delete/guard compose/recompose `_persist_tool_invocations` call sites listed in Step 3; retain non-compose-loop guided call sites)
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 Append to `tests/unit/web/composer/test_compose_loop_persistence.py`:
 
@@ -869,7 +869,7 @@ def test_step2_does_not_call_legacy_add_message_inside_loop(
 
 Expected: FAIL — `persist_compose_turn_async` is not yet called from `_compose_loop`; the legacy `add_message` drain path is still present.
 
-- [ ] **Step 2: Capture `raw_content` before runtime preflight rewrites assistant content without fabricating empty strings.**
+- [x] **Step 2: Capture `raw_content` before runtime preflight rewrites assistant content without fabricating empty strings.**
 
 Spec §5.2.1 line 1489 sets `raw_content=raw_assistant_content`. The "raw" is the pre-redaction LLM output; existing routes already pass `raw_content=result.raw_assistant_content` to `add_message` at the route layer. Inside `_compose_loop`, the equivalent value must be captured **before** any runtime preflight rewrite mutates `assistant_message.content`.
 
@@ -884,7 +884,7 @@ raw_assistant_content = assistant_message.content
 
 Hold the variable through Step 1's await boundary so it is available at Step 2 dispatch time. The `chat_messages.content` column remains non-null, so `assistant_content=assistant_message.content or ""` is acceptable for the visible content column only. The audit-attribution field `raw_content` must receive `raw_assistant_content` unchanged (`None` stays `None`).
 
-- [ ] **Step 2b: Wire `SessionServiceProtocol` into `ComposerServiceImpl`.**
+- [x] **Step 2b: Wire `SessionServiceProtocol` into `ComposerServiceImpl`.**
 
 Because rev 5 chooses service-owned compose-turn persistence without a broad constructor-call-site migration, add a sentinel-default `sessions_service: SessionServiceProtocol | None = None` dependency and a first-use guard. Do **not** add a required keyword-only parameter; current tests and helper factories construct `ComposerServiceImpl(...)` in many non-persistence scenarios. Those are not legacy callers, and they should not fail at construction time.
 
@@ -939,7 +939,7 @@ rg -n "ComposerServiceImpl\\(" src tests
 
 The `ComposerServiceImpl(` sweep is not an instruction to edit every caller. Its acceptance criterion is that existing callers either (a) are production/app wiring and pass `sessions_service=...`, (b) are persistence-path tests and use a fixture that wires a real or protocol-faithful service, or (c) are constructor-only/non-persistence tests and rely on the sentinel default intentionally. If a caller cannot be classified into (a), (b), or (c), stop and surface it to the operator before committing. The protocol docstring sweep must be closed by editing `src/elspeth/web/composer/protocol.py` seam contract B text so it no longer claims the composer has no `SessionService` dependency.
 
-- [ ] **Step 2c: Make persisted assistant ids available to the route layer mechanically.**
+- [x] **Step 2c: Make persisted assistant ids available to the route layer mechanically.**
 
 Define a small immutable metadata type in a neutral contracts module, then thread it through the composer result/carrier surface. Do not define this type in `web/composer/protocol.py` and import it from `contracts.errors`; that would invert the dependency. The allowed shapes are either `src/elspeth/contracts/errors.py:FailedTurnMetadata` or `src/elspeth/contracts/audit.py:FailedTurnMetadata` imported by both `contracts.errors` and `web/composer/protocol.py`:
 
@@ -971,7 +971,7 @@ Add `failed_turn: FailedTurnMetadata | None = None` to route-visible `AuditInteg
 
 For plugin-crash and runtime-preflight carriers raised after the commit, attach this `failed_turn` object to the captured exception before raising it. For successful terminal results, set `ComposerResult.persisted_assistant_message_id=audit_outcome.assistant_id` and `persisted_tool_call_turn=True` when the turn included tool calls. Route code uses these fields as the concrete assistant-id source and to decide whether terminal `add_message("assistant", ...)` is still responsible for storing the final no-tool answer.
 
-- [ ] **Step 3: Replace the legacy persistence with the single dispatch and route cutover.**
+- [x] **Step 3: Replace the legacy persistence with the single dispatch and route cutover.**
 
 After Task 5's redaction step, insert:
 
@@ -1053,7 +1053,7 @@ grep -n "_persist_tool_invocations" src/elspeth/web/sessions/routes.py
 
 The service grep should show no compose-loop route-drain path. The routes grep should show only retained non-compose-loop/guided call sites or guarded branches whose comments explain why they are not duplicating rows already committed by `persist_compose_turn_async`.
 
-- [ ] **Step 4: Re-run the Step 2 tests.**
+- [x] **Step 4: Re-run the Step 2 tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py -v

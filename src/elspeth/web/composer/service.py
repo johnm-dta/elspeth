@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
 
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
+    from elspeth.web.sessions.protocol import SessionServiceProtocol
 
 import structlog
 from opentelemetry import metrics
@@ -41,7 +42,7 @@ from elspeth.contracts.composer_llm_audit import (
     ComposerLLMCallStatus,
     ComposerLLMProviderCostSource,
 )
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.core.canonical import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
@@ -1129,11 +1130,14 @@ class ComposerServiceImpl:
         self,
         catalog: CatalogService,
         settings: ComposerSettings,
+        *,
+        sessions_service: SessionServiceProtocol | None = None,
         session_engine: Engine | None = None,
         secret_service: Any | None = None,
         runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
     ) -> None:
         self._catalog = catalog
+        self._sessions_service = sessions_service
         self._model = settings.composer_model
         self._max_composition_turns = settings.composer_max_composition_turns
         self._max_discovery_turns = settings.composer_max_discovery_turns
@@ -1145,6 +1149,13 @@ class ComposerServiceImpl:
         self._runtime_preflight_timeout_seconds = settings.composer_runtime_preflight_timeout_seconds
         self._runtime_preflight_coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
         self._availability = self._compute_availability()
+
+    def _require_sessions_service(self) -> SessionServiceProtocol:
+        """Return the wired sessions service or fail at the persistence boundary."""
+
+        if self._sessions_service is None:
+            raise RuntimeError("sessions_service not wired")
+        return self._sessions_service
 
     def get_availability(self) -> ComposerAvailability:
         """Return the boot-time composer availability snapshot."""
@@ -1829,6 +1840,9 @@ class ComposerServiceImpl:
         # additional iterations. NEVER catches plugin exceptions — only
         # configuration diagnostics.
         repair_turns_used = 0
+        persisted_assistant_message_id: str | None = None
+        persisted_tool_call_turn = False
+        failed_turn: FailedTurnMetadata | None = None
 
         while True:
             # Phase 3 Step 1 captures the state id observed before the
@@ -1845,6 +1859,7 @@ class ComposerServiceImpl:
                 recorder=recorder,
             )
             assistant_message = response.choices[0].message
+            raw_assistant_content = assistant_message.content
             assistant_tool_calls = assistant_message.tool_calls or ()
             if len(assistant_tool_calls) > self._max_tool_calls_per_turn:  # type: ignore[attr-defined]
                 telemetry = self._telemetry  # type: ignore[attr-defined]
@@ -1922,7 +1937,12 @@ class ComposerServiceImpl:
                 # response can surface ``composer_meta.repair_turns_used``)
                 # — see web/sessions/routes.py::_state_data_from_composer_state
                 # call sites in the compose / recompose paths.
-                return replace(result, repair_turns_used=repair_turns_used)
+                return replace(
+                    result,
+                    repair_turns_used=repair_turns_used,
+                    persisted_assistant_message_id=persisted_assistant_message_id,
+                    persisted_tool_call_turn=persisted_tool_call_turn,
+                )
 
             await _emit_progress(
                 progress,
@@ -2939,7 +2959,47 @@ class ComposerServiceImpl:
             )
             self._phase3_last_redacted_assistant_tool_calls = redacted_assistant_tool_calls
             self._phase3_last_redacted_tool_rows = redacted_tool_rows
+            if session_id is not None:
+                sessions_service = self._require_sessions_service()
+                try:
+                    audit_outcome = await sessions_service.persist_compose_turn_async(
+                        session_id=session_id,
+                        assistant_content=assistant_message.content or "",
+                        raw_content=raw_assistant_content,
+                        redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+                        redacted_tool_rows=redacted_tool_rows,
+                        parent_composition_state_id=current_state_id,
+                        expected_current_state_id=current_state_id,
+                        writer_principal="compose_loop",
+                        plugin_crash_pending=plugin_crash is not None,
+                    )
+                except AuditIntegrityError as exc:
+                    exc.failed_turn = FailedTurnMetadata(
+                        assistant_message_id=None,
+                        tool_calls_attempted=len(assistant_tool_calls),
+                        tool_responses_persisted=0,
+                    )
+                    raise
+                self._phase3_last_audit_outcome = audit_outcome
+                failed_turn = FailedTurnMetadata(
+                    assistant_message_id=audit_outcome.assistant_id,
+                    tool_calls_attempted=len(assistant_tool_calls),
+                )
+                persisted_assistant_message_id = audit_outcome.assistant_id
+                persisted_tool_call_turn = True
             if plugin_crash is not None:
+                if persisted_tool_call_turn:
+                    persisted_plugin_crash = ComposerPluginCrashError.capture(
+                        plugin_crash.original_exc,
+                        state=state,
+                        initial_version=initial_version,
+                        tool_invocations=(),
+                        llm_calls=recorder.llm_calls,
+                        failed_turn=failed_turn,
+                    )
+                    if plugin_crash_cause is None:
+                        raise persisted_plugin_crash
+                    raise persisted_plugin_crash from plugin_crash_cause
                 if plugin_crash_cause is None:
                     raise plugin_crash
                 raise plugin_crash from plugin_crash_cause
@@ -3007,7 +3067,7 @@ class ComposerServiceImpl:
                                 reason="composer_complete",
                             ),
                         )
-                        return await self._finalize_no_tool_response(
+                        result = await self._finalize_no_tool_response(
                             content=assistant_message.content or "",
                             state=state,
                             initial_version=initial_version,
@@ -3020,13 +3080,19 @@ class ComposerServiceImpl:
                             tool_invocations=recorder.invocations,
                             llm_calls=recorder.llm_calls,
                         )
+                        return replace(
+                            result,
+                            persisted_assistant_message_id=persisted_assistant_message_id,
+                            persisted_tool_call_turn=persisted_tool_call_turn,
+                        )
                     raise ComposerConvergenceError.capture(
                         max_turns=composition_turns_used + discovery_turns_used,
                         budget_exhausted="composition",
                         state=state,
                         initial_version=initial_version,
-                        tool_invocations=recorder.invocations,
+                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
                         llm_calls=recorder.llm_calls,
+                        failed_turn=failed_turn,
                     )
             elif turn_has_discovery:
                 discovery_turns_used += 1
@@ -3036,8 +3102,9 @@ class ComposerServiceImpl:
                         budget_exhausted="discovery",
                         state=state,
                         initial_version=initial_version,
-                        tool_invocations=recorder.invocations,
+                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
                         llm_calls=recorder.llm_calls,
+                        failed_turn=failed_turn,
                     )
             else:
                 # The only non-cache tool currently handled outside the
@@ -4021,18 +4088,6 @@ class ComposeLoopTestResult:
         return self.tool_outcomes
 
 
-def _phase3_require_sessions_service_for_test(self: ComposerServiceImpl) -> Any:
-    """Return the Phase 3 test-wired sessions service or fail loudly."""
-
-    try:
-        sessions_service = self._sessions_service  # type: ignore[attr-defined]
-    except AttributeError as exc:
-        raise RuntimeError("sessions_service not wired") from exc
-    if sessions_service is None:
-        raise RuntimeError("sessions_service not wired")
-    return sessions_service
-
-
 async def _phase3_run_one_turn_for_test(
     self: ComposerServiceImpl,
     *,
@@ -4053,7 +4108,7 @@ async def _phase3_run_one_turn_for_test(
     from elspeth.web.composer.state import PipelineMetadata
 
     del user_message_id
-    self._require_sessions_service()  # type: ignore[attr-defined]
+    self._require_sessions_service()
     state = initial_state or CompositionState(
         source=None,
         nodes=(),
@@ -4090,7 +4145,6 @@ async def _phase3_run_one_turn_for_test(
     )
 
 
-ComposerServiceImpl._require_sessions_service = _phase3_require_sessions_service_for_test  # type: ignore[attr-defined]
 ComposerServiceImpl._run_one_turn_for_test = _phase3_run_one_turn_for_test  # type: ignore[attr-defined]
 
 
@@ -4177,6 +4231,7 @@ def _phase3_composer_init(self: ComposerServiceImpl, *args: Any, **kwargs: Any) 
     self._phase3_last_expected_current_state_id = None
     self._phase3_last_redacted_assistant_tool_calls = ()
     self._phase3_last_redacted_tool_rows = ()
+    self._phase3_last_audit_outcome = None  # type: ignore[assignment]
 
 
 ComposerServiceImpl.__init__ = _phase3_composer_init  # type: ignore[method-assign]

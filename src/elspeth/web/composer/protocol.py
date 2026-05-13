@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
+from elspeth.contracts.errors import FailedTurnMetadata
 from elspeth.web.composer.progress import ComposerProgressReason, ComposerProgressSink
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
@@ -107,6 +108,11 @@ class ComposerResult:
     # returned text-only).
     tool_invocations: tuple[ComposerToolInvocation, ...] = ()
     llm_calls: tuple[ComposerLLMCall, ...] = ()
+    # Set when _compose_loop has already committed assistant+tool rows via
+    # SessionServiceProtocol.persist_compose_turn_async. Routes must not drain
+    # tool_invocations again for that turn.
+    persisted_assistant_message_id: str | None = None
+    persisted_tool_call_turn: bool = False
     # Number of forced repair turns the proof step injected into this compose
     # invocation. Capped at 2 by the loop. 0 means first-pass success; 1 or 2
     # means the model was given proof_diagnostics back as a synthesized
@@ -227,7 +233,7 @@ class ComposerConvergenceError(ComposerServiceError):
     """
 
     _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset(
-        {"max_turns", "budget_exhausted", "partial_state", "tool_invocations", "llm_calls", "reason", "evidence"}
+        {"max_turns", "budget_exhausted", "partial_state", "tool_invocations", "llm_calls", "reason", "evidence", "failed_turn"}
     )
 
     def __init__(
@@ -240,6 +246,7 @@ class ComposerConvergenceError(ComposerServiceError):
         llm_calls: tuple[ComposerLLMCall, ...] = (),
         reason: ComposerProgressReason | None = None,
         evidence: Mapping[str, Any] | None = None,
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> None:
         super().__init__(
             f"Composer did not converge within {max_turns} turns "
@@ -259,6 +266,7 @@ class ComposerConvergenceError(ComposerServiceError):
         # an audit gap.
         self.tool_invocations = tool_invocations
         self.llm_calls = llm_calls
+        self.failed_turn = failed_turn
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain machinery
@@ -284,6 +292,7 @@ class ComposerConvergenceError(ComposerServiceError):
         llm_calls: tuple[ComposerLLMCall, ...] = (),
         reason: ComposerProgressReason | None = None,
         evidence: Mapping[str, Any] | None = None,
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> ComposerConvergenceError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -312,6 +321,7 @@ class ComposerConvergenceError(ComposerServiceError):
             llm_calls=llm_calls,
             reason=reason,
             evidence=evidence,
+            failed_turn=failed_turn,
         )
 
 
@@ -355,7 +365,9 @@ class ComposerPluginCrashError(ComposerServiceError):
     precedes one of its ``ComposerServiceError`` subclasses.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset(
+        {"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls", "failed_turn"}
+    )
 
     def __init__(
         self,
@@ -364,6 +376,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         partial_state: CompositionState | None = None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> None:
         super().__init__(f"Composer plugin crash: {type(original_exc).__name__}")
         self.original_exc = original_exc
@@ -375,6 +388,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         # tried that triggered the bug.
         self.tool_invocations = tool_invocations
         self.llm_calls = llm_calls
+        self.failed_turn = failed_turn
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain dunders
@@ -400,6 +414,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> ComposerPluginCrashError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -420,13 +435,21 @@ class ComposerPluginCrashError(ComposerServiceError):
         :meth:`ComposerConvergenceError.capture`).
         """
         partial = state if state.version > initial_version else None
-        return cls(original_exc, partial_state=partial, tool_invocations=tool_invocations, llm_calls=llm_calls)
+        return cls(
+            original_exc,
+            partial_state=partial,
+            tool_invocations=tool_invocations,
+            llm_calls=llm_calls,
+            failed_turn=failed_turn,
+        )
 
 
 class ComposerRuntimePreflightError(ComposerServiceError):
     """Unexpected internal failure while running composer runtime preflight."""
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset(
+        {"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls", "failed_turn"}
+    )
 
     def __init__(
         self,
@@ -435,6 +458,7 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         partial_state: CompositionState | None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> None:
         super().__init__("Composer runtime preflight failed internally.")
         self.original_exc = original_exc
@@ -448,6 +472,7 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         # the caller threading ``result.tool_invocations`` through.
         self.tool_invocations = tool_invocations
         self.llm_calls = llm_calls
+        self.failed_turn = failed_turn
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in type(self)._FROZEN_ATTRS and name in self.__dict__:
@@ -463,9 +488,16 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> ComposerRuntimePreflightError:
         partial = state if state.version > initial_version else None
-        return cls(original_exc=exc, partial_state=partial, tool_invocations=tool_invocations, llm_calls=llm_calls)
+        return cls(
+            original_exc=exc,
+            partial_state=partial,
+            tool_invocations=tool_invocations,
+            llm_calls=llm_calls,
+            failed_turn=failed_turn,
+        )
 
 
 class ToolArgumentError(Exception):
@@ -637,8 +669,9 @@ class ComposerService(Protocol):
 
     Accepts a user message, pre-fetched chat history, and current state.
     Runs the LLM tool-use loop. Returns the assistant's response
-    and the (possibly updated) state. Does NOT depend on SessionService —
-    the route handler mediates (seam contract B).
+    and the (possibly updated) state. Tool-call turns may persist their
+    assistant/tool audit rows through SessionServiceProtocol; terminal
+    no-tool assistant messages are still route-persisted (seam contract B).
     """
 
     async def compose(
@@ -658,8 +691,9 @@ class ComposerService(Protocol):
             messages: Chat history as plain dicts (role/content keys).
                 The route handler fetches ChatMessageRecord from
                 session_service.get_messages(), converts each to a dict,
-                and passes the result here. ComposerService does NOT
-                depend on SessionService (seam contract B).
+                and passes the result here. ComposerService may depend on
+                SessionServiceProtocol for tool-call turn persistence (seam
+                contract B), but does not fetch history itself.
             state: The current CompositionState.
             user_id: Current user ID. Passed through to secret tools.
             guided_terminal: When set, the resolved TerminalState from the

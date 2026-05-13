@@ -68,6 +68,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args, get_origin
 from unittest.mock import MagicMock
@@ -102,6 +103,7 @@ from elspeth.web.composer.service import ComposerAvailability, ComposerServiceIm
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -497,10 +499,24 @@ def _composer_available_for_phase3(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def result_session_id() -> str:
+def result_session_id(composer_service_with_real_sessions: ComposerServiceImpl) -> str:
     """Session id used by ``_run_one_turn_for_test`` result assertions."""
 
-    return str(uuid4())
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    sessions_service = composer_service_with_real_sessions._sessions_service
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="phase3-test-user",
+                auth_provider_type="local",
+                title="Phase 3 test session",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return session_id
 
 
 def build_test_sessions_service(
@@ -538,8 +554,8 @@ def composer_service_with_real_sessions(tmp_path: Path) -> ComposerServiceImpl:
     service = ComposerServiceImpl(
         catalog=_mock_catalog(),
         settings=_make_settings(tmp_path),
+        sessions_service=sessions_service,
     )
-    service._sessions_service = sessions_service
     return service
 
 

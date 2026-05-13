@@ -522,6 +522,10 @@ class AuditedHTTPClient(AuditedClientBase):
             headers: Additional headers for this request
             follow_redirects: Whether to follow HTTP redirects (default: False)
             max_redirects: Maximum redirect hops when follow_redirects=True
+            allowed_ranges: IP networks that may bypass the default SSRF
+                blocklist when validating redirect targets. This must match
+                the ranges used to create the initial SSRFSafeRequest so every
+                redirect hop preserves the same caller-approved boundary.
 
         Returns:
             Tuple of (httpx.Response, final hostname URL as string, Call).
@@ -698,6 +702,10 @@ class AuditedHTTPClient(AuditedClientBase):
                 response.url is IP-based (from connection_url rewrite), so relative
                 Location headers must resolve against the original hostname URL to
                 preserve correct Host headers and TLS SNI.
+            allowed_ranges: IP networks that may bypass the default SSRF
+                blocklist when validating each redirect target. These ranges do
+                not bypass the unconditional blocks enforced by
+                validate_url_for_ssrf().
 
         Returns:
             Tuple of (final non-redirect response, number of redirects followed,

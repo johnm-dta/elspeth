@@ -240,6 +240,14 @@ def score(
     if phrase_hits:
         red_reasons.append(f"forbidden passivity phrases in final message: {phrase_hits}")
 
+    credential_hits = [
+        p for p in red.get("credential_misnarration_phrases", []) if p in final_body
+    ]
+    if credential_hits:
+        red_reasons.append(
+            f"credential misnarration phrases in final message: {credential_hits}"
+        )
+
     amber_reasons: list[str] = []
 
     if isinstance(state, dict):

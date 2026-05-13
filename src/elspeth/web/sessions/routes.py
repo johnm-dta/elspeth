@@ -23,7 +23,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
-from elspeth.contracts.composer_llm_audit import ComposerChatTurn, ComposerLLMCall
+from elspeth.contracts.composer_llm_audit import ComposerChatInitiator, ComposerChatTurn, ComposerLLMCall
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
@@ -963,7 +963,7 @@ async def _persist_chat_turns(
                 "_kind": "chat_turn_audit",
                 "status": turn.status.value,
                 "step": turn.step,
-                "initiator": turn.initiator,
+                "initiator": turn.initiator.value,
                 "chat_turn_seq": turn.chat_turn_seq,
                 "model": turn.model,
                 "latency_ms": turn.latency_ms,
@@ -4649,11 +4649,11 @@ def create_session_router() -> APIRouter:
                         else None,
                         chat_history=[
                             ChatTurnResponse(
-                                role=ChatRole(t["role"]).value,
-                                content=t["content"],
-                                seq=t["seq"],
-                                step=GuidedStep(t["step"]).value,
-                                ts_iso=t["ts_iso"],
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
                             )
                             for t in guided.chat_history
                         ],
@@ -4918,11 +4918,11 @@ def create_session_router() -> APIRouter:
                             terminal=new_terminal_response,
                             chat_history=[
                                 ChatTurnResponse(
-                                    role=ChatRole(t["role"]).value,
-                                    content=t["content"],
-                                    seq=t["seq"],
-                                    step=GuidedStep(t["step"]).value,
-                                    ts_iso=t["ts_iso"],
+                                    role=t.role.value,
+                                    content=t.content,
+                                    seq=t.seq,
+                                    step=t.step.value,
+                                    ts_iso=t.ts_iso,
                                 )
                                 for t in new_guided.chat_history
                             ],
@@ -5186,11 +5186,11 @@ def create_session_router() -> APIRouter:
                         else None,
                         chat_history=[
                             ChatTurnResponse(
-                                role=ChatRole(t["role"]).value,
-                                content=t["content"],
-                                seq=t["seq"],
-                                step=GuidedStep(t["step"]).value,
-                                ts_iso=t["ts_iso"],
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
                             )
                             for t in guided.chat_history
                         ],
@@ -5420,20 +5420,20 @@ def create_session_router() -> APIRouter:
                 # state update — a half-applied history (user without assistant)
                 # would surface mid-flight on a concurrent /guided read.
                 ts_iso = finished_at.isoformat()
-                user_turn: ChatTurn = {
-                    "role": ChatRole.USER,
-                    "content": body.message,
-                    "seq": guided.chat_turn_seq,
-                    "step": guided.step,
-                    "ts_iso": ts_iso,
-                }
-                assistant_turn: ChatTurn = {
-                    "role": ChatRole.ASSISTANT,
-                    "content": chat_result.assistant_message,
-                    "seq": guided.chat_turn_seq + 1,
-                    "step": guided.step,
-                    "ts_iso": ts_iso,
-                }
+                user_turn = ChatTurn(
+                    role=ChatRole.USER,
+                    content=body.message,
+                    seq=guided.chat_turn_seq,
+                    step=guided.step,
+                    ts_iso=ts_iso,
+                )
+                assistant_turn = ChatTurn(
+                    role=ChatRole.ASSISTANT,
+                    content=chat_result.assistant_message,
+                    seq=guided.chat_turn_seq + 1,
+                    step=guided.step,
+                    ts_iso=ts_iso,
+                )
                 new_guided = _replace(
                     guided,
                     chat_history=(*guided.chat_history, user_turn, assistant_turn),
@@ -5443,16 +5443,16 @@ def create_session_router() -> APIRouter:
                 # Emit the ComposerChatTurn audit record.  Hashes use the
                 # project canonical ``stable_hash`` over the literal message
                 # strings — never the raw text into the audit row.  The
-                # ``initiator`` is hard-coded to ``"user"`` for Phase A;
-                # Phase A.5 will set ``"step_entry_opener"`` for proactive
-                # turns through the same record.
+                # ``initiator`` is hard-coded to USER for Phase A; Phase A.5
+                # will set STEP_ENTRY_OPENER for proactive turns through the
+                # same record.
                 user_message_hash = stable_hash(body.message)
                 assistant_message_hash = stable_hash(chat_result.assistant_message)
                 recorder.record_chat_turn(
                     ComposerChatTurn(
                         step=guided.step.value,
-                        initiator="user",
-                        chat_turn_seq=user_turn["seq"],
+                        initiator=ComposerChatInitiator.USER,
+                        chat_turn_seq=user_turn.seq,
                         user_message_hash=user_message_hash,
                         assistant_message_hash=assistant_message_hash,
                         latency_ms=chat_result.latency_ms,
@@ -5505,11 +5505,11 @@ def create_session_router() -> APIRouter:
                         terminal=None,
                         chat_history=[
                             ChatTurnResponse(
-                                role=ChatRole(t["role"]).value,
-                                content=t["content"],
-                                seq=t["seq"],
-                                step=GuidedStep(t["step"]).value,
-                                ts_iso=t["ts_iso"],
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
                             )
                             for t in new_guided.chat_history
                         ],

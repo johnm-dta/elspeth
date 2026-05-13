@@ -153,16 +153,6 @@ class ComposerLLMCallRecorder(Protocol):
 # ---------------------------------------------------------------------------
 
 
-ComposerChatInitiator = Literal["user", "step_entry_opener"]
-"""Who started the chat turn.
-
-``user`` — the human typed a message into the chat input.
-``step_entry_opener`` — a Phase A.5 proactive opener fired by the server
-when ``session.step`` changed.  Phase A only emits ``user``; the
-discriminator is wired now so the audit schema is stable across phases.
-"""
-
-
 class ComposerChatTurnStatus(StrEnum):
     """Outcome of one per-step chat turn (Phase A slice 5).
 
@@ -176,6 +166,19 @@ class ComposerChatTurnStatus(StrEnum):
 
     SUCCESS = "success"
     SYNTHETIC_UNAVAILABLE = "synthetic_unavailable"
+
+
+class ComposerChatInitiator(StrEnum):
+    """Who started the chat turn.
+
+    ``user`` — the human typed a message into the chat input.
+    ``step_entry_opener`` — a Phase A.5 proactive opener fired by the server
+    when ``session.step`` changed.  Phase A only emits ``user``; the
+    discriminator is wired now so the audit schema is stable across phases.
+    """
+
+    USER = "user"
+    STEP_ENTRY_OPENER = "step_entry_opener"
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,12 +226,6 @@ class ComposerChatTurn:
     def __post_init__(self) -> None:
         require_int(self.chat_turn_seq, "chat_turn_seq", min_value=0)
         require_int(self.latency_ms, "latency_ms", min_value=0)
-        # ``initiator`` is a Literal — Python has no runtime enforcement.
-        # Validate at construction so Tier-1 corruption (e.g. a buggy
-        # caller passing ``"opener"`` instead of ``"step_entry_opener"``)
-        # crashes here rather than at a downstream consumer's pattern match.
-        if self.initiator not in ("user", "step_entry_opener"):
-            raise ValueError(f"initiator must be 'user' or 'step_entry_opener', got {self.initiator!r}")
         if self.status is ComposerChatTurnStatus.SUCCESS and self.error_class is not None:
             raise ValueError("error_class must be None when status is SUCCESS")
         if self.status is ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE and self.error_class is None:
@@ -238,6 +235,7 @@ class ComposerChatTurn:
         """JSON-friendly dict for sidecar serialization (mirror of ComposerLLMCall.to_dict)."""
         raw = {field.name: deep_thaw(getattr(self, field.name)) for field in fields(self)}
         raw["status"] = self.status.value
+        raw["initiator"] = self.initiator.value
         raw["started_at"] = self.started_at.isoformat()
         raw["finished_at"] = self.finished_at.isoformat()
         return raw

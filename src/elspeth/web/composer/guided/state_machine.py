@@ -397,27 +397,14 @@ class GuidedSession:
     step_2_5_recipe_offer: RecipeMatch | None = None
     step_2_chosen_plugin: str | None = None
     # Phase A slice 5 — per-step chat history persistence.
-    # `chat_history` is a tuple of ChatTurn TypedDicts (runtime dicts);
-    # because dict contents are mutable through any reference,
-    # ``__post_init__`` calls ``freeze_fields(self, "chat_history")`` to
-    # deep-freeze each entry into ``MappingProxyType``.  Without that
-    # guard, ``frozen=True`` on the dataclass is a lie for this field
-    # (see CLAUDE.md "Frozen Dataclass Immutability" section).
+    # `chat_history` is a tuple of frozen ChatTurn dataclasses containing
+    # scalars and enums only. The tuple plus frozen element type is already
+    # deeply immutable, so GuidedSession does not need a freeze_fields guard
+    # for this field.
     # `chat_turn_seq` is monotonic per session across all chat turns
     # (user + assistant share the counter); incremented on every append.
     chat_history: tuple[ChatTurn, ...] = ()
     chat_turn_seq: int = 0
-
-    def __post_init__(self) -> None:
-        # Tuple-of-TypedDict requires explicit deep-freeze because each
-        # element's inner dict is mutable through any reference.  Only
-        # ``chat_history`` carries mutable contents; ``history`` is a
-        # tuple of frozen ``TurnRecord`` dataclasses (already deeply
-        # immutable) and the optional-dataclass fields are likewise
-        # frozen.  Per CLAUDE.md "Scalar-Only Fields Need No Guard",
-        # the remaining scalars / enums / None need no protection.
-        if self.chat_history:
-            freeze_fields(self, "chat_history")
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -436,11 +423,10 @@ class GuidedSession:
         All nested optional types serialise their presence — ``None`` round-
         trips as ``None`` (never fabricated).
 
-        ``chat_history`` entries are TypedDicts; their ``role`` and ``step``
-        members are ``StrEnum`` instances, which serialise to their string
-        values via the explicit ``.value`` accessors below so JSON output
-        never carries enum reprs.  ``deep_thaw`` flattens any
-        ``MappingProxyType`` wrapper applied by ``__post_init__``.
+        ``chat_history`` entries are frozen dataclasses; their ``role`` and
+        ``step`` members are ``StrEnum`` instances, which serialise to their
+        string values via the explicit ``.value`` accessors below so JSON
+        output never carries enum reprs.
         """
         return {
             "step": self.step.value,
@@ -456,11 +442,11 @@ class GuidedSession:
             "step_2_chosen_plugin": self.step_2_chosen_plugin,
             "chat_history": [
                 {
-                    "role": ChatRole(t["role"]).value,
-                    "content": t["content"],
-                    "seq": t["seq"],
-                    "step": GuidedStep(t["step"]).value,
-                    "ts_iso": t["ts_iso"],
+                    "role": t.role.value,
+                    "content": t.content,
+                    "seq": t.seq,
+                    "step": t.step.value,
+                    "ts_iso": t.ts_iso,
                 }
                 for t in self.chat_history
             ],
@@ -500,7 +486,7 @@ class GuidedSession:
                 ChatTurn(
                     role=ChatRole(entry["role"]),
                     content=entry["content"],
-                    seq=int(entry["seq"]),
+                    seq=entry["seq"],
                     step=GuidedStep(entry["step"]),
                     ts_iso=entry["ts_iso"],
                 )

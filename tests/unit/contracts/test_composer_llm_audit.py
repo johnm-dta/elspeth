@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from elspeth.contracts.composer_llm_audit import (
+    ComposerChatInitiator,
     ComposerChatTurn,
     ComposerChatTurnRecorder,
     ComposerChatTurnStatus,
@@ -277,7 +278,7 @@ def _make_chat_turn(**overrides: object) -> ComposerChatTurn:
     t = datetime(2026, 5, 13, 12, 0, 0, tzinfo=UTC)
     defaults: dict[str, object] = {
         "step": "step_1_source",
-        "initiator": "user",
+        "initiator": ComposerChatInitiator.USER,
         "chat_turn_seq": 0,
         "user_message_hash": stable_hash("what columns?"),
         "assistant_message_hash": stable_hash("col_a, col_b"),
@@ -295,6 +296,11 @@ def _make_chat_turn(**overrides: object) -> ComposerChatTurn:
 def test_chat_turn_status_strenum_values() -> None:
     assert ComposerChatTurnStatus.SUCCESS.value == "success"
     assert ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE.value == "synthetic_unavailable"
+
+
+def test_chat_turn_initiator_strenum_values() -> None:
+    assert ComposerChatInitiator.USER.value == "user"
+    assert ComposerChatInitiator.STEP_ENTRY_OPENER.value == "step_entry_opener"
 
 
 def test_chat_turn_to_dict_serializes_enum_and_datetimes() -> None:
@@ -319,8 +325,8 @@ def test_chat_turn_negative_latency_rejected() -> None:
 
 
 def test_chat_turn_unknown_initiator_rejected() -> None:
-    with pytest.raises(ValueError, match="initiator"):
-        _make_chat_turn(initiator="opener")  # close but not exact
+    with pytest.raises(ValueError, match="opener"):
+        ComposerChatInitiator("opener")  # close but not exact
 
 
 def test_chat_turn_success_requires_no_error_class() -> None:

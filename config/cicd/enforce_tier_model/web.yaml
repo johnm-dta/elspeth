@@ -1,36 +1,36 @@
 allow_hits:
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=96a873e5a6375472
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=7a081b428549be56
   owner: composer-guided
   reason: Protocol boundary validator — isinstance(turn_type, TurnType) at Tier 3 entry point where untrusted payloads arrive
     from client, distinguishes valid TurnType enum member from arbitrary string to reject malformed protocol messages early
   safety: Raises ValueError if turn_type is not a known TurnType; callers are expected to handle this exception or pass verified
     types only
   expires: null
-- key: web/composer/guided/protocol.py:R1:validate_payload:fp=4c809d957850910b
+- key: web/composer/guided/protocol.py:R1:validate_payload:fp=06614e9d43f56396
   owner: composer-guided
   reason: _NESTED_SHAPES.get(turn_type, ()) — TurnTypes without nested shapes are not in the mapping; default-empty-tuple is
     idiomatic and correct here (not an error-suppressing defensive get on arbitrary data)
   safety: Returns empty tuple when no nested shapes defined; outer loop is a no-op; no data loss or fabrication
   expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=dcb3f10212f56a0b
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=e0307b72ce2122e7
   owner: composer-guided
   reason: Tier 3 nested payload validator — isinstance(field_value, Mapping) validates that a nested payload field is the
     expected type; this is an offensive Tier 3 boundary check that produces a human-readable error string, not silent suppression
   safety: Returns path-rooted error string on type mismatch; does not coerce or fabricate; caller handles the returned error
   expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=9200c0abbe71b01b
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=ee80afbe646fa252
   owner: composer-guided
   reason: Tier 3 nested payload validator — isinstance(field_value, Sequence) validates that a sequence-of-mappings field
     is a Sequence; this is an offensive Tier 3 boundary check that produces a human-readable error string
   safety: Returns path-rooted error string on type mismatch; does not coerce or fabricate; caller handles the returned error
   expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=b485801a5b553aef
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=d7d6119a472c4b54
   owner: composer-guided
   reason: Tier 3 nested payload validator — isinstance(field_value, str) excludes bare strings from being accepted as a
     Sequence (strings are Sequences but not valid slot-list payloads); this is an offensive boundary guard
   safety: Returns path-rooted error string when string used where sequence-of-mappings expected; no coercion or fabrication
   expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=c51b7d6255a44a41
+- key: web/composer/guided/protocol.py:R5:validate_payload:fp=964717a97789d9b1
   owner: composer-guided
   reason: Tier 3 nested payload validator — isinstance(item, Mapping) validates that each element of a sequence-of-mappings
     field is a Mapping; offensive Tier 3 boundary check producing a human-readable error string

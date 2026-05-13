@@ -6,6 +6,7 @@ See docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md §4.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypedDict
 
@@ -153,7 +154,8 @@ class ChatRole(StrEnum):
     ASSISTANT = "assistant"
 
 
-class ChatTurn(TypedDict):
+@dataclass(frozen=True, slots=True)
+class ChatTurn:
     """One conversational message in the per-step chat history (Phase A slice 5).
 
     Persisted in ``GuidedSession.chat_history``.  Trust tier: Tier 1
@@ -179,6 +181,24 @@ class ChatTurn(TypedDict):
     seq: int
     step: GuidedStep
     ts_iso: str
+
+    def __post_init__(self) -> None:
+        if type(self.role) is not ChatRole:
+            raise TypeError(f"role must be ChatRole, got {type(self.role).__name__}")
+        if type(self.step) is not GuidedStep:
+            raise TypeError(f"step must be GuidedStep, got {type(self.step).__name__}")
+        if type(self.seq) is not int:
+            raise TypeError(f"seq must be int, got {type(self.seq).__name__}")
+        if self.seq < 0:
+            raise ValueError("seq must be >= 0")
+        if type(self.content) is not str:
+            raise TypeError(f"content must be str, got {type(self.content).__name__}")
+        if self.content == "":
+            raise ValueError("content must be non-empty")
+        if type(self.ts_iso) is not str:
+            raise TypeError(f"ts_iso must be str, got {type(self.ts_iso).__name__}")
+        if self.ts_iso == "":
+            raise ValueError("ts_iso must be non-empty")
 
 
 _LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {

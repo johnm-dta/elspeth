@@ -477,6 +477,52 @@ class TestTokenRefreshNonLocal:
             )
         assert response.status_code == 404
 
+    @pytest.mark.parametrize(
+        ("provider_type", "settings_fields"),
+        [
+            ("oidc", _OIDC_FIELDS),
+            ("entra", _ENTRA_FIELDS),
+        ],
+    )
+    async def test_token_refresh_non_local_without_auth_returns_404_before_authentication(
+        self,
+        provider_type: str,
+        settings_fields: dict[str, str],
+    ) -> None:
+        provider = AsyncMock()
+        app = _create_test_app(provider, auth_provider_type=provider_type, **settings_fields)
+
+        async with _client_for(app) as client:
+            response = await client.post("/api/auth/token")
+
+        assert response.status_code == 404
+        provider.authenticate.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("provider_type", "settings_fields"),
+        [
+            ("oidc", _OIDC_FIELDS),
+            ("entra", _ENTRA_FIELDS),
+        ],
+    )
+    async def test_token_refresh_non_local_invalid_auth_returns_404_before_authentication(
+        self,
+        provider_type: str,
+        settings_fields: dict[str, str],
+    ) -> None:
+        provider = AsyncMock()
+        provider.authenticate.side_effect = AuthenticationError("bad token")
+        app = _create_test_app(provider, auth_provider_type=provider_type, **settings_fields)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/token",
+                headers={"Authorization": "Bearer garbage"},
+            )
+
+        assert response.status_code == 404
+        provider.authenticate.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 class TestMeErrorPath:

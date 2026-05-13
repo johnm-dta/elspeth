@@ -171,7 +171,6 @@ def create_auth_router() -> APIRouter:
     async def refresh_token(
         request: Request,
         response: Response,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
     ) -> TokenResponse:
         """Re-issue a JWT from a valid existing token (local auth only).
 
@@ -181,6 +180,8 @@ def create_auth_router() -> APIRouter:
         settings: WebSettings = request.app.state.settings
         if settings.auth_provider != "local":
             raise HTTPException(status_code=404, detail="Not found")
+
+        user = await get_current_user(request)
 
         # Extract iat from claims parsed by the auth middleware.
         # The middleware decodes claims without signature verification for

@@ -9322,6 +9322,44 @@ class TestPreviewProofStep:
         codes = [d["code"] for d in result.data["proof_diagnostics"]]
         assert "csv_duplicate_headers" not in codes
 
+    def test_observed_csv_numeric_gate_type_mismatch_blocks(self) -> None:
+        """Observed CSV leaves values stringy; numeric gate predicates must
+        fail preview before runtime hits ExpressionEvaluationError.
+        """
+        state = self._state_with_csv_source(schema_mode="observed")
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "price_gate",
+                "node_type": "gate",
+                "plugin": None,
+                "input": "rows",
+                "condition": "row['price'] >= 100",
+                "routes": {"true": "out", "false": "out"},
+                "options": {},
+            },
+            state,
+            _mock_catalog(),
+        )
+        assert result.success, result.data
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            result.updated_state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        mismatch = [d for d in diagnostics if d["code"] == "gate_expression_type_mismatch_against_source_schema"]
+        assert mismatch, diagnostics
+        assert mismatch[0]["severity"] == "blocking"
+        assert mismatch[0]["evidence_locator"]["node_id"] == "price_gate"
+        assert mismatch[0]["evidence_locator"]["field"] == "price"
+        assert result.data["is_valid"] is False
+
     def test_csv_duplicate_headers_registered_as_blocking_code(self) -> None:
         """Registry membership ripples — the constructor would crash if the
         emission site used an unregistered code, so this test pins the

@@ -105,7 +105,7 @@ Ten rules (numbered 0-9) that cover the historical convergence-failure modes. Ap
 4. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** A `gate` condition like `row['price'] >= 100` against a CSV-string field will fail at runtime. Either:
    - Declare the field as `int` or `float` in the source schema (`fields: ["price: float"]`), or
    - Insert a `type_coerce` node upstream that converts the field to `float`.
-   The threshold recipe (`apply_pipeline_recipe('split-by-numeric-threshold', ...)`) already does this in the right order — prefer it for "split rows by N" intents.
+   The threshold recipe (`apply_pipeline_recipe('split-by-numeric-threshold', ...)`) already does this in the right order — prefer it for "split rows by N" intents. The proof step in `preview_pipeline` blocks observed-CSV numeric comparison gaps with code `gate_expression_type_mismatch_against_source_schema`; repair it by adding explicit numeric source fields (for example `price: float`) and re-previewing.
 
 5. **Default `on_validation_failure: "discard"` for source validation.** Quarantine is a conventional output name, not a built-in sink. `on_validation_failure: "quarantine"` is valid only when an output named `quarantine` exists in the same pipeline. For ordinary intent, use `discard`.
 

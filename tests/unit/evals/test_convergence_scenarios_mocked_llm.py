@@ -41,7 +41,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -213,11 +213,11 @@ def _state_dict_for_scoring(result: Any) -> dict[str, Any]:
     state_dict = result.state.to_dict()
     state_dict["is_valid"] = bool(result.runtime_preflight is not None and result.runtime_preflight.is_valid)
     state_dict["composer_meta"] = _composer_meta_for(result)
-    return state_dict
+    return cast("dict[str, Any]", state_dict)
 
 
 def _load_scenario(name: str) -> dict[str, Any]:
-    return json.loads((_SUITE / name / "scenario.json").read_text())
+    return cast("dict[str, Any]", json.loads((_SUITE / name / "scenario.json").read_text()))
 
 
 @pytest.fixture(autouse=True)
@@ -383,23 +383,19 @@ class TestCsvClassifierScenario:
 # --------------------------------------------------------------------------
 # Scenario 2: numeric-gate
 #
-# The proof step does NOT emit a 'must_handle_field_as_numeric' diagnostic —
-# that criterion is scoring-only. So this scenario does not exercise the
-# repair loop. Test drives a single-turn build that satisfies the criterion
-# (type_coerce + gate + 2 outputs) and asserts repair_turns_used == 0 and
-# GREEN scoring.
+# The proof step blocks the direct observed-CSV -> numeric-gate failure shape
+# with gate_expression_type_mismatch_against_source_schema. A first-pass
+# success path still exists when the model uses the recipe-equivalent
+# type_coerce + gate + 2 outputs shape immediately.
 # --------------------------------------------------------------------------
 
 
 class TestNumericGateScenario:
     """End-to-end mocked-LLM run for the numeric-gate convergence scenario.
 
-    No proof-step blocker fires for this scenario, so the test is a
-    first-pass-success integration: scripted LLM emits a type_coerce + gate
-    + two-sink pipeline directly, scoring should GREEN with zero repair
-    turns. If a future change adds a 'must_handle_field_as_numeric' blocker
-    to compute_proof_diagnostics, this test should be promoted to a
-    forced-repair flow analogous to csv-classifier.
+    One test pins the first-pass success path. The sibling test pins the
+    proof-repair path for the historical direct observed-CSV numeric gate
+    mismatch.
     """
 
     @pytest.mark.asyncio
@@ -517,6 +513,179 @@ class TestNumericGateScenario:
         )
         assert verdict["verdict"] == "GREEN", (
             f"numeric-gate did not score GREEN. red={verdict['red_reasons']} amber={verdict['amber_reasons']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_numeric_gate_direct_observed_csv_gate_repairs_with_one_turn(self, tmp_path: Path) -> None:
+        engine, session_id = _session_engine()
+        body = b"order_id,customer,price,shipped_at\nO-1,Alice,49.95,2026-05-01\nO-2,Bob,150.00,2026-05-02\n"
+        blob_id = _seed_blob(
+            engine,
+            session_id,
+            body=body,
+            filename="orders.csv",
+            mime_type="text/csv",
+            storage_dir=tmp_path / "blobs" / session_id,
+        )
+
+        catalog = _real_catalog()
+        settings = _make_settings(tmp_path)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+
+        # Turn 1: structurally valid but runtime-broken pipeline — observed
+        # CSV values are raw strings, so the direct numeric gate would fail
+        # with ExpressionEvaluationError at run time.
+        turn1 = _llm_response(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_set",
+                    "name": "set_pipeline",
+                    "arguments": {
+                        "source": {
+                            "plugin": "csv",
+                            "blob_id": blob_id,
+                            "on_success": "rows",
+                            "options": {"schema": {"mode": "observed"}},
+                            "on_validation_failure": "discard",
+                        },
+                        "nodes": [
+                            {
+                                "id": "threshold_gate",
+                                "node_type": "gate",
+                                "input": "rows",
+                                "condition": "row['price'] >= 100",
+                                "routes": {"true": "high", "false": "low"},
+                            },
+                        ],
+                        "edges": [],
+                        "outputs": [
+                            {
+                                "sink_name": "high",
+                                "plugin": "json",
+                                "options": {
+                                    "path": "outputs/high.jsonl",
+                                    "format": "jsonl",
+                                    "schema": {"mode": "observed"},
+                                    "collision_policy": "auto_increment",
+                                },
+                                "on_write_failure": "discard",
+                            },
+                            {
+                                "sink_name": "low",
+                                "plugin": "json",
+                                "options": {
+                                    "path": "outputs/low.jsonl",
+                                    "format": "jsonl",
+                                    "schema": {"mode": "observed"},
+                                    "collision_policy": "auto_increment",
+                                },
+                                "on_write_failure": "discard",
+                            },
+                        ],
+                        "metadata": {"name": "numeric-gate"},
+                    },
+                },
+            ],
+        )
+        # Turn 2: claim completion -> proof gate fires.
+        turn2 = _llm_response(content="Pipeline ready.", tool_calls=None)
+        # Turn 3: repair with the recipe-equivalent type_coerce before gate.
+        turn3 = _llm_response(
+            content=None,
+            tool_calls=[
+                {
+                    "id": "call_repair",
+                    "name": "set_pipeline",
+                    "arguments": {
+                        "source": {
+                            "plugin": "csv",
+                            "blob_id": blob_id,
+                            "on_success": "rows",
+                            "options": {"schema": {"mode": "observed"}},
+                            "on_validation_failure": "discard",
+                        },
+                        "nodes": [
+                            {
+                                "id": "coerce_numeric",
+                                "node_type": "transform",
+                                "plugin": "type_coerce",
+                                "input": "rows",
+                                "on_success": "numeric_rows",
+                                "on_error": "discard",
+                                "options": {
+                                    "schema": {"mode": "observed"},
+                                    "conversions": [{"field": "price", "to": "float"}],
+                                },
+                            },
+                            {
+                                "id": "threshold_gate",
+                                "node_type": "gate",
+                                "input": "numeric_rows",
+                                "condition": "row['price'] >= 100.0",
+                                "routes": {"true": "high", "false": "low"},
+                            },
+                        ],
+                        "edges": [],
+                        "outputs": [
+                            {
+                                "sink_name": "high",
+                                "plugin": "json",
+                                "options": {
+                                    "path": "outputs/high.jsonl",
+                                    "format": "jsonl",
+                                    "schema": {"mode": "observed"},
+                                    "collision_policy": "auto_increment",
+                                },
+                                "on_write_failure": "discard",
+                            },
+                            {
+                                "sink_name": "low",
+                                "plugin": "json",
+                                "options": {
+                                    "path": "outputs/low.jsonl",
+                                    "format": "jsonl",
+                                    "schema": {"mode": "observed"},
+                                    "collision_policy": "auto_increment",
+                                },
+                                "on_write_failure": "discard",
+                            },
+                        ],
+                        "metadata": {"name": "numeric-gate"},
+                    },
+                },
+            ],
+        )
+        # Turn 4: claim completion after repair.
+        turn4 = _llm_response(content="Repaired and ready.", tool_calls=None)
+
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        empty = _empty_state()
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4]
+            result = await service.compose(
+                "Split orders by price threshold",
+                [],
+                empty,
+                session_id=session_id,
+                user_id="test-user",
+            )
+
+        assert mock_llm.call_count == 4, f"expected 4 LLM calls, got {mock_llm.call_count}"
+        assert result.repair_turns_used == 1
+
+        scenario = _load_scenario("numeric-gate")
+        state_dict = _state_dict_for_scoring(result)
+        verdict = score(
+            scenario,
+            [{"role": "assistant", "content": result.message or ""}],
+            state_dict,
+        )
+        assert verdict["verdict"] == "GREEN", (
+            f"numeric-gate repair flow did not score GREEN. red={verdict['red_reasons']} amber={verdict['amber_reasons']}"
         )
 
 

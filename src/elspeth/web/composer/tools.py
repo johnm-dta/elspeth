@@ -9,6 +9,7 @@ L3 (web/composer/state, web/catalog/protocol).
 
 from __future__ import annotations
 
+import ast
 import csv
 import hmac
 import io
@@ -5372,6 +5373,7 @@ _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
     {
         "csv_duplicate_headers",
         "csv_fixed_schema_omits_observed_columns",
+        "gate_expression_type_mismatch_against_source_schema",
         "text_source_url_without_web_scrape",
         "source_inspection_failed",
     }
@@ -5408,6 +5410,126 @@ def _blocking_diagnostic(
     }
 
 
+def _source_schema_mode(source: SourceSpec) -> str | None:
+    schema = source.options.get("schema")
+    if not isinstance(schema, Mapping):
+        return None
+    mode = schema.get("mode")
+    if not isinstance(mode, str):
+        return None
+    return mode.strip().lower()
+
+
+def _sample_csv_rows(content: bytes, *, filename: str, max_rows: int = 100) -> tuple[dict[str, str], ...]:
+    text = content[: 8 * 1024].decode("utf-8", errors="replace")
+    delimiter = "\t" if filename.lower().endswith(".tsv") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    rows: list[dict[str, str]] = []
+    for index, row in enumerate(reader):
+        if index >= max_rows:
+            break
+        rows.append({key: value for key, value in row.items() if isinstance(key, str) and value is not None})
+    return tuple(rows)
+
+
+def _row_fields_referenced_by_condition(condition: str) -> tuple[str, ...]:
+    tree = ast.parse(condition, mode="eval")
+    fields: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "row"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            fields.append(node.slice.value)
+            continue
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "row"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            fields.append(node.args[0].value)
+    return tuple(dict.fromkeys(fields))
+
+
+def _gate_expression_type_diagnostics_for_observed_csv(
+    state: CompositionState,
+    source: SourceSpec,
+    *,
+    blob_id: str,
+    filename: str,
+    content: bytes,
+) -> list[dict[str, Any]]:
+    """Evaluate direct source-fed gates against sampled observed CSV rows.
+
+    Observed CSV sources emit raw strings because there are no declared field
+    types to coerce against. A gate such as ``row['amount'] >= 1000`` is
+    syntactically valid but fails at runtime when the evaluator compares
+    ``str`` with ``int``. This preview proof step uses the same expression
+    evaluator against bounded raw rows and reports the type mismatch without
+    surfacing row values.
+    """
+    if _source_schema_mode(source) != "observed":
+        return []
+
+    rows = _sample_csv_rows(content, filename=filename)
+    if not rows:
+        return []
+
+    from elspeth.core.expression_parser import ExpressionEvaluationError, ExpressionParser
+
+    diagnostics: list[dict[str, Any]] = []
+    direct_gate_nodes = (
+        node for node in state.nodes if node.node_type == "gate" and node.input == source.on_success and node.condition is not None
+    )
+    for node in direct_gate_nodes:
+        condition = node.condition
+        if condition is None:
+            continue
+        if _validate_gate_expression(condition) is not None:
+            continue
+        parser = ExpressionParser(condition)
+        fields = _row_fields_referenced_by_condition(condition)
+        field = fields[0] if fields else None
+        for row_index, row in enumerate(rows):
+            try:
+                parser.evaluate(row)
+            except ExpressionEvaluationError as exc:
+                diagnostics.append(
+                    _blocking_diagnostic(
+                        code="gate_expression_type_mismatch_against_source_schema",
+                        message=(
+                            f"Gate '{node.id}' condition {condition!r} fails against sampled observed CSV "
+                            f"rows before runtime: {exc}. Observed CSV source values are strings unless the "
+                            "source schema declares explicit field types."
+                        ),
+                        suggested_repair=(
+                            "Patch the source schema to declare the compared field with an explicit numeric "
+                            "type, for example schema.mode='fixed' or 'flexible' with schema.fields including "
+                            f"{field + ': int' if field is not None else '<field>: int'}, then re-run preview_pipeline."
+                        ),
+                        evidence_locator={
+                            "source": "blob",
+                            "blob_id": str(blob_id),
+                            "node_id": node.id,
+                            "field": field,
+                            "fields": list(fields),
+                            "sample_row_index": row_index,
+                            "source_schema_mode": "observed",
+                        },
+                    )
+                )
+                break
+    return diagnostics
+
+
 def compute_proof_diagnostics(
     state: CompositionState,
     *,
@@ -5437,6 +5559,9 @@ def compute_proof_diagnostics(
       * ``text_source_url_without_web_scrape`` — text source whose blob
         content is a single URL but no web_scrape node downstream. The
         URL string itself reaches sinks instead of the URL's content.
+      * ``gate_expression_type_mismatch_against_source_schema`` — observed
+        CSV source values are still strings, and a direct source-fed gate
+        condition fails when evaluated against sampled rows before runtime.
       * ``source_inspection_warning`` — every warning surfaced by
         ``inspect_blob_content`` is mirrored here at ``info`` severity
         so the model sees them in the same array as blocking issues.
@@ -5538,7 +5663,19 @@ def compute_proof_diagnostics(
                         )
                     )
 
-    # 2. Text source containing a single URL but no web_scrape downstream.
+    # 2. Observed CSV + numeric gate predicate => preview/runtime agreement gap.
+    if facts.source_kind == "csv":
+        diagnostics.extend(
+            _gate_expression_type_diagnostics_for_observed_csv(
+                state,
+                source,
+                blob_id=str(blob_id),
+                filename=blob["filename"],
+                content=content,
+            )
+        )
+
+    # 3. Text source containing a single URL but no web_scrape downstream.
     if facts.source_kind == "text" and facts.url_candidates:
         node_plugins = {(n.plugin or "").lower() for n in state.nodes}
         if "web_scrape" not in node_plugins:
@@ -5563,7 +5700,7 @@ def compute_proof_diagnostics(
                 )
             )
 
-    # 3. Surface inspection warnings as info-severity diagnostics so the model
+    # 4. Surface inspection warnings as info-severity diagnostics so the model
     #    sees them in the same array as blocking issues. These are *advisory*
     #    only — the model can ignore them if the operator's intent justifies.
     #

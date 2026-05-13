@@ -23,6 +23,7 @@ mirrors the chain-solver test convention (see test_auto_drop.py).
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -57,6 +58,13 @@ def _fake_llm_reply(text: str) -> SimpleNamespace:
 def _post_chat(client: TestClient, session_id: str, **kwargs) -> tuple[int, dict]:
     resp = client.post(f"/api/sessions/{session_id}/guided/chat", json=kwargs)
     return resp.status_code, resp.json()
+
+
+def _chat_turn_audit_bodies(client: TestClient, session_id: str) -> list[dict]:
+    service = client.app.state.session_service
+    messages = asyncio.run(service.get_messages(UUID(session_id)))
+    audit_rows = [m for m in messages if m.role == "tool" and '"_kind": "chat_turn_audit"' in m.content]
+    return [json.loads(row.content) for row in audit_rows]
 
 
 # ---------------------------------------------------------------------------
@@ -209,16 +217,10 @@ class TestStepChatSuccess:
                 step_index="step_1_source",
             )
 
-        # Query the session messages and find the chat_turn_audit row.
-        service = composer_test_client.app.state.session_service
-        messages = asyncio.run(service.get_messages(UUID(session_id)))
-        audit_rows = [m for m in messages if m.role == "tool" and '"_kind": "chat_turn_audit"' in m.content]
-        assert len(audit_rows) == 1, [m.content for m in messages]
-
         # The content carries the slim summary fields.
-        import json as _json
-
-        body = _json.loads(audit_rows[0].content)
+        audit_bodies = _chat_turn_audit_bodies(composer_test_client, session_id)
+        assert len(audit_bodies) == 1, audit_bodies
+        body = audit_bodies[0]
         assert body["_kind"] == "chat_turn_audit"
         assert body["status"] == "success"
         assert body["step"] == "step_1_source"
@@ -251,14 +253,9 @@ class TestStepChatSuccess:
                 step_index="step_1_source",
             )
 
-        service = composer_test_client.app.state.session_service
-        messages = asyncio.run(service.get_messages(UUID(session_id)))
-        audit_rows = [m for m in messages if m.role == "tool" and '"_kind": "chat_turn_audit"' in m.content]
-        assert len(audit_rows) == 1
-
-        import json as _json
-
-        body = _json.loads(audit_rows[0].content)
+        audit_bodies = _chat_turn_audit_bodies(composer_test_client, session_id)
+        assert len(audit_bodies) == 1
+        body = audit_bodies[0]
         assert body["status"] == "synthetic_unavailable"
         assert body["error_class"] == "TimeoutError"
         assert body["chat_turn_seq"] == 0
@@ -585,6 +582,17 @@ class TestStepChatServerInvariants:
         # the path:line:func triple (B1 convention).
         assert isinstance(event["frames"], tuple) and len(event["frames"]) > 0
         assert all(f.startswith("frame=") for f in event["frames"])
+        audit_bodies = _chat_turn_audit_bodies(composer_test_client, session_id)
+        assert len(audit_bodies) == 1
+        audit_body = audit_bodies[0]
+        assert audit_body["status"] == "invariant_violated"
+        assert audit_body["initiator"] == "user"
+        assert audit_body["step"] == "step_1_source"
+        assert audit_body["error_class"] == "InvariantError"
+
+        reloaded = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["guided_session"]
+        assert reloaded["chat_history"] == []
+        assert reloaded["chat_turn_seq"] == 0
 
     def test_whitespace_only_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
         """Whitespace-only content → same path as empty content (``.strip()`` is empty)."""
@@ -604,6 +612,17 @@ class TestStepChatServerInvariants:
 
         assert status == 500, body
         assert body["detail"] == "Server invariant violated. See application audit log for diagnostic detail."
+        audit_bodies = _chat_turn_audit_bodies(composer_test_client, session_id)
+        assert len(audit_bodies) == 1
+        audit_body = audit_bodies[0]
+        assert audit_body["status"] == "invariant_violated"
+        assert audit_body["initiator"] == "user"
+        assert audit_body["step"] == "step_1_source"
+        assert audit_body["error_class"] == "InvariantError"
+
+        reloaded = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["guided_session"]
+        assert reloaded["chat_history"] == []
+        assert reloaded["chat_turn_seq"] == 0
 
 
 class TestStepChatCrossStep:

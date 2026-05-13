@@ -23,7 +23,12 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
-from elspeth.contracts.composer_llm_audit import ComposerChatInitiator, ComposerChatTurn, ComposerLLMCall
+from elspeth.contracts.composer_llm_audit import (
+    ComposerChatInitiator,
+    ComposerChatTurn,
+    ComposerChatTurnStatus,
+    ComposerLLMCall,
+)
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
@@ -5379,6 +5384,9 @@ def create_session_router() -> APIRouter:
 
                 settings = request.app.state.settings
                 started_at = datetime.now(UTC)
+                from time import perf_counter as _perf_counter
+
+                started_perf = _perf_counter()
                 # InvariantError from solve_step_chat (empty / whitespace LLM
                 # content) indicates a defective model response we cannot
                 # recover from.  Mirror of the post_guided_respond pattern at
@@ -5400,6 +5408,30 @@ def create_session_router() -> APIRouter:
                         user_message=body.message,
                     )
                 except InvariantError as exc:
+                    finished_at = datetime.now(UTC)
+                    latency_ms = int((_perf_counter() - started_perf) * 1000)
+                    user_turn = ChatTurn(
+                        role=ChatRole.USER,
+                        content=body.message,
+                        seq=guided.chat_turn_seq,
+                        step=guided.step,
+                        ts_iso=finished_at.isoformat(),
+                    )
+                    recorder.record_chat_turn(
+                        ComposerChatTurn(
+                            step=guided.step.value,
+                            initiator=ComposerChatInitiator.USER,
+                            chat_turn_seq=user_turn.seq,
+                            user_message_hash=stable_hash(body.message),
+                            assistant_message_hash=stable_hash(""),
+                            latency_ms=latency_ms,
+                            model=settings.composer_model,
+                            status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            error_class=type(exc).__name__,
+                        )
+                    )
                     slog.error(
                         "guided.invariant_violated",
                         session_id=str(session_id),

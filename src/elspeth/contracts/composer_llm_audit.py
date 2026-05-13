@@ -161,11 +161,13 @@ class ComposerChatTurnStatus(StrEnum):
     LLM calls (e.g. ``SYNTHETIC_UNAVAILABLE`` for the auto-drop synthetic
     message; the underlying LLM call may have ``TIMEOUT`` status but the
     chat turn surfaces a synthetic assistant message and is recorded as
-    ``SYNTHETIC_UNAVAILABLE``).
+    ``SYNTHETIC_UNAVAILABLE``). ``INVARIANT_VIOLATED`` records a defective
+    model response that raised before an assistant chat message landed.
     """
 
     SUCCESS = "success"
     SYNTHETIC_UNAVAILABLE = "synthetic_unavailable"
+    INVARIANT_VIOLATED = "invariant_violated"
 
 
 class ComposerChatInitiator(StrEnum):
@@ -226,10 +228,18 @@ class ComposerChatTurn:
     def __post_init__(self) -> None:
         require_int(self.chat_turn_seq, "chat_turn_seq", min_value=0)
         require_int(self.latency_ms, "latency_ms", min_value=0)
+        if type(self.initiator) is not ComposerChatInitiator:
+            raise TypeError(f"initiator must be ComposerChatInitiator, got {type(self.initiator).__name__}")
+        if type(self.status) is not ComposerChatTurnStatus:
+            raise TypeError(f"status must be ComposerChatTurnStatus, got {type(self.status).__name__}")
         if self.status is ComposerChatTurnStatus.SUCCESS and self.error_class is not None:
             raise ValueError("error_class must be None when status is SUCCESS")
-        if self.status is ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE and self.error_class is None:
-            raise ValueError("error_class must be populated when status is SYNTHETIC_UNAVAILABLE")
+        failed_statuses = (
+            ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+            ComposerChatTurnStatus.INVARIANT_VIOLATED,
+        )
+        if self.status in failed_statuses and self.error_class is None:
+            raise ValueError(f"error_class must be populated when status is {self.status.value}")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-friendly dict for sidecar serialization (mirror of ComposerLLMCall.to_dict)."""

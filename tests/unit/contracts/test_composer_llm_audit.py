@@ -296,6 +296,7 @@ def _make_chat_turn(**overrides: object) -> ComposerChatTurn:
 def test_chat_turn_status_strenum_values() -> None:
     assert ComposerChatTurnStatus.SUCCESS.value == "success"
     assert ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE.value == "synthetic_unavailable"
+    assert ComposerChatTurnStatus.INVARIANT_VIOLATED.value == "invariant_violated"
 
 
 def test_chat_turn_initiator_strenum_values() -> None:
@@ -329,6 +330,16 @@ def test_chat_turn_unknown_initiator_rejected() -> None:
         ComposerChatInitiator("opener")  # close but not exact
 
 
+def test_chat_turn_raw_initiator_string_rejected_at_construction() -> None:
+    with pytest.raises(TypeError, match="initiator"):
+        _make_chat_turn(initiator="user")
+
+
+def test_chat_turn_raw_status_string_rejected_at_construction() -> None:
+    with pytest.raises(TypeError, match="status"):
+        _make_chat_turn(status="success")
+
+
 def test_chat_turn_success_requires_no_error_class() -> None:
     with pytest.raises(ValueError, match="error_class"):
         _make_chat_turn(status=ComposerChatTurnStatus.SUCCESS, error_class="TimeoutError")
@@ -349,6 +360,23 @@ def test_chat_turn_synthetic_with_error_class_succeeds() -> None:
 
     assert payload["status"] == "synthetic_unavailable"
     assert payload["error_class"] == "TimeoutError"
+
+
+def test_chat_turn_invariant_violated_requires_error_class() -> None:
+    with pytest.raises(ValueError, match="error_class"):
+        _make_chat_turn(status=ComposerChatTurnStatus.INVARIANT_VIOLATED, error_class=None)
+
+
+def test_chat_turn_invariant_violated_with_error_class_succeeds() -> None:
+    turn = _make_chat_turn(
+        status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
+        error_class="InvariantError",
+    )
+
+    payload = turn.to_dict()
+
+    assert payload["status"] == "invariant_violated"
+    assert payload["error_class"] == "InvariantError"
 
 
 def test_chat_turn_recorder_protocol_runtime_check() -> None:

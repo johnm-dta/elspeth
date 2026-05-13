@@ -1,6 +1,6 @@
 {
   "verdict": "IMPLEMENTED_WITH_VERIFICATION_NOTES",
-  "summary": "Phase 4A and Phase 4B implementation is complete through the local recovery panel wiring. The implementation preserves the rev-4 constraints: no constructor fallback, backend gate coverage, sessionStore-owned recovery state with recoveryStartedCompositionVersion, structural recovery clearing, active-session transcript fetches with include_tool_rows=true, local-only Apply/Discard, no feature flag, and existing dialog/useFocusTrap patterns. Final verification is green except for the lint package-script gap: package.json does not define npm run lint and no frontend lint engine/config is present, so lint could not be executed as a package script.",
+  "summary": "Phase 4A and Phase 4B implementation is complete through the local recovery panel wiring. The implementation preserves the rev-4 constraints: no constructor fallback, backend gate coverage, sessionStore-owned recovery state with recoveryStartedCompositionVersion, structural recovery clearing, active-session transcript fetches with include_tool_rows=true, local-only Apply/Discard, no feature flag, and existing dialog/useFocusTrap patterns. Final verification is green. The only operational gap is tracker access: Filigree CLI/MCP cannot open the local project database because the installed client expects schema v8 and .filigree is schema v14.",
   "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-4-frontend.md",
   "overview_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md",
   "prior_review": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-4-frontend.review-rev3.json",
@@ -50,6 +50,16 @@
       "commit": "b29117523",
       "scope": "Task 7 App wiring",
       "message": "feat(frontend): trigger composer recovery panel (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "e89e14191",
+      "scope": "Task 8/9 handoff notes and explicit typecheck script",
+      "message": "docs(plan): record phase 4 frontend verification"
+    },
+    {
+      "commit": "86ee2f734",
+      "scope": "Task 9 lint gate",
+      "message": "chore(frontend): add lint gate"
     }
   ],
   "verification_results": [
@@ -66,17 +76,17 @@
     {
       "command": ".venv/bin/python -m pytest -q tests/unit/web/composer/ tests/property/web/composer/ tests/integration/pipeline/test_composer_llm_eval_characterization.py",
       "outcome": "passed",
-      "details": "1774 passed in 10.81s."
+      "details": "Final rerun: 1774 passed, 9 warnings in 8.68s."
     },
     {
       "command": "cd src/elspeth/web/frontend && npm test",
       "outcome": "passed",
-      "details": "51 test files passed; 518 tests passed."
+      "details": "Final rerun: 51 test files passed; 518 tests passed."
     },
     {
       "command": "cd src/elspeth/web/frontend && npm run build",
       "outcome": "passed",
-      "details": "tsc and vite build completed. Vite emitted existing chunk-size and dynamic-import chunking warnings."
+      "details": "Final rerun: tsc and vite build completed. Vite emitted existing chunk-size and dynamic-import chunking warnings."
     },
     {
       "command": "cd src/elspeth/web/frontend && npm run typecheck",
@@ -85,8 +95,8 @@
     },
     {
       "command": "cd src/elspeth/web/frontend && npm run lint",
-      "outcome": "blocked",
-      "details": "package.json has no lint script."
+      "outcome": "passed_with_warnings",
+      "details": "Added ESLint flat config scoped to src and vite.config.ts. Final run exited 0 with 5 pre-existing react-hooks/exhaustive-deps warnings and no errors."
     },
     {
       "command": "Local Chromium smoke against npm run dev -- --host 127.0.0.1 --port 5173 with mocked API routes",
@@ -170,9 +180,10 @@
     "Phase 4 Done When now states the panel has no feature flag and is gated solely by recovery response shape."
   ],
   "remaining_scope_for_reviewer": [
-    "Reviewers should confirm whether the frontend should add ESLint, Biome, or another lint engine/config. The implementation now has an explicit npm run typecheck gate, but npm run lint is still a missing-script failure because no frontend lint tool is configured.",
     "Filigree tracker status could not be updated from this checkout because the available CLI expects schema v8 and the project database is schema v14.",
-    "A Phase 4 PR was not opened because the plan says to open it only after all named gates pass; the lint package-script gate is not satisfiable until a lint tool/config exists or the plan is amended.",
+    "The new lint gate exits successfully but reports 5 existing react-hooks/exhaustive-deps warnings outside the recovery implementation.",
+    "npm install reported the existing chevrotain@12 Node >=22 engine warning under Node v20.19.3 and npm audit reported 5 vulnerabilities (4 moderate, 1 high).",
+    "Live staging restart/live verification was not performed; verification was local plus mocked-browser smoke.",
     "Rev-3 sibling review artifacts are intentionally preserved for comparison."
   ]
 }

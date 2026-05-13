@@ -16,7 +16,7 @@ import jwt
 import structlog
 from jwt.exceptions import PyJWTError
 
-from elspeth.web.auth.models import AuthenticationError, UserIdentity, UserProfile
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity, UserProfile
 from elspeth.web.validation import has_visible_content
 
 slog = structlog.get_logger()
@@ -139,7 +139,7 @@ class JWKSTokenValidator:
         unconditionally on fetch failure and short-circuiting requests
         while ``self._jwks is None and now < self._next_refresh_at`` —
         means only the first request per retry window pays the network
-        cost, and the rest fail fast with 401 until the horizon passes.
+        cost, and the rest fail fast with 503 until the horizon passes.
         """
         now = time.time()
         if self._jwks is not None and now < self._next_refresh_at:
@@ -153,7 +153,7 @@ class JWKSTokenValidator:
         # throttle window" — see the failure branches below for where
         # it is advanced on both network and shape failures.
         if self._jwks is None and now < self._next_refresh_at:
-            raise AuthenticationError("JWKS unavailable (cold-start fetch failed, retry throttled)")
+            raise AuthProviderUnavailable("JWKS unavailable (cold-start fetch failed, retry throttled)")
 
         # Lock-decoupled stale-serve: if another coroutine is already
         # attempting a refresh and we have a cached (possibly stale) JWKS,
@@ -178,7 +178,7 @@ class JWKSTokenValidator:
             # don't re-hit the dead IdP when the first coroutine releases
             # the lock after raising.
             if self._jwks is None and now < self._next_refresh_at:
-                raise AuthenticationError("JWKS unavailable (cold-start fetch failed, retry throttled)")
+                raise AuthProviderUnavailable("JWKS unavailable (cold-start fetch failed, retry throttled)")
 
             stale_jwks = self._jwks
             try:
@@ -302,12 +302,12 @@ class JWKSTokenValidator:
                 # Class name only. ``str(exc)`` on httpx.InvalidURL carries
                 # the raw jwks_uri (Tier-3 IdP-provided string), and
                 # httpx.ConnectError can include the resolved IP of the IdP.
-                # ``AuthenticationError.detail`` flows verbatim into the 401
+                # ``AuthProviderUnavailable.detail`` flows verbatim into the 503
                 # response body via auth middleware, so payload-free text is
                 # the only safe channel here. Symmetric with the Tier-1
                 # redaction discipline applied to _handle_plugin_crash
                 # (routes.py) and the blob/plugin SQLAlchemyError sites.
-                raise AuthenticationError(f"JWKS unavailable: {type(exc).__name__}") from exc
+                raise AuthProviderUnavailable(f"JWKS unavailable: {type(exc).__name__}") from exc
 
         return self._jwks
 

@@ -4,7 +4,8 @@ UserIdentity and UserProfile are frozen dataclasses. All fields are scalars,
 None, or tuple of scalars -- no freeze guard needed.
 
 AuthenticationError is the domain exception raised by all auth providers
-when token validation fails.
+when token validation fails. AuthProviderUnavailable is the domain exception
+for upstream provider availability failures.
 """
 
 from __future__ import annotations
@@ -61,4 +62,16 @@ class AuthenticationError(Exception):
 
     def __init__(self, detail: str = "Authentication failed") -> None:
         self.detail = detail
+        super().__init__(detail)
+
+
+class AuthProviderUnavailable(AuthenticationError):
+    """Raised when an upstream auth provider cannot validate availability.
+
+    This is separate from invalid credentials: the client may hold a valid
+    token, but the provider's discovery/JWKS service is unavailable. HTTP
+    routes map this to 503 rather than telling clients to re-authenticate.
+    """
+
+    def __init__(self, detail: str = "Authentication provider unavailable") -> None:
         super().__init__(detail)

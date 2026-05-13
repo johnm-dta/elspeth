@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 
 
 def _make_request(auth_provider, authorization: str | None = None) -> Request:
@@ -86,6 +86,17 @@ class TestGetCurrentUser:
 
         assert exc_info.value.status_code == 401
         assert exc_info.value.detail == "Token expired"
+
+    async def test_provider_unavailable_returns_503_with_detail(self) -> None:
+        mock_provider = AsyncMock()
+        mock_provider.authenticate.side_effect = AuthProviderUnavailable("JWKS unavailable: ConnectError")
+        request = _make_request(mock_provider, "Bearer maybe-valid-token")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_user(request)
+
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "JWKS unavailable: ConnectError"
 
     async def test_bearer_with_whitespace_only_token(self) -> None:
         mock_provider = AsyncMock()

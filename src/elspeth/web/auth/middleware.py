@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request
 
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider
 
 
@@ -16,7 +16,8 @@ async def get_current_user(request: Request) -> UserIdentity:
     """Extract and validate a Bearer token from the request.
 
     Retrieves the auth_provider from request.app.state and calls
-    authenticate(token). Converts AuthenticationError to HTTP 401.
+    authenticate(token). Converts AuthProviderUnavailable to HTTP 503 and
+    AuthenticationError to HTTP 401.
 
     Stashes the raw token on request.state.auth_token so downstream
     route handlers (e.g. /me) can reuse it without re-parsing the
@@ -55,5 +56,7 @@ async def get_current_user(request: Request) -> UserIdentity:
 
     try:
         return await auth_provider.authenticate(token)
+    except AuthProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.detail) from exc
     except AuthenticationError as exc:
         raise HTTPException(status_code=401, detail=exc.detail) from exc

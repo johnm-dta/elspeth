@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
 from elspeth.web.auth.local import LocalAuthProvider
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.routes import RegisterRequest, create_auth_router
 from elspeth.web.config import WebSettings
 
@@ -541,6 +541,21 @@ class TestMeErrorPath:
             )
         assert response.status_code == 401
         assert response.json()["detail"] == "Profile lookup failed"
+
+    async def test_me_get_user_info_unavailable_returns_503(self) -> None:
+        """Provider availability failures during profile lookup return 503."""
+        mock_provider = AsyncMock()
+        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
+        mock_provider.get_user_info.side_effect = AuthProviderUnavailable("JWKS unavailable: ConnectError")
+        app = _create_test_app(mock_provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        async with _client_for(app) as client:
+            response = await client.get(
+                "/api/auth/me",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "JWKS unavailable: ConnectError"
 
 
 class TestRegisterRequestValidation:

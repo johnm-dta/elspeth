@@ -16,7 +16,7 @@ from elspeth.contracts.auth import AuthProviderType
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider, CredentialAuthProvider
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import check_auth_rate_limit
@@ -242,6 +242,8 @@ def create_auth_router() -> APIRouter:
 
         try:
             profile = await auth_provider.get_user_info(token)
+        except AuthProviderUnavailable as exc:
+            raise HTTPException(status_code=503, detail=exc.detail) from exc
         except AuthenticationError as exc:
             raise HTTPException(status_code=401, detail=exc.detail) from exc
 

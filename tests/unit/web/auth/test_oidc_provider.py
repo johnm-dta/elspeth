@@ -11,7 +11,7 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.oidc import OIDCAuthProvider
 from tests.unit.web.auth.conftest import build_rsa_jwk, make_rs256_token, make_rsa_token
 
@@ -435,7 +435,7 @@ class TestOIDCJWKSFailures:
                 "elspeth.web.auth.oidc.httpx.AsyncClient",
                 return_value=client_mock,
             ),
-            pytest.raises(AuthenticationError, match="JWKS unavailable"),
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable"),
         ):
             await provider.authenticate("some-token")
 
@@ -489,7 +489,7 @@ class TestOIDCJWKSFailures:
                 "elspeth.web.auth.oidc.httpx.AsyncClient",
                 return_value=client_mock,
             ),
-            pytest.raises(AuthenticationError, match="JWKS unavailable"),
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable"),
         ):
             await provider.authenticate("some-token")
 
@@ -574,7 +574,7 @@ class TestOIDCJWKSFailures:
                 "elspeth.web.auth.oidc.httpx.AsyncClient",
                 return_value=client_mock,
             ),
-            pytest.raises(AuthenticationError, match="JWKS unavailable"),
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable"),
         ):
             await provider.authenticate("some-token")
 
@@ -899,7 +899,7 @@ class TestOIDCJWKSFailureLogRedaction:
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
             capture_logs() as cap_logs,
-            pytest.raises(AuthenticationError, match="JWKS unavailable: InvalidURL"),
+            pytest.raises(AuthProviderUnavailable, match="JWKS unavailable: InvalidURL"),
         ):
             await provider.authenticate(token)
 
@@ -1415,14 +1415,14 @@ class TestOIDCColdStartBackoff:
         failing_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
-            # First call: attempts fetch, has no stale cache, raises AuthenticationError.
-            with pytest.raises(AuthenticationError):
+            # First call: attempts fetch, has no stale cache, raises AuthProviderUnavailable.
+            with pytest.raises(AuthProviderUnavailable):
                 await provider.authenticate(token)
             # Second and third calls within the 60s backoff window:
             # MUST fail fast WITHOUT re-entering the httpx client.
-            with pytest.raises(AuthenticationError):
+            with pytest.raises(AuthProviderUnavailable):
                 await provider.authenticate(token)
-            with pytest.raises(AuthenticationError):
+            with pytest.raises(AuthProviderUnavailable):
                 await provider.authenticate(token)
 
         # The fix: only one network attempt during the backoff window.
@@ -1464,7 +1464,7 @@ class TestOIDCColdStartBackoff:
 
         with (
             patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
-            pytest.raises(AuthenticationError),
+            pytest.raises(AuthProviderUnavailable),
         ):
             await provider.authenticate(token)
 
@@ -1483,7 +1483,7 @@ class TestOIDCColdStartBackoff:
         rsa_keypair,
     ) -> None:
         """Concurrent cold-start requests during an IdP outage: exactly
-        one fetch attempt; all requests raise AuthenticationError; none
+        one fetch attempt; all requests raise AuthProviderUnavailable; none
         block on the httpx timeout in sequence."""
         private_key, _ = rsa_keypair
         provider = OIDCAuthProvider(
@@ -1516,7 +1516,7 @@ class TestOIDCColdStartBackoff:
             )
 
         # All five requests failed.
-        assert all(isinstance(r, AuthenticationError) for r in results), results
+        assert all(isinstance(r, AuthProviderUnavailable) for r in results), results
         # Exactly one attempt — the first acquired the lock and ran, the
         # other four hit the cold-start throttle fast-path and never
         # touched the network.

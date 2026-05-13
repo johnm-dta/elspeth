@@ -2033,7 +2033,7 @@ No broad `except Exception: pass` is permitted around this call. The fail-closed
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git commit -am "feat(sessions): record_audit_grade_view + audit-grade access logging (composer-progress-persistence phase 3)"

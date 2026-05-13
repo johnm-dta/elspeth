@@ -56,6 +56,28 @@ describe("Layout", () => {
     expect(columns).toContain("500px");
   });
 
+  it("keeps the theme toggle available when the sidebar is collapsed", () => {
+    localStorageMock.getItem.mockImplementation((key: string) => {
+      if (key === "elspeth_sidebar_collapsed") return "true";
+      return null;
+    });
+
+    render(
+      <Layout
+        sidebar={<div>Sidebar</div>}
+        chat={<div>Chat</div>}
+        inspector={<div>Inspector</div>}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /expand sessions sidebar/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /switch to light theme/i }),
+    ).toBeInTheDocument();
+  });
+
   describe("Layout resize handle keyboard arrows", () => {
     function lastPersistedWidth(setItem: ReturnType<typeof vi.spyOn>): number {
       const calls = setItem.mock.calls.filter(

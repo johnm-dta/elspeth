@@ -244,26 +244,23 @@ export function Layout({ sidebar, chat, inspector }: LayoutProps) {
             {sidebarCollapsed ? "\u25B6" : "\u25C0"}
           </button>
 
-          {/* Theme toggle — visible when sidebar is expanded */}
-          {!sidebarCollapsed && (
-            <button
-              className="theme-toggle"
-              onClick={toggleTheme}
-              aria-label={
-                resolvedTheme === "dark"
-                  ? "Switch to light theme"
-                  : "Switch to dark theme"
-              }
-              title={
-                resolvedTheme === "dark"
-                  ? "Switch to light theme"
-                  : "Switch to dark theme"
-              }
-            >
-              {/* Sun for light theme, moon for dark */}
-              {resolvedTheme === "dark" ? "\u2600" : "\u263E"}
-            </button>
-          )}
+          <button
+            className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={
+              resolvedTheme === "dark"
+                ? "Switch to light theme"
+                : "Switch to dark theme"
+            }
+            title={
+              resolvedTheme === "dark"
+                ? "Switch to light theme"
+                : "Switch to dark theme"
+            }
+          >
+            {/* Sun for light theme, moon for dark */}
+            {resolvedTheme === "dark" ? "\u2600" : "\u263E"}
+          </button>
         </div>
         {/* Sidebar content — hidden when collapsed */}
         <div

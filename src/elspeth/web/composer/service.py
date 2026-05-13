@@ -3820,3 +3820,94 @@ def _arg_error_payload(exc: ToolArgumentError, tool_name: str) -> Mapping[str, A
     if validation_errors is not None:
         payload["validation_errors"] = validation_errors
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 test-only compose-loop driver.
+#
+# Appended at end-of-file for the same reason as ``_arg_error_payload``:
+# inserting helper code above the existing composer implementation rotates
+# tier-model allowlist fingerprints for unrelated trust-boundary code.
+# Task 6 moves the sessions-service dependency into the constructor when the
+# production persistence path is wired; Task 0 only needs the explicit test
+# harness and first-use guard.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeLoopTestResult:
+    """Structured result returned by the Phase 3 one-turn test driver."""
+
+    assistant_message: str
+    tool_outcomes: tuple[Any, ...] = ()
+    persisted_assistant_row: Any | None = None
+    persisted_assistant_tool_calls: tuple[Any, ...] = ()
+    persisted_tool_row_content: tuple[Any, ...] = ()
+
+
+def _phase3_require_sessions_service_for_test(self: ComposerServiceImpl) -> Any:
+    """Return the Phase 3 test-wired sessions service or fail loudly."""
+
+    try:
+        sessions_service = self._sessions_service  # type: ignore[attr-defined]
+    except AttributeError as exc:
+        raise RuntimeError("sessions_service not wired") from exc
+    if sessions_service is None:
+        raise RuntimeError("sessions_service not wired")
+    return sessions_service
+
+
+async def _phase3_run_one_turn_for_test(
+    self: ComposerServiceImpl,
+    *,
+    llm: Any | None = None,
+    session_id: str | None = None,
+    initial_state: CompositionState | None = None,
+    user_message_id: str | None = None,
+) -> ComposeLoopTestResult:
+    """Drive exactly one compose-loop turn for Phase 3 tests.
+
+    Test-only helper: it bypasses HTTP route setup but exercises the
+    same ``_compose_loop`` body, including ``_require_sessions_service()``.
+    Missing ``sessions_service`` must therefore fail with
+    ``RuntimeError("sessions_service not wired")``, not ``AttributeError``
+    or a constructor ``TypeError``.
+    """
+
+    from elspeth.web.composer.state import PipelineMetadata
+
+    del user_message_id
+    self._require_sessions_service()  # type: ignore[attr-defined]
+    state = initial_state or CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    resolved_session_id = session_id or "00000000-0000-0000-0000-000000000000"
+    original_call_llm = self._call_llm
+
+    async def _call_fake_llm(messages: Any, tools: Any) -> Any:
+        if llm is None:
+            return await original_call_llm(messages, tools)
+        return await llm(messages, tools)
+
+    self._call_llm = _call_fake_llm  # type: ignore[method-assign]
+    try:
+        result = await self._compose_loop(
+            "Phase 3 one-turn test driver",
+            [],
+            state,
+            session_id=resolved_session_id,
+            deadline=asyncio.get_event_loop().time() + self._timeout_seconds,
+        )
+    finally:
+        self._call_llm = original_call_llm  # type: ignore[method-assign]
+
+    return ComposeLoopTestResult(assistant_message=result.message)
+
+
+ComposerServiceImpl._require_sessions_service = _phase3_require_sessions_service_for_test  # type: ignore[attr-defined]
+ComposerServiceImpl._run_one_turn_for_test = _phase3_run_one_turn_for_test  # type: ignore[attr-defined]

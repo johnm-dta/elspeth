@@ -31,14 +31,27 @@ minimum-columns inserts) literally absent from the test code.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
+import structlog
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import Connection, insert
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.auth.middleware import get_current_user
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.config import WebSettings
+from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions import models
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
 @pytest.fixture
@@ -80,3 +93,129 @@ def _make_session(
             updated_at=updated_at or now,
         )
     )
+
+
+@pytest.fixture
+def test_client(tmp_path: Path) -> TestClient:
+    """FastAPI ``TestClient`` with app state exposing ``sessions_service``."""
+
+    eng = create_session_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    initialize_session_schema(eng)
+    service = SessionServiceImpl(
+        eng,
+        data_dir=tmp_path,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.phase3.web"),
+    )
+    app = FastAPI()
+    identity = UserIdentity(user_id="alice", username="alice")
+
+    async def mock_user() -> UserIdentity:
+        return identity
+
+    app.dependency_overrides[get_current_user] = mock_user
+    app.state.session_service = service
+    app.state.session_engine = eng
+    app.state.settings = WebSettings(
+        data_dir=tmp_path,
+        composer_max_composition_turns=15,
+        composer_max_discovery_turns=10,
+        composer_timeout_seconds=85.0,
+        composer_rate_limit_per_minute=10,
+    )
+    app.state.composer_service = None
+    app.state.rate_limiter = ComposerRateLimiter(limit=100)
+    app.state.execution_service = None
+    app.state.composer_progress_registry = None
+    app.state.scoped_secret_resolver = None
+    app.include_router(create_session_router())
+    client = TestClient(app)
+    client.app.state.phase3_engine = eng
+    client.app.state.phase3_sessions_service = service
+    return client
+
+
+@pytest.fixture
+def inject_non_compose_loop_AuditIntegrityError() -> object:
+    """Return a route-visible raiser for non-compose-loop audit failures."""
+
+    def _raise() -> None:
+        raise AuditIntegrityError("phase3 non-compose audit failure")
+
+    return _raise
+
+
+@pytest.fixture
+def inject_audit_access_log_write_failure(monkeypatch: pytest.MonkeyPatch) -> object:
+    """Force the future audit-grade access-log writer to fail at the boundary."""
+
+    def _install(service: SessionServiceImpl) -> None:
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("phase3 audit access log write failure")
+
+        monkeypatch.setattr(service, "record_audit_grade_view", _raise, raising=False)
+
+    return _install
+
+
+@pytest.fixture
+def session_with_user_assistant_tool_rows(engine):
+    """Create user, assistant, and tool rows with monotonic ``sequence_no``."""
+
+    session_id = str(uuid4())
+    assistant_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        _make_session(conn, session_id=session_id, user_id="alice")
+        conn.execute(
+            insert(models.chat_messages_table),
+            [
+                {
+                    "id": str(uuid4()),
+                    "session_id": session_id,
+                    "role": "user",
+                    "content": "Build it",
+                    "raw_content": None,
+                    "tool_calls": None,
+                    "tool_call_id": None,
+                    "sequence_no": 1,
+                    "writer_principal": "route_user_message",
+                    "created_at": now,
+                    "composition_state_id": None,
+                    "parent_assistant_id": None,
+                },
+                {
+                    "id": assistant_id,
+                    "session_id": session_id,
+                    "role": "assistant",
+                    "content": "Calling a tool",
+                    "raw_content": None,
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_pipeline_state"}}],
+                    "tool_call_id": None,
+                    "sequence_no": 2,
+                    "writer_principal": "compose_loop",
+                    "created_at": now,
+                    "composition_state_id": None,
+                    "parent_assistant_id": None,
+                },
+                {
+                    "id": str(uuid4()),
+                    "session_id": session_id,
+                    "role": "tool",
+                    "content": "{}",
+                    "raw_content": None,
+                    "tool_calls": None,
+                    "tool_call_id": "call_1",
+                    "sequence_no": 3,
+                    "writer_principal": "compose_loop",
+                    "created_at": now,
+                    "composition_state_id": None,
+                    "parent_assistant_id": assistant_id,
+                },
+            ],
+        )
+    return {"session_id": session_id, "assistant_id": assistant_id}

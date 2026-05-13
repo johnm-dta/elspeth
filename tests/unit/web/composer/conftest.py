@@ -65,12 +65,26 @@ F6 follow-up: drift guard added per ``notes/composer-phase-2-followup-prompt-F1-
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, get_args, get_origin
+from unittest.mock import MagicMock
+from uuid import uuid4
 
 import hypothesis.strategies as st
+import pytest
+import structlog
 from pydantic import BaseModel
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.pool import StaticPool
 
+from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
     SetSourceFromBlobArgumentsModel,
@@ -83,6 +97,13 @@ from elspeth.web.composer.redaction import (
     _PipelineOutputModel,
     _SetPipelineSourceModel,
 )
+from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.config import WebSettings
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
 def _dict_strategy(thing: type) -> st.SearchStrategy[dict[Any, Any]]:
@@ -356,3 +377,373 @@ def _assert_default_factory_dict_models_have_overrides(
 
 
 _assert_default_factory_dict_models_have_overrides(MANIFEST, _OVERRIDE_REGISTERED_MODELS)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 compose-loop persistence harness fixtures.
+#
+# These helpers are intentionally defined in the package-level conftest before
+# the Phase 3 red tests are authored. The rev-6 quality ground rule forbids red
+# tests that fail because their scaffolding names do not exist.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeFunction:
+    name: str
+    arguments: str
+
+
+@dataclass
+class _FakeToolCall:
+    id: str
+    function: _FakeFunction
+
+
+@dataclass
+class _FakeMessage:
+    content: str | None
+    tool_calls: list[_FakeToolCall] | None
+
+
+@dataclass
+class _FakeChoice:
+    message: _FakeMessage
+
+
+@dataclass
+class _FakeLLMResponse:
+    choices: list[_FakeChoice]
+
+
+class _FakeComposeLLM:
+    """Callable fake LLM used by ``_run_one_turn_for_test`` fixtures."""
+
+    def __init__(self, responses: tuple[_FakeLLMResponse, ...]) -> None:
+        self._responses = list(responses)
+        self.execute_tool_invocations = 0
+
+    async def __call__(self, _messages: Any, _tools: Any) -> _FakeLLMResponse:
+        if not self._responses:
+            return _fake_llm_response(content="Done.")
+        return self._responses.pop(0)
+
+
+def _fake_llm_response(
+    *,
+    content: str | None = None,
+    tool_calls: tuple[dict[str, Any], ...] = (),
+) -> _FakeLLMResponse:
+    fake_tool_calls: list[_FakeToolCall] | None = None
+    if tool_calls:
+        fake_tool_calls = [
+            _FakeToolCall(
+                id=str(call["id"]),
+                function=_FakeFunction(
+                    name=str(call["name"]),
+                    arguments=json.dumps(call.get("arguments", {})),
+                ),
+            )
+            for call in tool_calls
+        ]
+    return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=content, tool_calls=fake_tool_calls))])
+
+
+def _empty_composition_state() -> CompositionState:
+    return CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
+
+
+def _mock_catalog() -> MagicMock:
+    catalog = MagicMock(spec=CatalogService)
+    catalog.list_sources.return_value = [
+        PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+    ]
+    catalog.list_transforms.return_value = [
+        PluginSummary(name="passthrough", description="Passthrough", plugin_type="transform", config_fields=[]),
+    ]
+    catalog.list_sinks.return_value = [
+        PluginSummary(name="csv", description="CSV sink", plugin_type="sink", config_fields=[]),
+    ]
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="csv",
+        plugin_type="source",
+        description="CSV source",
+        json_schema={"title": "Config", "properties": {}},
+    )
+    return catalog
+
+
+def _make_settings(data_dir: Path, **overrides: Any) -> WebSettings:
+    values: dict[str, Any] = {
+        "data_dir": data_dir,
+        "composer_max_composition_turns": 15,
+        "composer_max_discovery_turns": 10,
+        "composer_timeout_seconds": 85.0,
+        "composer_rate_limit_per_minute": 10,
+    }
+    values.update(overrides)
+    return WebSettings(**values)
+
+
+@pytest.fixture(autouse=True)
+def _composer_available_for_phase3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Phase 3 compose-loop harness tests independent of local API keys."""
+
+    def _available(self: ComposerServiceImpl) -> ComposerAvailability:
+        return ComposerAvailability(available=True, model=self._model, provider="test")
+
+    monkeypatch.setattr(ComposerServiceImpl, "_compute_availability", _available)
+
+
+@pytest.fixture
+def result_session_id() -> str:
+    """Session id used by ``_run_one_turn_for_test`` result assertions."""
+
+    return str(uuid4())
+
+
+def build_test_sessions_service(
+    *,
+    engine: Engine | None = None,
+    data_dir: Path | None = None,
+) -> SessionServiceImpl:
+    """Build a real SQLite-backed ``SessionServiceImpl`` for composer tests.
+
+    Uses ``create_session_engine(..., poolclass=StaticPool)`` plus
+    ``initialize_session_schema(engine)`` so tests exercise the same schema
+    bootstrap path as production. Bare ``metadata.create_all()`` is not used.
+    """
+
+    resolved_engine = engine or create_session_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    if engine is None:
+        initialize_session_schema(resolved_engine)
+    return SessionServiceImpl(
+        resolved_engine,
+        data_dir=data_dir,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.composer.phase3.sessions"),
+    )
+
+
+@pytest.fixture
+def composer_service_with_real_sessions(tmp_path: Path) -> ComposerServiceImpl:
+    """Return ``ComposerServiceImpl`` wired to a real SQLite sessions service."""
+
+    sessions_service = build_test_sessions_service(data_dir=tmp_path)
+    service = ComposerServiceImpl(
+        catalog=_mock_catalog(),
+        settings=_make_settings(tmp_path),
+    )
+    service._sessions_service = sessions_service
+    return service
+
+
+@pytest.fixture
+def composer_service_without_sessions_service(tmp_path: Path) -> ComposerServiceImpl:
+    """Return ``ComposerServiceImpl`` without ``sessions_service`` wired."""
+
+    return ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings(tmp_path))
+
+
+@pytest.fixture
+def fake_composer_service(composer_service_with_real_sessions: ComposerServiceImpl) -> ComposerServiceImpl:
+    """Lightweight composer with protocol-faithful sessions persistence wired."""
+
+    return composer_service_with_real_sessions
+
+
+@pytest.fixture
+def fake_llm_emitting_n_tool_calls() -> Any:
+    """Factory for an LLM whose first assistant response emits ``n`` tool calls."""
+
+    def _factory(n: int) -> _FakeComposeLLM:
+        calls = tuple({"id": f"call_{idx}", "name": "get_pipeline_state", "arguments": {}} for idx in range(n))
+        return _FakeComposeLLM((_fake_llm_response(tool_calls=calls), _fake_llm_response(content="Done.")))
+
+    return _factory
+
+
+@pytest.fixture
+def fake_llm_two_tool_calls(fake_llm_emitting_n_tool_calls: Any) -> _FakeComposeLLM:
+    """Fake LLM for exactly two successful tool calls."""
+
+    return fake_llm_emitting_n_tool_calls(2)
+
+
+@pytest.fixture
+def fake_llm_three_tool_calls(fake_llm_emitting_n_tool_calls: Any) -> _FakeComposeLLM:
+    """Fake LLM for exactly three successful tool calls."""
+
+    return fake_llm_emitting_n_tool_calls(3)
+
+
+@pytest.fixture
+def fake_llm_tool_argument_error_on_second() -> _FakeComposeLLM:
+    """Second tool has invalid arguments so the loop records ARG_ERROR payload."""
+
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {"id": "call_ok", "name": "get_pipeline_state", "arguments": {}},
+                    {"id": "call_bad", "name": "set_source", "arguments": []},
+                )
+            ),
+            _fake_llm_response(content="Done."),
+        )
+    )
+
+
+@pytest.fixture
+def fake_llm_runtime_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeComposeLLM:
+    """Second tool raises ``RuntimeError`` through the production dispatch seam."""
+
+    def _raise_on_second(tool_name: str, *_args: Any, **_kwargs: Any) -> Any:
+        if tool_name == "phase3_runtime_error":
+            raise RuntimeError("phase3 synthetic runtime error")
+        raise ToolArgumentError(argument="tool", expected="known tool", actual_type=tool_name)
+
+    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _raise_on_second)
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {"id": "call_ok", "name": "unknown_first", "arguments": {}},
+                    {"id": "call_crash", "name": "phase3_runtime_error", "arguments": {}},
+                )
+            ),
+        )
+    )
+
+
+@pytest.fixture
+def fake_llm_with_sensitive_tool_call() -> _FakeComposeLLM:
+    """Emits a tool call with arguments covered by Phase 2 manifest redaction."""
+
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {
+                        "id": "call_sensitive",
+                        "name": "create_blob",
+                        "arguments": {"filename": "secret.txt", "mime_type": "text/plain", "content": "top-secret"},
+                    },
+                )
+            ),
+            _fake_llm_response(content="Done."),
+        )
+    )
+
+
+@pytest.fixture
+def fake_llm_summarizer_active() -> _FakeComposeLLM:
+    """Emits a response shape that exercises ``redact_tool_call_response``."""
+
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {
+                        "id": "call_summarizer",
+                        "name": "create_blob",
+                        "arguments": {"filename": "summary.txt", "mime_type": "text/plain", "content": "summarize me"},
+                    },
+                )
+            ),
+            _fake_llm_response(content="Done."),
+        )
+    )
+
+
+@pytest.fixture
+def fake_llm_preflight_rewrites_content() -> _FakeComposeLLM:
+    """Exposes original text for runtime-preflight rewrite assertions."""
+
+    llm = _FakeComposeLLM((_fake_llm_response(content="The pipeline is ready."),))
+    llm.original_text = "The pipeline is ready."
+    return llm
+
+
+@pytest.fixture
+def fake_llm_tool_call_with_no_content() -> _FakeComposeLLM:
+    """Assistant message has ``content=None`` for raw-content NULL assertions."""
+
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                content=None,
+                tool_calls=({"id": "call_state", "name": "get_pipeline_state", "arguments": {}},),
+            ),
+            _fake_llm_response(content="Done."),
+        )
+    )
+
+
+@pytest.fixture
+def sqlalchemy_event_listener() -> Any:
+    """Return a helper that counts begin/commit/rollback events on an engine."""
+
+    def _install(engine: Engine) -> dict[str, int]:
+        counts = {"begin": 0, "commit": 0, "rollback": 0}
+
+        def _inc(name: str) -> None:
+            counts[name] += 1
+
+        event.listen(engine, "begin", lambda _conn: _inc("begin"))
+        event.listen(engine, "commit", lambda _conn: _inc("commit"))
+        event.listen(engine, "rollback", lambda _conn: _inc("rollback"))
+        return counts
+
+    return _install
+
+
+@pytest.fixture
+def add_message_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record caller frames for legacy ``SessionServiceImpl.add_message`` calls."""
+
+    calls: list[str] = []
+    original = SessionServiceImpl.add_message
+
+    async def _spy(self: SessionServiceImpl, *args: Any, **kwargs: Any) -> Any:
+        import inspect
+
+        frame = inspect.stack()[1]
+        calls.append(f"{frame.filename}:{frame.function}")
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(SessionServiceImpl, "add_message", _spy)
+    return calls
+
+
+@pytest.fixture
+def inject_commit_OperationalError() -> Any:
+    """Install a one-shot SQLAlchemy COMMIT failure hook."""
+
+    def _install(engine: Engine) -> None:
+        def _raise(_conn: Any) -> None:
+            event.remove(engine, "commit", _raise)
+            raise OperationalError("COMMIT", {}, RuntimeError("phase3 commit failure"))
+
+        event.listen(engine, "commit", _raise)
+
+    return _install
+
+
+@pytest.fixture
+def inject_IntegrityError_on_chat_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raise ``IntegrityError`` when assistant chat-message insert is attempted."""
+
+    original_insert = SessionServiceImpl._insert_chat_message
+
+    def _raise_for_chat_messages(self: SessionServiceImpl, *args: Any, **kwargs: Any) -> Any:
+        role = kwargs.get("role")
+        if role == "assistant":
+            raise IntegrityError("INSERT chat_messages", {}, RuntimeError("phase3 assistant insert failure"))
+        return original_insert(self, *args, **kwargs)
+
+    monkeypatch.setattr(SessionServiceImpl, "_insert_chat_message", _raise_for_chat_messages)

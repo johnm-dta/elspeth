@@ -6,35 +6,40 @@ import DOMPurify from "dompurify";
 import { Highlight, themes as prismThemes } from "prism-react-renderer";
 import { useTheme, type ResolvedTheme } from "@/hooks/useTheme";
 
-const MERMAID_THEMES: Record<ResolvedTheme, Parameters<typeof mermaid.initialize>[0]> = {
-  dark: {
+type MermaidConfig = NonNullable<Parameters<typeof mermaid.initialize>[0]>;
+
+function cssToken(name: string): string {
+  if (typeof document === "undefined") return "";
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+export function mermaidThemeFromTokens(theme: ResolvedTheme): MermaidConfig {
+  const themeVariables: Record<string, string> = {};
+  const tokenVariables = {
+    primaryColor: "--color-surface-elevated",
+    primaryBorderColor: "--color-border-strong",
+    primaryTextColor: "--color-text",
+    lineColor: "--color-text-muted",
+    secondaryColor: "--color-surface-raised",
+    tertiaryColor: "--color-bg",
+  };
+
+  for (const [themeKey, tokenName] of Object.entries(tokenVariables)) {
+    const value = cssToken(tokenName);
+    if (value) {
+      themeVariables[themeKey] = value;
+    }
+  }
+
+  return {
     startOnLoad: false,
-    theme: "dark",
-    themeVariables: {
-      primaryColor: "#1a3d47",
-      primaryBorderColor: "#4db89a",
-      primaryTextColor: "#dff0ee",
-      lineColor: "#6a9898",
-      secondaryColor: "#28504a",
-      tertiaryColor: "#0f2d35",
-    },
-  },
-  light: {
-    startOnLoad: false,
-    theme: "default",
-    themeVariables: {
-      primaryColor: "#eaf2f3",
-      primaryBorderColor: "#2a8a70",
-      primaryTextColor: "#0f2d35",
-      lineColor: "#5a7a84",
-      secondaryColor: "#f0f6f7",
-      tertiaryColor: "#f4f8f9",
-    },
-  },
-};
+    theme: theme === "dark" ? "dark" : "default",
+    themeVariables,
+  };
+}
 
 // Initial mermaid configuration (dark default, updated reactively by MermaidDiagram)
-mermaid.initialize(MERMAID_THEMES.dark);
+mermaid.initialize({ startOnLoad: false, theme: "dark" });
 
 interface MarkdownRendererProps {
   content: string;
@@ -181,7 +186,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
 
   // Re-initialize mermaid when theme changes
   useEffect(() => {
-    mermaid.initialize(MERMAID_THEMES[resolvedTheme]);
+    mermaid.initialize(mermaidThemeFromTokens(resolvedTheme));
     setRenderCount((c) => c + 1);
   }, [resolvedTheme]);
 

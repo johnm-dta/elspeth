@@ -7,8 +7,10 @@ import type {
   CompositionStateVersion,
   ComposerProgressSnapshot,
   ApiError,
+  ComposerRecoveryError,
   ValidationResult,
 } from "@/types/api";
+import { isComposerRecoveryError } from "@/types/recovery";
 import type {
   GuidedSession,
   TurnPayload,
@@ -98,6 +100,25 @@ function clearedGuidedState(): Pick<
   };
 }
 
+function clearedRecoveryState(): Pick<
+  SessionState,
+  "recoveryError" | "recoveryStartedCompositionVersion"
+> {
+  return {
+    recoveryError: null,
+    recoveryStartedCompositionVersion: null,
+  };
+}
+
+interface ApplyRecoveredStateOptions {
+  confirmed?: boolean;
+}
+
+interface ApplyRecoveredStateResult {
+  applied: boolean;
+  needsConfirmation: boolean;
+}
+
 interface SessionState {
   sessions: Session[];
   activeSessionId: string | null;
@@ -107,6 +128,8 @@ interface SessionState {
   isComposing: boolean;
   stateVersions: CompositionStateVersion[];
   error: string | null;
+  recoveryError: ComposerRecoveryError | null;
+  recoveryStartedCompositionVersion: number | null;
 
   // Shared selection state for cross-component sync (GraphView <-> SpecView)
   selectedNodeId: string | null;
@@ -123,6 +146,14 @@ interface SessionState {
   sendValidationFeedback: (result: ValidationResult) => Promise<void>;
   retryMessage: (messageId: string, signal?: AbortSignal) => Promise<void>;
   forkFromMessage: (messageId: string, newContent: string) => Promise<void>;
+  openRecoveryFromError: (
+    error: ApiError,
+    recoveryStartedCompositionVersion: number | null,
+  ) => boolean;
+  applyRecoveredState: (
+    options?: ApplyRecoveredStateOptions,
+  ) => ApplyRecoveredStateResult;
+  discardRecovery: () => void;
   loadStateVersions: () => Promise<void>;
   isLoadingVersions: boolean;
   revertToVersion: (stateId: string) => Promise<void>;
@@ -158,6 +189,7 @@ const initialState = {
   error: null as string | null,
   selectedNodeId: null as string | null,
   ...clearedGuidedState(),
+  ...clearedRecoveryState(),
 };
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -186,6 +218,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: null,
         selectedNodeId: null, // Clear selection for new session
         ...clearedGuidedState(),
+        ...clearedRecoveryState(),
       }));
       // Auto-start guided mode.  New sessions are created with
       // GuidedSession.initial() already attached by the backend (spec §5.2,
@@ -219,6 +252,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 isComposing: false,
                 selectedNodeId: null,
                 ...clearedGuidedState(),
+                ...clearedRecoveryState(),
               }
             : {}),
         };
@@ -244,6 +278,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       error: null,
       selectedNodeId: null, // Clear selection when switching sessions
       ...clearedGuidedState(),
+      ...clearedRecoveryState(),
     });
 
     try {
@@ -278,6 +313,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async sendMessage(content: string, signal?: AbortSignal) {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
+    const recoveryStartedCompositionVersion =
+      get().compositionState?.version ?? null;
 
     const optimisticMessage: ChatMessage = {
       id: `local-${crypto.randomUUID()}`,
@@ -362,6 +399,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             apiErr.detail ?? "Failed to send message. Please try again.";
         }
       }
+      const apiErr = err as ApiError;
+      const recoveryPatch = isComposerRecoveryError(apiErr)
+        ? {
+            recoveryError: apiErr,
+            recoveryStartedCompositionVersion,
+          }
+        : {};
       set((state) => ({
         isComposing: false,
         error: errorMessage,
@@ -370,6 +414,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             ? { ...existing, local_status: "failed", local_error: errorMessage }
             : existing,
         ),
+        ...recoveryPatch,
       }));
     } finally {
       get().stopComposerProgressPolling(activeSessionId);
@@ -447,6 +492,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async retryMessage(messageId: string, signal?: AbortSignal) {
     const { activeSessionId, messages } = get();
     if (!activeSessionId) return;
+    const recoveryStartedCompositionVersion =
+      get().compositionState?.version ?? null;
 
     const message = messages.find((entry) => entry.id === messageId);
     if (!message || message.role !== "user") return;
@@ -514,6 +561,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 ? "ELSPETH couldn't complete the composition after multiple attempts. Try breaking your request into smaller steps."
                 : apiErr.detail ?? "Failed to send message. Please try again.";
       }
+      const apiErr = err as ApiError;
+      const recoveryPatch = isComposerRecoveryError(apiErr)
+        ? {
+            recoveryError: apiErr,
+            recoveryStartedCompositionVersion,
+          }
+        : {};
 
       set((state) => ({
         isComposing: false,
@@ -523,6 +577,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             ? { ...existing, local_status: "failed", local_error: errorMessage }
             : existing,
         ),
+        ...recoveryPatch,
       }));
     } finally {
       get().stopComposerProgressPolling(activeSessionId);
@@ -557,6 +612,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         // the parent's guidedSession must not bleed into the fork's UI before
         // startGuided resolves.  Mirrors selectSession.
         ...clearedGuidedState(),
+        ...clearedRecoveryState(),
       }));
 
       // Fire-and-forget: refresh blob list for the NEW forked session
@@ -575,6 +631,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: "Failed to fork conversation. Please try again.",
       });
     }
+  },
+
+  openRecoveryFromError(error, recoveryStartedCompositionVersion) {
+    if (!isComposerRecoveryError(error)) {
+      return false;
+    }
+    set({
+      recoveryError: error,
+      recoveryStartedCompositionVersion,
+    });
+    return true;
+  },
+
+  applyRecoveredState(options) {
+    const { recoveryError, recoveryStartedCompositionVersion, compositionState } =
+      get();
+    if (recoveryError === null) {
+      return { applied: false, needsConfirmation: false };
+    }
+
+    const currentVersion = compositionState?.version ?? null;
+    if (
+      options?.confirmed !== true &&
+      currentVersion !== recoveryStartedCompositionVersion
+    ) {
+      return { applied: false, needsConfirmation: true };
+    }
+
+    const recoveredState = recoveryError.partial_state;
+    getExecutionStore().clearValidation();
+    set((state) => {
+      const nodeStillExists =
+        !state.selectedNodeId ||
+        recoveredState.nodes.some((node) => node.id === state.selectedNodeId);
+      return {
+        compositionState: recoveredState,
+        ...(nodeStillExists ? {} : { selectedNodeId: null }),
+        ...clearedRecoveryState(),
+      };
+    });
+    return { applied: true, needsConfirmation: false };
+  },
+
+  discardRecovery() {
+    set(clearedRecoveryState());
   },
 
   // Guided-mode actions

@@ -10,6 +10,7 @@ import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
 import { CompletionSummary } from "./guided/CompletionSummary";
 import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
+import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import type { BlobMetadata, ChatMessage } from "@/types/api";
@@ -245,6 +246,17 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
           the parent ChatPanel wraps turn content in one).
         */}
         <GuidedHistory history={guidedSession.history} />
+        {/*
+          Per-step chat log (Phase A slice 6).  Placed ABOVE the wizard
+          turn's role="log" region per handover guidance — the user
+          reads the chat above their current control surface, and the
+          ChatInput at the bottom of the branch is where they reply.
+          GuidedChatHistory carries its OWN role="log" + aria-live so
+          new chat turns are announced independently of wizard turn
+          advances.  Empty-state returns null; no DOM contribution
+          before the first chat exchange.
+        */}
+        <GuidedChatHistory chatHistory={guidedSession.chat_history} />
         <div
           ref={guidedLogRef}
           className="chat-panel-guided-log"

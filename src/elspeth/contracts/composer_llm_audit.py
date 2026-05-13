@@ -146,3 +146,106 @@ class ComposerLLMCallRecorder(Protocol):
     def resolve_session(self, session_id: str) -> None:
         """Hint that the session_id is now resolved."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# ComposerChatTurn — per-step-chat audit record (Phase A slice 5)
+# ---------------------------------------------------------------------------
+
+
+ComposerChatInitiator = Literal["user", "step_entry_opener"]
+"""Who started the chat turn.
+
+``user`` — the human typed a message into the chat input.
+``step_entry_opener`` — a Phase A.5 proactive opener fired by the server
+when ``session.step`` changed.  Phase A only emits ``user``; the
+discriminator is wired now so the audit schema is stable across phases.
+"""
+
+
+class ComposerChatTurnStatus(StrEnum):
+    """Outcome of one per-step chat turn (Phase A slice 5).
+
+    Mirrors :class:`ComposerLLMCallStatus` for symmetry, but a distinct
+    enum because chat turns also have outcomes that don't apply to bare
+    LLM calls (e.g. ``SYNTHETIC_UNAVAILABLE`` for the auto-drop synthetic
+    message; the underlying LLM call may have ``TIMEOUT`` status but the
+    chat turn surfaces a synthetic assistant message and is recorded as
+    ``SYNTHETIC_UNAVAILABLE``).
+    """
+
+    SUCCESS = "success"
+    SYNTHETIC_UNAVAILABLE = "synthetic_unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class ComposerChatTurn:
+    """One per-step chat turn as recorded for composer audit (Phase A slice 5).
+
+    Sibling to :class:`ComposerLLMCall`.  Where ``ComposerLLMCall``
+    records a *single outbound model request*, ``ComposerChatTurn``
+    records the higher-level *conversational turn* — which step the user
+    was on, who initiated it (user vs. proactive opener), the monotonic
+    per-session sequence number, and integrity hashes for the messages
+    exchanged.  An auditor can query "show me every chat turn at
+    ``step=step_1_source`` for run X" without joining through
+    ``ComposerLLMCall``.
+
+    Phase A is advisory-only — no tool calls, no rejected tool calls.
+    Phase B adds ``tool_calls`` / ``rejected_tool_calls`` fields.  Their
+    absence in Phase A is recorded honestly (``tool_calls`` defaults to
+    empty tuple), not fabricated.
+
+    ``user_message_hash`` and ``assistant_message_hash`` are canonical
+    stable hashes over the literal message strings.  Construction sites
+    in L3 compute them via :func:`elspeth.core.canonical.stable_hash`;
+    this record holds the hash only, never the raw text (the raw text is
+    Tier-3 user input or LLM output and must not enter the audit row).
+
+    ``latency_ms`` is end-to-end on the server: from user message
+    accepted at the route to assistant message persisted in
+    ``chat_history``.  On the synthetic-unavailable path it is still
+    populated (the time spent waiting for the failing LLM call).
+    """
+
+    step: str
+    initiator: ComposerChatInitiator
+    chat_turn_seq: int
+    user_message_hash: str
+    assistant_message_hash: str
+    latency_ms: int
+    model: str
+    status: ComposerChatTurnStatus
+    started_at: datetime
+    finished_at: datetime
+    error_class: str | None = None
+
+    def __post_init__(self) -> None:
+        require_int(self.chat_turn_seq, "chat_turn_seq", min_value=0)
+        require_int(self.latency_ms, "latency_ms", min_value=0)
+        # ``initiator`` is a Literal — Python has no runtime enforcement.
+        # Validate at construction so Tier-1 corruption (e.g. a buggy
+        # caller passing ``"opener"`` instead of ``"step_entry_opener"``)
+        # crashes here rather than at a downstream consumer's pattern match.
+        if self.initiator not in ("user", "step_entry_opener"):
+            raise ValueError(f"initiator must be 'user' or 'step_entry_opener', got {self.initiator!r}")
+        if self.status is ComposerChatTurnStatus.SUCCESS and self.error_class is not None:
+            raise ValueError("error_class must be None when status is SUCCESS")
+        if self.status is ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE and self.error_class is None:
+            raise ValueError("error_class must be populated when status is SYNTHETIC_UNAVAILABLE")
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-friendly dict for sidecar serialization (mirror of ComposerLLMCall.to_dict)."""
+        raw = {field.name: deep_thaw(getattr(self, field.name)) for field in fields(self)}
+        raw["status"] = self.status.value
+        raw["started_at"] = self.started_at.isoformat()
+        raw["finished_at"] = self.finished_at.isoformat()
+        return raw
+
+
+class ComposerChatTurnRecorder(Protocol):
+    """Append-only sink for :class:`ComposerChatTurn` records (Phase A slice 5)."""
+
+    def record_chat_turn(self, turn: ComposerChatTurn) -> None:
+        """Persist or buffer one chat-turn record."""
+        ...

@@ -14,7 +14,6 @@ import type {
   TurnPayload,
   TerminalState,
   GuidedRespondRequest,
-  GuidedChatHistoryEntry,
 } from "@/types/guided";
 import * as api from "@/api/client";
 import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
@@ -111,9 +110,10 @@ interface SessionState {
   guidedSession: GuidedSession | null;
   guidedNextTurn: TurnPayload | null;
   guidedTerminal: TerminalState | null;
-  // Per-step chat (Phase A slice 4) — in-memory only; slice 5 replaces this
-  // with a wire-level `chat_history` field on GuidedSession.
-  guidedChatHistory: GuidedChatHistoryEntry[];
+  // Per-step chat (Phase A slice 5).  The history itself lives on
+  // `guidedSession.chat_history` (server-authoritative); only the in-flight
+  // pending flag is local state.  Slice 4 carried an in-memory
+  // guidedChatHistory array; slice 5 replaced it with the wire field.
   guidedChatPending: boolean;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
@@ -139,7 +139,6 @@ const initialState = {
   guidedSession: null as GuidedSession | null,
   guidedNextTurn: null as TurnPayload | null,
   guidedTerminal: null as TerminalState | null,
-  guidedChatHistory: [] as GuidedChatHistoryEntry[],
   guidedChatPending: false,
 };
 
@@ -171,7 +170,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: null,
         guidedNextTurn: null,
         guidedTerminal: null,
-        guidedChatHistory: [],
         guidedChatPending: false,
       }));
       // Auto-start guided mode.  New sessions are created with
@@ -208,7 +206,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 guidedSession: null,
                 guidedNextTurn: null,
                 guidedTerminal: null,
-                guidedChatHistory: [],
                 guidedChatPending: false,
               }
             : {}),
@@ -237,7 +234,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
-      guidedChatHistory: [],
       guidedChatPending: false,
     });
 
@@ -554,7 +550,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: null,
         guidedNextTurn: null,
         guidedTerminal: null,
-        guidedChatHistory: [],
         guidedChatPending: false,
       }));
 
@@ -655,17 +650,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const requestedSessionId = activeSessionId;
     const requestedStep = guidedSession.step;
 
-    // Append the user turn immediately and mark pending.  The assistant
-    // turn is appended on response.  Phase A keeps chat history entirely
-    // client-side; slice 5 replaces this with a wire-level chat_history
-    // field on GuidedSession.
-    set((state) => ({
-      guidedChatHistory: [
-        ...state.guidedChatHistory,
-        { role: "user", content: message, step: requestedStep },
-      ],
-      guidedChatPending: true,
-    }));
+    // Slice 5: chat history is server-authoritative — no optimistic local
+    // append.  The route handler appends both user + assistant turns to
+    // `guidedSession.chat_history` and returns the updated session.  Only
+    // `guidedChatPending` is local: it blocks rapid double-submits while
+    // the round-trip is in flight.  Slice 4's optimistic-append pattern
+    // produced visible drift if the server replied with a slightly
+    // different ts_iso / seq than the client guessed.
+    set({ guidedChatPending: true });
 
     try {
       const response = await api.chatGuided(activeSessionId, {
@@ -673,33 +665,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         step_index: requestedStep,
       });
       // Stale-fetch guard: drop the response if session changed mid-flight.
-      // We still leave the user message in history (visible record of what
-      // they typed) but skip the assistant append + pending flip.
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
-      set((state) => ({
-        guidedChatHistory: [
-          ...state.guidedChatHistory,
-          {
-            role: "assistant",
-            content: response.assistant_message,
-            step: requestedStep,
-          },
-        ],
-        // Echo guided_session back into store — Phase A returns it
-        // unchanged but the wire contract may carry slice-5 chat_history
-        // updates in future.
+      set({
         guidedSession: response.guided_session,
         guidedChatPending: false,
-      }));
+      });
     } catch {
-      // Transient failure: surface an error and clear pending.  The
-      // backend's auto-drop helper already returns 200 with a synthetic
-      // assistant message on LLM-side transients, so reaching this catch
-      // means an HTTP-layer failure (network, 4xx/5xx from a stale
-      // server, etc.) — not the same as LLM-unavailable.  Leave the
-      // user message in history as a visible record of what they typed.
+      // HTTP-layer failure (network, 4xx/5xx).  Distinct from the
+      // backend's synthetic-message path, which returns 200 with an
+      // unavailable assistant message AND appends both turns to
+      // chat_history — that path completes the optimistic write
+      // server-side, so even a synthetic reply round-trips through this
+      // success branch.  This catch fires only when the request itself
+      // failed (no response shape at all).
       set({
         error: "Failed to send chat message. Please try again.",
         guidedChatPending: false,

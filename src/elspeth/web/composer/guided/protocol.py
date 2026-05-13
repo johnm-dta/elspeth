@@ -136,6 +136,51 @@ class GuidedStep(StrEnum):
     STEP_3_TRANSFORMS = "step_3_transforms"
 
 
+class ChatRole(StrEnum):
+    """Closed taxonomy of chat-turn authors.
+
+    A second author class for Phase A.5 — ``step_entry_opener`` (proactive
+    server-initiated turn) — is intentionally absent here.  Phase A only
+    distinguishes user-initiated and assistant-reply turns.  When openers
+    land, the discriminator moves to ``ComposerChatTurn.initiator`` (audit
+    record), not the ``ChatRole`` enum on the user-visible history — both
+    a user prompt and a step-entry opener produce an ``assistant`` turn
+    on the wire.  The plan §"Opener-specific invariant" relies on this
+    separation.
+    """
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ChatTurn(TypedDict):
+    """One conversational message in the per-step chat history (Phase A slice 5).
+
+    Persisted in ``GuidedSession.chat_history``.  Trust tier: Tier 1
+    (audit) — every field is server-authoritative.  ``seq`` is monotonic
+    per session across all chat turns (user + assistant share the
+    counter); on reload the frontend renders entries in ``seq`` order.
+
+    ``ts_iso`` is the server-recorded ISO 8601 timestamp at which the
+    turn entered the history.  It is informational for the UI; chrono
+    ordering should still be driven by ``seq`` to avoid sort drift when
+    the same wall clock-second carries two turns.
+
+    ``step`` records the wizard step the user was on when the turn was
+    produced.  Slice 5 keeps the same step for both user message and
+    assistant reply (chat does not advance step state); the field is
+    load-bearing for Phase A.5 openers and Phase B tool palettes where
+    the step at *emission* may differ from the step at *display* if the
+    user back-buttons.
+    """
+
+    role: ChatRole
+    content: str
+    seq: int
+    step: GuidedStep
+    ts_iso: str
+
+
 _LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {
     GuidedStep.STEP_1_SOURCE: frozenset(
         {

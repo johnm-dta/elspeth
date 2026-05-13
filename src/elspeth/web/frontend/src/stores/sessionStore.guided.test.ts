@@ -48,6 +48,8 @@ const sampleGuidedSession: GuidedSession = {
   step: "step_1_source",
   history: [],
   terminal: null,
+  chat_history: [],
+  chat_turn_seq: 0,
 };
 
 const sampleNextTurn: TurnPayload = {

@@ -58,13 +58,32 @@ export interface TerminalState {
 }
 
 /**
- * Wire: GuidedSessionResponse (schemas.py:231-236).
- * Exactly three wire fields — internal step results never cross the wire.
+ * Wire: ChatTurnResponse (schemas.py — Phase A slice 5).  Mirrors a single
+ * entry in GuidedSession.chat_history.  Server-emitted; all values are
+ * authoritative (Tier 1).  Ordering is driven by `seq`, not `ts_iso` —
+ * two turns produced in the same request share a wall-clock second.
+ */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+  seq: number;
+  step: GuidedStep;
+  ts_iso: string;
+}
+
+/**
+ * Wire: GuidedSessionResponse (schemas.py:231-242 post-slice-5).
+ * `chat_history` + `chat_turn_seq` were added in Phase A slice 5 to
+ * persist per-step chat across reloads; before slice 5 the frontend
+ * carried an in-memory `guidedChatHistory` array, which is replaced
+ * verbatim by this server-authoritative field.
  */
 export interface GuidedSession {
   step: GuidedStep;
   history: TurnRecord[];
   terminal: TerminalState | null;
+  chat_history: ChatTurn[];
+  chat_turn_seq: number;
 }
 
 /** Wire: TurnPayloadResponse (schemas.py:239-252). step_index is 0-based ordinal (number). */
@@ -134,19 +153,6 @@ export interface GuidedChatResponse {
   guided_session: GuidedSession;
 }
 
-/**
- * Client-side per-message record for the in-memory guided chat history.
- *
- * Phase A keeps chat history entirely client-side; slice 5 will replace
- * this with the wire-level `chat_history` field on `GuidedSession`. The
- * shape mirrors the eventual server-side ChatTurn TypedDict so the slice-5
- * migration is a near drop-in.
- */
-export interface GuidedChatHistoryEntry {
-  role: "user" | "assistant";
-  content: string;
-  step: GuidedStep;
-}
 
 // ── Per-turn payload shapes ───────────────────────────────────────────────────
 // Each widget owns its payload type; add yours when you implement the widget.

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 
 if TYPE_CHECKING:
     # Imported for type annotations only — avoids a circular dependency.
@@ -396,6 +396,28 @@ class GuidedSession:
     step_2_sink_intent: SinkIntent | None = None
     step_2_5_recipe_offer: RecipeMatch | None = None
     step_2_chosen_plugin: str | None = None
+    # Phase A slice 5 — per-step chat history persistence.
+    # `chat_history` is a tuple of ChatTurn TypedDicts (runtime dicts);
+    # because dict contents are mutable through any reference,
+    # ``__post_init__`` calls ``freeze_fields(self, "chat_history")`` to
+    # deep-freeze each entry into ``MappingProxyType``.  Without that
+    # guard, ``frozen=True`` on the dataclass is a lie for this field
+    # (see CLAUDE.md "Frozen Dataclass Immutability" section).
+    # `chat_turn_seq` is monotonic per session across all chat turns
+    # (user + assistant share the counter); incremented on every append.
+    chat_history: tuple[ChatTurn, ...] = ()
+    chat_turn_seq: int = 0
+
+    def __post_init__(self) -> None:
+        # Tuple-of-TypedDict requires explicit deep-freeze because each
+        # element's inner dict is mutable through any reference.  Only
+        # ``chat_history`` carries mutable contents; ``history`` is a
+        # tuple of frozen ``TurnRecord`` dataclasses (already deeply
+        # immutable) and the optional-dataclass fields are likewise
+        # frozen.  Per CLAUDE.md "Scalar-Only Fields Need No Guard",
+        # the remaining scalars / enums / None need no protection.
+        if self.chat_history:
+            freeze_fields(self, "chat_history")
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -413,6 +435,12 @@ class GuidedSession:
 
         All nested optional types serialise their presence — ``None`` round-
         trips as ``None`` (never fabricated).
+
+        ``chat_history`` entries are TypedDicts; their ``role`` and ``step``
+        members are ``StrEnum`` instances, which serialise to their string
+        values via the explicit ``.value`` accessors below so JSON output
+        never carries enum reprs.  ``deep_thaw`` flattens any
+        ``MappingProxyType`` wrapper applied by ``__post_init__``.
         """
         return {
             "step": self.step.value,
@@ -426,6 +454,17 @@ class GuidedSession:
             "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
             "step_2_5_recipe_offer": self.step_2_5_recipe_offer.to_dict() if self.step_2_5_recipe_offer is not None else None,
             "step_2_chosen_plugin": self.step_2_chosen_plugin,
+            "chat_history": [
+                {
+                    "role": ChatRole(t["role"]).value,
+                    "content": t["content"],
+                    "seq": t["seq"],
+                    "step": GuidedStep(t["step"]).value,
+                    "ts_iso": t["ts_iso"],
+                }
+                for t in self.chat_history
+            ],
+            "chat_turn_seq": self.chat_turn_seq,
         }
 
     @classmethod
@@ -449,6 +488,24 @@ class GuidedSession:
             # at module level here would create a cycle.
             from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
 
+            # Phase A slice 5 chat-history fields.  Tier-1 strict: every entry
+            # must declare role / content / seq / step / ts_iso.  Per CLAUDE.md
+            # "Our data crash on any anomaly" — no coercion of missing keys
+            # to defaults.  An empty list (default for sessions created before
+            # slice 5 landed in production) is valid; the entries themselves
+            # must be well-formed.
+            chat_history_raw = d["chat_history"]
+            chat_turn_seq_raw = d["chat_turn_seq"]
+            chat_history: tuple[ChatTurn, ...] = tuple(
+                ChatTurn(
+                    role=ChatRole(entry["role"]),
+                    content=entry["content"],
+                    seq=int(entry["seq"]),
+                    step=GuidedStep(entry["step"]),
+                    ts_iso=entry["ts_iso"],
+                )
+                for entry in chat_history_raw
+            )
             return cls(
                 step=GuidedStep(d["step"]),
                 history=tuple(TurnRecord.from_dict(r) for r in d["history"]),
@@ -461,6 +518,8 @@ class GuidedSession:
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
                 step_2_5_recipe_offer=_RecipeMatch.from_dict(recipe_offer_raw) if recipe_offer_raw is not None else None,
                 step_2_chosen_plugin=str(step_2_chosen_plugin_raw) if step_2_chosen_plugin_raw is not None else None,
+                chat_history=chat_history,
+                chat_turn_seq=int(chat_turn_seq_raw),
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc

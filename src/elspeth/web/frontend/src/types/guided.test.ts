@@ -75,11 +75,15 @@ describe("guided protocol types", () => {
     expect(payload.step_index).toBe(0);
   });
 
-  it("GuidedSession has exactly step, history, terminal — exhaustive", () => {
+  it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq — exhaustive", () => {
     type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
     // Compile-time mutual-extends: adding/removing a key in GuidedSession
-    // makes this assignment fail tsc.
-    const _exact: Equals<keyof GuidedSession, "step" | "history" | "terminal"> = true;
+    // makes this assignment fail tsc.  Slice 5 added chat_history and
+    // chat_turn_seq to the GuidedSession wire shape.
+    const _exact: Equals<
+      keyof GuidedSession,
+      "step" | "history" | "terminal" | "chat_history" | "chat_turn_seq"
+    > = true;
     expect(_exact).toBe(true);
   });
 

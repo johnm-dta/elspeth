@@ -11,6 +11,8 @@ import contextlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as _replace
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -21,7 +23,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
-from elspeth.contracts.composer_llm_audit import ComposerLLMCall
+from elspeth.contracts.composer_llm_audit import ComposerChatTurn, ComposerLLMCall
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
@@ -53,7 +55,7 @@ from elspeth.web.composer.guided.emitters import (
     build_step_3_propose_chain_turn,
 )
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
@@ -110,6 +112,7 @@ from elspeth.web.sessions.protocol import (
 )
 from elspeth.web.sessions.schemas import (
     ChatMessageResponse,
+    ChatTurnResponse,
     CompositionStateResponse,
     CreateSessionRequest,
     ForkSessionRequest,
@@ -4588,6 +4591,17 @@ def create_session_router() -> APIRouter:
                         )
                         if terminal is not None
                         else None,
+                        chat_history=[
+                            ChatTurnResponse(
+                                role=ChatRole(t["role"]).value,
+                                content=t["content"],
+                                seq=t["seq"],
+                                step=GuidedStep(t["step"]).value,
+                                ts_iso=t["ts_iso"],
+                            )
+                            for t in guided.chat_history
+                        ],
+                        chat_turn_seq=guided.chat_turn_seq,
                     ),
                     next_turn=TurnPayloadResponse(
                         type=turn["type"],
@@ -5103,6 +5117,17 @@ def create_session_router() -> APIRouter:
                         )
                         if terminal is not None
                         else None,
+                        chat_history=[
+                            ChatTurnResponse(
+                                role=ChatRole(t["role"]).value,
+                                content=t["content"],
+                                seq=t["seq"],
+                                step=GuidedStep(t["step"]).value,
+                                ts_iso=t["ts_iso"],
+                            )
+                            for t in guided.chat_history
+                        ],
+                        chat_turn_seq=guided.chat_turn_seq,
                     ),
                     next_turn=TurnPayloadResponse(
                         type=next_turn["type"],
@@ -5272,7 +5297,9 @@ def create_session_router() -> APIRouter:
                 )
 
             settings = request.app.state.settings
-            assistant_message = await solve_step_chat_with_auto_drop(
+            recorder = BufferingRecorder()
+            started_at = datetime.now(UTC)
+            chat_result = await solve_step_chat_with_auto_drop(
                 site="post_guided_chat",
                 session_id=str(session_id),
                 user_id=user.user_id,
@@ -5280,11 +5307,94 @@ def create_session_router() -> APIRouter:
                 step=guided.step,
                 user_message=body.message,
             )
+            finished_at = datetime.now(UTC)
+
+            # Append both turns (user + assistant) to chat_history with
+            # consecutive seq values, then bump chat_turn_seq past the pair.
+            # Phase A keeps user and assistant turns in the same atomic
+            # state update — a half-applied history (user without assistant)
+            # would surface mid-flight on a concurrent /guided read.
+            ts_iso = finished_at.isoformat()
+            user_turn: ChatTurn = {
+                "role": ChatRole.USER,
+                "content": body.message,
+                "seq": guided.chat_turn_seq,
+                "step": guided.step,
+                "ts_iso": ts_iso,
+            }
+            assistant_turn: ChatTurn = {
+                "role": ChatRole.ASSISTANT,
+                "content": chat_result.assistant_message,
+                "seq": guided.chat_turn_seq + 1,
+                "step": guided.step,
+                "ts_iso": ts_iso,
+            }
+            new_guided = _replace(
+                guided,
+                chat_history=(*guided.chat_history, user_turn, assistant_turn),
+                chat_turn_seq=guided.chat_turn_seq + 2,
+            )
+
+            # Emit the ComposerChatTurn audit record.  Hashes use the
+            # project canonical ``stable_hash`` over the literal message
+            # strings — never the raw text into the audit row.  The
+            # ``initiator`` is hard-coded to ``"user"`` for Phase A;
+            # Phase A.5 will set ``"step_entry_opener"`` for proactive
+            # turns through the same record.
+            user_message_hash = stable_hash(body.message)
+            assistant_message_hash = stable_hash(chat_result.assistant_message)
+            recorder.record_chat_turn(
+                ComposerChatTurn(
+                    step=guided.step.value,
+                    initiator="user",
+                    chat_turn_seq=user_turn["seq"],
+                    user_message_hash=user_message_hash,
+                    assistant_message_hash=assistant_message_hash,
+                    latency_ms=chat_result.latency_ms,
+                    model=settings.composer_model,
+                    status=chat_result.status,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    error_class=chat_result.error_class,
+                )
+            )
+
+            # Persist the updated GuidedSession.  Mirrors the persistence
+            # pattern in ``post_guided_respond``: replace state with the
+            # new guided_session, round-trip composer_meta through
+            # ``to_dict()`` so the field carries the new chat_history /
+            # chat_turn_seq values.
+            new_state = _replace(state, guided_session=new_guided)
+            existing_meta: dict[str, Any] = {}
+            if state_record is not None and state_record.composer_meta is not None:
+                existing_meta = dict(deep_thaw(state_record.composer_meta))
+            new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
+
+            state_d = new_state.to_dict()
+            state_data = CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=False,
+                validation_errors=None,
+                composer_meta=new_composer_meta,
+            )
+            await service.save_composition_state(session_id, state_data)
+
+            # ComposerChatTurn persistence to a dedicated audit table is
+            # deferred to Phase A.5 (alongside the proactive openers'
+            # audit shape).  For Phase A the in-memory record on the
+            # BufferingRecorder is the canonical surface; the underlying
+            # ComposerLLMCall is already persisted via the chat_solver's
+            # _litellm_acompletion path, so the basic "this LLM call
+            # happened" audit trail is intact.
 
             return GuidedChatResponse(
-                assistant_message=assistant_message,
+                assistant_message=chat_result.assistant_message,
                 guided_session=GuidedSessionResponse(
-                    step=guided.step.value,
+                    step=new_guided.step.value,
                     history=[
                         TurnRecordResponse(
                             step=r.step.value,
@@ -5293,9 +5403,20 @@ def create_session_router() -> APIRouter:
                             response_hash=r.response_hash,
                             emitter=r.emitter,
                         )
-                        for r in guided.history
+                        for r in new_guided.history
                     ],
                     terminal=None,
+                    chat_history=[
+                        ChatTurnResponse(
+                            role=ChatRole(t["role"]).value,
+                            content=t["content"],
+                            seq=t["seq"],
+                            step=GuidedStep(t["step"]).value,
+                            ts_iso=t["ts_iso"],
+                        )
+                        for t in new_guided.chat_history
+                    ],
+                    chat_turn_seq=new_guided.chat_turn_seq,
                 ),
             )
 

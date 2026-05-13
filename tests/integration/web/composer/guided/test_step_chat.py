@@ -87,7 +87,13 @@ class TestStepChatSuccess:
         assert body["guided_session"]["terminal"] is None
 
     def test_echoes_unchanged_guided_session(self, composer_test_client: TestClient) -> None:
-        """Slice 3 invariant: chat does not mutate guided_session.history."""
+        """Slice 3 invariant: chat does not mutate guided_session.history.
+
+        ``history`` (the wizard turn record list) is distinct from
+        ``chat_history`` (the per-step chat).  Slice 5 introduces the latter
+        and the chat route MUST append to ``chat_history`` only; the wizard
+        ``history`` field is owned by /respond + emitters.
+        """
         session_id = _create_session(composer_test_client)
         seeded = _seed_guided_session(composer_test_client, session_id)
         history_before = seeded["guided_session"]["history"]
@@ -104,6 +110,107 @@ class TestStepChatSuccess:
             )
 
         assert body["guided_session"]["history"] == history_before
+
+    def test_appends_user_and_assistant_turns_to_chat_history(self, composer_test_client: TestClient) -> None:
+        """Slice 5: a successful chat appends BOTH turns to chat_history atomically.
+
+        chat_turn_seq advances by 2 (user.seq=0, assistant.seq=1, next=2).
+        Both turns carry the same step and a server-recorded ts_iso; the
+        sequence guarantees deterministic ordering even when two turns
+        share a wall-clock second.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("rows look fine")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="any nulls in col_a?",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        chat_history = body["guided_session"]["chat_history"]
+        assert len(chat_history) == 2
+
+        user_entry, assistant_entry = chat_history
+        assert user_entry["role"] == "user"
+        assert user_entry["content"] == "any nulls in col_a?"
+        assert user_entry["seq"] == 0
+        assert user_entry["step"] == "step_1_source"
+        assert user_entry["ts_iso"]  # non-empty ISO string
+
+        assert assistant_entry["role"] == "assistant"
+        assert assistant_entry["content"] == "rows look fine"
+        assert assistant_entry["seq"] == 1
+        assert assistant_entry["step"] == "step_1_source"
+        # Both turns produced in the same request share a single ts_iso —
+        # ordering must come from `seq`, not the timestamp.
+        assert assistant_entry["ts_iso"] == user_entry["ts_iso"]
+
+        assert body["guided_session"]["chat_turn_seq"] == 2
+
+    def test_chat_history_round_trips_through_persistence(self, composer_test_client: TestClient) -> None:
+        """Slice 5 invariant: chat_history persists across a service reload.
+
+        After a chat exchange, GET /guided must restore the same chat_history
+        and chat_turn_seq.  This exercises GuidedSession.to_dict /
+        from_dict for the new fields end-to-end through the service layer.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("ack")),
+        ):
+            _post_chat(
+                composer_test_client,
+                session_id,
+                message="ping",
+                step_index="step_1_source",
+            )
+
+        # Force a fresh load via GET /guided (reads through state_from_record).
+        resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+        assert resp.status_code == 200, resp.json()
+        reloaded = resp.json()["guided_session"]
+
+        assert reloaded["chat_turn_seq"] == 2
+        assert len(reloaded["chat_history"]) == 2
+        assert reloaded["chat_history"][0]["content"] == "ping"
+        assert reloaded["chat_history"][1]["content"] == "ack"
+
+    def test_two_chat_turns_advance_seq_monotonically(self, composer_test_client: TestClient) -> None:
+        """Slice 5: chat_turn_seq is monotonic across multiple chat turns in the same step."""
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("first reply")),
+        ):
+            _post_chat(composer_test_client, session_id, message="first", step_index="step_1_source")
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("second reply")),
+        ):
+            _, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="second",
+                step_index="step_1_source",
+            )
+
+        # After two chats: seq advances 0,1,2,3 then next=4.
+        chat_history = body["guided_session"]["chat_history"]
+        assert [entry["seq"] for entry in chat_history] == [0, 1, 2, 3]
+        assert [entry["content"] for entry in chat_history] == ["first", "first reply", "second", "second reply"]
+        assert body["guided_session"]["chat_turn_seq"] == 4
 
 
 class TestStepChatRejections:
@@ -310,8 +417,19 @@ class TestStepChatTransientFailure:
         # Session is unchanged: still at step_1, no terminal.
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["guided_session"]["terminal"] is None
-        # History is not mutated by the failed chat.
+        # Wizard `history` is not mutated by the failed chat; the chat
+        # round-trip lives in `chat_history` only.
         assert body["guided_session"]["history"] == seeded["guided_session"]["history"]
+        # Slice 5: even on synthetic-message, the chat IS appended to
+        # chat_history.  The auditor must be able to see "this user typed
+        # X and got the synthetic reply" — that's the audit value of
+        # SYNTHETIC_UNAVAILABLE in ComposerChatTurnStatus.  ChatTurnStatus
+        # is the discriminator; on the wire (Phase A) the user sees the
+        # synthetic content directly.
+        chat_history = body["guided_session"]["chat_history"]
+        assert len(chat_history) == 2
+        assert chat_history[0]["content"] == "anything"
+        assert chat_history[1]["content"] == "I'm unavailable right now; you can still use the wizard controls."
 
     def test_malformed_litellm_response_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
         """Empty choices list (IndexError in solve_step_chat) → synthetic message."""

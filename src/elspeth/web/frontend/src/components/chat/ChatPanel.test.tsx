@@ -152,6 +152,8 @@ describe("ChatPanel mode discriminator", () => {
       step: "step_1_source",
       history: [],
       terminal: null,
+      chat_history: [],
+      chat_turn_seq: 0,
     };
   }
 
@@ -310,6 +312,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_3_transforms",
         history: completedHistory,
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedTerminal: terminal,
     });
@@ -355,6 +359,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_3_transforms",
         history: [],
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedTerminal: terminal,
     });
@@ -403,6 +409,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_1_source",
         history: [],
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedNextTurn: null,
       guidedTerminal: terminal,
@@ -477,6 +485,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_3_transforms",
         history: [],
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedTerminal: terminal,
     });
@@ -540,7 +550,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
   };
 
   function activeGuidedSession(): GuidedSession {
-    return { step: "step_1_source", history: [], terminal: null };
+    return { step: "step_1_source", history: [], terminal: null, chat_history: [], chat_turn_seq: 0 };
   }
 
   // Options are intentionally distinct per step so that test 2's assertion at

@@ -228,12 +228,37 @@ class TerminalStateResponse(_StrictResponse):
     pipeline_yaml: str | None
 
 
+class ChatTurnResponse(_StrictResponse):
+    """Wire representation of one entry in :attr:`GuidedSessionResponse.chat_history`.
+
+    Mirrors :class:`elspeth.web.composer.guided.protocol.ChatTurn`.  Field
+    values are server-emitted (Tier 1) — ``role`` is one of ``"user"`` or
+    ``"assistant"``, ``step`` is a :class:`GuidedStep` value, ``ts_iso``
+    is the ISO 8601 timestamp the turn was appended to ``chat_history``.
+    """
+
+    role: str
+    content: str
+    seq: int
+    step: str
+    ts_iso: str
+
+
 class GuidedSessionResponse(_StrictResponse):
     """Wire representation of the GuidedSession attached to a CompositionState."""
 
     step: str
     history: list[TurnRecordResponse]
     terminal: TerminalStateResponse | None
+    # Phase A slice 5 — per-step chat history persisted on the GuidedSession.
+    # Required (no Pydantic default) so every route surfacing a
+    # GuidedSessionResponse must explicitly pass the live values.  A default
+    # of ``[]`` / ``0`` here would hide drift: a route that forgot to thread
+    # ``guided.chat_history`` through would silently return an empty wire
+    # field while the server held real history.  Per CLAUDE.md auditability
+    # standard, that is evidence tampering.
+    chat_history: list[ChatTurnResponse]
+    chat_turn_seq: int
 
 
 class TurnPayloadResponse(_StrictResponse):

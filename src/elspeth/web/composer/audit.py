@@ -56,7 +56,12 @@ from elspeth.contracts.composer_audit import (
     ComposerToolRecorder,
     ComposerToolStatus,
 )
-from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallRecorder
+from elspeth.contracts.composer_llm_audit import (
+    ComposerChatTurn,
+    ComposerChatTurnRecorder,
+    ComposerLLMCall,
+    ComposerLLMCallRecorder,
+)
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.composer.protocol import ToolArgumentError
 
@@ -176,7 +181,7 @@ def build_canonicalization_sentinel(
     return sentinel
 
 
-class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
+class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder, ComposerChatTurnRecorder):
     """Append-only in-memory buffer for composer audit records.
 
     Used inside :meth:`ComposerServiceImpl._compose_loop`. The buffer is
@@ -193,6 +198,7 @@ class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
     def __init__(self) -> None:
         self._invocations: list[ComposerToolInvocation] = []
         self._llm_calls: list[ComposerLLMCall] = []
+        self._chat_turns: list[ComposerChatTurn] = []
         self._lock = threading.Lock()
 
     def record(self, invocation: ComposerToolInvocation) -> None:
@@ -202,6 +208,16 @@ class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
     def record_llm_call(self, call: ComposerLLMCall) -> None:
         with self._lock:
             self._llm_calls.append(call)
+
+    def record_chat_turn(self, turn: ComposerChatTurn) -> None:
+        """Append a :class:`ComposerChatTurn` record (Phase A slice 5).
+
+        Persistence to the audit DB is wired by the route handler via
+        the future ``_persist_chat_turns`` helper; this buffer is the
+        in-memory staging area for the request's per-turn records.
+        """
+        with self._lock:
+            self._chat_turns.append(turn)
 
     @property
     def invocations(self) -> tuple[ComposerToolInvocation, ...]:
@@ -214,6 +230,12 @@ class BufferingRecorder(ComposerToolRecorder, ComposerLLMCallRecorder):
         """Snapshot the current LLM-call buffer as an immutable tuple."""
         with self._lock:
             return tuple(self._llm_calls)
+
+    @property
+    def chat_turns(self) -> tuple[ComposerChatTurn, ...]:
+        """Snapshot the current chat-turn buffer as an immutable tuple."""
+        with self._lock:
+            return tuple(self._chat_turns)
 
     def resolve_session(self, session_id: str) -> None:
         """Protocol no-op — the in-memory buffer has nothing to flush.

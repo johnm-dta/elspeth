@@ -10,6 +10,7 @@ import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory, make_landscape_db
@@ -63,6 +64,34 @@ class TestJSONSink:
                     "collision_policy": "fail_if_exists",
                 }
             )
+
+        assert json.loads(output_file.read_text()) == [{"id": 0}]
+
+    def test_preflight_mode_defers_fail_if_exists_collision_until_write(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+    ) -> None:
+        """Preflight construction must not observe local sink output collisions."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        output_file.write_text('[{"id": 0}]')
+
+        with plugin_preflight_mode(True):
+            sink = JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "json",
+                    "schema": DYNAMIC_SCHEMA,
+                    "collision_policy": "fail_if_exists",
+                }
+            )
+
+        assert json.loads(output_file.read_text()) == [{"id": 0}]
+
+        with pytest.raises(FileExistsError, match="already exists"):
+            sink.write([{"id": 1}], ctx)
 
         assert json.loads(output_file.read_text()) == [{"id": 0}]
 

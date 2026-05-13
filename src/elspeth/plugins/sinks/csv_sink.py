@@ -37,6 +37,7 @@ from elspeth.plugins.infrastructure.output_paths import (
     should_create_exclusively,
     validate_output_collision_policy_mode,
 )
+from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 
 
@@ -109,7 +110,7 @@ class CSVSink(BaseSink):
 
     name = "csv"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c24ad00a6582427b"
+    source_file_hash: str | None = "sha256:c94039f2fa46794f"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -221,7 +222,7 @@ class CSVSink(BaseSink):
         self._mode = cfg.mode
         self._collision_policy = cfg.collision_policy
         self._write_target_claimed = False
-        if self._mode != "append":
+        if self._mode != "append" and not plugin_preflight_mode_enabled():
             self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
 
         # Display header state (shared module handles all modes)

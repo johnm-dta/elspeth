@@ -1040,10 +1040,10 @@ def validate_pipeline(
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     except FileExistsError as exc:
-        # File-sink collision raised by ``resolve_output_collision_path`` from
-        # within the sink ``__init__`` (json/csv sinks call it eagerly during
-        # plugin construction). Two raise sites in
-        # ``plugins/infrastructure/output_paths.py``:
+        # Belt-and-braces conversion for plugins that still perform filesystem
+        # collision checks during construction. Built-in local file sinks skip
+        # this check during runtime preflight and defer it to first write.
+        # Known raise sites in ``plugins/infrastructure/output_paths.py``:
         #
         # * line 48 — ``collision_policy="fail_if_exists"`` and the target path
         #   already exists.
@@ -1058,9 +1058,6 @@ def validate_pipeline(
         # exception does not carry sink-name attribution at this layer
         # (sinks raise ``FileExistsError`` directly without wrapping); the
         # message text contains the path, which is operator-actionable.
-        # Sink-name attribution is achievable architecturally by deferring
-        # the fs check until write-init time (filed separately) — out of
-        # scope here.
         detail = str(exc)
         checks.append(
             ValidationCheck(

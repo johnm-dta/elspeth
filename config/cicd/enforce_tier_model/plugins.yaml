@@ -195,21 +195,21 @@ allow_hits:
     is genuinely optional with empty-string default
   safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
   expires: '2026-07-02'
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:validate_output_target:fp=4f1ac56ede069b6c
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:validate_output_target:fp=4efa7c4c4895f0f4
   owner: feature
   reason: Display header mapping - fields not in map keep original name (transform-added
     fields)
   safety: Intentional fallback to original field name, not bug hiding
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=0146cfe5e62af33f
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=f40f66f9e32a0cbd
   owner: feature
   reason: Intentional fallback - reverse mapping may not contain all fields (transform-added)
   safety: Falls back to original field name - correct behavior for fields not in source
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=2c0175dc21d2253c
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=41a70dac3b172c7d
   owner: feature
   reason: Intentional fallback - display mapping may not contain all fields (transform-added)
   safety: Falls back to normalized field name - correct behavior for fields not in
     source
-- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=dfe658cafe4cfb1e
+- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=408917b25fecf17c
   owner: feature
   reason: Display header mapping - fields not in map keep original name (transform-added
     fields)

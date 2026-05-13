@@ -2977,20 +2977,13 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
             version=1,
         )
 
-    def test_composer_validate_converts_file_sink_collision_to_structured_error(self, tmp_path: Path) -> None:
-        """Pre-existing sink path + ``fail_if_exists`` policy → structured
-        ``is_valid=False`` (not an uncaught ``FileExistsError``).
-
-        Mirrors the eval session S3 trajectory: an LLM-built file sink
-        whose path collides with a stale on-disk artifact. The composer's
-        ``/validate`` (and the post-compose ``_state_data_from_composer_state``
-        in ``routes.py``) must surface this as a structured 422-class
-        diagnostic, not a 500.
-        """
+    def test_composer_validate_does_not_probe_file_sink_collision_in_preflight(self, tmp_path: Path) -> None:
+        """Preflight validation must not inspect local file-sink collisions."""
         csv_path = self._csv_input(tmp_path)
 
-        # Pre-create the sink target so resolve_output_collision_path's
-        # fail_if_exists branch fires inside json_sink.__init__.
+        # Pre-create the sink target. Runtime execution with fail_if_exists
+        # must still reject this, but composer preflight must not observe
+        # local filesystem collision state during plugin construction.
         sink_path = tmp_path / "outputs" / "all.jsonl"
         sink_path.parent.mkdir(parents=True, exist_ok=True)
         sink_path.write_text("", encoding="utf-8")  # any pre-existing content
@@ -2998,43 +2991,19 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
 
         state = self._build_state(csv_path, sink_path)
 
-        # The fix landing point: this call must NOT raise FileExistsError.
-        # Pre-fix it would have propagated as an uncaught exception out of
-        # validate_pipeline (the bug-verification protocol confirms this).
         result = validate_pipeline(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
         )
 
-        assert result.is_valid is False, (
-            "Composer must reject pipelines whose sink path collides with an existing file under fail_if_exists; got is_valid=True"
-        )
+        assert result.is_valid is True
 
         check_by_name = {check.name: check for check in result.checks}
         assert "plugin_instantiation" in check_by_name, "Missing plugin_instantiation check"
         plugin_check = check_by_name["plugin_instantiation"]
-        assert plugin_check.passed is False, f"plugin_instantiation must fail on fs collision; got detail={plugin_check.detail!r}"
-        assert "already exists" in plugin_check.detail, f"Detail must name the collision; got {plugin_check.detail!r}"
-        assert str(sink_path) in plugin_check.detail, f"Detail must include the colliding path; got {plugin_check.detail!r}"
-
-        # Downstream checks must be marked as skipped (not run) since plugin
-        # instantiation failed — this is the same shape as
-        # PluginNotFoundError / PluginConfigError handling.
-        for downstream in ("graph_structure", "route_target_resolution", "schema_compatibility"):
-            assert check_by_name[downstream].passed is False, f"{downstream} must be skipped after plugin_instantiation fail"
-            assert "Skipped" in check_by_name[downstream].detail, (
-                f"{downstream} should be marked as skipped; got {check_by_name[downstream].detail!r}"
-            )
-
-        # Structured error carries operator-actionable suggestion (auto_increment).
-        assert len(result.errors) >= 1, "Result must carry at least one ValidationError"
-        sink_errors = [e for e in result.errors if e.component_type == "sink"]
-        assert len(sink_errors) == 1, f"Expected one sink-attributed error; got {len(sink_errors)}"
-        err = sink_errors[0]
-        assert "already exists" in err.message
-        assert err.suggestion is not None
-        assert "auto_increment" in err.suggestion, f"Suggestion must mention auto_increment; got {err.suggestion!r}"
+        assert plugin_check.passed is True, f"plugin_instantiation must not probe fs collisions; got {plugin_check.detail!r}"
+        assert result.errors == []
 
     def test_composer_validate_passes_when_sink_path_does_not_collide(self, tmp_path: Path) -> None:
         """Positive control: same state with a non-existing sink path passes

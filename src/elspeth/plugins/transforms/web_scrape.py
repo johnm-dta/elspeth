@@ -330,7 +330,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c63323732f35c0f4"
+    source_file_hash: str | None = "sha256:975a6c280112b152"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -557,14 +557,13 @@ class WebScrapeTransform(BaseTransform):
             WebScrapeError: For retryable failures (5xx, 429, network)
                 Engine RetryManager handles these with exponential backoff
         """
-        url = row[self._url_field]
-
         # Validate URL and pin resolved IP (SSRF prevention with DNS rebinding defense)
         try:
+            url = row[self._url_field]
             safe_request = validate_url_for_ssrf(url, allowed_ranges=self._allowed_ranges)
-        except (SSRFBlockedError, SSRFNetworkError, TypeError) as e:
-            # Security violations, DNS failures, and invalid url types (e.g. None)
-            # are non-retryable
+        except (KeyError, SSRFBlockedError, SSRFNetworkError, TypeError) as e:
+            # Missing row fields, security violations, DNS failures, and invalid
+            # URL value types are row-level validation failures, not retries.
             return TransformResult.error(
                 {
                     "reason": "validation_failed",

@@ -225,10 +225,18 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
       />
 
       {/* Drawer panel */}
-      <div ref={drawerRef} className="catalog-drawer">
+      <div
+        ref={drawerRef}
+        className="catalog-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="catalog-drawer-title"
+      >
         {/* Header */}
         <div className="catalog-header">
-          <span className="catalog-header-title">Plugin Catalog</span>
+          <span id="catalog-drawer-title" className="catalog-header-title">
+            Plugin Catalog
+          </span>
           <button
             onClick={onClose}
             aria-label="Close plugin catalog"

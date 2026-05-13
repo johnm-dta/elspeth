@@ -42,6 +42,14 @@ describe("CatalogDrawer", () => {
     });
   });
 
+  it("announces the open drawer as a modal dialog", async () => {
+    render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
+
+    const dialog = screen.getByRole("dialog", { name: "Plugin Catalog" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    await screen.findByText("CSV file source");
+  });
+
   it("shows three tabs", async () => {
     render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
     await waitFor(() => {

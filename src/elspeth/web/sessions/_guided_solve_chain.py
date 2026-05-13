@@ -21,7 +21,7 @@ import structlog
 
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.audit import emit_dropped_to_freeform
-from elspeth.web.composer.guided.chain_solver import solve_chain
+from elspeth.web.composer.guided.chain_solver import ChainSolverResponseShapeError, solve_chain
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -100,6 +100,12 @@ async def solve_chain_with_auto_drop(
     ``AttributeError``, and ``json.JSONDecodeError`` cover malformed-response
     shape from ``chain_solver._extract_tool_call`` (empty ``choices``,
     missing ``message``, invalid tool-call JSON).
+    ``ChainSolverResponseShapeError`` covers shape failures one layer deeper:
+    wrong tool name, wrong ``turn_type``, missing or malformed
+    ``payload.steps`` / ``payload.why``.  All such failures are
+    external-system (LLM) shape misbehaviour, not server bugs -- routing
+    them through the auto-drop path matches what the codebase already does
+    for sibling shape failures at the LiteLLM-response level.
 
     ``asyncio.CancelledError`` is deliberately NOT in the set — client
     disconnects must propagate, not be silently absorbed as a "drop".
@@ -140,6 +146,7 @@ async def solve_chain_with_auto_drop(
         IndexError,
         AttributeError,
         json.JSONDecodeError,
+        ChainSolverResponseShapeError,
     ) as exc:
         slog.error(
             "guided.chain_solver_transient_failure",

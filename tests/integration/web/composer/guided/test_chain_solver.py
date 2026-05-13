@@ -220,6 +220,291 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
     assert "REPAIR ATTEMPT" not in system_content
 
 
+# ---------------------------------------------------------------------------
+# Schema and shape-failure tests (P2 — chain-solver response-shape constraint).
+#
+# The LLM tool schema (``_GUIDED_LLM_TOOLS``) is the primary defense; the
+# consumer-side parsing block is the backstop.  These tests pin both layers:
+#   * Schema shape — ``turn_type`` enum is restricted to ``["propose_chain"]``;
+#     ``payload`` requires ``steps`` and ``why``.  If anyone widens the schema
+#     by accident, the first test fires.
+#   * Consumer-side: any tool-call name / turn_type / payload shape mismatch
+#     raises :class:`ChainSolverResponseShapeError` (NOT ``InvariantError`` or
+#     ``KeyError``).  The auto-drop wrapper catches this class and routes
+#     through SOLVER_EXHAUSTED -- integration coverage lives in
+#     ``test_auto_drop.py::TestI2ChainSolverTransientFailure``.
+# ---------------------------------------------------------------------------
+
+
+def test_tool_schema_constrains_turn_type_to_propose_chain_only() -> None:
+    """The LLM tool schema must restrict ``turn_type`` to a single value.
+
+    Widening the enum here without updating the consumer would re-introduce
+    the P2 bug (LLM returns an allowed-but-unhandled turn_type, request
+    escapes as a shape error instead of taking the auto-drop path).
+    """
+    from elspeth.web.composer.guided.chain_solver import _GUIDED_LLM_TOOLS
+
+    params = _GUIDED_LLM_TOOLS[0]["function"]["parameters"]
+    assert params["properties"]["turn_type"]["enum"] == ["propose_chain"]
+
+
+def test_tool_schema_constrains_payload_required_keys() -> None:
+    """The LLM tool schema must declare ``steps`` and ``why`` as required.
+
+    Strict-mode-capable providers (OpenAI) enforce this at the wire; for
+    others, the consumer-side backstop in ``solve_chain`` is the safety net.
+    Either way, this test pins the contract.
+    """
+    from elspeth.web.composer.guided.chain_solver import _GUIDED_LLM_TOOLS
+
+    params = _GUIDED_LLM_TOOLS[0]["function"]["parameters"]
+    payload_schema = params["properties"]["payload"]
+    assert sorted(payload_schema["required"]) == ["steps", "why"]
+    assert payload_schema["additionalProperties"] is False
+
+
+def _make_solve_chain_args() -> dict:
+    """Common solve_chain kwargs for the shape-failure tests below."""
+    from elspeth.web.composer.guided.state_machine import (
+        SinkOutputResolved,
+        SinkResolved,
+        SourceResolved,
+    )
+
+    return {
+        "model": "anthropic/claude-3-opus",
+        "source": SourceResolved(
+            plugin="csv",
+            options={},
+            observed_columns=("price",),
+            sample_rows=({"price": "1.99"},),
+        ),
+        "sink": SinkResolved(
+            outputs=(
+                SinkOutputResolved(
+                    plugin="json",
+                    options={},
+                    required_fields=("price",),
+                    schema_mode="fixed",
+                ),
+            )
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_solve_chain_wrong_tool_name_raises_shape_error() -> None:
+    from elspeth.web.composer.guided.chain_solver import (
+        ChainSolverResponseShapeError,
+        solve_chain,
+    )
+
+    wrong_name_response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(name="not_emit_turn", arguments="{}"),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    with (
+        patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=wrong_name_response,
+        ),
+        pytest.raises(ChainSolverResponseShapeError, match="emit_turn"),
+    ):
+        await solve_chain(**_make_solve_chain_args())
+
+
+@pytest.mark.asyncio
+async def test_solve_chain_wrong_turn_type_raises_shape_error() -> None:
+    from elspeth.web.composer.guided.chain_solver import (
+        ChainSolverResponseShapeError,
+        solve_chain,
+    )
+
+    wrong_type = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps({"turn_type": "single_select", "payload": {}}),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    with (
+        patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=wrong_type,
+        ),
+        pytest.raises(ChainSolverResponseShapeError, match="propose_chain"),
+    ):
+        await solve_chain(**_make_solve_chain_args())
+
+
+@pytest.mark.asyncio
+async def test_solve_chain_missing_payload_steps_raises_shape_error() -> None:
+    from elspeth.web.composer.guided.chain_solver import (
+        ChainSolverResponseShapeError,
+        solve_chain,
+    )
+
+    missing_steps = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps({"turn_type": "propose_chain", "payload": {"why": "no steps"}}),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    with (
+        patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=missing_steps,
+        ),
+        pytest.raises(ChainSolverResponseShapeError, match="steps/why"),
+    ):
+        await solve_chain(**_make_solve_chain_args())
+
+
+@pytest.mark.asyncio
+async def test_solve_chain_missing_payload_why_raises_shape_error() -> None:
+    from elspeth.web.composer.guided.chain_solver import (
+        ChainSolverResponseShapeError,
+        solve_chain,
+    )
+
+    missing_why = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {
+                                            "steps": [
+                                                {
+                                                    "plugin": "noop",
+                                                    "options": {},
+                                                    "rationale": "stub",
+                                                }
+                                            ]
+                                        },
+                                    }
+                                ),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    with (
+        patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=missing_why,
+        ),
+        pytest.raises(ChainSolverResponseShapeError, match="steps/why"),
+    ):
+        await solve_chain(**_make_solve_chain_args())
+
+
+@pytest.mark.asyncio
+async def test_solve_chain_non_dict_step_element_raises_shape_error() -> None:
+    """``payload.steps`` element that isn't dict-coercible (e.g., a bare int)
+    must fail in the ``tuple(dict(s) for s in ...)`` coercion and surface as
+    :class:`ChainSolverResponseShapeError`, not :class:`TypeError`."""
+    from elspeth.web.composer.guided.chain_solver import (
+        ChainSolverResponseShapeError,
+        solve_chain,
+    )
+
+    bad_step = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {"steps": [42], "why": "garbage step"},
+                                    }
+                                ),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    with (
+        patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=bad_step,
+        ),
+        pytest.raises(ChainSolverResponseShapeError, match="list of dicts"),
+    ):
+        await solve_chain(**_make_solve_chain_args())
+
+
+@pytest.mark.asyncio
+async def test_solve_chain_empty_tool_calls_raises_shape_error() -> None:
+    """An empty ``tool_calls`` list -- the LLM responded without invoking
+    the tool -- is an external-system shape failure, not a server
+    invariant violation.  ``_extract_tool_call`` now raises
+    :class:`ChainSolverResponseShapeError` for consistency with the other
+    shape-failure paths."""
+    from elspeth.web.composer.guided.chain_solver import (
+        ChainSolverResponseShapeError,
+        solve_chain,
+    )
+
+    no_tool_calls = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[]))])
+    with (
+        patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=no_tool_calls,
+        ),
+        pytest.raises(ChainSolverResponseShapeError, match="no tool_calls"),
+    ):
+        await solve_chain(**_make_solve_chain_args())
+
+
 @pytest.mark.asyncio
 async def test_model_and_temperature_passed_to_litellm() -> None:
     """solve_chain passes the supplied model and temperature=0.0 to _litellm_acompletion.

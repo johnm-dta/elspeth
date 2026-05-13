@@ -92,7 +92,7 @@ class JSONSink(BaseSink):
 
     name = "json"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:cd491a54ae1a7a03"
+    source_file_hash: str | None = "sha256:53649302a2a03840"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -270,6 +270,10 @@ class JSONSink(BaseSink):
         self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
         self._write_target_claimed = True
 
+    def _ensure_output_parent_exists(self) -> None:
+        """Create the selected local output directory before opening files."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
     def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
         """Write a batch of rows to the JSON file.
 
@@ -379,6 +383,7 @@ class JSONSink(BaseSink):
                         msg_parts.append(f"Extra fields: {list(validation.extra_fields)}")
                     raise ValueError(". ".join(msg_parts))
 
+            self._ensure_output_parent_exists()
             self._file = open(self._path, file_mode, encoding=self._encoding)  # noqa: SIM115
 
     def _write_jsonl_content(self, rows: list[dict[str, Any]]) -> None:
@@ -406,6 +411,7 @@ class JSONSink(BaseSink):
             raise ValueError("JSONSink format='json' does not support mode='append'. Use format='jsonl' for append/resume output.")
 
         self._claim_write_target()
+        self._ensure_output_parent_exists()
         temp_path = self._path.with_suffix(self._path.suffix + ".tmp")
         try:
             with open(temp_path, "w", encoding=self._encoding) as f:

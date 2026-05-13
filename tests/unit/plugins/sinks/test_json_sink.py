@@ -112,6 +112,31 @@ class TestJSONSink:
         assert json.loads(lines[0])["name"] == "alice"
         assert json.loads(lines[1])["name"] == "bob"
 
+    def test_write_jsonl_creates_missing_parent_directory(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """JSONL sink output should create its configured parent directory."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "missing" / "nested" / "output.jsonl"
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}))
+
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.flush()
+        sink.close()
+
+        assert json.loads(output_file.read_text().strip()) == {"id": 1, "name": "alice"}
+
+    def test_write_json_array_creates_missing_parent_directory(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """JSON array sink output should create its configured parent directory."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "missing" / "nested" / "output.json"
+        sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
+
+        sink.write([{"id": 1, "name": "alice"}], ctx)
+        sink.close()
+
+        assert json.loads(output_file.read_text()) == [{"id": 1, "name": "alice"}]
+
     def test_auto_detect_format_from_extension(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Auto-detect JSONL format from .jsonl extension."""
         from elspeth.plugins.sinks.json_sink import JSONSink

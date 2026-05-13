@@ -1531,7 +1531,7 @@ Task 9 below adds `count_tool_responses_for_assistant_async`; this task wires th
 
 Expected: PASS once Task 9 is in.
 
-- [ ] **Step 4: Commit (combined with Task 9's helper).**
+- [x] **Step 4: Commit (combined with Task 9's helper).**
 
 This task's commit is paired with Task 9 because the route-layer wiring is meaningless without the helper. See Task 9 Step 5.
 
@@ -1674,7 +1674,7 @@ In `src/elspeth/web/sessions/protocol.py`, add the method to `SessionServiceProt
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit (paired with Task 8's wiring).**
+- [x] **Step 5: Commit (paired with Task 8's wiring).**
 
 ```bash
 git commit -am "feat(sessions): count_tool_responses_for_assistant + failed_turn response field (composer-progress-persistence phase 3)"
@@ -1691,7 +1691,7 @@ Extend the existing messages endpoint with the new query parameter and the new r
 - Modify: `src/elspeth/web/sessions/schemas.py` (message response model — add `tool_call_id`, `parent_assistant_id`, `sequence_no`)
 - Create: `tests/unit/web/sessions/test_messages_route_include_tool_rows.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 ```python
 """GET /api/sessions/{sid}/messages — include_tool_rows query parameter
@@ -1748,7 +1748,7 @@ def test_response_rows_expose_new_columns(
 
 Expected: FAIL.
 
-- [ ] **Step 2: Extend the response schema.**
+- [x] **Step 2: Extend the response schema.**
 
 In `src/elspeth/web/sessions/schemas.py`, the existing message response model gains three optional fields:
 
@@ -1760,7 +1760,7 @@ class MessageResponse(BaseModel):
     sequence_no: int  # NOT None — every row has one
 ```
 
-- [ ] **Step 3: Extend the endpoint.**
+- [x] **Step 3: Extend the endpoint.**
 
 ```python
 @router.get("/api/sessions/{session_id}/messages")
@@ -1791,7 +1791,7 @@ async def list_messages(
 
 `SessionServiceImpl.list_messages` already exists for the default case — extend it to accept `include_tool_rows: bool` and conditionally widen the role filter. Default ordering is `(sequence_no ASC)` per spec §6.2.
 
-- [ ] **Step 4: Re-run the test.**
+- [x] **Step 4: Re-run the test.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/sessions/test_messages_route_include_tool_rows.py -v

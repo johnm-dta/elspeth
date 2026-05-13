@@ -268,6 +268,9 @@ def _message_response(msg: ChatMessageRecord, *, include_raw_content: bool = Fal
         tool_calls=deep_thaw(msg.tool_calls) if msg.tool_calls is not None else None,
         created_at=msg.created_at,
         composition_state_id=str(msg.composition_state_id) if msg.composition_state_id else None,
+        tool_call_id=msg.tool_call_id,
+        parent_assistant_id=str(msg.parent_assistant_id) if msg.parent_assistant_id else None,
+        sequence_no=msg.sequence_no,
     )
 
 
@@ -787,6 +790,22 @@ def _composer_conversation_messages(messages: Sequence[ChatMessageRecord]) -> li
 def _composer_conversation_or_llm_audit_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
     """Return user-visible conversation plus safe per-LLM-call audit sidecars."""
     return [message for message in messages if not _is_composer_audit_tool_message(message) or _is_composer_llm_audit_tool_message(message)]
+
+
+def _composer_conversation_or_tool_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
+    """Return user-visible conversation plus real assistant-linked tool rows."""
+
+    return [message for message in messages if message.role == "tool" or not _is_composer_audit_tool_message(message)]
+
+
+def _composer_conversation_tool_or_llm_audit_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
+    """Return conversation, tool rows, and safe per-LLM-call audit sidecars."""
+
+    return [
+        message
+        for message in messages
+        if message.role == "tool" or not _is_composer_audit_tool_message(message) or _is_composer_llm_audit_tool_message(message)
+    ]
 
 
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
@@ -4137,6 +4156,7 @@ def create_session_router() -> APIRouter:
         offset: int = Query(0, ge=0),
         include_llm_audit: bool = Query(False),
         include_raw_content: bool = Query(False),
+        include_tool_rows: bool = Query(False),
     ) -> list[ChatMessageResponse]:
         """Get conversation history for a session.
 
@@ -4155,9 +4175,14 @@ def create_session_router() -> APIRouter:
         # to LLM-call sidecars, which contain model/usage/cost metadata but not
         # raw prompts, tool arguments, or tool results.
         messages = await service.get_messages(session.id, limit=None)
-        conversation_messages = (
-            _composer_conversation_or_llm_audit_messages(messages) if include_llm_audit else _composer_conversation_messages(messages)
-        )
+        if include_tool_rows and include_llm_audit:
+            conversation_messages = _composer_conversation_tool_or_llm_audit_messages(messages)
+        elif include_tool_rows:
+            conversation_messages = _composer_conversation_or_tool_messages(messages)
+        elif include_llm_audit:
+            conversation_messages = _composer_conversation_or_llm_audit_messages(messages)
+        else:
+            conversation_messages = _composer_conversation_messages(messages)
         paged_messages = conversation_messages[offset : offset + limit]
         return [_message_response(m, include_raw_content=include_raw_content) for m in paged_messages]
 
@@ -4551,6 +4576,7 @@ def create_session_router() -> APIRouter:
                         raw_content=user_msg.raw_content,
                         tool_calls=user_msg.tool_calls,
                         created_at=user_msg.created_at,
+                        sequence_no=user_msg.sequence_no,
                         composition_state_id=copied_state.id,
                         writer_principal=user_msg.writer_principal,
                         tool_call_id=user_msg.tool_call_id,

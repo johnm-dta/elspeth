@@ -190,6 +190,7 @@ class ChatMessageRecord:
     content: str
     created_at: datetime
     writer_principal: ChatMessageWriterPrincipal
+    sequence_no: int | None = None
     raw_content: str | None = None
     tool_calls: Sequence[Mapping[str, Any]] | None = None
     composition_state_id: UUID | None = None

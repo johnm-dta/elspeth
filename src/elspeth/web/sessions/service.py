@@ -1239,6 +1239,7 @@ class SessionServiceImpl:
         csid = str(composition_state_id) if composition_state_id else None
         pid = str(parent_assistant_id) if parent_assistant_id else None
         msg_id_holder: dict[str, str] = {}
+        sequence_holder: dict[str, int] = {}
 
         def _sync() -> None:
             with self._engine.begin() as conn:
@@ -1251,6 +1252,7 @@ class SessionServiceImpl:
                     )
                 with self._session_write_lock(conn, sid):
                     seq = self._reserve_sequence_range(conn, sid, count=1)
+                    sequence_holder["sequence_no"] = seq
                     msg_id_holder["id"] = self._insert_chat_message(
                         conn,
                         session_id=sid,
@@ -1283,6 +1285,7 @@ class SessionServiceImpl:
             raw_content=raw_content,
             tool_calls=tool_calls,
             created_at=now,
+            sequence_no=sequence_holder["sequence_no"],
             composition_state_id=composition_state_id,
             writer_principal=writer_principal,
             tool_call_id=tool_call_id,
@@ -1327,6 +1330,7 @@ class SessionServiceImpl:
                 raw_content=row.raw_content,
                 tool_calls=row.tool_calls,
                 created_at=self._ensure_utc(row.created_at),
+                sequence_no=row.sequence_no,
                 composition_state_id=UUID(row.composition_state_id) if row.composition_state_id else None,
                 writer_principal=row.writer_principal,
                 tool_call_id=row.tool_call_id,
@@ -2342,6 +2346,7 @@ class SessionServiceImpl:
                 raw_content=d["raw_content"],
                 tool_calls=d["tool_calls"],
                 created_at=d["created_at"],
+                sequence_no=d["sequence_no"],
                 composition_state_id=UUID(d["composition_state_id"]) if d["composition_state_id"] else None,
                 writer_principal=d["writer_principal"],
                 tool_call_id=d["tool_call_id"],

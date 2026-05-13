@@ -119,10 +119,26 @@ def _outputs_path(client: TestClient, filename: str) -> str:
 
 
 def _get_tool_messages(client: TestClient, session_id: str) -> list:
-    """Return all role=tool messages for this session from the session service."""
+    """Return audit-bearing messages for this session.
+
+    Post Phase-1B/rev-4 (`_persist_tool_invocations`), audit rows split by
+    parent linkage:
+    - ``role='tool'`` when paired with a parent assistant message (compose
+      success path).
+    - ``role='audit'`` when no parent assistant exists (convergence /
+      preflight / guided-endpoint paths — see ``_persist_tool_invocations``
+      docstring at routes.py:850).
+
+    Guided-mode audit invocations (``guided_turn_emitted`` /
+    ``guided_turn_answered`` / ``guided_step_advanced`` /
+    ``guided_dropped_to_freeform``) ride on the ``role='audit'`` channel
+    because the guided GET/POST endpoints emit the events server-side
+    without a paired assistant chat message. Filtering only ``role='tool'``
+    here would silently exclude every guided event the tests assert on.
+    """
     service = client.app.state.session_service
     msgs = asyncio.run(service.get_messages(UUID(session_id), limit=None))
-    return [m for m in msgs if m.role == "tool"]
+    return [m for m in msgs if m.role in ("tool", "audit")]
 
 
 def _extract_guided_invocations(client: TestClient, session_id: str) -> dict[str, list[dict]]:
@@ -670,7 +686,7 @@ class TestRejectionPathAuditDrain:
             validation_errors=None,
             composer_meta={},  # No guided_session key → freeform.
         )
-        asyncio.run(service.save_composition_state(UUID(session_id), freeform_state))
+        asyncio.run(service.save_composition_state(UUID(session_id), freeform_state, provenance="session_seed"))
 
         resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
         assert resp.status_code == 400, resp.json()

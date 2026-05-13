@@ -13,12 +13,17 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
 import yaml
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_audit import (
+    ComposerToolInvocation,
+    ComposerToolStatus,
+)
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape.database import LandscapeDB
@@ -60,6 +65,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # Sentinel empty state for mock composer responses
@@ -139,9 +145,10 @@ def _llm_call_audit_tool_calls(call: ComposerLLMCall | None = None) -> list[dict
 
 
 def _llm_call_audit_rows(messages: Sequence[ChatMessageRecord]) -> list[tuple[ChatMessageRecord, Mapping[str, Any]]]:
+    """Rev-4: LLM-call audit sidecars are stored with ``role="audit"``."""
     rows: list[tuple[ChatMessageRecord, Mapping[str, Any]]] = []
     for message in messages:
-        if message.role != "tool" or message.tool_calls is None:
+        if message.role != "audit" or message.tool_calls is None:
             continue
         first_tool_call = message.tool_calls[0]
         if first_tool_call.get("_kind") == "llm_call_audit":
@@ -260,9 +267,13 @@ class _ProgressRouteSessionService:
         session_id: uuid.UUID,
         role: ChatMessageRole,
         content: str,
+        *,
+        writer_principal: str,
         tool_calls=None,
         composition_state_id: uuid.UUID | None = None,
         raw_content: str | None = None,
+        tool_call_id: str | None = None,
+        parent_assistant_id: uuid.UUID | None = None,
     ) -> ChatMessageRecord:
         if session_id != self.session.id:
             raise ValueError("Session not found")
@@ -275,6 +286,9 @@ class _ProgressRouteSessionService:
             tool_calls=tool_calls,
             created_at=datetime.now(UTC),
             composition_state_id=composition_state_id,
+            writer_principal=writer_principal,
+            tool_call_id=tool_call_id,
+            parent_assistant_id=parent_assistant_id,
         )
         self.messages.append(message)
         return message
@@ -296,10 +310,17 @@ class _ProgressRouteSessionService:
         self,
         session_id: uuid.UUID,
         data: CompositionStateData,
+        *,
+        provenance: str,
     ) -> CompositionStateRecord:
         if session_id != self.session.id:
             raise ValueError("Session not found")
         version = 1 if self.current_state is None else self.current_state.version + 1
+        # Stub records the provenance label so handler tests can assert on it
+        # (the production INSERT writes it to the ``provenance`` column under
+        # the ``ck_composition_states_provenance`` CHECK; the stub mirrors the
+        # contract through the ``last_save_provenance`` attribute).
+        self.last_save_provenance = provenance
         record = CompositionStateRecord(
             id=uuid.uuid4(),
             session_id=session_id,
@@ -360,7 +381,11 @@ def _make_app(
         connect_args={"check_same_thread": False},
     )
     initialize_session_schema(engine)
-    service = SessionServiceImpl(engine)
+    service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
 
     app = FastAPI()
 
@@ -681,10 +706,7 @@ class TestSessionCRUDRoutes:
         session_id = uuid.UUID(create_resp.json()["id"])
 
         # Create a pending run via the service layer
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         await service.create_run(session_id, state.id)
 
         del_resp = client.delete(f"/api/sessions/{session_id}")
@@ -700,10 +722,7 @@ class TestSessionCRUDRoutes:
         create_resp = client.post("/api/sessions", json={"title": "Completed Run"})
         session_id = uuid.UUID(create_resp.json()["id"])
 
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         run = await service.create_run(session_id, state.id)
         await service.update_run_status(run.id, "running")
         await service.update_run_status(run.id, "completed", landscape_run_id="lscp-delete-allowed")
@@ -720,10 +739,7 @@ class TestSessionCRUDRoutes:
         create_resp = client.post("/api/sessions", json={"title": "Failed Run"})
         session_id = uuid.UUID(create_resp.json()["id"])
 
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         run = await service.create_run(session_id, state.id)
         await service.update_run_status(run.id, "running")
         await service.update_run_status(
@@ -753,10 +769,7 @@ class TestSessionCRUDRoutes:
         create_resp = client.post("/api/sessions", json={"title": "Fanout Run"})
         session_id = uuid.UUID(create_resp.json()["id"])
 
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         run = await service.create_run(session_id, state.id)
         await service.update_run_status(run.id, "running")
         await service.update_run_status(
@@ -800,10 +813,7 @@ class TestSessionCRUDRoutes:
         create_resp = client.post("/api/sessions", json={"title": "Missing Accounting"})
         session_id = uuid.UUID(create_resp.json()["id"])
 
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         run = await service.create_run(session_id, state.id)
         await service.update_run_status(run.id, "running")
         await service.update_run_status(
@@ -845,10 +855,7 @@ class TestSessionCRUDRoutes:
         create_resp = client.post("/api/sessions", json={"title": "Open Accounting"})
         session_id = uuid.UUID(create_resp.json()["id"])
 
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         run = await service.create_run(session_id, state.id)
         await service.update_run_status(run.id, "running")
         await service.update_run_status(
@@ -889,10 +896,7 @@ class TestSessionCRUDRoutes:
         create_resp = client.post("/api/sessions", json={"title": "Discarded Rows"})
         session_id = uuid.UUID(create_resp.json()["id"])
 
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         run = await service.create_run(session_id, state.id)
         landscape_run_id = "lscape-discard-summary"
         _insert_discard_audit_records(app.state.settings, landscape_run_id)
@@ -934,10 +938,7 @@ class TestSessionCRUDRoutes:
         create_resp = client.post("/api/sessions", json={"title": "Running Run"})
         session_id = uuid.UUID(create_resp.json()["id"])
 
-        state = await service.save_composition_state(
-            session_id,
-            CompositionStateData(is_valid=True),
-        )
+        state = await service.save_composition_state(session_id, CompositionStateData(is_valid=True), provenance="session_seed")
         run = await service.create_run(session_id, state.id)
         await service.update_run_status(run.id, "running", landscape_run_id="lscape-running")
 
@@ -1234,7 +1235,11 @@ class TestIDORProtection:
             connect_args={"check_same_thread": False},
         )
         initialize_session_schema(engine)
-        service = SessionServiceImpl(engine)
+        service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         # Create two apps sharing the same service
         def make_app_for_user(uid: str) -> FastAPI:
@@ -1444,7 +1449,11 @@ class TestSendMessageStateIdValidation:
             connect_args={"check_same_thread": False},
         )
         initialize_session_schema(engine)
-        service = SessionServiceImpl(engine)
+        service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         def make_app_for_user(uid: str) -> FastAPI:
             app = FastAPI()
@@ -1490,6 +1499,7 @@ class TestSendMessageStateIdValidation:
                         metadata_={"name": "Alice", "description": ""},
                         is_valid=True,
                     ),
+                    provenance="session_seed",
                 ),
             )
             # Bob creates his own session AND seeds a composition state
@@ -1509,6 +1519,7 @@ class TestSendMessageStateIdValidation:
                         metadata_={"name": "Bob", "description": ""},
                         is_valid=True,
                     ),
+                    provenance="session_seed",
                 ),
             )
         finally:
@@ -1673,6 +1684,7 @@ class TestMessageRoutes:
                     metadata_={"name": "Test", "description": ""},
                     is_valid=True,
                 ),
+                provenance="session_seed",
             ),
         )
         loop.close()
@@ -1748,6 +1760,7 @@ class TestMessageRoutes:
                         },
                     }
                 ],
+                writer_principal="compose_loop",
             )
         )
         loop.close()
@@ -1777,21 +1790,28 @@ class TestMessageRoutes:
 
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
+            # Rev-4: audit-only breadcrumb rows (no real assistant parent)
+            # are persisted with ``role="audit"`` so the
+            # ``ck_chat_messages_parent_role`` biconditional is satisfied.
+            # Pre-rev-4 stored these as ``role="tool"`` with no parent.
             loop.run_until_complete(
                 service.add_message(
                     session_id,
-                    "tool",
+                    "audit",
                     '{"success": true}',
                     tool_calls=_audit_tool_calls("call-1"),
+                    writer_principal="compose_loop",
                 )
             )
-            loop.run_until_complete(service.add_message(session_id, "assistant", "I updated the pipeline."))
+            loop.run_until_complete(
+                service.add_message(session_id, "assistant", "I updated the pipeline.", writer_principal="compose_loop")
+            )
             persisted = loop.run_until_complete(service.get_messages(session_id, limit=None))
         finally:
             loop.close()
 
-        assert [message.role for message in persisted] == ["user", "tool", "assistant"]
+        assert [message.role for message in persisted] == ["user", "audit", "assistant"]
 
         msgs_resp = client.get(f"/api/sessions/{session_id}/messages")
         assert msgs_resp.status_code == 200
@@ -1819,6 +1839,7 @@ class TestMessageRoutes:
                 service.save_composition_state(
                     session_id,
                     CompositionStateData(metadata_={"name": "Precompose", "description": ""}, is_valid=True),
+                    provenance="session_seed",
                 )
             )
         finally:
@@ -1854,19 +1875,24 @@ class TestMessageRoutes:
 
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
+            # Rev-4: dispatch-trail audit envelopes (no real assistant
+            # parent) and LLM-call audit sidecars are persisted with
+            # ``role="audit"`` (the parent-CHECK biconditional rejects
+            # ``role="tool"`` here).
             loop.run_until_complete(
                 service.add_message(
                     session_id,
-                    "tool",
+                    "audit",
                     '{"success": true}',
                     tool_calls=_audit_tool_calls("call-tool"),
+                    writer_principal="compose_loop",
                 )
             )
             loop.run_until_complete(
                 service.add_message(
                     session_id,
-                    "tool",
+                    "audit",
                     '{"_kind": "llm_call_audit", "total_tokens": 21, "provider_cost": 0.0037}',
                     tool_calls=_llm_call_audit_tool_calls(
                         _llm_call(
@@ -1875,9 +1901,10 @@ class TestMessageRoutes:
                             provider_cost_source="response_usage.cost",
                         )
                     ),
+                    writer_principal="compose_loop",
                 )
             )
-            loop.run_until_complete(service.add_message(session_id, "assistant", "Done."))
+            loop.run_until_complete(service.add_message(session_id, "assistant", "Done.", writer_principal="compose_loop"))
         finally:
             loop.close()
 
@@ -1888,7 +1915,10 @@ class TestMessageRoutes:
         audit_resp = client.get(f"/api/sessions/{session_id}/messages?include_llm_audit=true")
         assert audit_resp.status_code == 200
         messages = audit_resp.json()
-        assert [message["role"] for message in messages] == ["user", "tool", "assistant"]
+        # Rev-4: the LLM-call audit sidecar surfaces as ``role="audit"``
+        # in the response (it was previously surfaced as ``role="tool"``
+        # because that's how it was persisted).
+        assert [message["role"] for message in messages] == ["user", "audit", "assistant"]
         tool_calls = messages[1]["tool_calls"]
         assert tool_calls[0]["_kind"] == "llm_call_audit"
         assert tool_calls[0]["call"]["provider_cost"] == 0.0037
@@ -1914,13 +1944,14 @@ class TestMessageRoutes:
 
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
             loop.run_until_complete(
                 service.add_message(
                     session_id,
                     "assistant",
                     synthetic,
                     raw_content=actual_prose,
+                    writer_principal="compose_loop",
                 )
             )
         finally:
@@ -1943,7 +1974,25 @@ class TestMessageRoutes:
         user_included = next(m for m in included_messages if m["role"] == "user")
         assert user_included["raw_content"] is None
 
-    def test_send_message_llm_call_persistence_failure_does_not_mask_success(self, tmp_path) -> None:
+    def test_send_message_llm_call_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
+        """Success-path LLM-call audit-row persist failure MUST raise (Tier-1 audit corruption).
+
+        After CLAUDE.md audit-primacy enforcement, a SQLAlchemyError on the
+        success-path LLM-call audit-sidecar insert is a Tier-1 audit
+        corruption: the assistant row already exists in the audit trail but
+        the LLM-call audit row that proves what the model returned is
+        missing. ``_persist_llm_calls`` is invoked with
+        ``plugin_crash_pending=False`` on the success path; the helper
+        raises :class:`AuditIntegrityError` chained through the
+        ``OperationalError`` so the request 500s with the diagnostic visible
+        to the operator.
+
+        The "fail-soft on persist failure" behaviour previously asserted
+        here was the bug: silently swallowing the audit-row write
+        rationalised silent failure as mercy and violated CLAUDE.md
+        Auditability Standard ("'I don't know what happened' is never an
+        acceptable answer for any output").
+        """
         app, service = _make_app(tmp_path)
         composer = AsyncMock()
         composer.compose = AsyncMock(
@@ -1961,7 +2010,11 @@ class TestMessageRoutes:
         async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
             role = args[1]
             tool_calls = kwargs.get("tool_calls")
-            if role == "tool" and tool_calls and tool_calls[0].get("_kind") == "llm_call_audit":
+            # LLM-call audit sidecars persist with role="audit" — trigger
+            # only on that specific insert so the assistant row succeeds
+            # first (which is the precondition for the Tier-1 corruption
+            # the helper now guards against).
+            if role == "audit" and tool_calls and tool_calls[0].get("_kind") == "llm_call_audit":
                 raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
             return await original_add_message(*args, **kwargs)
 
@@ -1971,8 +2024,65 @@ class TestMessageRoutes:
         session_id = uuid.UUID(resp.json()["id"])
         send_resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Build it"})
 
-        assert send_resp.status_code == 200
-        assert send_resp.json()["message"]["content"] == "Assistant still saved."
+        assert send_resp.status_code == 500
+
+    def test_send_message_tool_invocation_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
+        """Symmetric to the LLM-call audit Tier-1 test.
+
+        ``_persist_tool_invocations`` writes ``role="tool"`` audit
+        breadcrumbs on the success path (with ``parent_assistant_id`` and
+        ``plugin_crash_pending=False``). A SQLAlchemyError from that
+        sidecar insert is a Tier-1 audit corruption (assistant row exists,
+        tool row missing) — the helper raises
+        :class:`AuditIntegrityError` and the request 500s. This replaces
+        the pre-fix "fail-soft" expectation; see the LLM-call sibling
+        test above for the full doctrine link.
+        """
+        app, service = _make_app(tmp_path)
+        invocation = ComposerToolInvocation(
+            tool_call_id="call_test_001",
+            tool_name="preview_pipeline",
+            arguments_canonical="{}",
+            arguments_hash="0" * 64,
+            result_canonical='{"ok":true}',
+            result_hash="1" * 64,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=0,
+            version_after=0,
+            started_at=datetime(2026, 5, 9, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 9, tzinfo=UTC),
+            latency_ms=1,
+            actor="composer-web:user-test",
+        )
+        composer = AsyncMock()
+        composer.compose = AsyncMock(
+            return_value=ComposerResult(
+                message="Assistant still saved.",
+                state=_EMPTY_STATE,
+                tool_invocations=(invocation,),
+            )
+        )
+        app.state.composer_service = composer
+        client = TestClient(app, raise_server_exceptions=False)
+
+        original_add_message = service.add_message
+
+        async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
+            role = args[1]
+            tool_calls = kwargs.get("tool_calls")
+            if role == "tool" and tool_calls and tool_calls[0].get("_kind") == "audit":
+                raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
+            return await original_add_message(*args, **kwargs)
+
+        service.add_message = flaky_add_message  # type: ignore[method-assign]
+
+        resp = client.post("/api/sessions", json={"title": "Chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+        send_resp = client.post(f"/api/sessions/{session_id}/messages", json={"content": "Build it"})
+
+        assert send_resp.status_code == 500
 
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:
@@ -2235,7 +2345,9 @@ class TestLiteLLMErrorRedaction:
 
         # recompose precondition: last message must be user turn.
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2256,7 +2368,9 @@ class TestLiteLLMErrorRedaction:
         session_id = resp.json()["id"]
 
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2303,7 +2417,9 @@ class TestRecomposeConvergencePartialState:
         # response. This is the precondition for recompose — the last
         # message must be a user turn.
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build a CSV pipeline"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build a CSV pipeline", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2337,7 +2453,9 @@ class TestRecomposeConvergencePartialState:
         session_id = resp.json()["id"]
 
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build something"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build something", writer_principal="route_user_message")
+        )
         loop.close()
 
         recompose_resp = client.post(f"/api/sessions/{session_id}/recompose")
@@ -2451,7 +2569,7 @@ class TestRecomposeConvergencePartialState:
 
         loop = asyncio.new_event_loop()
         loop.run_until_complete(
-            service.add_message(uuid.UUID(session_id), "user", "Load my CSV"),
+            service.add_message(uuid.UUID(session_id), "user", "Load my CSV", writer_principal="route_user_message"),
         )
         loop.close()
 
@@ -2534,7 +2652,7 @@ class TestRecomposeConvergencePartialState:
 
         loop = asyncio.new_event_loop()
         loop.run_until_complete(
-            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"),
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message"),
         )
         loop.close()
 
@@ -2610,7 +2728,7 @@ class TestRecomposeConvergencePartialState:
 
         loop = asyncio.new_event_loop()
         loop.run_until_complete(
-            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline"),
+            service.add_message(uuid.UUID(session_id), "user", "Build a pipeline", writer_principal="route_user_message"),
         )
         loop.close()
 
@@ -2754,7 +2872,7 @@ class TestRecomposeConvergencePartialState:
         # Recompose precondition: last persisted message must be a user turn.
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+            loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
         finally:
             loop.close()
 
@@ -2823,12 +2941,10 @@ class TestRevertEndpoint:
         # Create session and two state versions via the service
         session = await service.create_session("alice", "Pipeline", "local")
         v1 = await service.save_composition_state(
-            session.id,
-            CompositionStateData(source={"type": "csv"}, is_valid=True),
+            session.id, CompositionStateData(source={"type": "csv"}, is_valid=True), provenance="session_seed"
         )
         await service.save_composition_state(
-            session.id,
-            CompositionStateData(source={"type": "api"}, is_valid=True),
+            session.id, CompositionStateData(source={"type": "api"}, is_valid=True), provenance="session_seed"
         )
 
         # Revert to v1
@@ -2850,14 +2966,8 @@ class TestRevertEndpoint:
         client = TestClient(app)
 
         session = await service.create_session("alice", "Pipeline", "local")
-        v1 = await service.save_composition_state(
-            session.id,
-            CompositionStateData(is_valid=True),
-        )
-        await service.save_composition_state(
-            session.id,
-            CompositionStateData(is_valid=True),
-        )
+        v1 = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
 
         client.post(
             f"/api/sessions/{session.id}/state/revert",
@@ -2880,7 +2990,11 @@ class TestRevertEndpoint:
             connect_args={"check_same_thread": False},
         )
         initialize_session_schema(engine)
-        service = SessionServiceImpl(engine)
+        service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
 
         def make_app_for_user(uid: str) -> FastAPI:
             app = FastAPI()
@@ -2911,10 +3025,7 @@ class TestRevertEndpoint:
 
         # Alice creates a session with a state
         session = await service.create_session("alice", "Alice Only", "local")
-        v1 = await service.save_composition_state(
-            session.id,
-            CompositionStateData(is_valid=True),
-        )
+        v1 = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
 
         # Bob tries to revert -- should be 404
         resp = bob_client.post(
@@ -2931,10 +3042,7 @@ class TestRevertEndpoint:
 
         s1 = await service.create_session("alice", "Session 1", "local")
         s2 = await service.create_session("alice", "Session 2", "local")
-        v1_s2 = await service.save_composition_state(
-            s2.id,
-            CompositionStateData(is_valid=True),
-        )
+        v1_s2 = await service.save_composition_state(s2.id, CompositionStateData(is_valid=True), provenance="session_seed")
 
         # Try to revert s1 using s2's state -- should fail
         resp = client.post(
@@ -2969,6 +3077,7 @@ class TestYamlEndpoint:
                 metadata_={"name": "Test Pipeline", "description": ""},
                 is_valid=False,
             ),
+            provenance="session_seed",
         )
 
         async def _pass_preflight(state, *, settings, secret_service, user_id):
@@ -3013,6 +3122,7 @@ class TestYamlEndpoint:
                 metadata_={"name": "Blob-backed source", "description": ""},
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         async def _pass_preflight(state, *, settings, secret_service, user_id):
@@ -3081,6 +3191,7 @@ class TestYamlEndpoint:
                 metadata_={"name": "Connection-only Pipeline", "description": ""},
                 is_valid=False,
             ),
+            provenance="session_seed",
         )
 
         async def _pass_preflight(state, *, settings, secret_service, user_id):
@@ -3152,6 +3263,7 @@ class TestYamlEndpoint:
                 metadata_={"name": "Fork and merge", "description": ""},
                 is_valid=False,
             ),
+            provenance="session_seed",
         )
 
         async def _pass_preflight(state, *, settings, secret_service, user_id):
@@ -3200,6 +3312,7 @@ class TestYamlEndpoint:
                 metadata_={"name": "Snapshot", "description": ""},
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         captured_states: list[CompositionState] = []
@@ -3242,7 +3355,7 @@ class TestYamlEndpoint:
         client = TestClient(app)
         session = await service.create_session("alice", "Pipeline", "local")
         await service.save_composition_state(
-            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True)
+            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
         )
 
         async def pass_preflight(state, *, settings, secret_service, user_id):
@@ -3269,7 +3382,7 @@ class TestYamlEndpoint:
         client = TestClient(app)
         session = await service.create_session("alice", "Pipeline", "local")
         await service.save_composition_state(
-            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True)
+            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
         )
 
         failure = ValidationResult(
@@ -3303,7 +3416,7 @@ class TestYamlEndpoint:
         client = TestClient(app)
         session = await service.create_session("alice", "Pipeline", "local")
         await service.save_composition_state(
-            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True)
+            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
         )
 
         secret_canary = "this-text-must-not-appear-in-the-response-body"
@@ -3359,7 +3472,7 @@ class TestYamlEndpoint:
         client = TestClient(app, raise_server_exceptions=False)
         session = await service.create_session("alice", "Pipeline", "local")
         await service.save_composition_state(
-            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True)
+            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
         )
 
         async def programmer_bug(state, *, settings, secret_service, user_id):
@@ -3421,6 +3534,7 @@ class TestYamlEndpoint:
                 metadata_={"name": "Secret export", "description": ""},
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         async def fake_runtime_preflight(state, *, settings, secret_service, user_id):
@@ -3457,10 +3571,7 @@ class TestRunAlreadyActiveError:
         app, service = _make_app(tmp_path)
 
         session = await service.create_session("alice", "Pipeline", "local")
-        v1 = await service.save_composition_state(
-            session.id,
-            CompositionStateData(is_valid=True),
-        )
+        v1 = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
         # Create a run to block the session
         await service.create_run(session.id, v1.id)
 
@@ -3501,8 +3612,7 @@ class TestNewStateHasNoLineage:
 
         session = await service.create_session("alice", "Pipeline", "local")
         await service.save_composition_state(
-            session.id,
-            CompositionStateData(source={"type": "csv"}, is_valid=True),
+            session.id, CompositionStateData(source={"type": "csv"}, is_valid=True), provenance="session_seed"
         )
 
         resp = client.get(f"/api/sessions/{session.id}/state")
@@ -3579,7 +3689,7 @@ class TestComposerProgressRoutes:
         app, service = _make_progress_route_app(tmp_path)
         composer = _ProgressAwareComposer("Retry reply")
         app.state.composer_service = composer
-        user_msg = await service.add_message(service.session.id, "user", "Exploit HTML into JSON")
+        user_msg = await service.add_message(service.session.id, "user", "Exploit HTML into JSON", writer_principal="route_user_message")
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(f"/api/sessions/{service.session.id}/recompose")
@@ -3828,7 +3938,7 @@ class TestComposerCancellationLifecycle:
         forget the other.
         """
         app, service = _make_progress_route_app(tmp_path)
-        await service.add_message(service.session.id, "user", "Will be cancelled on retry")
+        await service.add_message(service.session.id, "user", "Will be cancelled on retry", writer_principal="route_user_message")
 
         class _CancellingComposer:
             async def compose(self, *args, **kwargs) -> None:
@@ -3849,7 +3959,7 @@ class TestComposerCancellationLifecycle:
     @pytest.mark.asyncio
     async def test_recompose_persists_cancelled_llm_call_audit_sidecar(self, tmp_path) -> None:
         app, service = _make_progress_route_app(tmp_path)
-        await service.add_message(service.session.id, "user", "Will be cancelled on retry")
+        await service.add_message(service.session.id, "user", "Will be cancelled on retry", writer_principal="route_user_message")
         llm_call = _llm_call(
             status=ComposerLLMCallStatus.CANCELLED,
             model_returned=None,
@@ -3896,7 +4006,7 @@ class TestComposerCancellationLifecycle:
         monkeypatch.setattr(routes_module, "_COMPOSER_REQUEST_TERMINAL_COUNTER", FakeCounter())
 
         app, service = _make_progress_route_app(tmp_path)
-        await service.add_message(service.session.id, "user", "Will be cancelled on retry")
+        await service.add_message(service.session.id, "user", "Will be cancelled on retry", writer_principal="route_user_message")
 
         class _CancellingComposer:
             async def compose(self, *args, **kwargs) -> None:
@@ -3990,7 +4100,7 @@ class TestPaginationRoutes:
         # Add messages directly via service to avoid composer dependency
         session = await service.get_session(uuid.UUID(session_id))
         for i in range(5):
-            await service.add_message(session.id, "user", f"Msg {i}")
+            await service.add_message(session.id, "user", f"Msg {i}", writer_principal="route_user_message")
 
         resp = client.get(f"/api/sessions/{session_id}/messages?limit=2")
         assert resp.status_code == 200
@@ -4026,10 +4136,7 @@ class TestPaginationRoutes:
 
         session = await service.create_session("alice", "Pipeline", "local")
         for _ in range(5):
-            await service.save_composition_state(
-                session.id,
-                CompositionStateData(is_valid=False),
-            )
+            await service.save_composition_state(session.id, CompositionStateData(is_valid=False), provenance="session_seed")
 
         resp = client.get(
             f"/api/sessions/{session.id}/state/versions?limit=2",
@@ -4132,7 +4239,9 @@ class TestComposePluginCrashResponse:
         # Recompose requires a pre-existing trailing user message (see
         # TestRecomposeConvergencePartialState for the template).
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(service.add_message(uuid.UUID(session_id), "user", "Build something"))
+        loop.run_until_complete(
+            service.add_message(uuid.UUID(session_id), "user", "Build something", writer_principal="route_user_message")
+        )
         loop.close()
 
         response = client.post(f"/api/sessions/{session_id}/recompose")
@@ -4941,7 +5050,7 @@ def test_recompose_success_persists_runtime_invalid_state(tmp_path) -> None:
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -5024,7 +5133,7 @@ def test_recompose_convergence_persists_runtime_invalid_partial_state(tmp_path) 
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -5238,7 +5347,7 @@ def test_recompose_runtime_preflight_persists_partial_state(tmp_path) -> None:
     # Recompose precondition: last persisted message must be a user turn.
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -5542,7 +5651,7 @@ def test_recompose_cached_runtime_preflight_no_partial_state_records_telemetry(t
     # Recompose precondition: last persisted message must be a user turn.
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
     finally:
         loop.close()
 
@@ -5778,6 +5887,7 @@ def test_non_augmentation_assistant_history_raises_audit_integrity_error() -> No
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     with pytest.raises(AuditIntegrityError) as exc_info:
@@ -5821,6 +5931,7 @@ def test_augmented_assistant_history_returns_unmodified_model_prose() -> None:
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([message])
@@ -5852,6 +5963,7 @@ def test_augmented_assistant_history_handles_content_equal_to_raw_content() -> N
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([message])
@@ -5896,6 +6008,7 @@ def test_augmented_assistant_history_treats_empty_raw_content_as_augmentation() 
         tool_calls=None,
         created_at=datetime.now(UTC),
         composition_state_id=None,
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([message])
@@ -5917,6 +6030,7 @@ def test_composer_chat_history_skips_audit_tool_messages() -> None:
         content="Build a CSV pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="route_user_message",
     )
     tool_audit_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5925,6 +6039,7 @@ def test_composer_chat_history_skips_audit_tool_messages() -> None:
         content='{"success": true}',
         tool_calls=_audit_tool_calls("call-1"),
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
     assistant_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5933,6 +6048,7 @@ def test_composer_chat_history_skips_audit_tool_messages() -> None:
         content="I updated the pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([user_message, tool_audit_message, assistant_message])
@@ -5954,6 +6070,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="Build a CSV pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="route_user_message",
     )
     llm_audit_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5962,6 +6079,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="llm audit sidecar",
         tool_calls=_llm_call_audit_tool_calls(_llm_call(provider_request_id="chatcmpl-history")),
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
     unknown_audit_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5970,6 +6088,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="future audit sidecar",
         tool_calls=[{"_kind": "future_audit", "payload": {"id": "future"}}],
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
     assistant_message = ChatMessageRecord(
         id=uuid.uuid4(),
@@ -5978,6 +6097,7 @@ def test_composer_chat_history_skips_llm_call_audit_and_unknown_audit_kinds() ->
         content="I updated the pipeline.",
         tool_calls=None,
         created_at=datetime.now(UTC),
+        writer_principal="compose_loop",
     )
 
     history = _composer_chat_history([user_message, llm_audit_message, unknown_audit_message, assistant_message])
@@ -5999,14 +6119,18 @@ def test_send_message_does_not_replay_audit_tool_rows_to_composer(tmp_path) -> N
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build it"))
-        loop.run_until_complete(service.add_message(session_id, "assistant", "I started."))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build it", writer_principal="route_user_message"))
+        loop.run_until_complete(service.add_message(session_id, "assistant", "I started.", writer_principal="compose_loop"))
+        # Rev-4: dispatch-trail audit envelopes without a real assistant
+        # parent are persisted with ``role="audit"`` so the parent-CHECK
+        # biconditional is satisfied. Pre-rev-4 used ``role="tool"``.
         loop.run_until_complete(
             service.add_message(
                 session_id,
-                "tool",
+                "audit",
                 '{"success": true}',
                 tool_calls=_audit_tool_calls("call-1"),
+                writer_principal="compose_loop",
             )
         )
     finally:
@@ -6018,6 +6142,7 @@ def test_send_message_does_not_replay_audit_tool_rows_to_composer(tmp_path) -> N
     history = composer.compose.call_args.args[1]
     assert [entry["role"] for entry in history] == ["user", "assistant"]
     assert all(entry["role"] != "tool" for entry in history)
+    assert all(entry["role"] != "audit" for entry in history)
 
 
 def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path) -> None:
@@ -6031,13 +6156,15 @@ def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline"))
+        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
+        # Rev-4 audit-only breadcrumb (no assistant parent).
         loop.run_until_complete(
             service.add_message(
                 session_id,
-                "tool",
+                "audit",
                 '{"success": true}',
                 tool_calls=_audit_tool_calls("call-1"),
+                writer_principal="compose_loop",
             )
         )
     finally:
@@ -6049,3 +6176,210 @@ def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path
     composer.compose.assert_awaited_once()
     assert composer.compose.call_args.args[0] == "Build a CSV pipeline"
     assert composer.compose.call_args.args[1] == []
+
+
+# ---------------------------------------------------------------------------
+# elspeth-obs-f217c634aa: provenance discriminator at the three handler sites.
+#
+# Pre-fix: ``service.save_composition_state`` hardcoded
+# ``provenance="session_seed"`` in the INSERT, so the three
+# ``_handle_*`` partial-state captures all wrote ``session_seed`` into the
+# audit DB — silently conflating four distinct event categories under one
+# label and weakening the §4.1.2 audit-attribution contract.
+#
+# Post-fix: the public API takes ``provenance`` as a required keyword
+# argument; the three handlers pass the discriminator value matching their
+# error class. These tests assert the persisted ``provenance`` column
+# carries the correct value end-to-end (handler → service →
+# composition_states INSERT). The assertion is on the raw column rather
+# than ``CompositionStateRecord`` because the field is not surfaced on
+# the dataclass per Schedule 1A scope (DB-only audit column).
+# ---------------------------------------------------------------------------
+
+
+def _read_persisted_provenance(service: SessionServiceImpl, session_id: str) -> str:
+    """Read the ``provenance`` column for the session's most-recent state row.
+
+    The field is not exposed on ``CompositionStateRecord`` per spec
+    §4.1.2 (DB-only audit column, Schedule 1A); a direct SELECT against
+    the engine is the only way to verify the persisted label without
+    breaking the deliberate read-side surface restriction.
+    """
+    from sqlalchemy import text
+
+    with service._engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT provenance FROM composition_states WHERE session_id = :sid ORDER BY version DESC LIMIT 1"),
+            {"sid": session_id},
+        ).fetchone()
+    assert row is not None, f"no composition_states row for session {session_id}"
+    return row[0]
+
+
+def test_handle_convergence_error_persists_convergence_persist_provenance(tmp_path: Path) -> None:
+    """``_handle_convergence_error`` must persist captured ``partial_state``
+    with ``provenance='convergence_persist'`` so an auditor counting
+    convergence-budget exhaustions gets the right answer.
+
+    Pre-fix the row was written with ``provenance='session_seed'`` because
+    ``save_composition_state`` hardcoded the label; this test pins the
+    fix in place.
+    """
+    from elspeth.web.composer.protocol import ComposerConvergenceError
+
+    partial = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="convergence-partial"),
+        version=2,
+    )
+    mock_composer = AsyncMock()
+    mock_composer.compose = AsyncMock(
+        side_effect=ComposerConvergenceError(
+            max_turns=15,
+            budget_exhausted="composition",
+            partial_state=partial,
+            tool_invocations=(),
+            llm_calls=(),
+        ),
+    )
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app, raise_server_exceptions=False)
+
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build me a pipeline"},
+    )
+    assert response.status_code == 422
+
+    assert _read_persisted_provenance(service, session_id) == "convergence_persist"
+
+
+def test_handle_plugin_crash_persists_plugin_crash_persist_provenance(tmp_path: Path) -> None:
+    """``_handle_plugin_crash`` must persist captured ``partial_state`` with
+    ``provenance='plugin_crash_persist'`` — distinct from convergence and
+    preflight partial-state captures so remediation triage can discriminate
+    bug-fix-required from retry/budget-tunable.
+    """
+    partial = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="plugin-crash-partial"),
+        version=3,
+    )
+    mock_composer = AsyncMock()
+    mock_composer.compose = AsyncMock(
+        side_effect=ComposerPluginCrashError(
+            ValueError("plugin bug"),
+            partial_state=partial,
+        ),
+    )
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app, raise_server_exceptions=False)
+
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build me a pipeline"},
+    )
+    assert response.status_code == 500
+
+    assert _read_persisted_provenance(service, session_id) == "plugin_crash_persist"
+
+
+def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(tmp_path: Path) -> None:
+    """``_handle_runtime_preflight_failure`` must persist captured
+    ``partial_state`` with ``provenance='preflight_persist'`` so
+    misconfiguration-class failures (preflight rejected the composed
+    pipeline) are distinguishable from runtime execution failures in the
+    audit DB.
+
+    The preflight handler is reached when a successful compose result's
+    state advance triggers a runtime preflight that crashes — see the
+    ``preflight_exception_policy="raise"`` branch in routes.py and the
+    matching ``ComposerRuntimePreflightError`` arm.
+    """
+    from elspeth.web.composer.protocol import ComposerRuntimePreflightError
+
+    partial = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="preflight-partial"),
+        version=4,
+    )
+    advanced_state = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="advanced"),
+        version=2,
+    )
+    mock_composer = AsyncMock()
+    # Compose succeeds (state advanced) but the post-compose
+    # ``_state_data_from_composer_state`` call with
+    # ``preflight_exception_policy="raise"`` would raise
+    # ``ComposerRuntimePreflightError``; here we drive the same handler
+    # via the cleaner top-level raise path that routes.py's path-1
+    # ``_handle_runtime_preflight_failure`` invocation also reaches.
+    mock_composer.compose = AsyncMock(
+        side_effect=ComposerRuntimePreflightError(
+            original_exc=ValueError("preflight rejected"),
+            partial_state=partial,
+            tool_invocations=(),
+            llm_calls=(),
+        ),
+    )
+    del advanced_state  # only declared to document the intended path-2 shape
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app, raise_server_exceptions=False)
+
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build me a pipeline"},
+    )
+    assert response.status_code == 500
+
+    assert _read_persisted_provenance(service, session_id) == "preflight_persist"
+
+
+def test_composition_state_provenance_python_and_sql_enums_agree() -> None:
+    """The ``ck_composition_states_provenance`` CHECK constraint and the
+    :data:`CompositionStateProvenance` Literal are paired contracts:
+    extending one without the other lets the Python writer pass while
+    the DB rejects the row (or vice versa). This test pins them equal
+    by parsing the CHECK SQL and comparing against the Literal's
+    ``frozenset``.
+
+    The save-time enforcement of unknown values lives at the DB layer
+    (the CHECK fires on INSERT). Exercising that path through
+    ``save_composition_state`` is awkward because the production
+    INSERT path retries on ``IntegrityError`` (B3 belt-and-suspenders
+    in service.py); the symmetry assertion here is the cleaner
+    contract pin-down.
+    """
+    import re
+
+    from elspeth.web.sessions.models import composition_states_table
+    from elspeth.web.sessions.protocol import COMPOSITION_STATE_PROVENANCE_VALUES
+
+    check = next(c for c in composition_states_table.constraints if getattr(c, "name", None) == "ck_composition_states_provenance")
+    sql_text = str(check.sqltext)  # type: ignore[attr-defined]
+    sql_values = frozenset(re.findall(r"'([a-z_]+)'", sql_text))
+    assert sql_values == COMPOSITION_STATE_PROVENANCE_VALUES, (
+        f"CHECK enum {sorted(sql_values)} drifted from CompositionStateProvenance Literal {sorted(COMPOSITION_STATE_PROVENANCE_VALUES)}"
+    )

@@ -186,10 +186,16 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
 
 
 def _get_tool_messages(client: TestClient, session_id: str) -> list:
-    """Return all role=tool messages for this session from the session service."""
+    """Return audit-bearing messages for this session.
+
+    Post Phase-1B/rev-4: guided audit invocations land on ``role='audit'``
+    (no parent assistant) — see the docstring at the matching helper in
+    test_audit_emission.py and ``_persist_tool_invocations`` at
+    src/elspeth/web/sessions/routes.py:850.
+    """
     service = client.app.state.session_service
     msgs = asyncio.run(service.get_messages(UUID(session_id), limit=None))
-    return [m for m in msgs if m.role == "tool"]
+    return [m for m in msgs if m.role in ("tool", "audit")]
 
 
 def _extract_guided_drop_invocations(client: TestClient, session_id: str) -> list[dict]:

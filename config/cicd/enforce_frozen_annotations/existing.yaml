@@ -8,6 +8,21 @@ allow:
   # MCP tool definition: Callable signature contains dict parameter
   - key: "src/elspeth/mcp/server.py:_ToolDef:handler"
 
+  # Composer redaction TraversalNode: value_provider Callable receives the
+  # model's serialised root dict (Tier 2 pipeline data view), same justification
+  # as _ToolDef:handler above. The signature reflects the consumer-supplied
+  # input shape for the closure; the TraversalNode itself is frozen and the
+  # callable reference is never mutated after construction.
+  - key: "src/elspeth/web/composer/redaction.py:TraversalNode:value_provider"
+
+  # Composer redaction TraversalNode: substitute_provider sibling to
+  # value_provider (Task 8). Same Callable-receives-root-dict shape; the
+  # closure mutates the consumer-supplied dict in place at every reachable
+  # leaf for this node's path. Frozen TraversalNode holds the callable
+  # reference, not the dict; the dict is the caller's local (rev-3 W8b
+  # walker-atomicity).
+  - key: "src/elspeth/web/composer/redaction.py:TraversalNode:substitute_provider"
+
   # Dataverse API response — Tier 3 external data, genuinely mutable
   - key: "src/elspeth/plugins/infrastructure/clients/dataverse.py:DataversePageResponse:rows"
   - key: "src/elspeth/plugins/infrastructure/clients/dataverse.py:DataversePageResponse:headers"

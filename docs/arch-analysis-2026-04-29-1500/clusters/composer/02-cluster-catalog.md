@@ -114,7 +114,7 @@ All `[ORACLE: ...]` citations resolve in `docs/arch-analysis-2026-04-29-1500/tem
 - `sniff.py` separates MIME detection from the service surface; `routes.py` handles HTTP-side parsing.
 
 **Concerns:**
-- The `web/blobs → web/sessions` weight-4 edge means session lifecycle is tightly coupled to blob lifecycle. Cascade-deletion semantics (when a session is closed, are its blobs orphaned?) — observed in `app.py:_periodic_orphan_cleanup` (the silent-except site at app.py:128). Confirmed cleanup path; see "session-db-reset" guide (`docs/guides/session-db-reset.md`, untracked at session start) for the operator-facing version.
+- The `web/blobs → web/sessions` weight-4 edge means session lifecycle is tightly coupled to blob lifecycle. Cascade-deletion semantics (when a session is closed, are its blobs orphaned?) — observed in `app.py:_periodic_orphan_cleanup` (the silent-except site at app.py:128). Confirmed cleanup path; see "staging-session-db-recreation" guide (`docs/runbooks/staging-session-db-recreation.md`, untracked at session start) for the operator-facing version.
 - Hash integrity tests are likely in `tests/unit/web/blobs/`; specific test name(s) confirming the audit-trail "hashes survive payload deletion" invariant are not enumerated here — invariant asserted in code only at this depth, recorded as L2 debt-flag candidate (would benefit from an explicit named test).
 
 **L1 cross-reference:** Supplements 02-l1-subsystem-map.md §5. No KNOW-A* claim for blobs.

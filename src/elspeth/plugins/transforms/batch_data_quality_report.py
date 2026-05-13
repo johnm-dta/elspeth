@@ -56,6 +56,13 @@ class _QualityStats:
     valid_values: tuple[object, ...]
 
     def __post_init__(self) -> None:
+        # ``observed_type_counts`` is Mapping[str, int]; producers may
+        # pass a mutable dict. ``valid_values`` is tuple[object, ...] —
+        # the tuple itself is immutable, but the elements are
+        # ``object`` (typically scalar bucket entries from
+        # ``append_unique_bucket_value``); deep_freeze is identity-
+        # preserving for already-immutable scalars and would crash
+        # loudly if a future caller passed a nested mutable.
         freeze_fields(self, "observed_type_counts", "valid_values")
 
     @property
@@ -95,7 +102,7 @@ class BatchDataQualityReport(BaseTransform):
 
     name = "batch_data_quality_report"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c9e49d03239b8195"
+    source_file_hash: str | None = "sha256:0707c5c912fbba6f"
     config_model = BatchDataQualityReportConfig
     is_batch_aware = True
 

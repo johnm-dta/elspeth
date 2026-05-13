@@ -1182,7 +1182,7 @@ class TestStep1InspectAndConfirmAccept:
             validation_errors=None,
             composer_meta=new_composer_meta,
         )
-        asyncio.run(service.save_composition_state(session_uuid, state_data))
+        asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
 
     def test_inspect_and_confirm_non_list_columns_returns_400(self, composer_test_client: TestClient) -> None:
         """Non-list ``columns`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).

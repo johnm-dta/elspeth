@@ -35,9 +35,11 @@ Before Task 1 changes required columns, inventory every direct writer for both a
 Run:
 
 ```bash
-rg -n "insert\((models\.)?chat_messages_table|chat_messages_table\.insert|insert\(chat_messages_table" src tests evals -g '*.py'
-rg -n "INSERT\s+INTO\s+chat_messages|exec_driver_sql\(|raw_connection\(|cursor\.execute\(|executemany\(" src tests evals -g '*.py'
+rg -n --no-ignore-vcs "insert\((models\.)?chat_messages_table|chat_messages_table\.insert|insert\(chat_messages_table" src tests evals -g '*.py'
+rg -n --no-ignore-vcs "INSERT\s+INTO\s+chat_messages|exec_driver_sql\(|raw_connection\(|cursor\.execute\(|executemany\(" src tests evals -g '*.py'
 ```
+
+`--no-ignore-vcs` is mandatory. The repository's root `.gitignore` has a generic `lib/` rule (Python build artefact) that matches the directory `tests/unit/evals/lib/`; the negation entries `!tests/unit/evals/lib/` and `!tests/unit/evals/lib/**` re-include the path for git tracking but ripgrep's recursive traversal applies the parent directory exclude before the negation, so a plain `rg` invocation silently skips the tracked standalone eval-decode chat-messages writer at `tests/unit/evals/lib/test_decode_tools.py` lines 107-108 and 186. `--no-ignore-vcs` bypasses `.gitignore` while still honoring manual `.ignore` / `.rgignore` rules. Verify the eval-fixture writers appear in the output before treating the inventory as complete; if they do not, the grep is broken and the inventory is unsound.
 
 Expected: every SQLAlchemy-table result is either rewritten in this schedule, routed through the new helper, or explicitly documented as not writing rows. Every raw-SQL result must be inspected and classified as one of: direct writer, corruption fixture that intentionally bypasses the normal writer, or unrelated raw SQL. Do not rely on the SQLAlchemy grep alone; existing tests use raw cursor SQL for integrity/corruption setup, and those sites can otherwise bypass the new required columns.
 
@@ -46,9 +48,11 @@ Expected: every SQLAlchemy-table result is either rewritten in this schedule, ro
 Run:
 
 ```bash
-rg -n "insert\((models\.)?composition_states_table|composition_states_table\.insert|insert\(composition_states_table" src tests -g '*.py'
-rg -n "INSERT\s+INTO\s+composition_states|exec_driver_sql\(|raw_connection\(|cursor\.execute\(" src tests -g '*.py'
+rg -n --no-ignore-vcs "insert\((models\.)?composition_states_table|composition_states_table\.insert|insert\(composition_states_table" src tests evals -g '*.py'
+rg -n --no-ignore-vcs "INSERT\s+INTO\s+composition_states|exec_driver_sql\(|raw_connection\(|cursor\.execute\(" src tests evals -g '*.py'
 ```
+
+`--no-ignore-vcs` is mandatory for the same reason described in Step 1. The `evals` path is included alongside `src` and `tests` so any future composition-state writer added in `evals/lib/` or its tests is surfaced; the current tree has none, but extending the search anchors closes the same negation footgun for both tables.
 
 Expected: every SQLAlchemy-table result supplies `provenance`, uses the new helper, or is rewritten to a canonical test row factory. Every raw-SQL result must be inspected and classified as one of: direct writer, corruption fixture that intentionally bypasses the normal writer, or unrelated raw SQL.
 
@@ -3919,12 +3923,12 @@ For SQLite, the artifact set is not just `sessions.db`: the main file,
 rollback/recreate unit. Never archive or delete only the main file.
 
 **Files:**
-- Modify: `docs/guides/session-db-reset.md` (existing canonical reset runbook)
-- Optional create: `docs/runbooks/staging-session-db-recreation.md` only if the repo's runbook index requires a staging-specific wrapper; if created, it must link back to `docs/guides/session-db-reset.md` and not fork the stop/go gates.
+- Modify: `docs/runbooks/staging-session-db-recreation.md` (existing canonical reset runbook)
+- Optional create: `docs/runbooks/staging-session-db-recreation.md` only if the repo's runbook index requires a staging-specific wrapper; if created, it must link back to `docs/runbooks/staging-session-db-recreation.md` and not fork the stop/go gates.
 
 - [ ] **Step 1: Extend the existing session DB reset runbook**
 
-Start from `docs/guides/session-db-reset.md`. Keep its Landscape orphaning stop/go gates, path-resolution rules, health checks, and create-session/journal verification. Add any 1A-specific schema-cutover notes there first; do not create a second reset procedure that can drift from the existing guide.
+Start from `docs/runbooks/staging-session-db-recreation.md`. Keep its Landscape orphaning stop/go gates, path-resolution rules, health checks, and create-session/journal verification. Add any 1A-specific schema-cutover notes there first; do not create a second reset procedure that can drift from the existing guide.
 
 Update the guide's expected session-table inventory in the same edit so
 it includes the new `audit_access_log` table. `initialize_session_schema`
@@ -3935,7 +3939,7 @@ only the pre-1A tables is stale and cannot be used as cutover evidence.
 
 If the repo needs a staging-specific wrapper, create
 `docs/runbooks/staging-session-db-recreation.md` with this section and
-link it to `docs/guides/session-db-reset.md`. If any existing staging
+link it to `docs/runbooks/staging-session-db-recreation.md`. If any existing staging
 note references row-level DELETE SQL or `elspeth migrate up` for the
 session DB, replace it.
 
@@ -3965,7 +3969,7 @@ archive, deletion, and rollback.
    deployed.
 4. `deploy/elspeth-web.env` has been inspected directly for session DB
    settings without printing secret values.
-5. The stop/go gates in `docs/guides/session-db-reset.md` have been run:
+5. The stop/go gates in `docs/runbooks/staging-session-db-recreation.md` have been run:
    Landscape code/schema must not reference web-session identifiers.
 6. The pre-cutover source ref compatible with the archived DB has been
    recorded. If rollback is needed, restore that ref and the archived DB
@@ -4093,7 +4097,7 @@ If either health check fails, inspect `journalctl -u elspeth-web.service
 
 After health checks pass, create a new session through the API or UI and
 confirm no `SessionSchemaError` appears in the service journal. This is
-the existing `docs/guides/session-db-reset.md` post-reset gate and must
+the existing `docs/runbooks/staging-session-db-recreation.md` post-reset gate and must
 remain in the staging wrapper if one is created.
 
 Before handing staging back to users, verify the `user_secrets` outcome
@@ -4220,7 +4224,7 @@ available. Record in the Phase 1 PR description:
 - [ ] **Step 4: Commit before schema/current-writer cutover**
 
 ```bash
-git add docs/guides/session-db-reset.md
+git add docs/runbooks/staging-session-db-recreation.md
 # If a staging-specific wrapper was created, stage it too:
 # git add docs/runbooks/staging-session-db-recreation.md
 git commit -m "docs(runbooks): session-DB recreation procedure for staging schema changes (composer-progress-persistence phase 1)"

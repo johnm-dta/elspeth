@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 from typing import Any
 
+import structlog
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
@@ -25,6 +26,7 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -44,7 +46,11 @@ def _make_app(
         connect_args={"check_same_thread": False},
     )
     initialize_session_schema(engine)
-    session_service = SessionServiceImpl(engine)
+    session_service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
     blob_service = BlobServiceImpl(engine, tmp_path)
 
     app = FastAPI()
@@ -277,7 +283,11 @@ class TestIDORProtection:
             connect_args={"check_same_thread": False},
         )
         initialize_session_schema(engine)
-        session_service = SessionServiceImpl(engine)
+        session_service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
         blob_service = BlobServiceImpl(engine, tmp_path)
 
         settings = WebSettings(

@@ -27,6 +27,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+import structlog
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
@@ -51,6 +52,7 @@ from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -108,7 +110,11 @@ def composer_freeform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     )
     initialize_session_schema(engine)
 
-    session_service = SessionServiceImpl(engine)
+    session_service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.guided.progressive_disclosure"),
+    )
     blob_service = BlobServiceImpl(engine, tmp_path)
 
     settings = WebSettings(
@@ -221,7 +227,7 @@ def _seed_terminal_guided_session(
         validation_errors=None,
         composer_meta=new_composer_meta,
     )
-    asyncio.run(service.save_composition_state(session_uuid, state_data))
+    asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
 
 
 def _get_current_guided_session(client: TestClient, session_id: str) -> dict:
@@ -246,9 +252,21 @@ def _send_message(client: TestClient, session_id: str, content: str) -> dict:
 
 
 def _seed_user_message(client: TestClient, session_id: str, content: str = "retry this") -> None:
-    """Insert a user message directly so recompose finds a valid last-user-turn."""
+    """Insert a user message directly so recompose finds a valid last-user-turn.
+
+    Post Phase-1A: ``add_message`` requires ``writer_principal`` keyword.
+    User-channel messages use ``route_user_message`` to match the production
+    POST /sessions/{id}/messages route's writer_principal assignment.
+    """
     service: SessionServiceImpl = client.app.state.session_service
-    asyncio.run(service.add_message(UUID(session_id), "user", content))
+    asyncio.run(
+        service.add_message(
+            UUID(session_id),
+            "user",
+            content,
+            writer_principal="route_user_message",
+        )
+    )
 
 
 def _recompose(client: TestClient, session_id: str) -> dict:

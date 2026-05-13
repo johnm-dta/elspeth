@@ -10,7 +10,6 @@ import asyncio
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,6 +27,7 @@ from elspeth.web.execution.schemas import (
     RunAccountingSource,
     RunAccountingTokens,
     RunEvent,
+    RunEventType,
 )
 
 _EventData = ProgressData | ErrorData | CompletedData | CancelledData | FailedData
@@ -98,7 +98,7 @@ _EVENT_DATA: dict[str, Callable[[], _EventData]] = {
 
 def _make_event(
     run_id: str = "run-1",
-    event_type: Literal["progress", "error", "completed", "cancelled", "failed"] = "progress",
+    event_type: RunEventType = "progress",
 ) -> RunEvent:
     return RunEvent(
         run_id=run_id,

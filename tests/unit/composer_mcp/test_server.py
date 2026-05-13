@@ -224,9 +224,19 @@ class TestDispatchTool:
         assert result["success"] is True
 
     def test_set_source_mutates_state(self, scratch_dir: Path) -> None:
+        # set_source is promoted to a type-driven manifest entry
+        # (SetSourceArgumentsModel) with extra="forbid" — the LLM-supplied
+        # argument set MUST include all four required fields.  Prior to
+        # promotion this test omitted on_validation_failure and relied on
+        # the handler defaulting it via .get(); that path is gone.
         result = _dispatch_tool(
             "set_source",
-            {"plugin": "csv", "on_success": "node_1", "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}}},
+            {
+                "plugin": "csv",
+                "on_success": "node_1",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
             _empty_state(),
             _mock_catalog(),
             scratch_dir,
@@ -358,10 +368,16 @@ class TestDispatchTool:
         )
         session_id = new_result["data"]["session_id"]
 
-        # Modify state via set_source
+        # Modify state via set_source.  All four required fields per
+        # SetSourceArgumentsModel (extra="forbid").
         modified = _dispatch_tool(
             "set_source",
-            {"plugin": "csv", "on_success": "node_1", "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}}},
+            {
+                "plugin": "csv",
+                "on_success": "node_1",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
             _empty_state(),
             _mock_catalog(),
             scratch_dir,

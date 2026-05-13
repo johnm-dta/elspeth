@@ -67,6 +67,10 @@ class ExecutionFanoutRisk:
     message: str
 
     def __post_init__(self) -> None:
+        # ``upstream_fanout`` declared as Sequence[str]; producers may
+        # pass a list literal which is mutable through the attribute
+        # reference without a freeze guard, defeating ``frozen=True``.
+        # All scalars are immutable; only the sequence needs the guard.
         freeze_fields(self, "upstream_fanout")
 
     def to_dict(self) -> ExecutionFanoutRiskPayload:
@@ -93,6 +97,11 @@ class ExecutionFanoutGuard:
     risks: Sequence[ExecutionFanoutRisk]
 
     def __post_init__(self) -> None:
+        # ``risks`` declared as Sequence[ExecutionFanoutRisk]. The risk
+        # elements are themselves frozen (with their own freeze guards
+        # above), but the outer sequence may be a mutable list at the
+        # call site — without deep_freeze the guard's ``frozen=True``
+        # claim leaks ``risks.append(...)`` mutability.
         freeze_fields(self, "risks")
 
     def to_dict(self) -> ExecutionFanoutGuardPayload:

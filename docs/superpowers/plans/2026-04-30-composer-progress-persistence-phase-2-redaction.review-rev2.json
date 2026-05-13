@@ -1,0 +1,496 @@
+{
+  "plan_path": "/home/john/elspeth/.worktrees/composer-progress-1a/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.md",
+  "plan_rev": "rev-2 rewrite (HEAD commit 7338e4e2)",
+  "spec_path": "/home/john/elspeth/.worktrees/composer-progress-1a/docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md",
+  "spec_rev": "rev-5 (HEAD commit 23509c87)",
+  "reviewed_at": "2026-05-12T00:00:00Z",
+  "head_commit_at_review": "7338e4e2",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "prior_review_path": "/home/john/elspeth/.worktrees/composer-progress-1a/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json",
+  "verdict": "CHANGES_REQUESTED",
+  "summary": "The rev-2 rewrite is a substantive structural improvement. All four prior BLOCKERs (B1 fictional class hierarchy, B2 walker recursion gap, B3 spec false premise, B4 unconditional gh pr create) are genuinely closed — confirmed independently by all four reviewers. The manifest-keyed dispatch + shared-iterator design is sound and the spec rev-5 derivation root is corrected. However, three new BLOCKERs emerged, and they collapse to a single underlying gap: Phase 2's correctness is proven at the wrong layer. The plan demonstrates internal correctness (manifest, iterator, guard) but does not pin the external contract that no raw sensitive value reaches the persistence layer once Phase 3 wires it. This is structurally the same failure shape as ELSPETH's eight-incident git-stash data-loss pattern: convenience operation captures state, does work, then re-emits the *original* state. Resolution requires 3–5 task edits + 1 spec paragraph + 1 done-when criterion — NOT a rewrite. Do not begin execution until BLOCKERs A/B/C and the bundled MAJORs are resolved.",
+  "closure_of_prior_findings": {
+    "B1_class_hierarchy_fictional": {
+      "status": "CLOSED",
+      "convergence": "all four reviewers confirm",
+      "evidence": "Plan rev-2 grounds every dispatch concept in the six function-pointer dicts at tools.py:5250-5314 (Reality verified). Manifest keyed by tool name mirrors _TOOL_REQUIRED_PATHS at service.py:702 (Architecture confirmed). Tasks 2/9/10 use function-pointer dispatch dicts (Reality). Spec rev-5 §1 line 15 + §4.2.1 explicitly correct the prior false premise."
+    },
+    "B2_walker_recursion_gap": {
+      "status": "CLOSED structurally; PARTIALLY CLOSED behaviourally",
+      "convergence": "Reality CLOSED; Systems PARTIALLY (cultural blocking only — MINOR-1); Quality CLOSED but flags 4 coverage gaps (MAJOR-1) + walker-guard read-divergence (MAJOR-3) + completeness property absent (MAJOR-4); Architecture CLOSED on shared-iterator approach",
+      "evidence": "Task 1 introduces shared walk_model_schema iterator with 6 container-shape tests (Reality). Both adequacy-guard and walker consumers route through it (Architecture). However: (a) 4 walker-coverage container shapes still untested (Quality MAJOR-1); (b) walker and guard read the same iterator output through different decision trees (Quality MAJOR-3); (c) no completeness property test that asserts no sensitive value escapes (Quality MAJOR-4); (d) nothing structurally prevents a future engineer writing a second traversal loop (Systems MINOR-1). The structural fix is correct; the behavioural assurance is incomplete."
+    },
+    "B3_spec_false_premise": {
+      "status": "CLOSED",
+      "convergence": "all four reviewers confirm",
+      "evidence": "Spec rev-5 §1 line 15 and §4.2.1 explicitly correct the prior class-hierarchy claim (Reality). Plan derives from corrected spec (Architecture, Quality, Systems all confirm)."
+    },
+    "B4_unconditional_gh_pr_create": {
+      "status": "CLOSED",
+      "convergence": "all four reviewers confirm",
+      "evidence": "Task 20 explicitly defers PR-open to operator confirmation, matching the Phase 1B / Phase 1C pattern (Reality)."
+    },
+    "W1_naming_collision_ComposerTool": {
+      "status": "CLOSED (no longer applicable)",
+      "evidence": "Plan now uses ToolRedaction not ComposerTool; no collision with ComposerToolInvocation/Status/Recorder L0 family (Architecture)."
+    },
+    "W2_calendar_synchronicity": {
+      "status": "CLOSED with residual observation",
+      "evidence": "Content-keyed hash replaces calendar review (Systems CLOSED). Residual OBSERVATION-1: bulk editorial PR could still trigger many simultaneous hash flips."
+    },
+    "W3_MissingToolError_on_Tier3": {
+      "status": "CLOSED (mechanism); PARTIALLY CLOSED (ordering)",
+      "evidence": "Task 17 pins existing ARG_ERROR routing for unknown tool names (Reality + Quality CLOSED). Systems MAJOR-1 flags that the Phase 2 → Phase 3 call-order contract (redact only after MANIFEST membership confirmed) is undocumented."
+    },
+    "W4_untyped_telemetry_duck_typing": {
+      "status": "NOMINALLY CLOSED; new MAJOR opens",
+      "evidence": "RedactionTelemetry(Protocol) defined (Architecture). However, Reality MAJOR finds the Task 3 implementation calls a fictional _increment_counter helper; the established OTel pattern (per service.py:135, 148, 824, 868, 1172, 1182) is module-level create_counter() objects and .add() calls. Quality MINOR-2 also notes summarizer_errors_total counter is unwired."
+    },
+    "W5_non_str_summarizer_return": {
+      "status": "CLOSED",
+      "evidence": "Task 7 crashes on non-str return as AuditIntegrityError (Quality, Systems)."
+    },
+    "W6_length_disclosure_sentinel": {
+      "status": "CLOSED",
+      "evidence": "Fixed sentinel <redacted-unknown-response-key> replaces length-disclosure form (Quality)."
+    },
+    "W7_mass_copy_uniqueness": {
+      "status": "CLOSED",
+      "evidence": "Task 10 includes exact-match and whitespace-normalised uniqueness assertion (Quality)."
+    },
+    "W8_sensitive_vs_policy_precedence": {
+      "status": "CLOSED",
+      "evidence": "Manifest construction-time ValueError on both-shapes / neither-shapes makes type-driven vs declarative mutually exclusive (Architecture, Quality)."
+    },
+    "W9_codeowners_team_nonexistent": {
+      "status": "CLOSED (mechanism); MAJOR-2 (governance) opens",
+      "evidence": "Task 18 replaces CODEOWNERS with label-gate workflow using jq -e exact match (Reality, Quality CLOSED). Systems MAJOR-2 notes label-gate is self-bypassing on a single-owner repo — governance gap, not code defect."
+    },
+    "W10_task9_underscoped": {
+      "status": "CLOSED",
+      "evidence": "Plan splits promotion waves into Tasks 13 (set_source-style), 14 (blob), 15 (secret), 16 (declarative remainder) (Architecture)."
+    },
+    "W11_hasattr_getattr_defensive": {
+      "status": "CLOSED",
+      "evidence": "Plan code blocks use direct typed attribute access per CLAUDE.md offensive-programming policy (Reality)."
+    },
+    "W12_snapshot_coverage_legacy_only": {
+      "status": "CLOSED",
+      "evidence": "Task 12 broadened to enumerate all manifest entries (Reality, Systems)."
+    },
+    "M1_test_redaction_policy_create_vs_replace": {
+      "status": "CLOSED",
+      "evidence": "Plan task description corrected."
+    },
+    "M2_sorted_on_non_string_keys": {
+      "status": "CLOSED",
+      "evidence": "Manifest enforces str keys structurally."
+    },
+    "M3_redact_tool_call_double_parses_json": {
+      "status": "CLOSED",
+      "evidence": "Manifest dispatch operates on already-parsed structure."
+    },
+    "M4_adequacy_guard_scaling": {
+      "status": "PARTIALLY CLOSED",
+      "evidence": "Task 19 imposes 5-second sanity bound (Systems). Systems MAJOR-3 flags AST parse strategy unspecified (becomes moot if Architecture MAJOR-2 accepted — AST inspection removed entirely)."
+    }
+  },
+  "blockers": [
+    {
+      "id": "A",
+      "title": "Phase 2 → Phase 3 contract integrity unproven at the persistence boundary",
+      "convergence": "Reality BLOCKER + Architecture BLOCKER + Quality MAJOR-2 + Quality MAJOR-4 + Systems BLOCKER-3 + Systems MAJOR-1",
+      "severity": "Critical (4) — Tier-3 → Tier-1 trust boundary; defect lands as permanent audit corruption once Phase 3 wires it",
+      "likelihood": "Likely (2) without integration coverage; Certain (3) if any subsequent refactor",
+      "reversibility": "Difficult (2) post-Phase-3 — audit data corruption is hard to reverse",
+      "priority_score": 16,
+      "fix_cost": "1 spec paragraph + 1 done-when criterion + 2 plan edits (Task 4 + new test)",
+      "components": [
+        {
+          "source": "reality",
+          "claim": "ValidationError from promoted handlers routes to HTTP 500, not ARG_ERROR. The plan's Task 4 commit message and spec §4.2.6 citation of service.py:1836-1870 are factually wrong. Live code: service.py:2480 catches ToolArgumentError only; service.py:2564 catches everything else (including pydantic.ValidationError) as ComposerPluginCrashError → HTTP 500. The pattern at tools.py:2668, 2761, 2767, 2773, 2787, 2801 catches ValidationError and re-raises as ToolArgumentError. Promoted handlers must follow the same pattern. Every per-tool test in Tasks 4/13/14/15 asserting 'ValidationError raised' must instead assert 'ToolArgumentError raised' with pydantic error on __cause__.",
+          "evidence_paths": ["service.py:2480", "service.py:2521", "service.py:2564", "tools.py:2668-2801"]
+        },
+        {
+          "source": "architecture",
+          "claim": "ComposerToolInvocation.arguments_canonical (the RFC 8785 canonical JSON of raw LLM-supplied arguments, computed at service.py:1930 by begin_dispatch / begin_dispatch_or_arg_error BEFORE redaction runs) is the MCP JSONL sidecar / BufferingRecorder persistence surface. Phase 2 builds redacted_assistant_tool_calls and redacted_tool_rows for chat_messages, but arguments_canonical is a separate persistence path not covered by Phase 2's walker. Three defensible postures (intentional raw / Phase 3 gap / reshape invariant); none picked explicitly. Phase 3 cannot wire persistence without making this choice. Cost escalates after Phase 3 lands.",
+          "evidence_paths": ["src/elspeth/contracts/composer_audit.py", "service.py:1930"]
+        },
+        {
+          "source": "quality",
+          "claim": "Tracer bullet (Task 4) stops at the walker output — tests call redact_tool_call_arguments directly and assert dict return value. Neither test pins what happens when the redacted dict is handed to the persistence layer or threaded through json.dumps. Spec §8.6 (test-path-integrity rule) and CLAUDE.md 'Never bypass production code paths in tests' both demand this. MAJOR-4: no completeness property test (Hypothesis-driven) that for any (M, P) where Sensitive[T] fields are populated, no raw value appears in json.dumps(redact_tool_call_arguments(...)) output.",
+          "evidence_paths": ["plan Task 4", "spec §8.6"]
+        },
+        {
+          "source": "systems",
+          "claim": "BLOCKER-3: No integration test crosses the Phase 2 → Phase 3 boundary. The pattern matches ELSPETH's 8-incident git-stash data-loss pattern exactly — convenience operation captures state, does work, re-emits original state. A Phase 3 author writing `redacted = redact(...); ... persist(decoded_arguments, ...)` (BUG: re-emits original) is not caught by Phase 2 tests (they don't test Phase 3 call sites) or Phase 3 tests (they don't yet exist). MAJOR-1: Phase 2 → Phase 3 call-order contract (redact only AFTER MANIFEST membership confirmed) is undocumented. If Phase 3 calls redact BEFORE the unknown-tool check, it crashes on LLM-hallucinated names — converting graceful Tier-3 quarantine into Tier-1 violation.",
+          "evidence_paths": ["plan done-when criteria", "memory: feedback_no_git_stash + 8-incident pattern"]
+        }
+      ],
+      "unified_recommendation": [
+        "1. Fix the ValidationError routing claim (Reality): in Task 4 Step N, every promoted handler must catch pydantic.ValidationError and re-raise as ToolArgumentError per the tools.py:2668-2801 pattern. Update Task 4 commit message; correct spec §4.2.6 citation; update per-tool tests in Tasks 4/13/14/15 to assert ToolArgumentError (with pydantic on __cause__).",
+        "2. Make an explicit architectural decision on ComposerToolInvocation.arguments_canonical (Architecture). Append to 'Files NOT touched in Phase 2' section: state which of (a) intentional raw — forensic record / (b) Phase 3 wires redacted form / (c) reshape invariant is the chosen posture, and propagate to spec as a Phase 3 pre-condition.",
+        "3. Add a Task 4 (tracer bullet) test that exercises redact_tool_call_arguments → json.dumps(redacted) → asserts the JSON string does not contain the original sensitive value (Quality MAJOR-2). If 'end-to-end' is not honoured, rename Task 4 to remove the term.",
+        "4. Add a Hypothesis property test (natural home: Task 19) — for any type-driven manifest entry model M and any valid payload P, no raw value of any Sensitive()-annotated field appears in json.dumps(redact_tool_call_arguments(tool_name, P, telemetry=noop)) (Quality MAJOR-4).",
+        "5. Add a Phase-2 done-when criterion: integration scenario (mock DB write if necessary) confirming chat_messages.tool_calls contains the redacted sentinel — not the original value — for at least one Sensitive[T]-annotated field (Systems BLOCKER-3).",
+        "6. Document the Phase 2 postcondition / Phase 3 precondition: argument-redaction is called only AFTER MANIFEST membership has been confirmed (Systems MAJOR-1). Place in plan interface-contract section and propagate to spec."
+      ]
+    },
+    {
+      "id": "B",
+      "title": "Label-gate does not enforce direction (snapshot weakening can be mislabelled as strengthening)",
+      "convergence": "Systems BLOCKER-1",
+      "severity": "Critical (4) — security control on a Tier-3 → Tier-1 boundary that, once Phase 3 wires it, gates whether LLM-sensitive data reaches the legal record",
+      "likelihood": "Possible (1) for accident; Likely (2) for distracted reviewer mis-labelling on autopilot",
+      "reversibility": "Difficult (2) once Phase 3 lands and an unredacted credential reaches Tier-1",
+      "priority_score": 8,
+      "fix_cost": "Replace 1 jq -e check in CI workflow with a direction-aware comparator (or add a second CI step) + add 1 test for the direction logic",
+      "components": [
+        {
+          "source": "systems",
+          "claim": "Task 18 label-gate accepts policy-strengthen OR policy-weaken-justified for any snapshot diff. An engineer who removes a Sensitive() annotation (weakening) and applies policy-strengthen passes CI. The CI does not know which direction the change went; both labels satisfy the gate. Second-order failure chain: (a) Sensitive() removed → (b) hash flips → (c) wrong label applied → (d) CI green → (e) Phase 3 ships → (f) credentials in Tier-1 audit row.",
+          "evidence_paths": ["Task 18 jq -e check"]
+        }
+      ],
+      "unified_recommendation": "CI step must verify the snapshot diff direction. Compute the count of Sensitive()-annotated fields in the new snapshot vs the base snapshot; if the new count is lower (or the per-tool field set shrinks), only policy-weaken-justified is valid. Add an explicit Task 18 test for direction-misclassification: PR removes a Sensitive() annotation + applies policy-strengthen → CI must fail."
+    },
+    {
+      "id": "C",
+      "title": "Summarizer behavioural weakening is undetectable",
+      "convergence": "Systems BLOCKER-2",
+      "severity": "High (3) — relates to redaction summarizer correctness; depends on closure form discipline",
+      "likelihood": "Possible (1) — requires either in-place mutation of closed-over module state or refactor that reassigns a module-level name",
+      "reversibility": "Difficult (2) — same trust-boundary class as A and B",
+      "priority_score": 6,
+      "fix_cost": "1 spec paragraph documenting the assumption + 1 plan test (replacement-flips-hash) + 1 plan test (identity-preserving refactor)",
+      "components": [
+        {
+          "source": "systems",
+          "claim": "Hash captures callable identity (reference equality). Replacement flips the hash correctly. BUT: (a) in-place mutation of module-level state closed over by the lambda does not flip identity, hash stable, behavioural drift uncaught; (b) reassignment of a module-level name to a new function that the manifest dereferences at evaluation time may or may not flip depending on capture order. The spec's claim 'changed summarizer identity all flip the hash' is over-broad.",
+          "evidence_paths": ["spec §4.4 summarizer hash claim"]
+        }
+      ],
+      "unified_recommendation": "Document the assumption explicitly in spec: summarizer hash detects callable-identity replacement, not behavioural mutation of captured state. Best practice (codified in spec or plan): summarizers must be pure functions of their argument — no module-level state capture. Add Task 19 test cases: (a) replacing a summarizer flips the hash; (b) identity-preserving refactor that changes formatting (without changing the captured callable identity) is the known false-negative class."
+    }
+  ],
+  "majors": [
+    {
+      "id": "M-adequacy-mechanical-enforcement",
+      "title": "Adequacy guard does not mechanically enforce all the invariants the spec claims it does",
+      "convergence": "Architecture MAJOR-1 + Architecture MAJOR-2 + Quality MAJOR-1",
+      "components": [
+        {
+          "source": "architecture MAJOR-1",
+          "claim": "Promoted argument models (SetSourceArgumentsModel + all promoted models in Tasks 13-15) do not set model_config = ConfigDict(extra='forbid'). Pydantic 2.x defaults extra='ignore' — extra keys silently dropped. Consequence: arguments_canonical captures extra keys; walker walks model_fields (no extra-key field exists there); redacted payload omits extra key; coverage claim is not exact.",
+          "fix": "Every promoted argument model includes model_config = ConfigDict(extra='forbid'). Task 10 adequacy guard asserts this for every type-driven entry."
+        },
+        {
+          "source": "architecture MAJOR-2",
+          "claim": "Task 10 AST inspection (parsing tools.py for arguments['x'] subscript literals) is implementation coupling. Any handler using args = arguments; args['x'], arguments.get('x'), destructuring, or helper delegation evades the AST scan. CLAUDE.md: 'if a constraint isn't mechanically enforced (by types, tests, CI, or named constants), assume the next session won't know about it.'",
+          "fix": "Remove AST inspection entirely. Handler author declares complete key set explicitly in ToolRedactionPolicy; adequacy guard asserts internal consistency only. For tools where key-coverage guarantees are actually needed, promote to a Pydantic argument model. (This also makes Systems MAJOR-3 moot.)"
+        },
+        {
+          "source": "quality MAJOR-1",
+          "claim": "Walker container-shape coverage has 4 gaps: (A) duplicate Sensitive() markers (Annotated[str, Sensitive(), Sensitive()]) — spec §4.2.5 says coverage includes this but no test exists; (B) compound container nesting list[list[BaseModel]] — only list[_FlatModel] and 3-level model nesting are covered; (C) Field() + Annotated combination (Annotated[str, Field(description='...'), Sensitive()]) — FieldInfo placement in the metadata tuple may interfere with marker detection; (D) 3-arm Union (Union[A, BaseModel, bool]) — descent into BaseModel arm + non-descent on bool arm needs explicit coverage. Each gap is a silent-leak path.",
+          "fix": "Add four test functions to test_walk_model_schema.py before Task 2 begins."
+        }
+      ],
+      "unified_recommendation": "Add extra='forbid' to all promoted argument models with adequacy-guard assertion. Remove AST inspection from Task 10 entirely. Add the four walker container-shape tests before Task 2."
+    },
+    {
+      "id": "M-telemetry-implementation",
+      "title": "Telemetry implementation is fictional and one declared counter is unwired",
+      "convergence": "Reality MAJOR + Quality MINOR-2",
+      "components": [
+        {
+          "source": "reality",
+          "claim": "Plan Task 3 OtelRedactionTelemetry methods call _increment_counter(name, **labels) and the test monkeypatches elspeth.web.composer.redaction_telemetry._increment_counter. No such function exists. Established OTel pattern (verified at service.py:135, 148, 824, 868, 1172, 1182) is module-level _FOO_COUNTER = metrics.get_meter(__name__).create_counter('foo.total', description='...') and _FOO_COUNTER.add(1, {'label_key': label_value}). Verbatim execution of Task 3 produces NameError at import time.",
+          "fix": "Rewrite Task 3 to use module-level create_counter() objects (one per counter name) and .add() calls. Rewrite the test to patch the counter objects, not a nonexistent intermediate function."
+        },
+        {
+          "source": "quality MINOR-2",
+          "claim": "Spec §1.4 NFR table names composer.redaction.summarizer_errors_total (SLO=0). If walker raises AuditIntegrityError on summarizer failure, no code path increments the counter. Protocol does not include it. Operators watching OTel dashboards see never-nonzero.",
+          "fix": "Either (a) add summarizer_error(*, tool_name: str) to RedactionTelemetry Protocol, wired immediately before raise AuditIntegrityError; or (b) document that the counter is emitted by persistence-layer exception handler (Phase 3 scope), with pointer to that wiring site."
+        }
+      ],
+      "unified_recommendation": "Rewrite Task 3 around the actual OTel pattern (module-level create_counter() + .add()). Wire summarizer_error counter in the Protocol immediately before raise AuditIntegrityError sites, OR explicitly defer to Phase 3 with a pointer."
+    },
+    {
+      "id": "M-walker-guard-parity",
+      "title": "Walker↔guard parity asserted structurally but not behaviourally",
+      "convergence": "Quality MAJOR-3 + Systems MINOR-1",
+      "components": [
+        {
+          "source": "quality MAJOR-3",
+          "claim": "Both consumers share walk_model_schema (forecloses 'different iteration functions' failure shape). But they READ the iterator's output differently: walker (Task 8) reads TraversalNode.metadata and dispatches by isinstance(m, _SensitiveMarker); guard (Task 10) walks by _SensitiveMarker presence AND by field-shape rule table in spec §4.4.2 (fails on Any-typed fields). Distinct decision trees over the same nodes. A model with Any-typed field: guard fails, walker may silently skip. No test verifies for any model M: {n.path for n in walk_model_schema(M)} (guard mode) == {n.path for n in walk_model_schema(M, with_values=True)} (walker mode).",
+          "fix": "Add parametrized test in test_adequacy_guard.py (or new test_walker_guard_parity.py) asserting path-set identity between modes for each manifest entry's argument model."
+        },
+        {
+          "source": "systems MINOR-1",
+          "claim": "Shared iterator (Task 1) and explicit Tasks 7-12 routing both consumers through it is correct. But nothing prevents a future engineer from writing a second traversal loop in redaction.py, tools.py, or a new module. Cultural blocking only.",
+          "fix": "Single integration test walking a fixture model through both adequacy-guard code path AND runtime walker code path, asserting identical (path, has_marker) tuples."
+        }
+      ],
+      "unified_recommendation": "Add a behavioural parity test asserting both code paths produce identical path-sets and marker-presence over the same input model. Two related but distinct angles converge on the same single test addition."
+    },
+    {
+      "id": "M-governance-single-owner",
+      "title": "Label-gate is self-bypassing on a single-owner repo",
+      "convergence": "Systems MAJOR-2",
+      "components": [
+        {
+          "source": "systems MAJOR-2",
+          "claim": "Spec acknowledges @elspeth/security team unavailable on personal-account repo. Label-gate is the only procedural gate. No code-review requirement separate from the label. Single-owner repo can self-bypass the control by applying the label without review. Not a code defect but a governance gap; the spec's 'defense by mechanism' claim is overstated for a single-owner repo.",
+          "fix": "Note in docs/guides/redaction-policy-changes.md that label gate assumes multi-person review and is self-bypassing in single-owner context."
+        }
+      ],
+      "unified_recommendation": "Document the governance assumption explicitly in the policy-changes guide."
+    },
+    {
+      "id": "M-blob-summarizer-type-variability",
+      "title": "Blob-tool summarizer type-safety not validated by tracer bullet",
+      "convergence": "Systems MAJOR-4",
+      "components": [
+        {
+          "source": "systems MAJOR-4",
+          "claim": "create_blob and update_blob (Task 13) use lambda b: f'<inline-blob:{len(b)}-bytes>'. If LLM supplies non-string (list, dict, int) that validates without Sensitive marker raising, len() may fail or f-string may raise. The set_source tracer bullet does not exercise this type variability. Feedback loop failure: Task 4 green; bulk migration begins at Task 13; first blob-content LLM-supplied non-string triggers AuditIntegrityError; per-turn write crashes.",
+          "fix": "Task 13 explicit step: 'verify the summarizer handles every type the LLM could supply for this field.'"
+        }
+      ],
+      "unified_recommendation": "Add an explicit step in Task 13 to enumerate and test every type the LLM could supply for blob content."
+    }
+  ],
+  "minors": [
+    {
+      "id": "m-script-dir-missing",
+      "source": "reality MINOR",
+      "claim": "Task 12 creates scripts/composer/bootstrap_redaction_snapshot.py but scripts/composer/ does not exist. Agent must create the directory; not documented in Task 12 steps.",
+      "fix": "Add directory-creation step to Task 12."
+    },
+    {
+      "id": "m-citation-hygiene",
+      "source": "reality MINOR + propagated through plan and spec",
+      "claim": "service.py:1836-1870 citation is misapplied throughout the plan and spec. That range is the JSON-decode / non-dict pre-dispatch gate; it is consistently cited as covering all ARG_ERROR routing, including cases that actually land at ToolArgumentError catch at service.py:2480 or _failure_result at tools.py:5481.",
+      "fix": "Audit every service.py:1836-1870 citation in plan and spec; replace with the correct catch site for each case."
+    },
+    {
+      "id": "m-sentinel-equality-assertion",
+      "source": "quality MINOR-1",
+      "claim": "Task 7 prose says 'fixed sentinel <redacted-unknown-response-key>' but test bullets do not specify assertion operator. A regressed <redacted-unknown-key:42-bytes> form would pass an `in` check. Sentinel is security-relevant (W6 closure removes length disclosure).",
+      "fix": "Task 7 test bullet specifies `==` (string equality), not regex or prefix match."
+    },
+    {
+      "id": "m-redact-source-storage-path-passthrough",
+      "source": "quality MINOR-3",
+      "claim": "Existing redaction.py has three defensive .get() calls on Tier-3 input. Tier-boundary access does justify defensive patterns, but no plan task audits the behaviour relative to Phase 2's new code. The summarizer wrapper in _summarize_set_source_options (Task 4) calls into this function.",
+      "fix": "Task 4 Step 3 summarizer implementation states the input shape expected; Task 19 property test for this summarizer includes an input without blob_ref key to verify pass-through."
+    },
+    {
+      "id": "m-task17-pinning-risk",
+      "source": "quality MINOR-4",
+      "claim": "Task 17 Step 3 says 'pin whatever you observe.' Epistemically correct given unknown dispatch path, but creates risk: latent bug in current behaviour gets pinned as expected.",
+      "fix": "Add to Task 17 Step 1: 'Verify actual audit status for unknown tool name is ARG_ERROR. If actual differs, report to operator — do not pin a non-ARG_ERROR status without escalation.'"
+    },
+    {
+      "id": "m-traversalnode-polymorphism",
+      "source": "architecture MINOR-1",
+      "claim": "TraversalNode.value_provider polymorphic (None in adequacy mode; live closure in walker mode; scalar vs Iterator[tuple] return). Latent footgun for future consumers.",
+      "fix": "Class-level docstring documenting polymorphism; consider is_container_descent: bool field. Defer to post-Phase-2 hygiene unless third consumer planned."
+    },
+    {
+      "id": "m-sensitive-placement",
+      "source": "architecture MINOR-2",
+      "claim": "_SensitiveMarker and Sensitive() have no upward dependencies. Per CLAUDE.md 'Move the code down', future L0 use cases could justify moving them to contracts/. Document placement decision so future session can find migration path.",
+      "fix": "Document placement decision in redaction.py module docstring."
+    },
+    {
+      "id": "m-crash-in-walker-call-k",
+      "source": "systems MINOR-2",
+      "claim": "Plan covers 'summarizer raises → AuditIntegrityError' for single walker call, but not walker call 1 succeeds → walker call 2 raises, confirming already-computed redacted output from call 1 is discarded and no row written.",
+      "fix": "Add test scenario for partial-walker-failure atomicity."
+    },
+    {
+      "id": "m-dynamic-tool-name",
+      "source": "systems MINOR-3",
+      "claim": "If tool_name is constructed at runtime, adequacy guard cannot enumerate. Acceptable per spec's Tier-3 disposition table, but no warning against dynamic name construction.",
+      "fix": "Warning comment in MANIFEST and execute_tool() noting 'tool names must be string literals for adequacy CI coverage.'"
+    },
+    {
+      "id": "m-sentinel-reach-audit-row",
+      "source": "systems MINOR-4",
+      "claim": "Tests confirm walker substitutes sentinel in returned dict; whether the dict reaches the DB (Phase 3 concern) is untested in Phase 2.",
+      "fix": "Subsumed by BLOCKER A unified recommendation (integration scenario crossing Phase 2 → Phase 3 boundary)."
+    }
+  ],
+  "observations": [
+    {
+      "id": "obs-bulk-editorial-pr",
+      "source": "systems OBSERVATION-1",
+      "note": "Residual calendar synchronicity risk. Snapshot bootstrap is content-keyed (closes M8). But a deliberate editorial decision ('standardise all discovery-tool reason phrasing') could trigger one PR with many simultaneous hash flips and bulk label-gate approval without per-entry review."
+    },
+    {
+      "id": "obs-cancellation-composition",
+      "source": "systems OBSERVATION-2",
+      "note": "If redact_tool_call_arguments raises AuditIntegrityError between redaction and sync block, CancelledError is suppressed by AuditIntegrityError. Consistent with ELSPETH crash semantics, but composition with Phase 3 cancellation handling needs explicit testing."
+    },
+    {
+      "id": "obs-atomicity-preserved",
+      "source": "systems OBSERVATION-3",
+      "note": "Redaction phase is entirely pre-transaction; crash in any walker invocation prevents entry into sync block. Architecturally correct."
+    },
+    {
+      "id": "obs-snapshot-drift-detector",
+      "source": "systems OBSERVATION-4",
+      "note": "Adequacy guard's per-field rule passes str fields without Sensitive (omission is an assertion of non-sensitivity). The snapshot is what detects 'this field used to have Sensitive and now doesn't' — makes snapshot integrity + label-gate correctness load-bearing for drift scenarios. Reinforces BLOCKER B priority."
+    },
+    {
+      "id": "obs-claude-primacy-honoured",
+      "source": "systems OBSERVATION-5",
+      "note": "Unknown-response-key event recorded in Tier-1 audit row (sentinel string in JSON) before telemetry counter fires. Silent telemetry failure degrades observability but does not hide the event from the legal record."
+    },
+    {
+      "id": "obs-tool-redaction-policy-not-legacy",
+      "source": "architecture",
+      "note": "ToolRedactionPolicy dual-shape (type-driven vs declarative) is NOT legacy support. Legitimate design — mutually exclusive by construction-time ValueError. CLAUDE.md no-legacy-code policy does not apply."
+    },
+    {
+      "id": "obs-twenty-task-count-justified",
+      "source": "architecture",
+      "note": "Tasks 13-15 (three promotion waves) validate type-driven shape on real handlers with sensitive fields (create_blob.content, update_blob.content) before Task 16 locks in declarative shape for remaining 29 tools. Deferring would ship Phase 2 with type-driven shape validated on exactly one tool."
+    }
+  ],
+  "convergence_map": [
+    {
+      "unified_finding": "BLOCKER A (Phase 2 → Phase 3 contract integrity)",
+      "collapsed_from": [
+        "reality BLOCKER (ValidationError routing)",
+        "architecture BLOCKER (arguments_canonical surface decision)",
+        "quality MAJOR-2 (tracer bullet stops at walker)",
+        "quality MAJOR-4 (no completeness property)",
+        "systems BLOCKER-3 (no cross-boundary integration test)",
+        "systems MAJOR-1 (manifest-membership ordering precondition)"
+      ],
+      "rationale": "All six findings describe one underlying gap: Phase 2 proves internal correctness but does not pin the external contract that no raw sensitive value reaches the persistence layer. Resolution is bundled because the same set of edits closes all six."
+    },
+    {
+      "unified_finding": "BLOCKER B (label-gate direction)",
+      "collapsed_from": ["systems BLOCKER-1"],
+      "rationale": "Standalone — not convergent. Surfaced only by systems lens because the failure mode is procedural (mis-applied label), not architectural or symbol-level."
+    },
+    {
+      "unified_finding": "BLOCKER C (summarizer behavioural weakening)",
+      "collapsed_from": ["systems BLOCKER-2"],
+      "rationale": "Standalone — closure-form discipline issue around callable identity hashing."
+    },
+    {
+      "unified_finding": "MAJOR adequacy-mechanical-enforcement",
+      "collapsed_from": [
+        "architecture MAJOR-1 (missing extra='forbid')",
+        "architecture MAJOR-2 (AST inspection brittle)",
+        "quality MAJOR-1 (4 walker container-shape coverage gaps)"
+      ],
+      "rationale": "All three describe stated invariants without mechanical enforcement. extra='forbid' + remove AST + add 4 walker tests are three coordinated edits, not three unrelated items."
+    },
+    {
+      "unified_finding": "MAJOR telemetry-implementation",
+      "collapsed_from": [
+        "reality MAJOR (_increment_counter fictional)",
+        "quality MINOR-2 (summarizer_errors_total unwired)"
+      ],
+      "rationale": "Both touch Task 3's RedactionTelemetry implementation. Single Task 3 rewrite closes both."
+    },
+    {
+      "unified_finding": "MAJOR walker-guard-parity",
+      "collapsed_from": [
+        "quality MAJOR-3 (no behavioural parity test)",
+        "systems MINOR-1 (cultural-only structural blocking)"
+      ],
+      "rationale": "Two angles on the same single test addition (path-set identity between iterator modes)."
+    },
+    {
+      "unified_finding": "Apparent conflict (resolved): AST inspection",
+      "collapsed_from": [
+        "architecture MAJOR-2 (remove AST entirely)",
+        "systems MAJOR-3 (specify parse-once strategy)"
+      ],
+      "rationale": "Architecture's recommendation is structurally stronger and makes Systems MAJOR-3 moot. Canonical fix: remove AST inspection entirely; mechanical enforcement via promoted Pydantic models for tools needing key-coverage guarantees."
+    },
+    {
+      "unified_finding": "Apparent conflict (not actually conflict): BLOCKER count divergence",
+      "collapsed_from": [
+        "quality reports 0 BLOCKERS",
+        "reality reports 1 BLOCKER",
+        "architecture reports 1 BLOCKER",
+        "systems reports 3 BLOCKERS"
+      ],
+      "rationale": "Quality lens excludes architectural decisions (arguments_canonical), routing-fact correctness (ValidationError), and cross-phase ordering. Total cross-reviewer BLOCKER count is 5 but collapses to 3 distinct underlying problems (A, B, C) after deduplication."
+    }
+  ],
+  "what_changed_since_rev_4": {
+    "verdict": "Substantive improvement, not a relabel",
+    "evidence": [
+      "All four prior BLOCKERs (B1 fictional class hierarchy, B2 walker recursion gap, B3 spec false premise, B4 unconditional gh pr create) are genuinely closed. Reality, Architecture, Quality, and Systems independently confirm.",
+      "13/13 quality-coded prior WARNINGs and MAJORs (W3, W4, W5, W6, W7, W8, W9, W12, M2, M4, M5, M7, M9) are closed (Quality verification).",
+      "Spec rev-5 has corrected the derivation root (§1, §4.2.1). Plan now derives from real architecture, not a fictional one.",
+      "Manifest-keyed dispatch architecture mirrors the existing _TOOL_REQUIRED_PATHS pattern at service.py:702 — structurally aligned, not invented.",
+      "Shared walk_model_schema iterator forecloses the 'different iteration functions' failure shape that produced B2 in rev-4.",
+      "Task 20 explicitly defers PR-open per operator memory.",
+      "20-task count is justified: three promotion waves (Tasks 13-15) validate type-driven shape on real sensitive fields before Task 16 locks in declarative shape for the remaining 29 tools."
+    ],
+    "new_BLOCKERs_are_real_but_smaller_in_scope": "The new BLOCKERs are NOT a regression to the rev-4 class. They represent contract-boundary work that the structural rewrite enabled but did not yet complete. Resolution is mostly documentation + a small number of test scenarios — not a rewrite. Estimate: 3-5 task edits + 1 spec paragraph + 1 done-when criterion.",
+    "framing_for_operator": "The eight-incident git-stash data-loss pattern is the most important framing. BLOCKER A is structurally the same shape: convenience operation captures state, does work, and on the next step a different code path re-emits the *original* state instead of the transformed one. Phase 2's tests stop at the transformation boundary — they do not verify that the *original* state never reaches the persistence layer. This is the load-bearing concern."
+  },
+  "final_recommendation": {
+    "verdict": "CHANGES_REQUESTED",
+    "remediation_path": "Iterate plan once — substantive but not a rewrite",
+    "qualifier": "Resolution is mostly documentation + adding a small number of test scenarios. The plan does not need to be torn up. The structural rewrite is correct.",
+    "estimate": "3-5 task edits + 1 spec paragraph + 1 done-when criterion + 4 walker container-shape tests added before Task 2",
+    "ordering": [
+      "1. Resolve BLOCKER A: (a) correct ValidationError routing claim in Task 4 + spec §4.2.6 + per-tool tests; (b) pick arguments_canonical posture and document in 'Files NOT touched in Phase 2'; (c) extend Task 4 tracer bullet to json.dumps boundary; (d) add Hypothesis property test in Task 19; (e) add Phase-2 done-when integration scenario; (f) document Phase 2 → Phase 3 call-order precondition.",
+      "2. Resolve BLOCKER B: rewrite Task 18 label-gate as direction-aware comparator + add direction-misclassification test.",
+      "3. Resolve BLOCKER C: document summarizer-hash assumption in spec + add identity/refactor tests in Task 19.",
+      "4. Resolve bundled MAJORs: (a) add extra='forbid' + adequacy assertion; (b) remove AST inspection from Task 10 entirely; (c) rewrite Task 3 around module-level create_counter() pattern; (d) wire summarizer_errors_total counter; (e) add walker-guard behavioural parity test; (f) document governance assumption for single-owner repo; (g) add Task 13 type-variability step for blob summarizers; (h) add the 4 walker container-shape tests before Task 2.",
+      "5. Sweep MINORs at the same time (script-dir creation, citation hygiene, sentinel equality, Task 17 escalation rule, etc.).",
+      "6. New plan-review cycle on the iterated plan.",
+      "7. Implementation."
+    ],
+    "do_not_start_implementation": "Until BLOCKERs A/B/C and the bundled MAJORs are resolved. The Tier-3 → Tier-1 boundary failure-mode cost is too high to accept these gaps."
+  },
+  "reviewer_summaries": {
+    "reality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 1,
+      "major": 1,
+      "minor": 2,
+      "report_path": "/tmp/composer-phase2-review-2026-05-12/reality.md"
+    },
+    "architecture": {
+      "status": "ISSUES_FOUND",
+      "blocking": 1,
+      "major": 2,
+      "minor": 2,
+      "observations": 4,
+      "grade": "B+",
+      "report_path": "/tmp/composer-phase2-review-2026-05-12/architecture.md"
+    },
+    "quality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 0,
+      "major": 4,
+      "minor": 4,
+      "report_path": "/tmp/composer-phase2-review-2026-05-12/quality.md",
+      "note": "Quality lens excludes architectural decisions, routing-fact correctness, and cross-phase ordering — explains 0 BLOCKERs vs the other reviewers. Not a conflict; different lens."
+    },
+    "systems": {
+      "status": "ISSUES_FOUND",
+      "blocking": 3,
+      "major": 4,
+      "minor": 4,
+      "observations": 5,
+      "report_path": "/tmp/composer-phase2-review-2026-05-12/systems.md"
+    }
+  },
+  "reviewer_outputs_inline": {
+    "note": "Full reports preserved at /tmp/composer-phase2-review-2026-05-12/{reality,architecture,quality,systems}.md as of 2026-05-12 review pass."
+  }
+}

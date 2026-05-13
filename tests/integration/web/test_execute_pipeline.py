@@ -160,7 +160,7 @@ class TestEndToEndPipelineExecution:
                 validation_errors=None,
             )
             session_service = app.state.session_service
-            await session_service.save_composition_state(UUID(session_id), state_data)
+            await session_service.save_composition_state(UUID(session_id), state_data, provenance="session_seed")
 
             # 3. Execute via REST
             resp = await client.post(
@@ -382,7 +382,7 @@ class TestGateRoutedPipelineExecution:
                 validation_errors=None,
             )
             session_service = app.state.session_service
-            await session_service.save_composition_state(UUID(session_id), state_data)
+            await session_service.save_composition_state(UUID(session_id), state_data, provenance="session_seed")
 
             resp = await client.post(
                 f"/api/sessions/{session_id}/execute",

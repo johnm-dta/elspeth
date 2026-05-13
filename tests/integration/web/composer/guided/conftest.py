@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import structlog
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
@@ -30,6 +31,7 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -62,7 +64,11 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
     initialize_session_schema(engine)
 
     # Session and blob services
-    session_service = SessionServiceImpl(engine)
+    session_service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.guided.conftest"),
+    )
     blob_service = BlobServiceImpl(engine, tmp_path)
 
     # FastAPI app

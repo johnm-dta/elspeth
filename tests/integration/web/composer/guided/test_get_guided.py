@@ -182,10 +182,17 @@ class TestGetGuidedAuditTrail:
     def _get_tool_messages(self, client: TestClient, session_id: str) -> list:
         """Query chat messages from service layer directly (bypasses API filter).
 
-        Audit messages (role=tool, _kind=audit) are deliberately excluded from
-        the public GET /messages API response — they are internal audit rows,
-        not conversation turns.  Query the service layer directly to verify
+        Audit-bearing messages are deliberately excluded from the public
+        GET /messages API response — they are internal audit rows, not
+        conversation turns.  Query the service layer directly to verify
         persistence.
+
+        Post Phase-1B/rev-4 (`_persist_tool_invocations`): guided audit
+        invocations land on ``role='audit'`` when there is no parent
+        assistant message (the GET /guided path emits server-side without
+        a paired assistant chat). Include both ``role='tool'`` and
+        ``role='audit'`` here so the test's persistence check sees what
+        the production endpoint actually writes.
 
         Uses ``asyncio.run()`` since SyncASGITestClient runs in a thread pool
         that may not have an active event loop.
@@ -196,7 +203,7 @@ class TestGetGuidedAuditTrail:
         service = app.state.session_service
 
         msgs = asyncio.run(service.get_messages(UUID(session_id), limit=None))
-        return [m for m in msgs if m.role == "tool"]
+        return [m for m in msgs if m.role in ("tool", "audit")]
 
     def test_audit_message_persisted_after_first_fetch(self, composer_test_client: TestClient) -> None:
         """An audit role=tool message is persisted after the first GET /guided call.
@@ -418,7 +425,7 @@ def _seed_guided_session(client: TestClient, session_id: str, guided_session_dic
         validation_errors=None,
         composer_meta=new_composer_meta,
     )
-    asyncio.run(service.save_composition_state(session_uuid, state_data))
+    asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
 
 
 class TestGetGuidedFullStateRebuild:

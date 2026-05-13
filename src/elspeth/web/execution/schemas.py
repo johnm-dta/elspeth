@@ -19,6 +19,16 @@ from elspeth.web.sessions.protocol import (
     TerminalSessionRunStatus,
 )
 
+# Closed enum mirroring the ``ck_run_events_type`` CHECK constraint in
+# ``web/sessions/models.py`` (L429). The Python Literal and the SQL CHECK
+# are paired contracts: extending one without the other lets the
+# pydantic writer pass while the DB rejects the row, or vice versa.
+# Order mirrors the CHECK declaration for visual diff clarity. Adding a
+# value is a governance action — see the closed-list-of-permitted-writers
+# comment block at ``audit_access_log_table`` for the same posture.
+RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
+RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
+
 
 class _StrictResponse(BaseModel):
     """Base model for execution response schemas — Tier 1 trust rules.
@@ -355,7 +365,7 @@ class RunEvent(_StrictResponse):
     # NOTE: Fast pipelines may produce identical timestamps.
     # Event ordering is guaranteed by the asyncio.Queue FIFO, not by timestamp.
     # Frontend must NOT sort by timestamp — use arrival order instead.
-    event_type: Literal["progress", "error", "completed", "cancelled", "failed"]
+    event_type: RunEventType
     data: ProgressData | ErrorData | CompletedData | CancelledData | FailedData
 
     @field_validator("timestamp", mode="before")

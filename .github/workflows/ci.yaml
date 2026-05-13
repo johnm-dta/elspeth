@@ -90,6 +90,37 @@ jobs:
             --format text
 
   # ===========================================================================
+  # Stage 2a: Frozen-Dataclass Freeze-Guard Enforcement (closes
+  # elspeth-obs-c025f9fc15 — CLAUDE.md asserted "Enforced by CI" but no
+  # workflow file existed prior to this lane).
+  #
+  # MUST stay listed in ci-success.needs: below so the gate is real
+  # under branch protection. Mirror the test-postgres-testcontainer
+  # rationale: removing this lane from ci-success.needs would let a red
+  # freeze-guard lane silently leave ci-success green.
+  # ===========================================================================
+  enforce-freeze-guards:
+    name: Enforce Freeze Guards
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run freeze-guard enforcement
+        run: |
+          python scripts/cicd/enforce_freeze_guards.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_freeze_guards
+
+  # ===========================================================================
   # Stage 2a: Audit Evidence Nominal Enforcement
   # ===========================================================================
   enforce-audit-evidence-nominal:
@@ -247,14 +278,14 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under=80 \
             -v \
-            -m "not slow and not stress and not performance"
+            -m "not slow and not stress and not performance and not testcontainer"
 
       - name: Run tests without coverage
         if: ${{ !matrix.coverage }}
         run: |
           uv run pytest tests/ \
             -v \
-            -m "not slow and not stress and not performance"
+            -m "not slow and not stress and not performance and not testcontainer"
 
       - name: Upload coverage report
         if: matrix.coverage && always()
@@ -298,6 +329,74 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: uv run pytest tests/integration/ -v -m integration || echo "Integration tests skipped (no API keys)"
+
+  # ===========================================================================
+  # Stage 3b: Testcontainer Postgres lane (CL-PP-11 dialect-portability proof)
+  # ===========================================================================
+  # Runs the tests marked ``@pytest.mark.testcontainer`` against a
+  # Docker-backed PostgreSQL 16 container spun up via testcontainers-python.
+  # The default and matrix test lanes deselect this marker (see addopts in
+  # pyproject.toml and the explicit ``and not testcontainer`` clauses in the
+  # test matrix above) so that Docker-free local runs and CI lanes don't
+  # try to collect Docker-required tests. This lane is the canonical
+  # execution path for CL-PP-11 (composer-progress-persistence Phase 1
+  # spec §8.2).
+  #
+  # Docker-on-Docker: GitHub Actions ubuntu-latest runners have Docker
+  # available with no extra setup. testcontainers-python pulls postgres
+  # images on first use; image pull adds ~30s to first run, cached after.
+  #
+  # MUST stay listed in ci-success.needs: below — branch protection relies
+  # on the aggregate ci-success result. Removing this lane from needs:
+  # would let a red testcontainer lane silently leave ci-success green
+  # (the Phase 1C plan calls this out at line 127-131).
+  test-postgres-testcontainer:
+    name: Test (Postgres testcontainer)
+    runs-on: ubuntu-latest
+    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libsqlcipher-dev
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Verify testcontainers Postgres extra is installed
+        # Fail-closed dependency check (Phase 1C Preflight Step 3): the
+        # plan explicitly forbids ``|| echo missing``-style fallbacks here.
+        # If the import fails, the job fails — which is the correct
+        # signal that the lane cannot prove CL-PP-11.
+        run: uv run python -c "import testcontainers.postgres"
+
+      - name: Run testcontainer tests
+        # Marker filter is the contract; path narrowing breeds drift.
+        # Future testcontainer-marked tests anywhere under tests/
+        # (e.g. tests/integration/landscape/) should be picked up
+        # automatically. The earlier `tests/integration/web/` constraint
+        # would silently skip out-of-tree testcontainer-marked tests
+        # while CI still reported green — defeating the gate's purpose.
+        run: |
+          uv run pytest tests/ \
+            -v \
+            -m testcontainer
 
   # ===========================================================================
   # Stage 4: Frontend E2E (Playwright) — INFORMATIONAL until baseline lands
@@ -381,7 +480,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test]
+    needs: [lint, enforce-tier-model, enforce-freeze-guards, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test, test-postgres-testcontainer]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -392,6 +491,10 @@ jobs:
           fi
           if [[ "${{ needs.enforce-tier-model.result }}" != "success" ]]; then
             echo "Tier model enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-freeze-guards.result }}" != "success" ]]; then
+            echo "Freeze-guard enforcement job failed"
             exit 1
           fi
           if [[ "${{ needs.enforce-audit-evidence-nominal.result }}" != "success" ]]; then
@@ -408,6 +511,10 @@ jobs:
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "Test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.test-postgres-testcontainer.result }}" != "success" ]]; then
+            echo "Postgres testcontainer test job failed"
             exit 1
           fi
           echo "All CI checks passed!"

@@ -176,7 +176,7 @@
       "source": "systems",
       "issue": "Plan-embedded deployment runbook creates a precedent for plan-as-runbook",
       "priority_score": 4,
-      "recommendation": "Extract Task 5 Step 0 (systemd restart commands, env-file paths, host-shell vs sandbox guidance) to docs/guides/session-db-reset.md and reference it from the plan. Plans are decision artifacts; runbooks are operational artifacts - keep them separate."
+      "recommendation": "Extract Task 5 Step 0 (systemd restart commands, env-file paths, host-shell vs sandbox guidance) to docs/runbooks/staging-session-db-recreation.md and reference it from the plan. Plans are decision artifacts; runbooks are operational artifacts - keep them separate."
     },
     {
       "id": "W13",

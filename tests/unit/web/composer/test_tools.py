@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
@@ -1122,12 +1123,22 @@ class TestUpsertEdge:
         assert "gate" in result.data["error"].lower()
 
     def test_edge_to_output_syncs_source_on_success(self) -> None:
-        """Edge from source to output updates source's on_success."""
+        """Edge from source to output updates source's on_success.
+
+        set_source is promoted to a Pydantic argument model with
+        extra='forbid'; all four required fields must be supplied
+        (Task 4).
+        """
         state = _empty_state()
         catalog = _mock_catalog()
         r1 = execute_tool(
             "set_source",
-            {"plugin": "csv", "on_success": "old_stream", "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}}},
+            {
+                "plugin": "csv",
+                "on_success": "old_stream",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
             state,
             catalog,
         )
@@ -3222,6 +3233,10 @@ class TestDeleteBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -3285,6 +3300,10 @@ class TestDeleteBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -5822,14 +5841,35 @@ class TestSetPipeline:
         assert "sink" in result.data["error"].lower()
 
     def test_set_pipeline_missing_required_field_fails(self) -> None:
+        """Missing required field is now a Tier-3 ToolArgumentError.
+
+        Post Task 14 (set_pipeline manifest promotion):
+        :class:`SetPipelineArgumentsModel` / :class:`_SetPipelineSourceModel`
+        require ``source.on_success``; absence raises a structured
+        :class:`pydantic.ValidationError` that the handler re-raises as
+        :class:`ToolArgumentError` BEFORE any handler-side spec
+        construction.  Previously the omission fell through to the
+        ``try: SourceSpec(...)``/``except KeyError`` branch and was
+        reported via ``"Invalid pipeline spec"`` in ``result.data["error"]``;
+        that branch was removed in Task 14 because Pydantic now catches
+        the type errors upstream.
+
+        The compose-loop ARG_ERROR routing at ``service.py:2480`` builds
+        the LLM-facing error payload from the captured
+        :class:`ToolArgumentError`.  This unit-level test reaches the
+        handler directly via ``execute_tool``, so it observes the bare
+        exception class — not the wrapped LLM payload.
+        """
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
         args = _valid_pipeline_args()
         # Remove on_success from source — required field
         del args["source"]["on_success"]
-        result = execute_tool("set_pipeline", args, state, catalog)
-        assert result.success is False
-        assert "Invalid pipeline spec" in result.data["error"]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool("set_pipeline", args, state, catalog)
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_set_pipeline_replaces_entire_state(self) -> None:
         # Build a state with 3 nodes first
@@ -6110,14 +6150,27 @@ class TestFailedMutationVersionStable:
 # ---------------------------------------------------------------------------
 
 
-class TestServiceKeyError:
-    """Tool raises KeyError on missing required argument — execute_tool propagates."""
+class TestServiceMissingArgToolArgumentError:
+    """Tool raises ToolArgumentError on missing required argument.
 
-    def test_missing_required_arg_raises_key_error(self) -> None:
+    Post Task 4 (set_source manifest promotion), missing required
+    arguments are caught at the Tier-3 boundary by
+    :class:`SetSourceArgumentsModel`; the handler re-raises
+    :class:`pydantic.ValidationError` as :class:`ToolArgumentError` so
+    the compose loop's ARG_ERROR routing at ``service.py:2480`` receives
+    the right exception class.  A bare ``KeyError`` (the prior shape) is
+    a plugin-bug indicator and would be routed to ``PLUGIN_CRASH`` —
+    that disposition is wrong for Tier-3 input.
+    """
+
+    def test_missing_required_arg_raises_tool_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
-        # set_source requires "plugin" — omitting it should raise KeyError
-        with pytest.raises(KeyError):
+        # set_source requires "plugin" — omitting it must raise
+        # ToolArgumentError (no longer KeyError) per Task 4.
+        with pytest.raises(ToolArgumentError):
             execute_tool("set_source", {}, state, catalog)
 
 
@@ -7469,6 +7522,19 @@ class TestCreateBlobTypeGuard:
     test_service.py) patch execute_tool at the seam and cannot prove the
     real handler raises the right class. This test drives the handler
     end-to-end through execute_tool() dispatch.
+
+    Post Task 13 (Wave 2 — ``create_blob`` manifest promotion): the
+    Tier-3 type guard now lives in :class:`CreateBlobArgumentsModel`
+    via Pydantic's strict ``content: str`` validation.  The handler
+    catches :class:`pydantic.ValidationError` and re-raises as
+    :class:`ToolArgumentError` (pattern at ``tools.py:2320-2327`` /
+    Task 4); the LLM-facing message names the argument-bundle and the
+    Pydantic model, not the offending value (rev-2 BLOCKER_A leak
+    discipline).  Memory:
+    ``feedback_locked_in_buggy_expectations`` — the previous
+    ``"'content' must be a string, got int"`` assertion pinned the
+    legacy ``_prepare_blob_create`` message; the new boundary fires
+    earlier with a leak-safe shell.
     """
 
     @pytest.fixture(autouse=True)
@@ -7505,12 +7571,20 @@ class TestCreateBlobTypeGuard:
             )
 
     def test_non_string_content_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
         state = _empty_state()
 
-        with pytest.raises(ToolArgumentError, match=r"'content' must be a string, got int"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value is not echoed (the
+        # full Pydantic detail survives on __cause__ for auditors).
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'create_blob arguments' must be object conforming to CreateBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "create_blob",
                 {
@@ -7524,6 +7598,10 @@ class TestCreateBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail
+        # (rev-2 BLOCKER_A leak discipline: full detail audit-side,
+        # leak-safe shell LLM-side).
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -7537,6 +7615,15 @@ class TestUpdateBlobTypeGuard:
     The fixture is deliberately copy-pasted from TestCreateBlobTypeGuard
     rather than factored into a shared helper: the two guards are
     independent raise sites and one should be moveable without the other.
+
+    Post Task 13 (Wave 2 — ``update_blob`` manifest promotion): the
+    Tier-3 type guard now lives in :class:`UpdateBlobArgumentsModel`
+    via Pydantic's strict ``content: str`` validation.  Identical
+    discipline to :class:`TestCreateBlobTypeGuard` — the same locked-in
+    legacy assertion (``"'content' must be a string, got int"``) is
+    updated to the new ToolArgumentError shape; the file-mutation
+    critical section is never entered on a pure argument-validation
+    failure (handler docstring pins this precedence).
     """
 
     @pytest.fixture(autouse=True)
@@ -7573,6 +7660,8 @@ class TestUpdateBlobTypeGuard:
             )
 
     def test_non_string_content_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
@@ -7593,7 +7682,13 @@ class TestUpdateBlobTypeGuard:
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
 
-        with pytest.raises(ToolArgumentError, match=r"'content' must be a string, got int"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value is not echoed (the
+        # full Pydantic detail survives on __cause__ for auditors).
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'update_blob arguments' must be object conforming to UpdateBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "update_blob",
                 {"blob_id": blob_id, "content": 42},
@@ -7603,6 +7698,8 @@ class TestUpdateBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail.
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -7611,7 +7708,22 @@ class TestUpdateBlobTypeGuard:
 
 
 class TestSetSourceFromBlobTypeGuard:
-    """Malformed `options` must stay a retryable tool-argument failure."""
+    """Malformed `options` must stay a retryable tool-argument failure.
+
+    Post Task 13 (Wave 2 — ``set_source_from_blob`` manifest promotion):
+    the Tier-3 type guard now lives in
+    :class:`SetSourceFromBlobArgumentsModel` via Pydantic's strict
+    ``options: dict[str, Any]`` validation.  The handler catches
+    :class:`pydantic.ValidationError` and re-raises as
+    :class:`ToolArgumentError` (pattern at ``tools.py:2320-2327`` /
+    Task 4); the LLM-facing message names the argument-bundle and the
+    Pydantic model, not the offending value (rev-2 BLOCKER_A leak
+    discipline).  Memory:
+    ``feedback_locked_in_buggy_expectations`` — the previous
+    ``"'options' must be an object, got str"`` assertion pinned the
+    legacy in-handler isinstance guard; the new boundary fires earlier
+    with a leak-safe shell.
+    """
 
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path: Path) -> None:
@@ -7647,6 +7759,8 @@ class TestSetSourceFromBlobTypeGuard:
             )
 
     def test_non_object_options_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
         from elspeth.web.composer.protocol import ToolArgumentError
 
         catalog = _mock_catalog()
@@ -7664,7 +7778,13 @@ class TestSetSourceFromBlobTypeGuard:
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
 
-        with pytest.raises(ToolArgumentError, match=r"'options' must be an object, got str"):
+        # Post Task 13 the LLM-facing message names the argument-bundle and
+        # the Pydantic model; the raw offending value (the string
+        # "column=text") and its type ("got str") are not echoed.
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'set_source_from_blob arguments' must be object conforming to SetSourceFromBlobArgumentsModel, got ValidationError",
+        ) as exc_info:
             execute_tool(
                 "set_source_from_blob",
                 {
@@ -7678,6 +7798,8 @@ class TestSetSourceFromBlobTypeGuard:
                 session_engine=self.engine,
                 session_id=self.session_id,
             )
+        # __cause__ chain MUST preserve the structured Pydantic detail.
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 # ---------------------------------------------------------------------------
@@ -8039,6 +8161,10 @@ class TestUpdateBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -8092,6 +8218,10 @@ class TestUpdateBlobActiveRunGuard:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -8333,6 +8463,10 @@ class TestUpdateBlobAtomicWrite:
                     metadata_=None,
                     is_valid=False,
                     validation_errors=None,
+                    # Plan §2294: composer-tools test fixture; provenance
+                    # required for setup row supporting subsequent runs/
+                    # blob_run_links FKs.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )

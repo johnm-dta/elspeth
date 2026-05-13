@@ -98,6 +98,7 @@ from elspeth.web.sessions.converters import state_from_record as _state_from_rec
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
+    ChatMessageRole,
     CompositionStateData,
     CompositionStateRecord,
     InvalidForkTargetError,
@@ -578,6 +579,33 @@ _COMPOSER_REQUEST_TERMINAL_COUNTER = metrics.get_meter(__name__).create_counter(
     description="Count of completed composer message requests by endpoint and terminal status",
 )
 
+# Audit-primacy counters for the route-side persistence helpers
+# (``_persist_tool_invocations``, ``_persist_llm_calls``). These mirror the
+# SessionServiceImpl-side counters in ``web/sessions/telemetry.py`` by
+# OTel metric name so dashboards aggregate; the route helpers use module-
+# level access (consistent with the other route counters above) rather
+# than threading the SessionsTelemetry container through every helper.
+# The ``helper`` attribute discriminates which row family failed
+# (``tool_invocations`` vs ``llm_calls``).
+_COMPOSER_TIER1_VIOLATION_COUNTER = metrics.get_meter(__name__).create_counter(
+    "composer.audit.tool_row_tier1_violation_total",
+    unit="1",
+    description=(
+        "Count of Tier-1 audit-row persist failures on the success path "
+        "(assistant row already written; tool/LLM-call audit row failed). "
+        "Each increment is paired with an AuditIntegrityError raise."
+    ),
+)
+_COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER = metrics.get_meter(__name__).create_counter(
+    "composer.audit.tool_row_persist_failed_during_unwind_total",
+    unit="1",
+    description=(
+        "Count of audit-row persist failures on the unwind path (a primary "
+        "failure was already in flight; this row failure is recorded but "
+        "does not raise so it cannot mask the primary exception)."
+    ),
+)
+
 
 def _record_composer_request_terminal(
     status: _ComposerRequestTerminalStatus,
@@ -693,7 +721,18 @@ def _composer_history_content(message: ChatMessageRecord) -> str:
 
 
 def _is_composer_audit_tool_message(message: ChatMessageRecord) -> bool:
-    """Return true when a persisted chat row is an audit-only composer tool row."""
+    """Return true when a persisted chat row is an audit-only composer row.
+
+    Rev-4: ``role="audit"`` rows are unconditionally audit-only — they exist
+    precisely because there is no parent assistant to carry a real
+    ``role="tool"`` row. The legacy ``role="tool"`` audit-envelope path is
+    preserved for the dispatch trail of in-loop tool calls produced by the
+    compose loop; those rows are excluded from prompt history because
+    replaying them without the assistant's tool-call request would create
+    orphan OpenAI tool messages.
+    """
+    if message.role == "audit":
+        return True
     if message.role != "tool":
         return False
     if message.tool_calls is None:
@@ -710,8 +749,13 @@ def _is_composer_audit_tool_message(message: ChatMessageRecord) -> bool:
 
 
 def _is_composer_llm_audit_tool_message(message: ChatMessageRecord) -> bool:
-    """Return true only for persisted composer LLM-call audit sidecars."""
-    if message.role != "tool" or message.tool_calls is None:
+    """Return true only for persisted composer LLM-call audit sidecars.
+
+    Rev-4: LLM-call audit rows are persisted with ``role="audit"`` (they
+    have no real OpenAI tool-call identity, so they cannot be ``role="tool"``
+    after the parent-CHECK biconditional landed in Task 1).
+    """
+    if message.role != "audit" or message.tool_calls is None:
         return False
     return any("_kind" in tool_call and tool_call["_kind"] == "llm_call_audit" for tool_call in message.tool_calls)
 
@@ -808,10 +852,21 @@ async def _persist_tool_invocations(
     session_id: UUID,
     tool_invocations: tuple[ComposerToolInvocation, ...],
     composition_state_id: UUID | None,
+    *,
+    parent_assistant_id: UUID | None = None,
+    plugin_crash_pending: bool,
 ) -> None:
-    """Persist per-tool-call audit records as ``role=tool`` chat messages.
+    """Persist per-tool-call audit records, splitting role by parent presence.
 
-    Each :class:`ComposerToolInvocation` lands as one ``role=tool`` row whose
+    Rev-4: when ``parent_assistant_id`` is supplied (success-path callers
+    after the assistant row was persisted), the row uses ``role="tool"``
+    with the OpenAI-shaped tool-call linkage. When the caller has no
+    assistant row (failure / convergence / preflight paths), the row uses
+    ``role="audit"`` — an internal-only role for audit breadcrumbs that
+    cannot satisfy the ``ck_chat_messages_parent_role`` /
+    ``ck_chat_messages_tool_call_id_role`` biconditional CHECKs.
+
+    Each :class:`ComposerToolInvocation` still lands as one chat row whose
     ``tool_calls`` JSON column carries the audit envelope under a ``_kind``
     discriminator (see :func:`elspeth.web.composer.audit.audit_envelope`).
 
@@ -829,13 +884,34 @@ async def _persist_tool_invocations(
     id; the per-call audit envelope's ``version_before``/``version_after``
     captures the per-call state delta.
 
-    Audit primacy: a SQLAlchemy failure here MUST NOT mask the calling
-    handler's primary outcome (the assistant message has already been
-    written, the partial-state row has already been written). The narrow
-    catch matches the discipline used in ``_handle_*_error`` helpers —
-    log with class name only and continue. The tool-row gap is observable
-    via the per-message ``tool_calls`` count vs.
-    ``ComposerResult.tool_invocations`` length on read-back.
+    Audit primacy disposition (caller-driven via ``plugin_crash_pending``).
+    Mirrors :meth:`SessionServiceImpl.persist_compose_turn` exactly —
+    same name, same semantics:
+
+    - ``plugin_crash_pending=False`` (success path): the assistant row
+      was already written and we are about to return success. A
+      SQLAlchemyError here means the assistant message exists in the
+      audit trail but the tool rows that prove what the LLM saw are
+      missing. That is a Tier-1 audit corruption (CLAUDE.md: "I don't
+      know what happened" is never an acceptable answer). Increment the
+      Tier-1 counter and raise :class:`AuditIntegrityError` chained
+      through the SQLAlchemyError. The request will 500 with the chained
+      cause visible to the operator.
+
+    - ``plugin_crash_pending=True`` (unwind / recovery path): the
+      caller already has a primary failure in hand
+      (ConvergenceError / PluginCrashError / RuntimePreflightError /
+      LLM provider error / CancelledError) and is calling this helper to
+      record audit detail of what happened. Raising
+      AuditIntegrityError here would mask the original failure, which is
+      what the operator needs to see. Increment the
+      "persist failed during unwind" counter, slog the audit-system
+      failure (the slog is permitted under CLAUDE.md primacy because the
+      audit system itself failed — telemetry has nowhere to write the
+      structured event), and continue. The unwind disposition is
+      observable via the counter increment + slog event; the partial
+      tool-trail is observable on read-back via per-message ``tool_calls``
+      count vs. ``ComposerResult.tool_invocations`` length.
     """
     for invocation in tool_invocations:
         if invocation.status == ComposerToolStatus.PLUGIN_CRASH:
@@ -855,26 +931,49 @@ async def _persist_tool_invocations(
                     "error_message": invocation.error_message,
                 }
             )
+        role: ChatMessageRole = "tool" if parent_assistant_id is not None else "audit"
         try:
             await service.add_message(
                 session_id,
-                "tool",
+                role,
                 content,
                 tool_calls=[audit_envelope(invocation)],
                 composition_state_id=composition_state_id,
+                writer_principal="compose_loop",
+                tool_call_id=invocation.tool_call_id if role == "tool" else None,
+                parent_assistant_id=parent_assistant_id if role == "tool" else None,
             )
         except SQLAlchemyError as save_err:
-            slog.error(
-                "composer_tool_invocation_persist_failed",
-                session_id=str(session_id),
-                tool_call_id=invocation.tool_call_id,
-                tool_name=invocation.tool_name,
-                exc_class=type(save_err).__name__,
+            if plugin_crash_pending:
+                # Unwind path: a primary failure is already in flight.
+                # Counting + slog preserves audibility without masking
+                # the original exception.
+                _COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER.add(
+                    1,
+                    {"helper": "tool_invocations"},
+                )
+                slog.error(
+                    "composer_tool_invocation_persist_failed_during_unwind",
+                    session_id=str(session_id),
+                    tool_call_id=invocation.tool_call_id,
+                    tool_name=invocation.tool_name,
+                    exc_class=type(save_err).__name__,
+                )
+                continue
+            # Success-path Tier-1 violation: the assistant row succeeded
+            # but the audit-companion tool row failed. The audit trail
+            # would assert "this tool was called" without the row that
+            # proves what it returned. Crash with the chained cause so
+            # the operator sees the full diagnostic.
+            _COMPOSER_TIER1_VIOLATION_COUNTER.add(
+                1,
+                {"helper": "tool_invocations"},
             )
-            # Continue — the goal is to preserve as much of the audit
-            # trail as possible. Logging this as a structured event lets
-            # operators detect partial-trail persistence by comparing
-            # event counts to the assistant's reported tool_invocations.
+            raise AuditIntegrityError(
+                f"composer_tool_invocation_persist_failed: audit insert "
+                f"failed for session_id={session_id!r} after assistant row "
+                f"was persisted — Tier-1 audit corruption (no recovery)"
+            ) from save_err
 
 
 def _llm_calls_from_exception(exc: BaseException) -> tuple[ComposerLLMCall, ...]:
@@ -892,8 +991,17 @@ async def _persist_llm_calls(
     session_id: UUID,
     llm_calls: tuple[ComposerLLMCall, ...],
     composition_state_id: UUID | None,
+    *,
+    plugin_crash_pending: bool,
 ) -> None:
-    """Persist per-LLM-call audit records as audit-only ``role=tool`` rows."""
+    """Persist per-LLM-call audit records as audit-only ``role=tool`` rows.
+
+    Audit-primacy disposition mirrors :func:`_persist_tool_invocations`
+    via the ``plugin_crash_pending`` flag — see that helper's docstring
+    for the full rationale. The shape is the same: success-path failure
+    is a Tier-1 audit corruption that must crash; unwind-path failure
+    is recorded via counter + slog so it cannot mask the primary error.
+    """
     for call in llm_calls:
         content = json.dumps(
             {
@@ -909,19 +1017,35 @@ async def _persist_llm_calls(
         try:
             await service.add_message(
                 session_id,
-                "tool",
+                "audit",
                 content,
                 tool_calls=[llm_call_audit_envelope(call)],
                 composition_state_id=composition_state_id,
+                writer_principal="compose_loop",
             )
         except SQLAlchemyError as save_err:
-            slog.error(
-                "composer_llm_call_persist_failed",
-                session_id=str(session_id),
-                model_requested=call.model_requested,
-                status=call.status.value,
-                exc_class=type(save_err).__name__,
+            if plugin_crash_pending:
+                _COMPOSER_PERSIST_FAILED_DURING_UNWIND_COUNTER.add(
+                    1,
+                    {"helper": "llm_calls"},
+                )
+                slog.error(
+                    "composer_llm_call_persist_failed_during_unwind",
+                    session_id=str(session_id),
+                    model_requested=call.model_requested,
+                    status=call.status.value,
+                    exc_class=type(save_err).__name__,
+                )
+                continue
+            _COMPOSER_TIER1_VIOLATION_COUNTER.add(
+                1,
+                {"helper": "llm_calls"},
             )
+            raise AuditIntegrityError(
+                f"composer_llm_call_persist_failed: audit insert failed for "
+                f"session_id={session_id!r} on success path — Tier-1 audit "
+                f"corruption (no recovery)"
+            ) from save_err
 
 
 async def _state_data_from_composer_state(
@@ -1128,7 +1252,11 @@ async def _handle_convergence_error(
                 initial_version=None,
                 telemetry_source="convergence",
             )
-            partial_record = await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="convergence_persist",
+            )
             persisted_state_id = partial_record.id
             state_d = exc.partial_state.to_dict()
             response_body["partial_state"] = redact_source_storage_path(state_d)
@@ -1167,6 +1295,7 @@ async def _handle_convergence_error(
             session_id,
             exc.tool_invocations,
             persisted_state_id,
+            plugin_crash_pending=True,
         )
     if exc.llm_calls:
         await _persist_llm_calls(
@@ -1174,6 +1303,7 @@ async def _handle_convergence_error(
             session_id,
             exc.llm_calls,
             llm_composition_state_id,
+            plugin_crash_pending=True,
         )
     return response_body
 
@@ -1262,7 +1392,11 @@ async def _handle_plugin_crash(
                 initial_version=None,
                 telemetry_source="plugin_crash",
             )
-            partial_record = await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="plugin_crash_persist",
+            )
             persisted_state_id_pc = partial_record.id
         except SQLAlchemyError as save_err:
             # Full SQLAlchemyError family — a narrow ``IntegrityError``
@@ -1311,6 +1445,7 @@ async def _handle_plugin_crash(
             session_id,
             exc.tool_invocations,
             persisted_state_id_pc,
+            plugin_crash_pending=True,
         )
     if exc.llm_calls:
         await _persist_llm_calls(
@@ -1318,6 +1453,7 @@ async def _handle_plugin_crash(
             session_id,
             exc.llm_calls,
             llm_composition_state_id,
+            plugin_crash_pending=True,
         )
     return response_body
 
@@ -1485,7 +1621,11 @@ async def _handle_runtime_preflight_failure(
                 initial_version=None,
                 telemetry_source="runtime_preflight",
             )
-            partial_record = await service.save_composition_state(session_id, state_data)
+            partial_record = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="preflight_persist",
+            )
             persisted_state_id_rpf = partial_record.id
         except SQLAlchemyError as save_err:
             # See sibling helpers for redaction rationale (exc_info
@@ -1528,6 +1668,7 @@ async def _handle_runtime_preflight_failure(
             session_id,
             exc.tool_invocations,
             persisted_state_id_rpf,
+            plugin_crash_pending=True,
         )
     if exc.llm_calls:
         await _persist_llm_calls(
@@ -1535,6 +1676,7 @@ async def _handle_runtime_preflight_failure(
             session_id,
             exc.llm_calls,
             llm_composition_state_id,
+            plugin_crash_pending=True,
         )
     return response_body
 
@@ -2751,6 +2893,7 @@ def create_session_router() -> APIRouter:
                 "user",
                 body.content,
                 composition_state_id=pre_send_state_id,
+                writer_principal="route_user_message",
             )
             progress_registry = _get_composer_progress_registry(request)
             progress_sink = _composer_progress_sink(
@@ -2866,7 +3009,7 @@ def create_session_router() -> APIRouter:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -2901,7 +3044,7 @@ def create_session_router() -> APIRouter:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -3033,7 +3176,7 @@ def create_session_router() -> APIRouter:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail={"error_type": "composer_error", "detail": str(exc)},
@@ -3163,6 +3306,17 @@ def create_session_router() -> APIRouter:
                     new_state_record = await service.save_composition_state(
                         session.id,
                         state_data,
+                        # Preserves pre-fix labelling. This call site (post-
+                        # compose path 1, send_message) wrote ``session_seed``
+                        # under the previous hardcoded label and continues to
+                        # do so here. The mismatch between this label and the
+                        # actual writer category (post-compose state advance,
+                        # not session create / branch reseed) is a SEPARATE
+                        # mis-attribution from the three handler sites that
+                        # commit elspeth-obs-f217c634aa addresses; widening
+                        # this commit to relabel post-compose paths would
+                        # require its own spec amendment + observation.
+                        provenance="session_seed",
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
@@ -3189,6 +3343,12 @@ def create_session_router() -> APIRouter:
                     _transition_record = await service.save_composition_state(
                         session.id,
                         _transition_state_data,
+                        # Mirrors the paired session_seed-labelled site immediately
+                        # above (post-compose path 1, transition_consumed flip).
+                        # Same known mis-attribution as that paired site — see the
+                        # comment block at the earlier save call for the
+                        # elspeth-obs-f217c634aa relabelling history.
+                        provenance="session_seed",
                     )
                     post_compose_state_id = _transition_record.id
 
@@ -3199,6 +3359,7 @@ def create_session_router() -> APIRouter:
                     result.message,
                     composition_state_id=post_compose_state_id,
                     raw_content=result.raw_assistant_content,
+                    writer_principal="compose_loop",
                 )
                 # 6b. Persist per-tool-call audit trail. Each ComposerToolInvocation
                 # lands as one role=tool chat message linked to the post-compose
@@ -3210,6 +3371,8 @@ def create_session_router() -> APIRouter:
                         session.id,
                         result.tool_invocations,
                         post_compose_state_id,
+                        parent_assistant_id=assistant_msg.id,
+                        plugin_crash_pending=False,
                     )
                 if result.llm_calls:
                     await _persist_llm_calls(
@@ -3217,6 +3380,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         result.llm_calls,
                         pre_send_state_id,
+                        plugin_crash_pending=False,
                     )
                 await _publish_progress(
                     progress_registry,
@@ -3283,7 +3447,15 @@ def create_session_router() -> APIRouter:
                 llm_calls = _llm_calls_from_exception(exc)
                 if llm_calls:
                     with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
+                        await asyncio.shield(
+                            _persist_llm_calls(
+                                service,
+                                session.id,
+                                llm_calls,
+                                pre_send_state_id,
+                                plugin_crash_pending=True,
+                            )
+                        )
                 with contextlib.suppress(asyncio.CancelledError):
                     # The shielded publish runs to completion in the
                     # background; the outer await re-raises CancelledError
@@ -3456,7 +3628,7 @@ def create_session_router() -> APIRouter:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -3486,7 +3658,7 @@ def create_session_router() -> APIRouter:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -3577,7 +3749,7 @@ def create_session_router() -> APIRouter:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id)
+                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail={"error_type": "composer_error", "detail": str(exc)},
@@ -3685,6 +3857,11 @@ def create_session_router() -> APIRouter:
                     new_state_record = await service.save_composition_state(
                         session.id,
                         state_data,
+                        # Preserves pre-fix labelling — see the parallel
+                        # comment on the post-compose path 1 site above.
+                        # Symmetric mis-attribution; out of scope for the
+                        # f217c634aa handler-site fix.
+                        provenance="session_seed",
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
@@ -3711,6 +3888,12 @@ def create_session_router() -> APIRouter:
                     _transition_record = await service.save_composition_state(
                         session.id,
                         _transition_state_data,
+                        # Mirrors the paired session_seed-labelled site immediately
+                        # above (post-compose path 1, transition_consumed flip).
+                        # Same known mis-attribution as that paired site — see the
+                        # comment block at the earlier save call for the
+                        # elspeth-obs-f217c634aa relabelling history.
+                        provenance="session_seed",
                     )
                     post_compose_state_id = _transition_record.id
 
@@ -3721,6 +3904,7 @@ def create_session_router() -> APIRouter:
                     result.message,
                     composition_state_id=post_compose_state_id,
                     raw_content=result.raw_assistant_content,
+                    writer_principal="compose_loop",
                 )
                 # Per-tool-call audit trail (recompose path; symmetric with send_message).
                 if result.tool_invocations:
@@ -3729,6 +3913,8 @@ def create_session_router() -> APIRouter:
                         session.id,
                         result.tool_invocations,
                         post_compose_state_id,
+                        parent_assistant_id=assistant_msg.id,
+                        plugin_crash_pending=False,
                     )
                 if result.llm_calls:
                     await _persist_llm_calls(
@@ -3736,6 +3922,7 @@ def create_session_router() -> APIRouter:
                         session.id,
                         result.llm_calls,
                         pre_send_state_id,
+                        plugin_crash_pending=False,
                     )
                 await _publish_progress(
                     progress_registry,
@@ -3783,7 +3970,15 @@ def create_session_router() -> APIRouter:
                 llm_calls = _llm_calls_from_exception(exc)
                 if llm_calls:
                     with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(_persist_llm_calls(service, session.id, llm_calls, pre_send_state_id))
+                        await asyncio.shield(
+                            _persist_llm_calls(
+                                service,
+                                session.id,
+                                llm_calls,
+                                pre_send_state_id,
+                                plugin_crash_pending=True,
+                            )
+                        )
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.shield(
                         _publish_progress(
@@ -3976,6 +4171,7 @@ def create_session_router() -> APIRouter:
             session.id,
             role="system",
             content=f"Pipeline reverted to version {original_state.version}.",
+            writer_principal="route_system_message",
         )
 
         return _state_response(new_state)
@@ -4198,6 +4394,15 @@ def create_session_router() -> APIRouter:
                     copied_state = await service.save_composition_state(
                         new_session.id,
                         state_data,
+                        # Preserves pre-fix labelling. The fork-time source-
+                        # storage rewrite previously wrote ``session_seed``
+                        # under the hardcoded label and continues to do so.
+                        # Whether this row should carry ``session_fork``
+                        # (the rewrite is part of the fork operation) or a
+                        # new ``fork_storage_rewrite`` discriminator is a
+                        # separate audit-attribution question outside the
+                        # scope of elspeth-obs-f217c634aa.
+                        provenance="session_seed",
                     )
 
                     # The edited user message (last in list) still references
@@ -4217,6 +4422,9 @@ def create_session_router() -> APIRouter:
                         tool_calls=user_msg.tool_calls,
                         created_at=user_msg.created_at,
                         composition_state_id=copied_state.id,
+                        writer_principal=user_msg.writer_principal,
+                        tool_call_id=user_msg.tool_call_id,
+                        parent_assistant_id=user_msg.parent_assistant_id,
                     )
         except BlobQuotaExceededError:
             # Build the HTTPException up-front so cleanup failures can be
@@ -4500,7 +4708,18 @@ def create_session_router() -> APIRouter:
                         validation_errors=None,
                         composer_meta=new_composer_meta,
                     )
-                    state_record_out = await service.save_composition_state(session_id, state_data)
+                    state_record_out = await service.save_composition_state(
+                        session_id,
+                        state_data,
+                        # Guided-mode server-emitted turn: the LLM converged on a
+                        # guided step transition and the resulting state is being
+                        # persisted. ``convergence_persist`` is the closest existing
+                        # provenance category (Phase 1A enum does not have a
+                        # ``guided_persist`` value; widening the enum mid-merge
+                        # would require a Phase 1A spec amendment and is out of
+                        # scope here — see merge commit message).
+                        provenance="convergence_persist",
+                    )
 
                     # Emit audit event.  Persistence of the buffered invocations
                     # is handled by the finally block below — that way both
@@ -4553,7 +4772,17 @@ def create_session_router() -> APIRouter:
                             validation_errors=None,
                             composer_meta=repair_meta,
                         )
-                        state_record_out = await service.save_composition_state(session_id, repair_data)
+                        state_record_out = await service.save_composition_state(
+                            session_id,
+                            repair_data,
+                            # Idempotency repair: re-populating ``step_2_5_recipe_offer``
+                            # that was missing on a session created before that field
+                            # was introduced. The repair restores a derived seed value,
+                            # not a new convergence — ``session_seed`` is the closest
+                            # existing provenance category. See merge commit message
+                            # for the guided-vs-enum scope decision.
+                            provenance="session_seed",
+                        )
                         guided = repaired_guided
 
                 # Build response.  On re-fetch the same turn is returned (deterministic
@@ -4620,6 +4849,11 @@ def create_session_router() -> APIRouter:
                         session_id,
                         recorder.invocations,
                         state_record_out.id if state_record_out is not None else None,
+                        # Guided endpoints don't dispatch tools that can plugin-crash;
+                        # auto-drop on solver exhaustion is a separate channel that
+                        # doesn't surface through this audit path. Phase 1B/rev-4
+                        # made this keyword-only with no default, exposing the gap.
+                        plugin_crash_pending=False,
                     )
                 except Exception as persist_exc:
                     slog.error(
@@ -4916,7 +5150,16 @@ def create_session_router() -> APIRouter:
                     validation_errors=None,
                     composer_meta=new_composer_meta,
                 )
-                state_record_out = await service.save_composition_state(session_id, state_data)
+                state_record_out = await service.save_composition_state(
+                    session_id,
+                    state_data,
+                    # Guided POST /respond: the user-supplied turn converged on a
+                    # guided step transition and the resulting state is being
+                    # persisted. Same provenance choice as the GET /guided server-
+                    # emitted path (the Phase 1A enum predates guided mode; widening
+                    # is out of scope here — see merge commit message).
+                    provenance="convergence_persist",
+                )
 
                 # Recorder persistence happens in the finally block below so
                 # rejection paths drain identically to the success path.
@@ -4982,6 +5225,11 @@ def create_session_router() -> APIRouter:
                         session_id,
                         recorder.invocations,
                         state_record_out.id if state_record_out is not None else None,
+                        # Guided endpoints don't dispatch tools that can plugin-crash;
+                        # auto-drop on solver exhaustion is a separate channel that
+                        # doesn't surface through this audit path. Phase 1B/rev-4
+                        # made this keyword-only with no default, exposing the gap.
+                        plugin_crash_pending=False,
                     )
                 except Exception as persist_exc:
                     slog.error(

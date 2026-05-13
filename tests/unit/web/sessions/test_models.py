@@ -13,6 +13,7 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
+    run_events_table,
     runs_table,
     sessions_table,
 )
@@ -121,6 +122,9 @@ class TestCompositionStateUniqueConstraint:
                     session_id=session_id,
                     version=1,
                     is_valid=False,
+                    # Plan §2294: schema-test direct insert must supply
+                    # provenance after Task 3's NOT NULL/CHECK addition.
+                    provenance="session_seed",
                     created_at=datetime.now(UTC),
                 )
             )
@@ -132,6 +136,12 @@ class TestCompositionStateUniqueConstraint:
                         session_id=session_id,
                         version=1,
                         is_valid=False,
+                        # Plan §2294: provenance required even on the
+                        # expected-to-fail row, so the failure exercises
+                        # ``uq_composition_state_version`` (the actual
+                        # subject under test) rather than the provenance
+                        # NOT NULL constraint.
+                        provenance="session_seed",
                         created_at=datetime.now(UTC),
                     )
                 )
@@ -165,6 +175,8 @@ class TestSessionForeignKeys:
                     session_id=session_id,
                     role="user",
                     content="Hello",
+                    sequence_no=1,
+                    writer_principal="route_user_message",
                     created_at=datetime.now(UTC),
                 )
             )
@@ -183,6 +195,8 @@ class TestSessionForeignKeys:
                         session_id="nonexistent-session",
                         role="user",
                         content="Orphan message",
+                        sequence_no=1,
+                        writer_principal="route_user_message",
                         created_at=datetime.now(UTC),
                     )
                 )
@@ -210,6 +224,8 @@ class TestCheckConstraints:
                         session_id=session_id,
                         role="invalid_role",
                         content="Hello",
+                        sequence_no=1,
+                        writer_principal="route_user_message",
                         created_at=datetime.now(UTC),
                     )
                 )
@@ -233,6 +249,10 @@ class TestCheckConstraints:
                     session_id=session_id,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: schema-test direct insert; provenance
+                    # required for the FK-target row that subsequent
+                    # runs_table inserts depend on.
+                    provenance="session_seed",
                     created_at=datetime.now(UTC),
                 )
             )
@@ -246,5 +266,54 @@ class TestCheckConstraints:
                         started_at=datetime.now(UTC),
                         rows_processed=0,
                         rows_failed=0,
+                    )
+                )
+
+    def test_invalid_run_event_type_rejected(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            conn.execute(
+                insert(sessions_table).values(
+                    id=session_id,
+                    user_id="alice",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            conn.execute(
+                insert(composition_states_table).values(
+                    id=state_id,
+                    session_id=session_id,
+                    version=1,
+                    is_valid=True,
+                    # Plan §2294: schema-test direct insert; provenance
+                    # required for the FK-target row that subsequent
+                    # runs_table inserts depend on.
+                    provenance="session_seed",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            conn.execute(
+                insert(runs_table).values(
+                    id=run_id,
+                    session_id=session_id,
+                    state_id=state_id,
+                    status="pending",
+                    started_at=datetime.now(UTC),
+                    rows_processed=0,
+                    rows_failed=0,
+                )
+            )
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(run_events_table).values(
+                        id=str(uuid.uuid4()),
+                        run_id=run_id,
+                        timestamp=datetime.now(UTC),
+                        event_type="invalid_type",
+                        data="{}",
                     )
                 )

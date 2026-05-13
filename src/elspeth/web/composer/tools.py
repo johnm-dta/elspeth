@@ -41,7 +41,18 @@ from elspeth.web.composer.recipes import (
     apply_recipe,
     list_recipes,
 )
-from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.redaction import (
+    ApplyPipelineRecipeArgumentsModel,
+    CreateBlobArgumentsModel,
+    PatchNodeOptionsArgumentsModel,
+    PatchOutputOptionsArgumentsModel,
+    PatchSourceOptionsArgumentsModel,
+    SetPipelineArgumentsModel,
+    SetSourceArgumentsModel,
+    SetSourceFromBlobArgumentsModel,
+    UpdateBlobArgumentsModel,
+    redact_source_storage_path,
+)
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
     facts_to_dict,
@@ -50,7 +61,9 @@ from elspeth.web.composer.source_inspection import (
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
+    EdgeType,
     NodeSpec,
+    NodeType,
     OutputSpec,
     PipelineMetadata,
     SourceSpec,
@@ -1966,7 +1979,15 @@ class _ResolvedSourceBlob:
     payload: SourceBlobPayload
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "options")
+        # ``options`` is the resolved-source pipeline-options mapping; it
+        # may carry nested dicts/lists from the composer YAML and is
+        # mutable through the attribute reference without a freeze guard,
+        # defeating ``frozen=True``. ``payload`` is a SourceBlobPayload
+        # TypedDict whose declared fields are all scalars (str / int /
+        # str | None) — the dict itself is a container so we deep-freeze
+        # both for symmetry rather than relying on caller discipline to
+        # keep payload scalar-only forever.
+        freeze_fields(self, "options", "payload")
 
 
 def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
@@ -2402,8 +2423,33 @@ def _execute_set_source(
     catalog: CatalogService,
     data_dir: str | None = None,
 ) -> ToolResult:
-    """Set or replace the pipeline source."""
-    plugin = args["plugin"]
+    """Set or replace the pipeline source.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`SetSourceArgumentsModel` (the
+    single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["set_source"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.  A bare
+    ``ValidationError`` would escape into the catch-all
+    (``ComposerPluginCrashError`` → HTTP 500) — wrong disposition for
+    Tier-3 input.  Pattern: ``tools.py:2668, 2761, 2767, 2773, 2787, 2801``.
+    """
+    try:
+        validated = SetSourceArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="set_source arguments",
+            expected="object conforming to SetSourceArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    plugin = validated.plugin
+    options = validated.options
+
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(catalog, "source", plugin)
     if plugin_error is not None:
@@ -2415,7 +2461,6 @@ def _execute_set_source(
     # blob_ref + path lets the caller persist a path that disagrees with the
     # blob's canonical storage_path, breaking runtime resolution and
     # composer/runtime agreement.  See elspeth-07089fbaa3.
-    options = args.get("options", {})
     manual_blob_ref_error = _reject_manual_source_blob_ref(options, tool_name="set_source")
     if manual_blob_ref_error is not None:
         return _failure_result(state, manual_blob_ref_error)
@@ -2433,14 +2478,14 @@ def _execute_set_source(
     if path_error is not None:
         return _failure_result(state, path_error)
 
-    on_vf = args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
+    on_vf = validated.on_validation_failure
     prevalidation_error = _prevalidate_source(plugin, options, on_vf)
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
 
     source = SourceSpec(
         plugin=plugin,
-        on_success=args["on_success"],
+        on_success=validated.on_success,
         options=options,
         on_validation_failure=on_vf,
     )
@@ -2763,18 +2808,47 @@ def _execute_set_source_from_blob(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> ToolResult:
-    caller_options = arguments.get("options", {})
-    if not isinstance(caller_options, dict):
+    """Bind the pipeline source to an existing blob.
+
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`SetSourceFromBlobArgumentsModel` (the single source of
+    truth for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["set_source_from_blob"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).  On
+    :class:`pydantic.ValidationError` we re-raise as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing
+    at ``service.py:2480`` receives the right exception class (Task 13
+    / Wave 2; mirrors Task 4 pattern at ``tools.py:2320-2327``).
+
+    The prior in-handler ``isinstance(caller_options, dict)`` guard at
+    this site is superseded by the Pydantic model's ``options: dict[str,
+    Any]`` validation: a non-dict (or missing-required-fields) input now
+    raises a structured ValidationError that the handler re-raises as
+    ToolArgumentError before any blob-lookup work is done.
+
+    Optional-field semantics (mirrors the JSON schema's `required`):
+      * ``options`` defaults to ``{}`` (matches the prior
+        ``arguments.get("options", {})``).
+      * ``plugin`` and ``on_validation_failure`` remain ``str | None``
+        so the handler can distinguish operator-omitted from
+        operator-specified.  ``on_validation_failure`` None falls back
+        to ``_DEFAULT_SOURCE_VALIDATION_FAILURE`` ("discard") at the
+        seam below, matching the prior ``arguments.get(...)`` default.
+    """
+    try:
+        validated = SetSourceFromBlobArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
         raise ToolArgumentError(
-            argument="options",
-            expected="an object",
-            actual_type=type(caller_options).__name__,
-        )
-    on_vf = arguments.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
+            argument="set_source_from_blob arguments",
+            expected="object conforming to SetSourceFromBlobArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    on_vf = validated.on_validation_failure if validated.on_validation_failure is not None else _DEFAULT_SOURCE_VALIDATION_FAILURE
     resolved = _resolve_source_blob(
-        blob_id=arguments["blob_id"],
-        explicit_plugin=arguments.get("plugin"),
-        caller_options=caller_options,
+        blob_id=validated.blob_id,
+        explicit_plugin=validated.plugin,
+        caller_options=validated.options,
         on_validation_failure=on_vf,
         state=state,
         catalog=catalog,
@@ -2786,7 +2860,7 @@ def _execute_set_source_from_blob(
 
     source = SourceSpec(
         plugin=resolved.plugin,
-        on_success=arguments["on_success"],
+        on_success=validated.on_success,
         options=resolved.options,
         on_validation_failure=on_vf,
     )
@@ -2852,29 +2926,36 @@ def _prepare_blob_create(
     data_dir: str,
     session_id: str,
 ) -> _PreparedBlobCreate:
-    """Validate a create_blob-style payload and allocate its storage path."""
+    """Validate a create_blob-style payload and allocate its storage path.
+
+    Type guarantees on entry
+    ------------------------
+    Post Task 14 (set_pipeline promotion), every reachable caller validates
+    ``arguments`` via a Pydantic model BEFORE invoking this helper:
+
+      * :func:`_execute_create_blob` — :class:`CreateBlobArgumentsModel`
+        (Task 13 / Wave 2; ``filename: str``, ``mime_type: str``,
+        ``content: str`` + ``extra="forbid"``).
+      * :func:`_execute_set_pipeline` inline-blob path — passes
+        ``validated.source.inline_blob.model_dump()`` (Task 14 / Wave 3
+        via :class:`_InlineBlobModel`; same string-typed required fields
+        + ``extra="forbid"``).
+
+    The three ``isinstance(..., str)`` guards that previously sat at the
+    top of this function are therefore unreachable — Pydantic rejects any
+    non-string value with a structured :class:`pydantic.ValidationError`
+    re-raised by the caller as :class:`ToolArgumentError` before this
+    helper is invoked.  They are removed in the same commit that promotes
+    ``set_pipeline`` so the dead-code surface does not linger past the
+    wave that makes it dead (CLAUDE.md "No Legacy Code Policy").
+
+    Semantic checks below this point (MIME allowlist, filename
+    sanitisation) ARE NOT type checks — they enforce content-validity
+    rules Pydantic cannot express — and remain.
+    """
     filename = arguments["filename"]
     mime_type = arguments["mime_type"]
     content = arguments["content"]
-
-    if not isinstance(filename, str):
-        raise ToolArgumentError(
-            argument="filename",
-            expected="a string",
-            actual_type=type(filename).__name__,
-        )
-    if not isinstance(mime_type, str):
-        raise ToolArgumentError(
-            argument="mime_type",
-            expected="a string",
-            actual_type=type(mime_type).__name__,
-        )
-    if not isinstance(content, str):
-        raise ToolArgumentError(
-            argument="content",
-            expected="a string",
-            actual_type=type(content).__name__,
-        )
 
     if mime_type not in _ALLOWED_BLOB_MIME_TYPES:
         # Tier-3 boundary: the LLM-supplied mime_type is not in the
@@ -3044,18 +3125,43 @@ def _execute_create_blob(
     Uses the same storage layout and safety functions as BlobServiceImpl:
     sanitize_filename() for path traversal defence, content_hash() for
     SHA-256, per-session subdirectory, and atomic quota enforcement.
+
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`CreateBlobArgumentsModel` (the single source of truth for
+    the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["create_blob"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).  On :class:`pydantic.ValidationError` we
+    re-raise as :class:`ToolArgumentError` so the compose loop's
+    ARG_ERROR routing at ``service.py:2480`` receives the right
+    exception class (Task 13 / Wave 2; mirrors Task 4 pattern at
+    ``tools.py:2320-2327``).
+
+    The validated ``model_dump()`` is then fed to ``_prepare_blob_create``
+    which still performs the MIME-type allowlist check and
+    :func:`sanitize_filename` traversal-defence — those are semantic
+    Tier-3 checks (value-based) that Pydantic's type validation cannot
+    express.
     """
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
     if data_dir is None:
         return _failure_result(state, "Blob tools require data_dir for storage.")
 
-    # _prepare_blob_create raises ToolArgumentError on invalid LLM
-    # arguments (CEC1 channel discipline). Letting it propagate routes
-    # the audit row to ARG_ERROR (which is the truthful classification:
-    # the LLM provided unusable input) rather than masking it as a
-    # SUCCESS-with-success=False ToolResult via _failure_result.
-    prepared = _prepare_blob_create(arguments, data_dir=data_dir, session_id=session_id)
+    try:
+        validated = CreateBlobArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="create_blob arguments",
+            expected="object conforming to CreateBlobArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    # _prepare_blob_create still raises ToolArgumentError on semantic
+    # Tier-3 violations (disallowed MIME type, un-sanitizable filename).
+    # The Pydantic model catches type/shape violations; _prepare_blob_create
+    # catches value-domain violations.  Both route via ToolArgumentError
+    # to ARG_ERROR (CEC1 channel discipline).
+    prepared = _prepare_blob_create(validated.model_dump(), data_dir=data_dir, session_id=session_id)
 
     quota_error = _persist_prepared_blob_create(prepared, session_engine=session_engine, session_id=session_id)
     if quota_error is not None:
@@ -3213,37 +3319,47 @@ def _execute_update_blob(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> ToolResult:
-    """Update the content of an existing blob."""
+    """Update the content of an existing blob.
+
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`UpdateBlobArgumentsModel` (the single source of truth
+    for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["update_blob"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).  On :class:`pydantic.ValidationError` we
+    re-raise as :class:`ToolArgumentError` so the compose loop's
+    ARG_ERROR routing at ``service.py:2480`` receives the right
+    exception class (Task 13 / Wave 2; mirrors Task 4 pattern at
+    ``tools.py:2320-2327``).
+
+    Validation precedence (file/lock safety).  ``model_validate`` MUST
+    run BEFORE :func:`_session_blob_lock` is acquired and BEFORE any
+    filesystem read/write.  The prior in-handler ``isinstance(content,
+    str)`` guard documented this requirement at length — the same
+    discipline still applies, now expressed structurally: Pydantic
+    rejects a non-str ``content`` (or a missing ``blob_id``) before the
+    handler reaches the tempfile/replace critical section, so the
+    rollback-on-divergence path (which would otherwise issue an
+    unnecessary filesystem write over an unmodified file) is never
+    entered on a pure argument-validation failure.  ``_execute_create_blob``'s
+    cleanup is ``unlink(missing_ok=True)`` (a genuine no-op); ``_execute_update_blob``'s
+    is ``write_bytes(old_content)`` (a real filesystem mutation) — hence
+    the validation MUST precede lock acquisition here, not merely
+    precede the begin-transaction block.
+    """
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
 
-    blob_id = arguments["blob_id"]
-    content = arguments["content"]
-
-    # Tier 3 boundary: LLM can pass wrong types (e.g. int for content).
-    # ToolArgumentError (not TypeError) so the compose loop can distinguish
-    # this LLM-side error from plugin-internal type errors.
-    #
-    # IMPORTANT: this guard MUST remain BEFORE the ``content.encode()`` call
-    # that produces ``content_bytes`` and BEFORE the
-    # ``storage_path.read_bytes()`` / ``storage_path.write_bytes()`` pair
-    # that snapshots ``old_content`` and overwrites the backing file. If it
-    # moved after, the file would be overwritten with garbage before
-    # validation fails. It MUST also remain BEFORE the
-    # ``try: with session_engine.begin()`` block below: that block's
-    # ``except Exception`` branch restores ``old_content`` via
-    # ``storage_path.write_bytes(old_content)`` — running that rollback on a
-    # pure argument-validation failure would issue an unnecessary filesystem
-    # write over a file that was never modified on this call path. (This
-    # failure mode differs from ``_execute_create_blob``, whose cleanup is
-    # ``unlink(missing_ok=True)`` — a genuine no-op — so the precise
-    # rationale does not transfer by back-reference.)
-    if not isinstance(content, str):
+    try:
+        validated = UpdateBlobArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
         raise ToolArgumentError(
-            argument="content",
-            expected="a string",
-            actual_type=type(content).__name__,
-        )
+            argument="update_blob arguments",
+            expected="object conforming to UpdateBlobArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    blob_id = validated.blob_id
+    content = validated.content
 
     # Serialise the read→write→commit critical section across concurrent
     # composer-tool callers on this session.  See ``_session_blob_lock``'s
@@ -3784,22 +3900,51 @@ def _execute_apply_pipeline_recipe(
 ) -> ToolResult:
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
 
+    Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
+    via :class:`ApplyPipelineRecipeArgumentsModel` (the single source of
+    truth for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["apply_pipeline_recipe"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).  On
+    :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing
+    at ``service.py:2480`` receives the right exception class (Task 4
+    pattern; mirrored by Task 13 / Task 14).
+
+    Semantic vs argument-shape failures
+    ------------------------------------
+    Pydantic enforces argument shape (type, required-fields, extra=forbid).
+    The empty-``recipe_name`` semantic check and the
+    :class:`RecipeValidationError` slot-shape check remain in this handler
+    and produce recoverable ``_failure_result`` responses with repair
+    hints (``Call list_recipes to discover available recipes``).  Two
+    channels for two failure shapes (type vs semantic) — same pattern as
+    :class:`SetSourceArgumentsModel` plugin-not-in-catalog handling.
+
     ``set_pipeline`` is full state replacement, so a ``replaced_pipeline_note`` is
     emitted to make the destructive replacement visible to the LLM/operator. The
     note is suppressed when the prior pipeline is empty — a no-op replacement
     needs no flag, and emitting one would be noise on a fresh-session apply.
     """
-    recipe_name = arguments.get("recipe_name")
-    raw_slots = arguments.get("slots")
-    if not isinstance(recipe_name, str) or not recipe_name:
+    try:
+        validated = ApplyPipelineRecipeArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="apply_pipeline_recipe arguments",
+            expected="object conforming to ApplyPipelineRecipeArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    recipe_name = validated.recipe_name
+    raw_slots = validated.slots
+    if not recipe_name:
+        # Empty-string recipe_name passes Pydantic's ``str`` validation
+        # but the handler treats it as a recoverable semantic failure
+        # with a repair-hint pointing the LLM at list_recipes (rather
+        # than the generic ARG_ERROR envelope a Pydantic min_length=1
+        # would produce).
         return _failure_result(
             state,
             "apply_pipeline_recipe requires a non-empty 'recipe_name' string. Call list_recipes to discover available recipes.",
-        )
-    if not isinstance(raw_slots, Mapping):
-        return _failure_result(
-            state,
-            "apply_pipeline_recipe requires 'slots' as a JSON object whose keys match the recipe's declared slot names.",
         )
 
     try:
@@ -4002,10 +4147,50 @@ def _execute_set_pipeline(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> ToolResult:
-    """Atomically replace the entire pipeline composition state."""
+    """Atomically replace the entire pipeline composition state.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`SetPipelineArgumentsModel` (the
+    single source of truth for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["set_pipeline"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class (Task 4 pattern;
+    mirrored by Task 13 promotions at ``tools.py:2326-2333``).
+
+    Dispatcher-wired kwargs
+    -----------------------
+    The dispatcher at :func:`execute_tool` (``tools.py:5530-5540``) supplies
+    ``session_engine`` and ``session_id`` as kwargs.  These are NOT part of
+    the LLM-supplied ``arguments`` dict — they are wired from the composer
+    service request context — so they are NOT modelled in
+    :class:`SetPipelineArgumentsModel`.  The Pydantic model validates only
+    the LLM-supplied dict; the kwargs enter through the function signature.
+
+    Semantic vs argument-shape failures
+    ------------------------------------
+    Pydantic enforces argument shape (type, required-fields, extra=forbid).
+    Per-component semantic checks (plugin existence in catalog, path
+    allowlist, manual blob_ref injection rejection, source.blob_id +
+    source.inline_blob exclusivity, gate-condition expression validity)
+    remain in this handler and produce recoverable ``_failure_result``
+    responses with repair hints.  Two channels for two failure shapes
+    (type vs semantic) — same pattern as
+    :class:`SetSourceArgumentsModel` plugin-not-in-catalog handling.
+    """
+    try:
+        validated = SetPipelineArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="set_pipeline arguments",
+            expected="object conforming to SetPipelineArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
     # 1. Validate source plugin
-    src_args = args["source"]
-    src_plugin = src_args["plugin"]
+    src_plugin = validated.source.plugin
     plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
     if plugin_error is not None:
         return _failure_result(state, plugin_error)
@@ -4015,13 +4200,13 @@ def _execute_set_pipeline(
     # authoritative exactly as if create_blob + set_source_from_blob had been
     # called, but the LLM gets one audited tool decision instead of a serial
     # blob-then-source-then-pipeline conversation.
-    src_options: Mapping[str, Any] = src_args.get("options", {})
-    if not isinstance(src_options, dict):
-        raise ToolArgumentError(
-            argument="source.options",
-            expected="an object",
-            actual_type=type(src_options).__name__,
-        )
+    #
+    # ``src_options`` starts as a mutable copy of the Pydantic-validated
+    # dict so the inline-blob branch below can extend it with the
+    # authoritative ``path`` / ``blob_ref`` without mutating
+    # ``validated.source.options`` (Pydantic returns the inner dict
+    # directly, so mutating it would leak across re-validations in tests).
+    src_options: Mapping[str, Any] = dict(validated.source.options)
     manual_blob_ref_error = _reject_manual_source_blob_ref(
         src_options,
         tool_name="set_pipeline",
@@ -4039,18 +4224,14 @@ def _execute_set_pipeline(
         return credential_error
     prepared_inline_blob: _PreparedBlobCreate | None = None
     resolved_source_blob: _ResolvedSourceBlob | None = None
-    source_blob_id = src_args.get("blob_id")
-    inline_blob = src_args.get("inline_blob")
-    src_on_vf = src_args.get("on_validation_failure", _DEFAULT_SOURCE_VALIDATION_FAILURE)
+    source_blob_id = validated.source.blob_id
+    inline_blob = validated.source.inline_blob
+    src_on_vf = (
+        validated.source.on_validation_failure if validated.source.on_validation_failure is not None else _DEFAULT_SOURCE_VALIDATION_FAILURE
+    )
     if source_blob_id is not None and inline_blob is not None:
         return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
     if source_blob_id is not None:
-        if not isinstance(source_blob_id, str):
-            raise ToolArgumentError(
-                argument="source.blob_id",
-                expected="a string",
-                actual_type=type(source_blob_id).__name__,
-            )
         resolved = _resolve_source_blob(
             blob_id=source_blob_id,
             explicit_plugin=src_plugin,
@@ -4071,17 +4252,15 @@ def _execute_set_pipeline(
             return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
         if data_dir is None:
             return _failure_result(state, "set_pipeline source.inline_blob requires data_dir for storage.")
-        if not isinstance(inline_blob, dict):
-            raise ToolArgumentError(
-                argument="source.inline_blob",
-                expected="an object",
-                actual_type=type(inline_blob).__name__,
-            )
         # _prepare_blob_create raises ToolArgumentError on invalid LLM
         # arguments (CEC1 channel discipline) — propagate to the
         # compose loop's ARG_ERROR branch rather than masking as
-        # SUCCESS-with-success=False.
-        prepared_inline_blob = _prepare_blob_create(inline_blob, data_dir=data_dir, session_id=session_id)
+        # SUCCESS-with-success=False.  Post-Task 14 the inline_blob
+        # contents are already type-validated by ``_InlineBlobModel``
+        # (str/str/str + extra=forbid), so the isinstance guards inside
+        # _prepare_blob_create are unreachable from this caller — see
+        # the Task 14 cleanup that removes them.
+        prepared_inline_blob = _prepare_blob_create(inline_blob.model_dump(), data_dir=data_dir, session_id=session_id)
         header_conflict = _header_only_inline_csv_conflict(
             prepared_inline_blob,
             session_engine=session_engine,
@@ -4113,11 +4292,11 @@ def _execute_set_pipeline(
         return _failure_result(state, src_prevalidation)
 
     # 2. Validate node plugins and options
-    for node_args in args["nodes"]:
-        node_id = node_args.get("id", "?")
-        node_type = node_args["node_type"]
-        node_plugin = node_args.get("plugin")
-        node_options = node_args.get("options", {})
+    for node in validated.nodes:
+        node_id = node.id
+        node_type = node.node_type
+        node_plugin = node.plugin
+        node_options = node.options
         credential_error = _credential_wiring_contract_failure(
             state,
             component_id=node_id,
@@ -4130,7 +4309,7 @@ def _execute_set_pipeline(
             plugin_error = _validate_plugin_name(catalog, "transform", node_plugin)
             if plugin_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {plugin_error}")
-            batch_placement_error = _batch_aware_placement_error(node_id, node_type, node_plugin, node_args.get("output_mode"))
+            batch_placement_error = _batch_aware_placement_error(node_id, node_type, node_plugin, node.output_mode)
             if batch_placement_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {batch_placement_error}")
             batch_required_error = _batch_aware_required_input_fields_error(node_id, node_plugin, node_options)
@@ -4142,22 +4321,34 @@ def _execute_set_pipeline(
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
 
         # Validate gate condition expression at composition time.
-        node_condition = node_args.get("condition")
-        if node_type == "gate" and node_condition is not None:
-            expr_error = _validate_gate_expression(node_condition)
+        if node_type == "gate" and node.condition is not None:
+            expr_error = _validate_gate_expression(node.condition)
             if expr_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {expr_error}")
 
     # 3. Validate output plugins and options
-    for out_args in args["outputs"]:
-        out_name = out_args.get("sink_name", "?")
-        out_plugin = out_args["plugin"]
+    #
+    # ``options_missing`` distinguishes "operator omitted the options key
+    # entirely" from "operator supplied options: {}".  Post-Pydantic the
+    # default-factory replaces an absent key with ``{}`` on the model side,
+    # so we look at the raw ``args`` dict to recover the operator's
+    # original intent for the repair-hint branch.  The semantic-validation
+    # branch (file-sink collision policy, path allowlist) still runs on
+    # the validated dict.
+    raw_outputs = args.get("outputs") if isinstance(args, Mapping) else None
+    for index, output in enumerate(validated.outputs):
+        out_name = output.sink_name
+        out_plugin = output.plugin
         plugin_error = _validate_plugin_name(catalog, "sink", out_plugin)
         if plugin_error is not None:
             return _failure_result(state, f"Output '{out_name}': {plugin_error}")
-        # S2: Validate sink path allowlist (mirrors source path check)
-        options_missing = "options" not in out_args
-        out_options = out_args.get("options", {})
+        out_options = output.options
+        raw_out_args: Mapping[str, Any] = {}
+        if isinstance(raw_outputs, list) and 0 <= index < len(raw_outputs):
+            raw_entry = raw_outputs[index]
+            if isinstance(raw_entry, Mapping):
+                raw_out_args = raw_entry
+        options_missing = "options" not in raw_out_args
         if options_missing:
             out_prevalidation = _prevalidate_sink(out_plugin, out_options)
             out_collision_error = validate_composer_file_sink_collision_policy(
@@ -4172,7 +4363,7 @@ def _execute_set_pipeline(
                     _missing_output_options_repair_error(
                         sink_name=out_name,
                         plugin_name=out_plugin,
-                        on_write_failure=out_args.get("on_write_failure", "discard"),
+                        on_write_failure=output.on_write_failure if output.on_write_failure is not None else "discard",
                         validation_error=validation_error,
                     ),
                 )
@@ -4199,82 +4390,91 @@ def _execute_set_pipeline(
             return _failure_result(state, f"Output '{out_name}': {out_collision_error}")
 
     # 4. Construct specs (same field extraction as individual handlers)
-    try:
-        source_spec = SourceSpec(
-            plugin=src_plugin,
-            on_success=src_args["on_success"],
-            options=src_options,
-            on_validation_failure=src_on_vf,
+    source_spec = SourceSpec(
+        plugin=src_plugin,
+        on_success=validated.source.on_success,
+        options=src_options,
+        on_validation_failure=src_on_vf,
+    )
+
+    # ``node_type`` / ``edge_type`` are typed as ``str`` on
+    # ``_PipelineNodeModel`` / ``_PipelineEdgeModel`` to preserve Tier-3
+    # LLM-recoverable feedback (the handler reports unknown enum values
+    # via semantic _failure_result; a Pydantic Literal rejection would
+    # surface as ARG_ERROR with no repair guidance).  At the point we
+    # construct :class:`NodeSpec` / :class:`EdgeSpec`, the downstream
+    # validation (``_validate_plugin_name``, graph topology) and the
+    # ``_batch_aware_placement_error`` checks above have not yet
+    # rejected non-canonical enum values explicitly — that responsibility
+    # remains on the state-level dataclass invariants.  The ``cast`` here
+    # narrows the static type without re-validating; semantically wrong
+    # enum values flow through to be rejected at runtime by NodeSpec /
+    # EdgeSpec / CompositionState invariants.
+    node_specs = []
+    for n in validated.nodes:
+        fork_to = tuple(n.fork_to) if n.fork_to is not None else None
+        branches = tuple(n.branches) if n.branches is not None else None
+        nt = n.node_type
+        node_specs.append(
+            NodeSpec(
+                id=n.id,
+                node_type=cast(NodeType, nt),
+                plugin=n.plugin,
+                input=n.input,
+                on_success=n.on_success,
+                on_error=n.on_error or ("discard" if nt in ("transform", "aggregation") else None),
+                options=n.options,
+                condition=n.condition,
+                routes=n.routes,
+                fork_to=fork_to,
+                branches=branches,
+                policy=n.policy,
+                merge=n.merge,
+                # ``n.trigger`` is a typed :class:`_NodeTriggerModel` (or None) per F3 —
+                # convert to a plain dict at the NodeSpec boundary because
+                # :class:`NodeSpec.trigger` is typed ``Mapping[str, Any] | None`` and
+                # is deep-frozen by ``freeze_fields("trigger")``; the freeze contract
+                # requires a Mapping, not a Pydantic model instance.
+                trigger=n.trigger.model_dump() if n.trigger is not None else None,
+                output_mode=n.output_mode,
+                expected_output_count=n.expected_output_count,
+            )
         )
 
-        node_specs = []
-        for n in args["nodes"]:
-            fork_to = n.get("fork_to")
-            if fork_to is not None:
-                fork_to = tuple(fork_to)
-            branches = n.get("branches")
-            if branches is not None:
-                branches = tuple(branches)
-            nt = n["node_type"]
-            node_specs.append(
-                NodeSpec(
-                    id=n["id"],
-                    node_type=nt,
-                    plugin=n.get("plugin"),
-                    input=n["input"],
-                    on_success=n.get("on_success"),
-                    on_error=n.get("on_error") or ("discard" if nt in ("transform", "aggregation") else None),
-                    options=n.get("options", {}),
-                    condition=n.get("condition"),
-                    routes=n.get("routes"),
-                    fork_to=fork_to,
-                    branches=branches,
-                    policy=n.get("policy"),
-                    merge=n.get("merge"),
-                    trigger=n.get("trigger"),
-                    output_mode=n.get("output_mode"),
-                    expected_output_count=n.get("expected_output_count"),
-                )
+    edge_specs = []
+    for e in validated.edges:
+        edge_specs.append(
+            EdgeSpec(
+                id=e.id,
+                from_node=e.from_node,
+                to_node=e.to_node,
+                edge_type=cast(EdgeType, e.edge_type),
+                label=e.label,
             )
+        )
 
-        edge_specs = []
-        for e in args["edges"]:
-            edge_specs.append(
-                EdgeSpec(
-                    id=e["id"],
-                    from_node=e["from_node"],
-                    to_node=e["to_node"],
-                    edge_type=e["edge_type"],
-                    label=e.get("label"),
-                )
+    output_specs = []
+    for o in validated.outputs:
+        output_specs.append(
+            OutputSpec(
+                name=o.sink_name,
+                plugin=o.plugin,
+                options=o.options,
+                on_write_failure=o.on_write_failure if o.on_write_failure is not None else "discard",
             )
+        )
 
-        output_specs = []
-        for o in args["outputs"]:
-            output_specs.append(
-                OutputSpec(
-                    name=o["sink_name"],
-                    plugin=o["plugin"],
-                    options=o.get("options", {}),
-                    on_write_failure=o.get("on_write_failure", "discard"),
-                )
-            )
-
-        meta_raw = args.get("metadata")
-        if meta_raw is None:
-            meta = {}
-        elif isinstance(meta_raw, dict):
-            meta = meta_raw
-        else:
-            return _failure_result(state, "metadata must be an object.")
-        meta_kwargs: dict[str, str] = {}
-        if "name" in meta:
-            meta_kwargs["name"] = meta["name"]
-        if "description" in meta:
-            meta_kwargs["description"] = meta["description"]
-        metadata_spec = PipelineMetadata(**meta_kwargs)
-    except (KeyError, TypeError) as exc:
-        return _failure_result(state, f"Invalid pipeline spec: {exc}")
+    # PipelineMetadata's __init__ supplies its own defaults for ``name`` and
+    # ``description``; honour those by passing through only explicitly
+    # supplied fields.  ``validated.metadata`` is None when the LLM omitted
+    # the ``metadata`` key entirely.
+    meta_kwargs: dict[str, str] = {}
+    if validated.metadata is not None:
+        if validated.metadata.name is not None:
+            meta_kwargs["name"] = validated.metadata.name
+        if validated.metadata.description is not None:
+            meta_kwargs["description"] = validated.metadata.description
+    metadata_spec = PipelineMetadata(**meta_kwargs)
 
     # 5. Build new state
     new_state = CompositionState(
@@ -4330,11 +4530,32 @@ def _execute_patch_source_options(
     state: CompositionState,
     data_dir: str | None = None,
 ) -> ToolResult:
+    """Apply a merge-patch to the current source options.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`PatchSourceOptionsArgumentsModel`
+    (the single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["patch_source_options"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.  A bare
+    ``ValidationError`` would escape into the catch-all
+    (``ComposerPluginCrashError`` → HTTP 500) — wrong disposition for
+    Tier-3 input.
+    """
     if state.source is None:
         return _failure_result(state, "No source configured to patch.")
-    patch = args["patch"]
-    if not isinstance(patch, dict):
-        return _failure_result(state, "patch must be an object.")
+    try:
+        validated = PatchSourceOptionsArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="patch_source_options arguments",
+            expected="object conforming to PatchSourceOptionsArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+    patch = validated.patch
 
     # Lock the (path, blob_ref) pair on blob-backed sources.  Once
     # set_source_from_blob has bound a source to a blob, the path is the
@@ -4434,10 +4655,34 @@ def _execute_patch_node_options(
     args: dict[str, Any],
     state: CompositionState,
 ) -> ToolResult:
-    node_id = args["node_id"]
-    patch = args["patch"]
-    if not isinstance(patch, dict):
-        return _failure_result(state, "patch must be an object.")
+    """Apply a merge-patch to a node's plugin options.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`PatchNodeOptionsArgumentsModel`
+    (the single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["patch_node_options"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.
+
+    Routing-key guard: :func:`_node_routing_option_patch_error` rejects
+    routing-field keys in ``patch`` (on_error, on_success, input, routes,
+    fork_to).  This is a value-domain check that Pydantic cannot express;
+    it runs AFTER Pydantic validation — same discipline as
+    ``set_pipeline``'s blob_id/inline_blob mutual-exclusion check.
+    """
+    try:
+        validated = PatchNodeOptionsArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="patch_node_options arguments",
+            expected="object conforming to PatchNodeOptionsArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+    node_id = validated.node_id
+    patch = validated.patch
     current = next((n for n in state.nodes if n.id == node_id), None)
     if current is None:
         return _failure_result(state, f"Node '{node_id}' not found.")
@@ -4495,10 +4740,28 @@ def _execute_patch_output_options(
     state: CompositionState,
     data_dir: str | None = None,
 ) -> ToolResult:
-    sink_name = args["sink_name"]
-    patch = args["patch"]
-    if not isinstance(patch, dict):
-        return _failure_result(state, "patch must be an object.")
+    """Apply a merge-patch to an output's plugin options.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`PatchOutputOptionsArgumentsModel`
+    (the single source of truth for the argument schema — supersedes the
+    deleted ``_TOOL_REQUIRED_PATHS["patch_output_options"]`` entry in
+    ``service.py``, rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.
+    """
+    try:
+        validated = PatchOutputOptionsArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="patch_output_options arguments",
+            expected="object conforming to PatchOutputOptionsArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+    sink_name = validated.sink_name
+    patch = validated.patch
     current = next((o for o in state.outputs if o.name == sink_name), None)
     if current is None:
         return _failure_result(state, f"Output '{sink_name}' not found.")

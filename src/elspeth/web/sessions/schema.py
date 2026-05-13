@@ -48,6 +48,17 @@ def _user_tables(inspector: Inspector) -> frozenset[str]:
 
 
 def _validate_current_schema(engine: Engine) -> None:
+    # Static partial-index symmetry check fires before any inspector-driven
+    # validation. Catches the elspeth-obs-2ef48619d5 drift class at app-
+    # start time (or import time when called from a hot-reload loop), which
+    # is strictly better than waiting for a per-test fresh-DB creation.
+    # Runtime cross-dialect text comparison was considered and rejected:
+    # the inspector's reported WHERE text diverges from the model's
+    # compiled SQL (different key prefixes, qualified vs unqualified
+    # column refs, TextClause vs BinaryExpression). The static guard
+    # below is the load-bearing defense.
+    _validate_partial_index_dialect_symmetry()
+
     inspector = inspect(engine)
     expected_tables = frozenset(metadata.tables)
     actual_tables = _user_tables(inspector)
@@ -151,10 +162,33 @@ def _validate_named_checks(inspector: Inspector, table_name: str, table: Table) 
 
 
 def _validate_named_unique_constraints(inspector: Inspector, table_name: str, table: Table) -> None:
+    """Validate the table's UNIQUE-constraint surface.
+
+    The expected set unions two model-side shapes: ``UniqueConstraint``
+    declarations on ``table.constraints`` AND ``Index(name=..., unique=True)``
+    declarations on ``table.indexes``. Both are semantically unique
+    constraints; SQLAlchemy's choice of declaration shape is purely
+    convenience (an ``Index(unique=True)`` accepts ``sqlite_where=`` /
+    ``postgresql_where=`` for partial-index predicates while a
+    ``UniqueConstraint`` does not). Per elspeth-obs-3ac0c829c5, the
+    pre-fix validator only iterated ``table.constraints`` for
+    ``UniqueConstraint`` and would silently leave a future
+    ``Index(name=..., unique=True)`` unvalidated.
+
+    Symmetric on the actual side: ``inspector.get_unique_constraints``
+    surfaces only "true" unique constraints on SQLite (not Index-backed
+    uniques), but Postgres surfaces unique-backed indexes in BOTH
+    ``get_unique_constraints`` and ``get_indexes``. Unioning
+    ``get_indexes`` entries where ``index['unique']`` is set covers the
+    SQLite case; ``_validate_named_indexes`` strips the same names from
+    its check to avoid double-counting.
+    """
     expected = {
         str(constraint.name) for constraint in table.constraints if type(constraint) is UniqueConstraint and constraint.name is not None
+    } | {str(index.name) for index in table.indexes if index.unique and index.name is not None}
+    actual = {str(constraint["name"]) for constraint in inspector.get_unique_constraints(table_name) if constraint["name"] is not None} | {
+        str(index["name"]) for index in inspector.get_indexes(table_name) if index["unique"] and index["name"] is not None
     }
-    actual = {str(constraint["name"]) for constraint in inspector.get_unique_constraints(table_name) if constraint["name"] is not None}
     if actual != expected:
         _schema_error(
             f"{table_name} UNIQUE constraint mismatch",
@@ -164,14 +198,113 @@ def _validate_named_unique_constraints(inspector: Inspector, table_name: str, ta
 
 
 def _validate_named_indexes(inspector: Inspector, table_name: str, table: Table) -> None:
-    expected = {str(index.name) for index in table.indexes if index.name is not None}
-    actual = {str(index["name"]) for index in inspector.get_indexes(table_name) if index["name"] is not None}
+    # Names already validated as UNIQUE constraints (via UniqueConstraint
+    # declaration OR Index(unique=True)) are excluded from the index check
+    # so we don't double-count. _validate_named_unique_constraints unions
+    # both shapes; _validate_named_indexes is the residual non-unique
+    # index validator.
+    expected_unique = {
+        str(constraint.name) for constraint in table.constraints if type(constraint) is UniqueConstraint and constraint.name is not None
+    } | {str(index.name) for index in table.indexes if index.unique and index.name is not None}
+    actual_unique = {
+        str(constraint["name"]) for constraint in inspector.get_unique_constraints(table_name) if constraint["name"] is not None
+    } | {str(index["name"]) for index in inspector.get_indexes(table_name) if index["unique"] and index["name"] is not None}
+    expected = {str(index.name) for index in table.indexes if index.name is not None and not index.unique} - expected_unique
+    actual = {
+        str(index["name"])
+        for index in inspector.get_indexes(table_name)
+        if index["name"] is not None and not index["unique"] and str(index["name"]) not in actual_unique
+    }
     if actual != expected:
         _schema_error(
             f"{table_name} index mismatch",
             expected=sorted(expected),
             actual=sorted(actual),
         )
+
+
+def _validate_partial_index_dialect_symmetry() -> None:
+    """Enforce the partial-index dialect-symmetry contract at the model layer.
+
+    For every ``Index`` whose ``dialect_options`` contain a ``where`` predicate
+    under any dialect, BOTH ``sqlite_where`` AND ``postgresql_where`` MUST be
+    set, AND they MUST compile to the same SQL text under their respective
+    dialects.
+
+    Closes elspeth-obs-2ef48619d5: the pre-fix validator only compared
+    index NAMES, so an index declared with ``sqlite_where=`` only (or with
+    a different ``postgresql_where=`` predicate) would pass schema
+    validation while silently enforcing different invariants across
+    dialects. Concrete prior incident: ``uq_runs_one_active_per_session``
+    originally had only ``sqlite_where=``, which on Postgres silently
+    became a non-partial unique index — over-restricting "at most one
+    ACTIVE run per session" to "at most one run per session ever."
+
+    Static (model-import-time) check rather than runtime inspector
+    comparison: the inspector's reported WHERE text diverges from the
+    model's compiled SQL across dialects (different key prefixes,
+    qualified vs unqualified column refs, TextClause vs BinaryExpression),
+    so a runtime cross-dialect text comparison would be brittle without
+    proportionate signal. The drift class this guards against is a
+    model-side mistake catchable at import time, where a structured
+    crash is materially more informative than a per-test fresh-DB
+    failure.
+    """
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    sqlite_dialect = sqlite.dialect()
+    postgresql_dialect = postgresql.dialect()  # type: ignore[no-untyped-call]
+
+    for table_name, table in metadata.tables.items():
+        for index in table.indexes:
+            if index.name is None:
+                continue
+            sqlite_where = _dialect_where(index, "sqlite")
+            postgres_where = _dialect_where(index, "postgresql")
+
+            if sqlite_where is None and postgres_where is None:
+                continue
+
+            # One-sided declaration is the original drift class.
+            if sqlite_where is None or postgres_where is None:
+                _schema_error(
+                    f"{table_name}.{index.name} partial-index dialect asymmetry",
+                    expected="both sqlite_where= and postgresql_where= set",
+                    actual=f"sqlite_where={'set' if sqlite_where is not None else 'unset'}, "
+                    f"postgresql_where={'set' if postgres_where is not None else 'unset'}",
+                )
+
+            # Both set — compile under their respective dialects and
+            # compare the literal-bound SQL text. Mismatched predicates
+            # are the second drift class: silently divergent invariants
+            # under the same name.
+            sqlite_text = str(sqlite_where.compile(dialect=sqlite_dialect, compile_kwargs={"literal_binds": True}))
+            postgres_text = str(postgres_where.compile(dialect=postgresql_dialect, compile_kwargs={"literal_binds": True}))
+            if sqlite_text != postgres_text:
+                _schema_error(
+                    f"{table_name}.{index.name} partial-index WHERE clause text diverges between dialects",
+                    expected=sqlite_text,
+                    actual=postgres_text,
+                )
+
+
+def _dialect_where(index: Any, dialect_key: str) -> Any:
+    """Return the ``where`` predicate for ``dialect_key`` on ``index``, or
+    ``None`` when the index declared no kwargs for that dialect or the
+    dialect declared no ``where`` predicate.
+
+    Direct dictionary access rather than ``.get()`` to satisfy the
+    Tier-1 defensive-programming gate (``enforce_tier_model``). The
+    DialectKWArgs container's ``__contains__`` semantics are the
+    canonical absence test; ``in`` is the offensive equivalent of
+    ``.get(..., None)`` here.
+    """
+    if dialect_key not in index.dialect_options:
+        return None
+    options = index.dialect_options[dialect_key]
+    if "where" not in options:
+        return None
+    return options["where"]
 
 
 def _schema_error(detail: str, *, expected: object | None = None, actual: object | None = None) -> NoReturn:

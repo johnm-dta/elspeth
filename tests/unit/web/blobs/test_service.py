@@ -317,6 +317,12 @@ class TestDeleteBlob:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -370,6 +376,12 @@ class TestDeleteBlob:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -437,6 +449,12 @@ class TestDeleteBlob:
                         "options": {"blob_ref": str(record.id), "path": str(record.storage_path)},
                     },
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -495,6 +513,12 @@ class TestDeleteBlob:
                         "options": {"path": "/data/external/other.csv"},
                     },
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -553,6 +577,12 @@ class TestDeleteBlob:
                         "options": {"path": record.storage_path},
                     },
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -598,6 +628,12 @@ class TestDeleteBlob:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -1107,6 +1143,12 @@ class TestFinalizeRunOutputBlobs:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -1256,6 +1298,12 @@ class TestFinalizeRunOutputBlobsPartialFailure:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -1710,6 +1758,12 @@ class TestFinalizeRunOutputBlobsErrorCleanup:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -2072,6 +2126,8 @@ class TestLinkBlobToRunDirectionGuard:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: setup-only row; provenance required.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )

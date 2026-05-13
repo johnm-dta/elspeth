@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import UUID
 
 import structlog
@@ -55,6 +55,7 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticsResponse,
     RunDiagnosticsWorkingView,
     RunEvent,
+    RunEventType,
     RunOutputArtifactPreview,
     RunOutputsResponse,
     RunResultsResponse,
@@ -233,7 +234,7 @@ def _build_terminal_run_event(current: RunStatusResponse, *, cancelled_run_recor
             raise RuntimeError(
                 f"Completed run {current.run_id} failed CompletedData validation — Tier 1 anomaly (audit trail inconsistent): {exc}"
             ) from exc
-        event_type: Literal["progress", "error", "completed", "cancelled", "failed"] = "completed"
+        event_type: RunEventType = "completed"
     elif current.status == "failed":
         if current.error is None:
             raise RuntimeError(f"Failed run {current.run_id} has no error message — Tier 1 anomaly (error column NULL on terminal failure)")

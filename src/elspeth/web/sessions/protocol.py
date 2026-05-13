@@ -15,13 +15,28 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 
-ChatMessageRole = Literal["user", "assistant", "system", "tool"]
+if TYPE_CHECKING:
+    # TYPE_CHECKING-only import to avoid a runtime circular dependency:
+    # ``_persist_payload`` imports ``CompositionStateData`` from this
+    # module, so this module MUST NOT import ``_persist_payload`` at
+    # runtime. The async dispatcher signature on
+    # ``SessionServiceProtocol.persist_compose_turn_async`` only needs
+    # the names for type-checker resolution.
+    from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
+
+ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
+# ``audit`` is an internal-only role for breadcrumb rows that have no real
+# OpenAI tool-response or assistant parent (LLM-call audit envelopes,
+# pre-flight redaction failures, etc.). They MUST be filtered out of any
+# user-facing chat response and any composer prompt-history rebuild —
+# enforced at ``_is_composer_audit_tool_message`` /
+# ``_composer_conversation_messages`` and the public messages route.
 # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
 # `completed_with_failures` and `empty` join the previous three so an
 # operator scanning `/api/runs/{rid}` can distinguish "ran cleanly" from
@@ -32,7 +47,42 @@ SessionRunStatus = Literal["pending", "running", "completed", "completed_with_fa
 TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "failed", "empty", "cancelled"]
 OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
 
+# Closed enum mirroring the ``ck_chat_messages_writer_principal`` CHECK
+# constraint in ``web/sessions/models.py``. The Python Literal and the SQL
+# CHECK are paired contracts: extending one without the other lets the
+# dataclass validator pass while the DB rejects the row (or vice versa).
+# The order here mirrors the CHECK declaration (models.py L116) for visual
+# diff clarity. Adding a value is a governance action — see the
+# closed-list-of-permitted-writers comment block at the
+# ``audit_access_log_table`` definition for the same posture.
+ChatMessageWriterPrincipal = Literal[
+    "compose_loop",
+    "route_user_message",
+    "route_system_message",
+    "admin_tool",
+    "session_fork",
+]
+
+# Closed enum mirroring the ``ck_composition_states_provenance`` CHECK
+# constraint in ``web/sessions/models.py``. Same paired-contract posture as
+# ``ChatMessageWriterPrincipal``: extending one without the other lets the
+# Python writer pass while the DB rejects the row (or vice versa). Order
+# mirrors the CHECK declaration (models.py L257) for visual diff clarity.
+# Adding a value is a governance action — see the dormant-value friction
+# block at the ``composition_states_table`` definition for the activation
+# contract (spec amendment + integration test + Filigree ticket).
+CompositionStateProvenance = Literal[
+    "tool_call",
+    "convergence_persist",
+    "plugin_crash_persist",
+    "preflight_persist",
+    "session_seed",
+    "session_fork",
+]
+
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
+CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES: frozenset[str] = frozenset(get_args(ChatMessageWriterPrincipal))
+COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(CompositionStateProvenance))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
 OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
@@ -138,13 +188,31 @@ class ChatMessageRecord:
     role: ChatMessageRole
     content: str
     created_at: datetime
+    writer_principal: ChatMessageWriterPrincipal
     raw_content: str | None = None
     tool_calls: Sequence[Mapping[str, Any]] | None = None
     composition_state_id: UUID | None = None
+    tool_call_id: str | None = None
+    parent_assistant_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.role not in CHAT_MESSAGE_ROLE_VALUES:
             raise AuditIntegrityError(f"Tier 1: chat_messages.role is {self.role!r}, expected one of {sorted(CHAT_MESSAGE_ROLE_VALUES)}")
+        # Tier-1 read guard: ``writer_principal`` mirrors the
+        # ``ck_chat_messages_writer_principal`` CHECK constraint. Reading a
+        # value outside the closed enum from our own session DB means
+        # something catastrophic happened (constraint disabled, direct SQL
+        # write, schema drift). Crash with a Tier-1 audit-integrity error
+        # rather than letting a Literal-typed field carry a wider str at
+        # runtime — same posture as the role guard above.
+        if self.writer_principal not in CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: chat_messages.writer_principal is {self.writer_principal!r}, "
+                f"expected one of {sorted(CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES)}"
+            )
+        # tool_call_id / parent_assistant_id are scalar fields and need no
+        # freeze guard (CLAUDE.md "Scalar-Only Fields Need No Guard"). Only
+        # ``tool_calls`` carries mutable contents.
         if self.tool_calls is not None:
             freeze_fields(self, "tool_calls")
 
@@ -348,6 +416,62 @@ class RunAlreadyActiveError(Exception):
         super().__init__(f"Session {session_id} already has an active run")
 
 
+class StaleComposeStateError(RuntimeError):
+    """Compose result was based on a no-longer-current composition state.
+
+    Raised by ``SessionServiceProtocol.persist_compose_turn_async`` (and
+    its concrete implementation ``SessionServiceImpl.persist_compose_turn``)
+    when the session's current composition state changed between the LLM
+    call and the persist attempt. Defined here on the protocol module so
+    Phase 3 callers can catch the error without importing the concrete
+    service class — the symbol is part of the public contract, not an
+    implementation detail.
+
+    Mirrors :class:`elspeth.contracts.errors.AuditIntegrityError`'s
+    placement on the contracts layer: protocol-level error shapes belong
+    on the abstraction, not on the concrete service module.
+    """
+
+
+class ToolCallIDMismatchError(RuntimeError):
+    """Assistant ``tool_calls`` and persisted tool rows disagreed on
+    the set of tool-call IDs for one compose turn.
+
+    Carries the four mutually-exclusive failure axes (missing, extra,
+    duplicate-in-assistant, duplicate-in-rows) so the diagnostic
+    string identifies WHICH violation fired without forcing the
+    caller to re-derive it.
+
+    Defined on the protocol module alongside
+    :class:`StaleComposeStateError` because both are pre-DB exceptions
+    referenced by ``SessionServiceProtocol.persist_compose_turn_async``.
+    Phase 3 callers can catch the error without importing the concrete
+    service class — the symbol is part of the public contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        missing: frozenset[str],
+        extra: frozenset[str],
+        duplicates_in_assistant: frozenset[str],
+        duplicates_in_rows: frozenset[str],
+    ) -> None:
+        self.missing = missing
+        self.extra = extra
+        self.duplicates_in_assistant = duplicates_in_assistant
+        self.duplicates_in_rows = duplicates_in_rows
+        super().__init__(
+            "persist_compose_turn: assistant tool_calls and tool rows "
+            "disagree on the tool-call ID set "
+            f"(missing={sorted(missing)!r}, extra={sorted(extra)!r}, "
+            f"duplicates_in_assistant={sorted(duplicates_in_assistant)!r}, "
+            f"duplicates_in_rows={sorted(duplicates_in_rows)!r}). "
+            "Refusing to persist a turn that would leave the audit "
+            "trail with an asymmetric assistant/tool transcript."
+        )
+
+
 @runtime_checkable
 class SessionServiceProtocol(Protocol):
     """Protocol for session persistence operations."""
@@ -378,9 +502,13 @@ class SessionServiceProtocol(Protocol):
         session_id: UUID,
         role: ChatMessageRole,
         content: str,
+        *,
+        writer_principal: ChatMessageWriterPrincipal,
         tool_calls: Sequence[Mapping[str, Any]] | None = None,
         composition_state_id: UUID | None = None,
         raw_content: str | None = None,
+        tool_call_id: str | None = None,
+        parent_assistant_id: UUID | None = None,
     ) -> ChatMessageRecord: ...
 
     async def get_messages(
@@ -394,7 +522,21 @@ class SessionServiceProtocol(Protocol):
         self,
         session_id: UUID,
         state: CompositionStateData,
-    ) -> CompositionStateRecord: ...
+        *,
+        provenance: CompositionStateProvenance,
+    ) -> CompositionStateRecord:
+        """Save a new immutable composition state snapshot.
+
+        ``provenance`` MUST be one of the six values enumerated by the
+        ``ck_composition_states_provenance`` CHECK constraint and the
+        :data:`CompositionStateProvenance` Literal. It records WHY this row
+        was written and is the load-bearing discriminator for the
+        backward-direction INV-AUDIT-AHEAD invariant (§4.1.2). Implementations
+        MUST persist the value verbatim — no defaulting, no coercion: a
+        confident wrong attribution is evidence-tampering-class harm under
+        the auditability standard.
+        """
+        ...
 
     async def get_current_state(
         self,
@@ -562,5 +704,34 @@ class SessionServiceProtocol(Protocol):
                 These are skipped even if they exceed max_age_seconds.
             reason: Written to the error column so operators can distinguish
                 orphan-cleanup cancellations from user cancellations.
+        """
+        ...
+
+    async def persist_compose_turn_async(
+        self,
+        *,
+        session_id: str,
+        assistant_content: str,
+        raw_content: str | None = None,
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
+        redacted_tool_rows: tuple[RedactedToolRow, ...],
+        parent_composition_state_id: str | None,
+        expected_current_state_id: str | None,
+        writer_principal: ChatMessageWriterPrincipal,
+        plugin_crash_pending: bool,
+    ) -> AuditOutcome:
+        """Persist one compose turn (assistant + tool rows + per-tool
+        composition states) atomically.
+
+        Spec §5.2.2. The async dispatcher; the underlying sync work runs
+        in a worker thread under ``asyncio.shield`` (commit-wins
+        cancellation contract — see ``SessionServiceImpl
+        .persist_compose_turn_async``).
+
+        Raises :class:`StaleComposeStateError` when the session's current
+        composition state changed between the LLM call and the persist
+        attempt. Raises :class:`ToolCallIDMismatchError` when the
+        assistant ``tool_calls`` IDs and the tool rows'
+        ``tool_call_id`` values are not the same unique set.
         """
         ...

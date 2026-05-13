@@ -738,6 +738,15 @@ class TerminalPairFieldConstraints:
     forbidden: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        # ``required`` and ``forbidden`` are tuple[str, ...] — strings are
+        # immutable, the tuples themselves are immutable; they need no
+        # guard. ``exact`` is Mapping[str, object] and the constructor
+        # default is a fresh ``dict()`` — the dict is mutable through
+        # the attribute reference and would lie about ``frozen=True``
+        # without deep_freeze. Producers populate ``exact`` with
+        # scalar/string values for ADR-019 (outcome, path) discriminator
+        # matches, but the field type does not statically guarantee it,
+        # so deep-freeze is the correct guard rather than a shallow wrap.
         freeze_fields(self, "exact")
 
 

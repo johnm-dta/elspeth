@@ -1929,19 +1929,25 @@ allow_hits:
     result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=d14d0386a2252949
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=282221ab6eddba64
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as bounded tool
     results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=2b21aa4333928c94
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=bc9911a9749ddfce
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as bounded tool
     results.
+  expires: null
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=5b3ad7821daaad5d
+  owner: composer-progress-persistence
+  reason: Tier 3 plugin execution boundary; plugin bugs are captured for durable compose-turn audit before propagation.
+  safety: AuditIntegrityError and interpreter-invariant exceptions re-raise before this catch; ordinary plugin crashes are captured
+    as ComposerPluginCrashError after recording the failing tool outcome.
   expires: null
 - key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=551b9850bc6a77aa
   owner: composer-advisor

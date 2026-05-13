@@ -1831,6 +1831,10 @@ class ComposerServiceImpl:
         repair_turns_used = 0
 
         while True:
+            # Phase 3 Step 1 captures the state id observed before the
+            # provider call. Step 2 passes this exact value to
+            # persist_compose_turn_async as expected_current_state_id.
+            current_state_id: str | None = None
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
                 llm_messages,
@@ -1953,9 +1957,43 @@ class ComposerServiceImpl:
             turn_has_mutation = False
             turn_has_discovery = False
             all_cache_hits = True
+            # Step 1 — execute tool calls in async land while accumulating
+            # immutable _ToolOutcome records. Step 2 performs audit writes
+            # from this list; cancellation before Step 2 leaves the DB
+            # unchanged for the current assistant response.
+            from elspeth.web.sessions._persist_payload import _ToolOutcome
+
+            tool_outcomes: list[_ToolOutcome] = []
+            plugin_crash: ComposerPluginCrashError | None = None
+            plugin_crash_cause: Exception | None = None
+            pre_state_id = current_state_id
+            self._phase3_last_expected_current_state_id = pre_state_id
 
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
+                pre_version = state.version
+
+                def _append_tool_outcome(
+                    *,
+                    response: Any,
+                    error_class: str | None,
+                    error_message: str | None,
+                    post_version: int,
+                    _tool_outcomes: list[_ToolOutcome] = tool_outcomes,
+                    _tool_call: Any = tool_call,
+                    _pre_version: int = pre_version,
+                ) -> None:
+                    _tool_outcomes.append(
+                        _ToolOutcome(
+                            call=_tool_call,
+                            response=response,
+                            error_class=error_class,
+                            error_message=error_message,
+                            pre_version=_pre_version,
+                            post_version=post_version,
+                        )
+                    )
+
                 try:
                     decoded_arguments = json.loads(tool_call.function.arguments)
                 except (json.JSONDecodeError, TypeError) as exc:
@@ -1985,6 +2023,12 @@ class ComposerServiceImpl:
                             error_message=type(exc).__name__,
                             error_payload=error_payload,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=type(exc).__name__,
+                        error_message=type(exc).__name__,
+                        post_version=state.version,
                     )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
@@ -2031,6 +2075,12 @@ class ComposerServiceImpl:
                             error_payload=error_payload,
                         )
                     )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=error_class,
+                        error_message=error_message,
+                        post_version=state.version,
+                    )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
@@ -2071,6 +2121,12 @@ class ComposerServiceImpl:
                             error_message=type(canonicalization_failed).__name__,
                             error_payload=error_payload,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=type(canonicalization_failed).__name__,
+                        error_message=type(canonicalization_failed).__name__,
+                        post_version=state.version,
                     )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
@@ -2117,6 +2173,12 @@ class ComposerServiceImpl:
                                 cache_hit=True,
                             )
                         )
+                        _append_tool_outcome(
+                            response=cached_result,
+                            error_class=None,
+                            error_message=None,
+                            post_version=state.version,
+                        )
                         # Cache hits are exclusively for discovery tools
                         # (`is_cacheable_discovery_tool` gates above). A
                         # discovery success is an *observation* — the model
@@ -2162,6 +2224,12 @@ class ComposerServiceImpl:
                             error_message=f"missing: {', '.join(missing)}",
                             error_payload=error_payload,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class="MissingRequiredPaths",
+                        error_message=f"missing: {', '.join(missing)}",
+                        post_version=state.version,
                     )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
@@ -2635,6 +2703,12 @@ class ComposerServiceImpl:
                         ),
                     )
                     arg_error_payload = _arg_error_payload(exc, tool_name)
+                    _append_tool_outcome(
+                        response=None,
+                        error_class="ToolArgumentError",
+                        error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
+                        post_version=state.version,
+                    )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
@@ -2687,6 +2761,10 @@ class ComposerServiceImpl:
                     # ``type(exc).__name__`` — no poisoned memory work.
                     # Closes blocker B2 from the panel review (2026-05-04).
                     raise
+                except AuditIntegrityError:
+                    # Tier-1 audit invariant. Do not let the plugin-bug
+                    # catch-all below launder it into ComposerPluginCrashError.
+                    raise
                 except Exception as tool_exc:
                     # Plugin-bug path: any exception class OTHER than
                     # ToolArgumentError escaping execute_tool() is a plugin
@@ -2726,13 +2804,21 @@ class ComposerServiceImpl:
                     # takes the recorder buffer (including the helper's
                     # final crash record) so the route handler's
                     # ``_handle_plugin_crash`` gets the complete sequence.
-                    raise ComposerPluginCrashError.capture(
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=type(tool_exc).__name__,
+                        error_message=str(tool_exc),
+                        post_version=state.version,
+                    )
+                    plugin_crash = ComposerPluginCrashError.capture(
                         tool_exc,
                         state=state,
                         initial_version=initial_version,
                         tool_invocations=recorder.invocations,
                         llm_calls=recorder.llm_calls,
-                    ) from tool_exc
+                    )
+                    plugin_crash_cause = tool_exc
+                    break
 
                 # SUCCESS path — the helper already recorded
                 # ComposerToolStatus.SUCCESS via finish_success (with the
@@ -2773,6 +2859,12 @@ class ComposerServiceImpl:
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                 result_json = _serialize_tool_result(result)
                 await _emit_progress(progress, _tool_completed_progress_event(tool_name, result.success))
+                _append_tool_outcome(
+                    response=result,
+                    error_class=None,
+                    error_message=None,
+                    post_version=state.version,
+                )
 
                 # Cache cacheable discovery results
                 if is_cacheable_discovery_tool(tool_name):
@@ -2791,6 +2883,12 @@ class ComposerServiceImpl:
                     turn_has_mutation = True
                 else:
                     turn_has_discovery = True
+
+            self._phase3_last_tool_outcomes = tuple(tool_outcomes)
+            if plugin_crash is not None:
+                if plugin_crash_cause is None:
+                    raise plugin_crash
+                raise plugin_crash from plugin_crash_cause
 
             # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
             # same (tool_name, arguments_hash), the model has stopped reading
@@ -3862,6 +3960,12 @@ class ComposeLoopTestResult:
     persisted_assistant_tool_calls: tuple[Any, ...] = ()
     persisted_tool_row_content: tuple[Any, ...] = ()
 
+    @property
+    def tool_outcomes_for_assertion(self) -> tuple[Any, ...]:
+        """Backward-compatible assertion surface named by the Phase 3 plan."""
+
+        return self.tool_outcomes
+
 
 def _phase3_require_sessions_service_for_test(self: ComposerServiceImpl) -> Any:
     """Return the Phase 3 test-wired sessions service or fail loudly."""
@@ -3924,7 +4028,10 @@ async def _phase3_run_one_turn_for_test(
     finally:
         self._call_llm = original_call_llm  # type: ignore[method-assign]
 
-    return ComposeLoopTestResult(assistant_message=result.message)
+    return ComposeLoopTestResult(
+        assistant_message=result.message,
+        tool_outcomes=tuple(self._phase3_last_tool_outcomes),
+    )
 
 
 ComposerServiceImpl._require_sessions_service = _phase3_require_sessions_service_for_test  # type: ignore[attr-defined]
@@ -3942,6 +4049,8 @@ def _phase3_composer_init(self: ComposerServiceImpl, *args: Any, **kwargs: Any) 
     except AttributeError:
         self._max_tool_calls_per_turn = 16  # type: ignore[attr-defined]
     self._telemetry = None  # type: ignore[attr-defined]
+    self._phase3_last_tool_outcomes = ()
+    self._phase3_last_expected_current_state_id = None
 
 
 ComposerServiceImpl.__init__ = _phase3_composer_init  # type: ignore[method-assign]

@@ -84,6 +84,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer import tools as tools_module
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -582,15 +583,24 @@ def fake_llm_three_tool_calls(fake_llm_emitting_n_tool_calls: Any) -> _FakeCompo
 
 
 @pytest.fixture
-def fake_llm_tool_argument_error_on_second() -> _FakeComposeLLM:
-    """Second tool has invalid arguments so the loop records ARG_ERROR payload."""
+def fake_llm_tool_argument_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeComposeLLM:
+    """Second tool raises ``ToolArgumentError`` while the loop continues."""
 
+    original_execute_tool = tools_module.execute_tool
+
+    def _execute(tool_name: str, *args: Any, **kwargs: Any) -> Any:
+        if tool_name == "phase3_tool_argument_error":
+            raise ToolArgumentError(argument="phase3", expected="valid fixture input", actual_type="invalid")
+        return original_execute_tool(tool_name, *args, **kwargs)
+
+    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(
                 tool_calls=(
                     {"id": "call_ok", "name": "get_pipeline_state", "arguments": {}},
-                    {"id": "call_bad", "name": "set_source", "arguments": []},
+                    {"id": "call_bad", "name": "phase3_tool_argument_error", "arguments": {}},
+                    {"id": "call_ok_after", "name": "get_pipeline_state", "arguments": {}},
                 )
             ),
             _fake_llm_response(content="Done."),
@@ -599,21 +609,49 @@ def fake_llm_tool_argument_error_on_second() -> _FakeComposeLLM:
 
 
 @pytest.fixture
-def fake_llm_runtime_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeComposeLLM:
-    """Second tool raises ``RuntimeError`` through the production dispatch seam."""
+def fake_llm_assertion_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeComposeLLM:
+    """Second tool raises ``AssertionError`` through the production dispatch seam."""
 
-    def _raise_on_second(tool_name: str, *_args: Any, **_kwargs: Any) -> Any:
-        if tool_name == "phase3_runtime_error":
-            raise RuntimeError("phase3 synthetic runtime error")
-        raise ToolArgumentError(argument="tool", expected="known tool", actual_type=tool_name)
+    original_execute_tool = tools_module.execute_tool
 
-    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _raise_on_second)
+    def _execute(tool_name: str, *args: Any, **kwargs: Any) -> Any:
+        if tool_name == "phase3_assertion_error":
+            raise AssertionError("phase3 synthetic invariant")
+        return original_execute_tool(tool_name, *args, **kwargs)
+
+    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(
                 tool_calls=(
-                    {"id": "call_ok", "name": "unknown_first", "arguments": {}},
+                    {"id": "call_ok", "name": "get_pipeline_state", "arguments": {}},
+                    {"id": "call_assert", "name": "phase3_assertion_error", "arguments": {}},
+                    {"id": "call_skipped", "name": "get_pipeline_state", "arguments": {}},
+                )
+            ),
+        )
+    )
+
+
+@pytest.fixture
+def fake_llm_runtime_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeComposeLLM:
+    """Second tool raises ``RuntimeError`` through the production dispatch seam."""
+
+    original_execute_tool = tools_module.execute_tool
+
+    def _execute(tool_name: str, *args: Any, **kwargs: Any) -> Any:
+        if tool_name == "phase3_runtime_error":
+            raise RuntimeError("phase3 synthetic runtime error")
+        return original_execute_tool(tool_name, *args, **kwargs)
+
+    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {"id": "call_ok", "name": "get_pipeline_state", "arguments": {}},
                     {"id": "call_crash", "name": "phase3_runtime_error", "arguments": {}},
+                    {"id": "call_skipped", "name": "get_pipeline_state", "arguments": {}},
                 )
             ),
         )

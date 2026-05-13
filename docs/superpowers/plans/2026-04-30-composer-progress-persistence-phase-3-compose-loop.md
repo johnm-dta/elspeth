@@ -422,7 +422,7 @@ The loop body must also track two load-bearing variables for Step 2:
 **Files:**
 - Modify: `src/elspeth/web/composer/service.py` (`_compose_loop` body)
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 Create `tests/unit/web/composer/test_compose_loop_persistence.py`:
 
@@ -528,7 +528,7 @@ def test_step1_plugin_bug_captures_crash_breaks_loop(
 
 Expected: FAIL — the loop currently drains to `BufferingRecorder`, not `_ToolOutcome[]`. The test hook `tool_outcomes_for_assertion` does not exist.
 
-- [ ] **Step 2: Refactor the per-tool for-loop body to accumulate `_ToolOutcome`.**
+- [x] **Step 2: Refactor the per-tool for-loop body to accumulate `_ToolOutcome`.**
 
 In `_compose_loop`, replace the current per-tool record/drain pattern with the §5.2.1 Step 1 shape:
 
@@ -614,7 +614,7 @@ for tool_call in assistant_message.tool_calls:
 
 Delete the now-orphaned `BufferingRecorder.add_message` calls within the loop body. The recorder remains in scope for non-tool events (LLM call telemetry, request-level audit), but `add_message` is no longer the path for per-tool persistence.
 
-- [ ] **Step 3: Re-run the Step 1 tests.**
+- [x] **Step 3: Re-run the Step 1 tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py -v -k "step1"
@@ -622,7 +622,7 @@ Delete the now-orphaned `BufferingRecorder.add_message` calls within the loop bo
 
 Expected: PASS for `test_step1_three_tools_all_succeed_accumulates_three_outcomes`, `test_step1_tool_argument_error_continues_loop`, and `test_step1_assertion_error_reraises_before_persist`. The plugin-bug test (`test_step1_plugin_bug_captures_crash_breaks_loop`) still fails because Step 2 isn't wired — it expects the audit row to exist, which only happens after Step 2 lands.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 1 — _ToolOutcome accumulation + crash capture (composer-progress-persistence phase 3)"

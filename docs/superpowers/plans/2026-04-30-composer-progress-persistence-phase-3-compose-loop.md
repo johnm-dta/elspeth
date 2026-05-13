@@ -2555,7 +2555,7 @@ Phase 4 begins after this PR merges. Phase 4 reads the `failed_turn` field this 
 
 ## Appendix A — Phase-2-as-shipped traceability (added rev-2)
 
-Phase 2 shipped before the rev-3 `RC5.2` baseline with 38 manifest entries (10 type-driven + 28 declarative) plus the F1–F6 follow-up sweep. Three deliverables from that sweep are load-bearing for Phase 3 and not obvious from the spec body — this appendix surfaces them so an implementer at task-execution time doesn't have to reverse-engineer the precedents.
+Phase 2 shipped before the rev-3 `RC5.2` baseline with 39 manifest entries plus the F1–F6 follow-up sweep. The type-driven/declarative split is intentionally approximate in the phase overview unless recounted live during the same task. Three deliverables from that sweep are load-bearing for Phase 3 and not obvious from the spec body — this appendix surfaces them so an implementer at task-execution time doesn't have to reverse-engineer the precedents.
 
 ### A.1 F2 — ARG_ERROR `validation_errors` field (commit `70424cc1`)
 

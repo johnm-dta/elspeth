@@ -639,7 +639,7 @@ Build the redacted assistant `tool_calls` tuple and the `RedactedToolRow` tuple 
 **Files:**
 - Modify: `src/elspeth/web/composer/service.py` (`_compose_loop` body, after the Task 4 Step 1 block)
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 Append to `tests/unit/web/composer/test_compose_loop_persistence.py`:
 
@@ -695,7 +695,7 @@ def test_step2_redacts_response_with_summarizer(
 
 Expected (rev-3 update — Phase 2 is shipped on `RC5.2`): FAIL with `AssertionError` on `assert persisted == expected` (or similar wiring assertion). Phase 2 imports resolve cleanly; the red is the loop body not yet calling the walker. (Rev-1 said "ImportError until Phase 2 merges"; that expectation is superseded.)
 
-- [ ] **Step 2: Wire the redaction step in `_compose_loop`.**
+- [x] **Step 2: Wire the redaction step in `_compose_loop`.**
 
 After the Task 4 Step 1 for-loop, before the (Task 6) dispatch:
 
@@ -775,7 +775,7 @@ def _serialize_response_via_walker(
 
 Do not introduce a module-level `pre_state_id_for(...)` helper in Phase 3. It would be a premature abstraction whose only legal return value is `None`. The inline comment above is load-bearing: it documents that `None` is intentional and delegated to Phase 1's version-ordering lineage, not a missing predecessor lookup.
 
-- [ ] **Step 3: Re-run the Step 2 tests.**
+- [x] **Step 3: Re-run the Step 2 tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py -v -k "step2"
@@ -783,7 +783,7 @@ Do not introduce a module-level `pre_state_id_for(...)` helper in Phase 3. It wo
 
 Expected: PASS. (Phase 2 is shipped on `RC5.2`; rev-1's "PASS once Phase 2 is in" is superseded — see Dependency posture.)
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 2 — async-side manifest redaction (composer-progress-persistence phase 3)"

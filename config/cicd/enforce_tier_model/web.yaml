@@ -1929,21 +1929,21 @@ allow_hits:
     result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=282221ab6eddba64
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=7b1fd06bec405fd1
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as bounded tool
     results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=bc9911a9749ddfce
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=563b48eb3f34c263
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as bounded tool
     results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=5b3ad7821daaad5d
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=ab5e0bee9df65127
   owner: composer-progress-persistence
   reason: Tier 3 plugin execution boundary; plugin bugs are captured for durable compose-turn audit before propagation.
   safety: AuditIntegrityError and interpreter-invariant exceptions re-raise before this catch; ordinary plugin crashes are captured

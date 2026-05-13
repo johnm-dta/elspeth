@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
 from sqlalchemy import text
 
 from elspeth.web.composer.protocol import ComposerPluginCrashError
+from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_tool_call_response
 from elspeth.web.composer.service import ComposerServiceImpl
 
 
@@ -103,3 +105,51 @@ async def test_step1_plugin_bug_captures_crash_breaks_loop(
     assert len(outcomes) == 2
     assert outcomes[0].error_class is None
     assert outcomes[1].error_class == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_step2_redacts_via_manifest_walker(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_with_sensitive_tool_call: Any,
+    result_session_id: str,
+) -> None:
+    """Assistant tool_calls are redacted with the Phase 2 manifest walker."""
+
+    result = await _run_one_turn(
+        composer_service_with_real_sessions,
+        llm=fake_llm_with_sensitive_tool_call,
+        session_id=result_session_id,
+    )
+
+    expected = tuple(
+        redact_tool_call_arguments(
+            outcome.call.function.name,
+            json.loads(outcome.call.function.arguments),
+            telemetry=composer_service_with_real_sessions._redaction_telemetry,  # type: ignore[attr-defined]
+        )
+        for outcome in result.tool_outcomes
+    )
+    persisted = tuple(json.loads(call["function"]["arguments"]) for call in result.persisted_assistant_tool_calls)
+    assert persisted == expected
+
+
+@pytest.mark.asyncio
+async def test_step2_redacts_response_with_summarizer(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_summarizer_active: Any,
+    result_session_id: str,
+) -> None:
+    """Tool-row content is serialized from redact_tool_call_response output."""
+
+    result = await _run_one_turn(
+        composer_service_with_real_sessions,
+        llm=fake_llm_summarizer_active,
+        session_id=result_session_id,
+    )
+
+    expected_content = redact_tool_call_response(
+        tool_name=result.tool_outcomes[0].call.function.name,
+        response=result.tool_outcomes[0].response.to_dict(),
+        telemetry=composer_service_with_real_sessions._redaction_telemetry,  # type: ignore[attr-defined]
+    )
+    assert json.loads(result.persisted_tool_row_content[0]) == expected_content

@@ -587,9 +587,12 @@ def fake_llm_tool_argument_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _
     """Second tool raises ``ToolArgumentError`` while the loop continues."""
 
     original_execute_tool = tools_module.execute_tool
+    calls = 0
 
     def _execute(tool_name: str, *args: Any, **kwargs: Any) -> Any:
-        if tool_name == "phase3_tool_argument_error":
+        nonlocal calls
+        calls += 1
+        if calls == 2:
             raise ToolArgumentError(argument="phase3", expected="valid fixture input", actual_type="invalid")
         return original_execute_tool(tool_name, *args, **kwargs)
 
@@ -598,9 +601,9 @@ def fake_llm_tool_argument_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _
         (
             _fake_llm_response(
                 tool_calls=(
-                    {"id": "call_ok", "name": "get_pipeline_state", "arguments": {}},
-                    {"id": "call_bad", "name": "phase3_tool_argument_error", "arguments": {}},
-                    {"id": "call_ok_after", "name": "get_pipeline_state", "arguments": {}},
+                    {"id": "call_ok", "name": "set_metadata", "arguments": {"patch": {"name": "ok"}}},
+                    {"id": "call_bad", "name": "set_metadata", "arguments": {"patch": {"name": "bad"}}},
+                    {"id": "call_ok_after", "name": "set_metadata", "arguments": {"patch": {"name": "after"}}},
                 )
             ),
             _fake_llm_response(content="Done."),
@@ -613,9 +616,12 @@ def fake_llm_assertion_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _Fake
     """Second tool raises ``AssertionError`` through the production dispatch seam."""
 
     original_execute_tool = tools_module.execute_tool
+    calls = 0
 
     def _execute(tool_name: str, *args: Any, **kwargs: Any) -> Any:
-        if tool_name == "phase3_assertion_error":
+        nonlocal calls
+        calls += 1
+        if calls == 2:
             raise AssertionError("phase3 synthetic invariant")
         return original_execute_tool(tool_name, *args, **kwargs)
 
@@ -624,9 +630,9 @@ def fake_llm_assertion_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _Fake
         (
             _fake_llm_response(
                 tool_calls=(
-                    {"id": "call_ok", "name": "get_pipeline_state", "arguments": {}},
-                    {"id": "call_assert", "name": "phase3_assertion_error", "arguments": {}},
-                    {"id": "call_skipped", "name": "get_pipeline_state", "arguments": {}},
+                    {"id": "call_ok", "name": "set_metadata", "arguments": {"patch": {"name": "ok"}}},
+                    {"id": "call_assert", "name": "set_metadata", "arguments": {"patch": {"name": "assert"}}},
+                    {"id": "call_skipped", "name": "set_metadata", "arguments": {"patch": {"name": "skipped"}}},
                 )
             ),
         )
@@ -638,9 +644,12 @@ def fake_llm_runtime_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeCo
     """Second tool raises ``RuntimeError`` through the production dispatch seam."""
 
     original_execute_tool = tools_module.execute_tool
+    calls = 0
 
     def _execute(tool_name: str, *args: Any, **kwargs: Any) -> Any:
-        if tool_name == "phase3_runtime_error":
+        nonlocal calls
+        calls += 1
+        if calls == 2:
             raise RuntimeError("phase3 synthetic runtime error")
         return original_execute_tool(tool_name, *args, **kwargs)
 
@@ -649,9 +658,9 @@ def fake_llm_runtime_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeCo
         (
             _fake_llm_response(
                 tool_calls=(
-                    {"id": "call_ok", "name": "get_pipeline_state", "arguments": {}},
-                    {"id": "call_crash", "name": "phase3_runtime_error", "arguments": {}},
-                    {"id": "call_skipped", "name": "get_pipeline_state", "arguments": {}},
+                    {"id": "call_ok", "name": "set_metadata", "arguments": {"patch": {"name": "ok"}}},
+                    {"id": "call_crash", "name": "set_metadata", "arguments": {"patch": {"name": "crash"}}},
+                    {"id": "call_skipped", "name": "set_metadata", "arguments": {"patch": {"name": "skipped"}}},
                 )
             ),
         )

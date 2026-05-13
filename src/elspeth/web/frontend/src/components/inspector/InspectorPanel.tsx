@@ -3,7 +3,7 @@
 //
 // Right panel with two-row header and tab-driven content area.
 //
-// Row 1: VersionSelector (custom dropdown with inline revert) + ValidationDot
+// Row 1: VersionSelector (custom dropdown with separate revert action) + ValidationDot
 //         on the left; Validate + Execute buttons on the right.
 // Row 2: Tab strip (Spec, Graph, YAML, Runs) navigable by arrow keys.
 //
@@ -11,7 +11,7 @@
 // Tab content area is wrapped in an ARIA live region.
 // ============================================================================
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useId, useRef } from "react";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
@@ -39,7 +39,7 @@ const TABS: { id: TabId; label: string }[] = [
 export const OPEN_CATALOG_EVENT = "open-catalog";
 
 // ---------------------------------------------------------------------------
-// VersionSelector — custom dropdown with inline revert
+// VersionSelector — custom dropdown with separate revert action
 // ---------------------------------------------------------------------------
 
 interface VersionSelectorProps {
@@ -59,7 +59,9 @@ function VersionSelector({
 }: VersionSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(-1);
+  const [selectedIndex, setSelectedIndex] = useState(0);
   const [revertTarget, setRevertTarget] = useState<CompositionStateVersion | null>(null);
+  const listboxId = useId();
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -90,7 +92,8 @@ function VersionSelector({
       const next = !prev;
       if (next) {
         onOpen();
-        setFocusedIndex(-1);
+        setFocusedIndex(0);
+        setSelectedIndex(0);
       }
       return next;
     });
@@ -129,8 +132,14 @@ function VersionSelector({
   useEffect(() => {
     if (!isOpen || focusedIndex < 0) return;
     const items = listRef.current?.querySelectorAll("[role='option']");
-    items?.[focusedIndex]?.scrollIntoView({ block: "nearest" });
+    items?.[focusedIndex]?.scrollIntoView?.({ block: "nearest" });
   }, [isOpen, focusedIndex]);
+
+  useEffect(() => {
+    if (selectedIndex < sortedVersions.length) return;
+    setSelectedIndex(0);
+    setFocusedIndex(sortedVersions.length > 0 ? 0 : -1);
+  }, [selectedIndex, sortedVersions.length]);
 
   function handleTriggerKeyDown(e: React.KeyboardEvent) {
     if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
@@ -150,20 +159,29 @@ function VersionSelector({
     }
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      if (count > 0) setFocusedIndex((prev) => (prev + 1) % count);
+      if (count > 0) {
+        setFocusedIndex((prev) => {
+          const next = (prev + 1) % count;
+          setSelectedIndex(next);
+          return next;
+        });
+      }
       return;
     }
     if (e.key === "ArrowUp") {
       e.preventDefault();
-      if (count > 0) setFocusedIndex((prev) => (prev - 1 + count) % count);
+      if (count > 0) {
+        setFocusedIndex((prev) => {
+          const next = (prev - 1 + count) % count;
+          setSelectedIndex(next);
+          return next;
+        });
+      }
       return;
     }
-    if (e.key === "Enter" && focusedIndex >= 0) {
+    if ((e.key === "Enter" || e.key === " ") && focusedIndex >= 0) {
       e.preventDefault();
-      const entry = sortedVersions[focusedIndex];
-      if (entry && entry.version !== currentVersion) {
-        handleRevert(entry);
-      }
+      setSelectedIndex(focusedIndex);
     }
   }
 
@@ -179,12 +197,16 @@ function VersionSelector({
     }
   }
 
+  const selectedVersion = sortedVersions[selectedIndex] ?? null;
+  const canRevertSelected = !!selectedVersion && selectedVersion.version !== currentVersion;
+
   return (
     <div ref={containerRef} className="version-selector">
       <button
         ref={triggerRef}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
+        aria-controls={listboxId}
         aria-label={`Version ${currentVersion}`}
         onClick={toggle}
         onKeyDown={handleTriggerKeyDown}
@@ -197,9 +219,14 @@ function VersionSelector({
         <div className="version-selector-dropdown">
           <ul
             ref={listRef}
+            id={listboxId}
             role="listbox"
             aria-label="Version history"
-            aria-activedescendant={focusedIndex >= 0 && sortedVersions[focusedIndex] ? `version-option-${sortedVersions[focusedIndex].version}` : undefined}
+            aria-activedescendant={
+              focusedIndex >= 0 && sortedVersions[focusedIndex]
+                ? `${listboxId}-option-${sortedVersions[focusedIndex].version}`
+                : undefined
+            }
             onKeyDown={handleListKeyDown}
             tabIndex={0}
             className="version-selector-list"
@@ -215,11 +242,15 @@ function VersionSelector({
               return (
                 <li
                   key={v.version}
-                  id={`version-option-${v.version}`}
+                  id={`${listboxId}-option-${v.version}`}
                   role="option"
-                  aria-selected={isCurrent}
+                  aria-selected={selectedIndex === i}
                   aria-label={`Version ${v.version}${isCurrent ? " (current)" : ""}`}
                   className={`version-selector-item${isFocused ? " version-selector-item--focused" : ""}${isCurrent ? " version-selector-item--current" : ""}`}
+                  onClick={() => {
+                    setFocusedIndex(i);
+                    setSelectedIndex(i);
+                  }}
                   onMouseEnter={() => setFocusedIndex(i)}
                 >
                   <span className="version-selector-item-info">
@@ -238,22 +269,29 @@ function VersionSelector({
                       {relativeTime(v.created_at)}
                     </span>
                   </span>
-                  {!isCurrent && (
-                    <button
-                      aria-label={`Revert to version ${v.version}`}
-                      className="btn version-selector-revert-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRevert(v);
-                      }}
-                    >
-                      Revert
-                    </button>
-                  )}
                 </li>
               );
             })}
           </ul>
+          <div className="version-selector-actions">
+            <button
+              type="button"
+              className="btn version-selector-revert-btn"
+              disabled={!canRevertSelected}
+              aria-label={
+                canRevertSelected
+                  ? `Revert selected version ${selectedVersion.version}`
+                  : "Select a previous version to revert"
+              }
+              onClick={() => {
+                if (canRevertSelected) {
+                  handleRevert(selectedVersion);
+                }
+              }}
+            >
+              {canRevertSelected ? `Revert to v${selectedVersion.version}` : "Current version selected"}
+            </button>
+          </div>
         </div>
       )}
       {revertTarget && (

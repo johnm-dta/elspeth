@@ -1926,11 +1926,16 @@ summary:focus-visible {
   color: var(--color-text-muted);
 }
 
+.version-selector-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-xs);
+  border-top: 1px solid var(--color-border);
+}
+
 .version-selector-revert-btn {
   padding: 2px var(--space-sm);
   font-size: var(--font-size-xs);
-  margin-left: var(--space-sm);
-  flex-shrink: 0;
 }
 
 .version-selector-loading {

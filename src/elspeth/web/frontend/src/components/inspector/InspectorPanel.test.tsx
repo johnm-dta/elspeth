@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { InspectorPanel } from "./InspectorPanel";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -272,6 +272,52 @@ describe("Version selector and catalog", () => {
     await user.click(trigger);
     // Dropdown listbox should be visible
     expect(screen.getByRole("listbox")).toBeInTheDocument();
+  });
+
+  it("keeps version options free of nested actions and wires trigger aria-controls", async () => {
+    const { fetchStateVersions } = await import("@/api/client");
+    const versions: CompositionStateVersion[] = [
+      { id: "state-2", version: 2, created_at: "2026-03-31T00:00:00Z", node_count: 5 },
+      { id: "state-1", version: 1, created_at: "2026-03-30T00:00:00Z", node_count: 3 },
+    ];
+    (fetchStateVersions as ReturnType<typeof vi.fn>).mockResolvedValue(versions);
+    useSessionStore.setState({
+      compositionState: makeState({ version: 2 }),
+      stateVersions: versions,
+    });
+    render(<InspectorPanel />);
+    const user = userEvent.setup();
+
+    const trigger = screen.getByRole("button", { name: /Version 2/ });
+    await user.click(trigger);
+
+    const listbox = screen.getByRole("listbox", { name: "Version history" });
+    await within(listbox).findByRole("option", { name: /Version 1/ });
+    expect(listbox.id).not.toBe("");
+    expect(trigger).toHaveAttribute("aria-controls", listbox.id);
+    expect(within(listbox).queryByRole("button", { name: /Revert/ })).not.toBeInTheDocument();
+  });
+
+  it("reverts the selected non-current version with an action outside the listbox", async () => {
+    const { fetchStateVersions } = await import("@/api/client");
+    const versions: CompositionStateVersion[] = [
+      { id: "state-2", version: 2, created_at: "2026-03-31T00:00:00Z", node_count: 5 },
+      { id: "state-1", version: 1, created_at: "2026-03-30T00:00:00Z", node_count: 3 },
+    ];
+    (fetchStateVersions as ReturnType<typeof vi.fn>).mockResolvedValue(versions);
+    useSessionStore.setState({
+      compositionState: makeState({ version: 2 }),
+      stateVersions: versions,
+    });
+    render(<InspectorPanel />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: /Version 2/ }));
+    const listbox = screen.getByRole("listbox", { name: "Version history" });
+    await user.click(await within(listbox).findByRole("option", { name: /Version 1/ }));
+    await user.click(screen.getByRole("button", { name: "Revert selected version 1" }));
+
+    expect(screen.getByRole("alertdialog", { name: "Revert pipeline" })).toBeInTheDocument();
   });
 
   it("catalog button toggles drawer", async () => {

@@ -229,6 +229,39 @@ class TestEntraGroupClaims:
         assert profile.groups == ()
 
     @pytest.mark.asyncio
+    async def test_hasgroups_overage_marker_raises(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Implicit-flow group overage must not become empty membership."""
+        private_key, _ = rsa_keypair
+        provider = EntraAuthProvider(tenant_id=TENANT_ID, audience=AUDIENCE)
+        claims = _valid_entra_claims({"hasgroups": True})
+        token = make_rs256_token(private_key, claims)
+        with mock_httpx_discovery, pytest.raises(AuthenticationError, match="group overage"):
+            await provider.get_user_info(token)
+
+    @pytest.mark.asyncio
+    async def test_claim_names_groups_overage_marker_raises(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Distributed group overage claims require explicit resolution."""
+        private_key, _ = rsa_keypair
+        provider = EntraAuthProvider(tenant_id=TENANT_ID, audience=AUDIENCE)
+        claims = _valid_entra_claims(
+            {
+                "_claim_names": {"groups": "src1"},
+                "_claim_sources": {"src1": {"endpoint": "https://graph.windows.net/overage"}},
+            }
+        )
+        token = make_rs256_token(private_key, claims)
+        with mock_httpx_discovery, pytest.raises(AuthenticationError, match="group overage"):
+            await provider.get_user_info(token)
+
+    @pytest.mark.asyncio
     async def test_no_name_claims_returns_none_display_name(
         self,
         rsa_keypair,

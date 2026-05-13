@@ -55,15 +55,20 @@ class EntraAuthProvider:
         """Extract group IDs and role-prefixed entries from Entra claims.
 
         ``groups`` and ``roles`` are optional Entra claims (Tier 3 data
-        from the IdP). Absence means "no groups/roles assigned";
-        non-list values indicate IdP misconfiguration.
+        from the IdP). Absence means "no groups/roles assigned" only
+        when Entra has not emitted a group-overage marker; non-list
+        values indicate IdP misconfiguration.
         """
         groups: list[str] = []
 
-        raw_groups = payload.get("groups")
+        claim_names = payload["_claim_names"] if "_claim_names" in payload else None
+        if ("hasgroups" in payload and payload["hasgroups"] is True) or (type(claim_names) is dict and "groups" in claim_names):
+            raise AuthenticationError("Entra token contains a group overage marker; group membership must be resolved via Microsoft Graph")
+
+        raw_groups = payload["groups"] if "groups" in payload else None
         if raw_groups is None:
             pass  # Absent claim -- no groups assigned
-        elif isinstance(raw_groups, list):
+        elif type(raw_groups) is list:
             # Coerce group IDs to str — IdPs may send integers (e.g. Entra
             # group object IDs). This is intentional Tier 3 coercion.
             groups.extend(str(g) for g in raw_groups)
@@ -72,10 +77,10 @@ class EntraAuthProvider:
                 f"Unexpected type for 'groups' claim: {type(raw_groups).__name__} (expected list) — check IdP token configuration"
             )
 
-        raw_roles = payload.get("roles")
+        raw_roles = payload["roles"] if "roles" in payload else None
         if raw_roles is None:
             pass  # Absent claim -- no roles assigned
-        elif isinstance(raw_roles, list):
+        elif type(raw_roles) is list:
             # Coerce group IDs to str — IdPs may send integers (e.g. Entra
             # group object IDs). This is intentional Tier 3 coercion.
             groups.extend(f"role:{r}" for r in raw_roles)

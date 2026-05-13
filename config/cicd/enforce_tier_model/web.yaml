@@ -223,26 +223,6 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 preferred_username is optional in OIDC tokens, falls back to sub"
   safety: Default is payload['sub'] which is required
   expires: null
-- key: web/auth/entra.py:R1:EntraAuthProvider:_extract_groups:fp=268368c0e155cc41
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 groups claim is optional in Entra tokens; None = no groups"
-  safety: None returns empty; non-list raises AuthenticationError; no silent discard
-  expires: null
-- key: web/auth/entra.py:R5:EntraAuthProvider:_extract_groups:fp=6dcc1eafd56c6429
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 groups claim type is not guaranteed by external IdP"
-  safety: Non-list raises AuthenticationError with type info
-  expires: null
-- key: web/auth/entra.py:R1:EntraAuthProvider:_extract_groups:fp=cc258a6069465936
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 roles claim is optional in Entra tokens; None = no roles"
-  safety: None returns empty; non-list raises AuthenticationError; no silent discard
-  expires: null
-- key: web/auth/entra.py:R5:EntraAuthProvider:_extract_groups:fp=8a85154b5c04b93d
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 roles claim type is not guaranteed by external IdP"
-  safety: Non-list raises AuthenticationError with type info
-  expires: null
 - key: web/auth/entra.py:R1:EntraAuthProvider:authenticate:fp=564181fecfacb986
   owner: web-auth
   reason: "Tier 3 boundary \u2014 preferred_username is optional in Entra tokens, falls back to sub"

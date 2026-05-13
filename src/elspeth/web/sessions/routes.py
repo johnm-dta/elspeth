@@ -4483,7 +4483,7 @@ def create_session_router() -> APIRouter:
                     state = _initial_composition_state_with_guided_session()
                 else:
                     state = _state_from_record(state_record)
-                state_record_out = state_record
+                    state_record_out = state_record
 
                 # Reject freeform sessions.
                 if state.guided_session is None:
@@ -4799,6 +4799,7 @@ def create_session_router() -> APIRouter:
                     state = _initial_composition_state_with_guided_session()
                 else:
                     state = _state_from_record(state_record)
+                    state_record_out = state_record
 
                 if state.guided_session is None:
                     raise HTTPException(
@@ -5358,6 +5359,7 @@ def create_session_router() -> APIRouter:
                     state = _initial_composition_state_with_guided_session()
                 else:
                     state = _state_from_record(state_record)
+                    state_record_out = state_record
 
                 if state.guided_session is None:
                     raise HTTPException(

@@ -61,10 +61,13 @@ def _post_chat(client: TestClient, session_id: str, **kwargs) -> tuple[int, dict
 
 
 def _chat_turn_audit_bodies(client: TestClient, session_id: str) -> list[dict]:
+    return [json.loads(row.content) for row in _chat_turn_audit_rows(client, session_id)]
+
+
+def _chat_turn_audit_rows(client: TestClient, session_id: str) -> list:
     service = client.app.state.session_service
     messages = asyncio.run(service.get_messages(UUID(session_id)))
-    audit_rows = [m for m in messages if m.role == "tool" and '"_kind": "chat_turn_audit"' in m.content]
-    return [json.loads(row.content) for row in audit_rows]
+    return [m for m in messages if m.role == "tool" and '"_kind": "chat_turn_audit"' in m.content]
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +596,8 @@ class TestStepChatServerInvariants:
         reloaded = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["guided_session"]
         assert reloaded["chat_history"] == []
         assert reloaded["chat_turn_seq"] == 0
+        audit_rows = _chat_turn_audit_rows(composer_test_client, session_id)
+        assert audit_rows[0].composition_state_id is not None
 
     def test_whitespace_only_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
         """Whitespace-only content → same path as empty content (``.strip()`` is empty)."""
@@ -623,6 +628,8 @@ class TestStepChatServerInvariants:
         reloaded = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["guided_session"]
         assert reloaded["chat_history"] == []
         assert reloaded["chat_turn_seq"] == 0
+        audit_rows = _chat_turn_audit_rows(composer_test_client, session_id)
+        assert audit_rows[0].composition_state_id is not None
 
 
 class TestStepChatCrossStep:

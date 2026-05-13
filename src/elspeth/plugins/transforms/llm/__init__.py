@@ -36,13 +36,14 @@ and may change between versions without notice.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Literal
 
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.token_usage import TokenUsage
 
 if TYPE_CHECKING:
     from elspeth.contracts import PluginSchema
-    from elspeth.contracts.schema import SchemaConfig
 
 # Metadata field suffixes for contract-stable fields (downstream can depend on these)
 LLM_GUARANTEED_SUFFIXES: tuple[str, ...] = (
@@ -90,6 +91,21 @@ LLM_AUDIT_SUFFIXES: tuple[str, ...] = (
 )
 
 
+def _validate_response_field(response_field: str) -> None:
+    if not response_field or not response_field.strip():
+        raise ValueError("response_field cannot be empty or whitespace-only")
+    if not response_field.isidentifier():
+        raise ValueError(
+            f"response_field '{response_field}' is not a valid Python identifier. "
+            f"Use only letters, digits, and underscores, starting with a letter or underscore."
+        )
+
+
+def _metadata_fields(response_field: str, suffixes: Iterable[str]) -> tuple[str, ...]:
+    _validate_response_field(response_field)
+    return tuple(f"{response_field}{suffix}" for suffix in suffixes)
+
+
 def get_llm_guaranteed_fields(response_field: str) -> tuple[str, ...]:
     """Return contract-stable metadata field names for LLM transforms.
 
@@ -106,14 +122,7 @@ def get_llm_guaranteed_fields(response_field: str) -> tuple[str, ...]:
     Raises:
         ValueError: If response_field is empty or whitespace-only.
     """
-    if not response_field or not response_field.strip():
-        raise ValueError("response_field cannot be empty or whitespace-only")
-    if not response_field.isidentifier():
-        raise ValueError(
-            f"response_field '{response_field}' is not a valid Python identifier. "
-            f"Use only letters, digits, and underscores, starting with a letter or underscore."
-        )
-    return tuple(f"{response_field}{suffix}" for suffix in LLM_GUARANTEED_SUFFIXES)
+    return _metadata_fields(response_field, LLM_GUARANTEED_SUFFIXES)
 
 
 def get_llm_audit_fields(response_field: str) -> tuple[str, ...]:
@@ -132,14 +141,27 @@ def get_llm_audit_fields(response_field: str) -> tuple[str, ...]:
     Raises:
         ValueError: If response_field is empty or whitespace-only.
     """
-    if not response_field or not response_field.strip():
-        raise ValueError("response_field cannot be empty or whitespace-only")
-    if not response_field.isidentifier():
-        raise ValueError(
-            f"response_field '{response_field}' is not a valid Python identifier. "
-            f"Use only letters, digits, and underscores, starting with a letter or underscore."
-        )
-    return tuple(f"{response_field}{suffix}" for suffix in LLM_AUDIT_SUFFIXES)
+    return _metadata_fields(response_field, LLM_AUDIT_SUFFIXES)
+
+
+def _build_llm_output_schema_config(
+    schema_config: SchemaConfig,
+    guaranteed_fields: Iterable[str],
+) -> SchemaConfig:
+    """Build LLM output schema config while preserving current audit-field policy."""
+    base_guaranteed = set(schema_config.guaranteed_fields or ())
+    output_fields = base_guaranteed | set(guaranteed_fields)
+    upstream_declared = schema_config.guaranteed_fields is not None
+    if upstream_declared or output_fields:
+        guaranteed_fields_result = tuple(sorted(output_fields))
+    else:
+        guaranteed_fields_result = None
+    return SchemaConfig(
+        mode=schema_config.mode,
+        fields=schema_config.fields,
+        guaranteed_fields=guaranteed_fields_result,
+        required_fields=schema_config.required_fields,
+    )
 
 
 def populate_llm_operational_fields(

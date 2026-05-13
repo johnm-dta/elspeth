@@ -427,7 +427,7 @@ allow_hits:
   safety: Raises TypeError (crash), does not suppress or coerce; message identifies
     the upstream plugin bug
   expires: null
-- key: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform:_configured_collection_name:fp=887390c301de47c9
+- key: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform:_configured_collection_name:fp=4b72e60f7eac27db
   owner: architecture
   reason: Provider config comes from a validated provider-specific model union; getattr
     is limited to the two mutually exclusive naming conventions (collection vs index)
@@ -435,7 +435,7 @@ allow_hits:
   safety: Missing both attributes raises FrameworkBugError immediately; no fallback
     value is fabricated
   expires: null
-- key: plugins/transforms/rag/transform.py:R5:RAGRetrievalTransform:_configured_collection_name:fp=f3428dc23e118267
+- key: plugins/transforms/rag/transform.py:R5:RAGRetrievalTransform:_configured_collection_name:fp=727fc5a4cc1ad144
   owner: architecture
   reason: Provider config comes from a validated provider-specific model union; isinstance(value,
     str) confirms the selected readiness-audit identifier is a non-empty string before

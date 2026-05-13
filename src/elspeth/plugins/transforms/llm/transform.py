@@ -33,7 +33,6 @@ from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.errors import FrameworkBugError, RuntimePreflightFailedError
 from elspeth.contracts.freeze import freeze_fields
-from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.value_source import register_value_source_plugin
@@ -42,10 +41,12 @@ from elspeth.plugins.infrastructure.batching import BatchTransformMixin, OutputP
 from elspeth.plugins.infrastructure.clients.llm import ContextLengthError, LLMClientError
 from elspeth.plugins.infrastructure.pooling import PooledExecutor, RowContext
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.infrastructure.telemetry import make_warn_telemetry_before_start
 from elspeth.plugins.infrastructure.templates import TemplateError
 from elspeth.plugins.transforms.llm import (
     _OUTPUT_FIELD_TYPE_TO_SCHEMA,
     _build_augmented_output_schema,
+    _build_llm_output_schema_config,
     _build_multi_query_output_schema,
     _FieldType,
     build_llm_audit_metadata,
@@ -74,12 +75,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.plugin_semantics import OutputSemanticDeclaration
 
 
-def _warn_telemetry_before_start(event: Any) -> None:
-    """Default telemetry callback before on_start() — warns instead of silently dropping."""
-    logger.warning(
-        "telemetry_emit called before on_start() — event dropped",
-        event_type=type(event).__name__,
-    )
+_warn_telemetry_before_start = make_warn_telemetry_before_start(logger)
 
 
 _FINISH_REASON_ERRORS: dict[FinishReason, tuple[str, str]] = {
@@ -1043,7 +1039,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:10a49e19d8c4419c"
+    source_file_hash: str | None = "sha256:373c0b203b6adb4a"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1303,24 +1299,8 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
             # Output schema config with prefixed fields for DAG contract propagation.
             # INVARIANT: guaranteed_fields must be a superset of declared_output_fields.
-            # This transform builds _output_schema_config manually (not via
-            # _build_output_schema_config) because multi-query field computation
-            # requires prefix interpolation beyond the generic helper's scope.
             # See: docs/superpowers/specs/2026-03-20-output-schema-contract-enforcement-design.md
-            base_guaranteed = set(schema_config.guaranteed_fields or ())
-            output_fields = base_guaranteed | prefixed_guaranteed
-            # Preserve None-vs-empty-tuple semantics: None = abstain, () = explicitly empty.
-            upstream_declared = schema_config.guaranteed_fields is not None
-            if upstream_declared or output_fields:
-                guaranteed_fields_result = tuple(sorted(output_fields))
-            else:
-                guaranteed_fields_result = None
-            self._output_schema_config = SchemaConfig(
-                mode=schema_config.mode,
-                fields=schema_config.fields,
-                guaranteed_fields=guaranteed_fields_result,
-                required_fields=schema_config.required_fields,
-            )
+            self._output_schema_config = _build_llm_output_schema_config(schema_config, prefixed_guaranteed)
 
             # Pydantic output schema with prefixed LLM fields
             # Build extracted_fields mapping: query_name → (field_name, schema_type) tuples
@@ -1356,19 +1336,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             # Output schema config with LLM output fields for DAG contract propagation.
             # INVARIANT: guaranteed_fields must be a superset of declared_output_fields.
             # See: docs/superpowers/specs/2026-03-20-output-schema-contract-enforcement-design.md
-            base_guaranteed = set(schema_config.guaranteed_fields or ())
-            output_fields = base_guaranteed | set(guaranteed)
-            upstream_declared = schema_config.guaranteed_fields is not None
-            if upstream_declared or output_fields:
-                guaranteed_fields_result = tuple(sorted(output_fields))
-            else:
-                guaranteed_fields_result = None
-            self._output_schema_config = SchemaConfig(
-                mode=schema_config.mode,
-                fields=schema_config.fields,
-                guaranteed_fields=guaranteed_fields_result,
-                required_fields=schema_config.required_fields,
-            )
+            self._output_schema_config = _build_llm_output_schema_config(schema_config, guaranteed)
 
             # Pydantic output schema with unprefixed LLM fields
             self.output_schema = _build_augmented_output_schema(

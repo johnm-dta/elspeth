@@ -24,6 +24,7 @@ from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
+from elspeth.plugins.infrastructure.telemetry import make_warn_telemetry_before_start
 from elspeth.plugins.transforms.rag.config import PROVIDERS, RAGRetrievalConfig
 from elspeth.plugins.transforms.rag.formatter import format_context
 from elspeth.plugins.transforms.rag.query import QueryBuilder
@@ -35,12 +36,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def _warn_telemetry_before_start(event: Any) -> None:
-    """Default telemetry callback before on_start() — warns instead of silently dropping."""
-    logger.warning(
-        "telemetry_emit called before on_start() — event dropped",
-        event_type=type(event).__name__,
-    )
+_warn_telemetry_before_start = make_warn_telemetry_before_start(logger)
 
 
 class RAGRetrievalTransform(BaseTransform):
@@ -58,7 +54,7 @@ class RAGRetrievalTransform(BaseTransform):
 
     name = "rag_retrieval"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:146ccd250aefa105"
+    source_file_hash: str | None = "sha256:633a7b332887749c"
     determinism: Determinism = Determinism.EXTERNAL_CALL
     config_model = RAGRetrievalConfig
     passes_through_input = True

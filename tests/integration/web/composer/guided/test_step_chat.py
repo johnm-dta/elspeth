@@ -185,6 +185,84 @@ class TestStepChatSuccess:
         assert reloaded["chat_history"][0]["content"] == "ping"
         assert reloaded["chat_history"][1]["content"] == "ack"
 
+    def test_chat_turn_persists_audit_message(self, composer_test_client: TestClient) -> None:
+        """Slice 5.1: each chat round-trip persists a ComposerChatTurn audit row.
+
+        The audit message lands as a ``role=tool`` chat message tagged
+        ``_kind=chat_turn_audit``.  Per CLAUDE.md auditability standard
+        ("no inference - if it's not recorded, it didn't happen"), the
+        per-turn audit record MUST persist; constructing it in memory
+        and letting it GC at function return would be evidence
+        tampering.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("acked")),
+        ):
+            _post_chat(
+                composer_test_client,
+                session_id,
+                message="ping",
+                step_index="step_1_source",
+            )
+
+        # Query the session messages and find the chat_turn_audit row.
+        service = composer_test_client.app.state.session_service
+        messages = asyncio.run(service.get_messages(UUID(session_id)))
+        audit_rows = [m for m in messages if m.role == "tool" and '"_kind": "chat_turn_audit"' in m.content]
+        assert len(audit_rows) == 1, [m.content for m in messages]
+
+        # The content carries the slim summary fields.
+        import json as _json
+
+        body = _json.loads(audit_rows[0].content)
+        assert body["_kind"] == "chat_turn_audit"
+        assert body["status"] == "success"
+        assert body["step"] == "step_1_source"
+        assert body["initiator"] == "user"
+        assert body["chat_turn_seq"] == 0
+        # latency is captured but non-deterministic; assert presence only.
+        assert isinstance(body["latency_ms"], int)
+        assert body["latency_ms"] >= 0
+
+    def test_synthetic_unavailable_persists_audit_message(self, composer_test_client: TestClient) -> None:
+        """Slice 5.1: synthetic-unavailable chat round-trips also persist audit.
+
+        The SYNTHETIC_UNAVAILABLE status is the audit-discriminator that
+        tells an auditor "this LLM call failed and the user got the
+        unavailable fallback."  It must reach the audit table, otherwise
+        the operator cannot distinguish a real LLM reply from a synthetic
+        one after the fact.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=TimeoutError("upstream timeout")),
+        ):
+            _post_chat(
+                composer_test_client,
+                session_id,
+                message="ping",
+                step_index="step_1_source",
+            )
+
+        service = composer_test_client.app.state.session_service
+        messages = asyncio.run(service.get_messages(UUID(session_id)))
+        audit_rows = [m for m in messages if m.role == "tool" and '"_kind": "chat_turn_audit"' in m.content]
+        assert len(audit_rows) == 1
+
+        import json as _json
+
+        body = _json.loads(audit_rows[0].content)
+        assert body["status"] == "synthetic_unavailable"
+        assert body["error_class"] == "TimeoutError"
+        assert body["chat_turn_seq"] == 0
+
     def test_two_chat_turns_advance_seq_monotonically(self, composer_test_client: TestClient) -> None:
         """Slice 5: chat_turn_seq is monotonic across multiple chat turns in the same step."""
         session_id = _create_session(composer_test_client)

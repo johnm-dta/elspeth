@@ -276,6 +276,19 @@ def llm_call_audit_envelope(call: ComposerLLMCall) -> dict[str, object]:
     return {"_kind": "llm_call_audit", "call": call.to_dict()}
 
 
+def chat_turn_audit_envelope(turn: ComposerChatTurn) -> dict[str, object]:
+    """Wrap a chat turn in the canonical ``tool_calls`` JSON envelope.
+
+    Sibling of :func:`llm_call_audit_envelope`.  The ``_kind`` discriminator
+    distinguishes this from LLM-call audit payloads so a reader of
+    ``chat_messages`` can dispatch on the field without inspecting the body.
+
+    ``turn.to_dict()`` already serialises the enum + datetimes; the envelope
+    just adds the kind tag.
+    """
+    return {"_kind": "chat_turn_audit", "turn": turn.to_dict()}
+
+
 # ---------------------------------------------------------------------------
 # Per-dispatch audit envelope.
 # Hoisted from web/composer/service.py so the helper :func:`dispatch_with_audit`

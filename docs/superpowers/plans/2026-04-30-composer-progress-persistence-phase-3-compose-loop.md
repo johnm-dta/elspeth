@@ -2083,7 +2083,7 @@ If the `other` bucket is non-empty, stop and surface it to the operator before c
 
 Implementation log (2026-05-14): the CL-PP-1..8 grep found no labelled cases in `test_composer_llm_eval_characterization.py`; the live Phase 3 surface instead exposed one characterization harness failure where the composition-budget replay reached `_compose_loop` persistence without a wired `SessionServiceProtocol`. The fix wires a real `SessionServiceImpl` with `create_session_engine(..., StaticPool)` and `initialize_session_schema()` for that replay. Assertion-churn buckets from `git diff -- tests/`: `shape-now-correct` = none; `counter-now-correct` = none; `other` = none (no assertions changed, only real-DB harness wiring).
 
-- [ ] **Step 4: Commit (one commit per scenario or per coherent batch).**
+- [x] **Step 4: Commit (one commit per scenario or per coherent batch).**
 
 ```bash
 git commit -am "test(integration): CL-PP-{N} extends failed_turn assertions (composer-progress-persistence phase 3)"

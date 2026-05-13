@@ -750,9 +750,15 @@ export type BlobCategory = "source" | "sink" | "other";
 // ── Secret References ───────────────────────────────────────────────────────
 
 /** Secret inventory item — browser-safe metadata, never contains values. */
+export type SecretUnavailabilityReason =
+  | "fingerprint_resolver_not_configured"
+  | "env_var_not_set"
+  | "value_decryption_failed";
+
 export interface SecretInventoryItem {
   name: string;
   scope: "user" | "server" | "org";
   available: boolean;
   source_kind: string;
+  reason: SecretUnavailabilityReason | null;
 }

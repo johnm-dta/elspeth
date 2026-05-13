@@ -2397,12 +2397,25 @@ summary:focus-visible {
   background-color: var(--color-surface-raised);
 }
 
-.secrets-list-name {
+.secrets-list-detail {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.secrets-list-name {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   word-break: break-all;
   color: var(--color-text);
+}
+
+.secrets-unavailable-reason {
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+  line-height: 1.35;
 }
 
 .secrets-scope-badge {

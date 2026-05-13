@@ -44,6 +44,16 @@ function AvailabilityDot({ available }: { available: boolean }) {
   );
 }
 
+function reasonLabel(reason: SecretInventoryItem["reason"]): string | null {
+  if (reason === null) return null;
+  const labels: Record<NonNullable<SecretInventoryItem["reason"]>, string> = {
+    fingerprint_resolver_not_configured: "Fingerprint resolver is not configured",
+    env_var_not_set: "Environment variable is not set",
+    value_decryption_failed: "Stored value could not be decrypted",
+  };
+  return labels[reason];
+}
+
 /**
  * Secrets settings panel — modal overlay.
  *
@@ -259,29 +269,39 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
               </div>
             ) : (
               <ul role="list" className="secrets-list">
-                {secrets.map((secret) => (
-                  <li key={secret.name} className="secrets-list-item">
-                    <AvailabilityDot available={secret.available} />
+                {secrets.map((secret) => {
+                  const unavailableReason = reasonLabel(secret.reason);
+                  return (
+                    <li key={secret.name} className="secrets-list-item">
+                      <AvailabilityDot available={secret.available} />
 
-                    <span className="secrets-list-name">
-                      {secret.name}
-                    </span>
+                      <span className="secrets-list-detail">
+                        <span className="secrets-list-name">
+                          {secret.name}
+                        </span>
+                        {!secret.available && unavailableReason && (
+                          <span className="secrets-unavailable-reason">
+                            {unavailableReason}
+                          </span>
+                        )}
+                      </span>
 
-                    <ScopeBadge scope={secret.scope} />
+                      <ScopeBadge scope={secret.scope} />
 
-                    {/* Server-scoped and org-scoped secrets are read-only — no delete */}
-                    {secret.scope === "user" && (
-                      <button
-                        onClick={() => handleDelete(secret.name)}
-                        aria-label={`Delete secret ${secret.name}`}
-                        title="Delete"
-                        className="secrets-delete-btn"
-                      >
-                        ×
-                      </button>
-                    )}
-                  </li>
-                ))}
+                      {/* Server-scoped and org-scoped secrets are read-only — no delete */}
+                      {secret.scope === "user" && (
+                        <button
+                          onClick={() => handleDelete(secret.name)}
+                          aria-label={`Delete secret ${secret.name}`}
+                          title="Delete"
+                          className="secrets-delete-btn"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>

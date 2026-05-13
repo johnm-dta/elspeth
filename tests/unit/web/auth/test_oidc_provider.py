@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from elspeth.web.auth.models import AuthenticationError, UserIdentity
 from elspeth.web.auth.oidc import OIDCAuthProvider
@@ -826,6 +827,88 @@ class TestOIDCStaleCacheBackoff:
             await provider.authenticate(token)  # should attempt fetch again
 
         assert attempt_count == 2
+
+
+@pytest.mark.asyncio
+class TestOIDCJWKSFailureLogRedaction:
+    """JWKS fetch-failure logs must carry exception class, not exception text."""
+
+    async def test_stale_cache_fetch_failure_logs_exc_class_without_exception_message(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        private_key, _ = rsa_keypair
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=0,
+            jwks_failure_retry_seconds=60,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+
+        with mock_httpx_discovery:
+            await provider.authenticate(token)
+
+        sensitive_uri = "https://login.example.com/keys?client_secret=super-secret"
+
+        async def failing_get(url, **kwargs):
+            raise httpx.InvalidURL(f"bad JWKS URL: {sensitive_uri}")
+
+        failing_client = AsyncMock()
+        failing_client.get = failing_get
+        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
+        failing_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
+            capture_logs() as cap_logs,
+        ):
+            identity = await provider.authenticate(token)
+
+        assert identity.user_id == "user-123"
+        events = [entry for entry in cap_logs if entry.get("event") == "JWKS fetch failed, serving stale cache"]
+        assert len(events) == 1, cap_logs
+        event = events[0]
+        assert event["exc_class"] == "InvalidURL"
+        assert "error" not in event
+        assert sensitive_uri not in repr(event)
+
+    async def test_cold_start_fetch_failure_logs_exc_class_without_exception_message(
+        self,
+        rsa_keypair,
+    ) -> None:
+        private_key, _ = rsa_keypair
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=3600,
+            jwks_failure_retry_seconds=60,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+        sensitive_uri = "https://login.example.com/keys?client_secret=super-secret"
+
+        async def failing_get(url, **kwargs):
+            raise httpx.InvalidURL(f"bad JWKS URL: {sensitive_uri}")
+
+        failing_client = AsyncMock()
+        failing_client.get = failing_get
+        failing_client.__aenter__ = AsyncMock(return_value=failing_client)
+        failing_client.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client),
+            capture_logs() as cap_logs,
+            pytest.raises(AuthenticationError, match="JWKS unavailable: InvalidURL"),
+        ):
+            await provider.authenticate(token)
+
+        events = [entry for entry in cap_logs if entry.get("event") == "JWKS cold-start fetch failed; throttling retry"]
+        assert len(events) == 1, cap_logs
+        event = events[0]
+        assert event["exc_class"] == "InvalidURL"
+        assert "error" not in event
+        assert sensitive_uri not in repr(event)
 
 
 class TestOIDCShapeFailureBackoff:

@@ -289,14 +289,14 @@ class JWKSTokenValidator:
                     slog.debug(
                         "JWKS fetch failed, serving stale cache",
                         issuer=self._issuer,
-                        error=str(exc),
+                        exc_class=type(exc).__name__,
                         next_refresh_in_seconds=self._jwks_failure_retry_seconds,
                     )
                     return stale_jwks
                 slog.debug(
                     "JWKS cold-start fetch failed; throttling retry",
                     issuer=self._issuer,
-                    error=str(exc),
+                    exc_class=type(exc).__name__,
                     next_refresh_in_seconds=self._jwks_failure_retry_seconds,
                 )
                 # Class name only. ``str(exc)`` on httpx.InvalidURL carries

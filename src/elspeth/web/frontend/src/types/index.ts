@@ -6,6 +6,8 @@
 // is available, these can be replaced with imports from the generated file.
 // ============================================================================
 
+import type { FailedTurn } from "./recovery";
+
 // ── Auth ────────────────────────────────────────────────────────────────────
 
 /**
@@ -73,13 +75,17 @@ export interface ToolCall {
 export interface ChatMessage {
   id: string;
   session_id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool" | "audit";
   content: string;
+  raw_content?: string | null;
   tool_calls: ToolCall[] | null;
   created_at: string;
   local_status?: "pending" | "failed";
   local_error?: string;
-  composition_state_id?: string;
+  composition_state_id?: string | null;
+  tool_call_id?: string | null;
+  parent_assistant_id?: string | null;
+  sequence_no?: number | null;
 }
 
 // ── Composition State ───────────────────────────────────────────────────────
@@ -726,6 +732,10 @@ export interface ApiError {
   status: number;
   detail: string;
   error_type?: string;
+  partial_state?: CompositionState | null;
+  failed_turn?: FailedTurn | null;
+  partial_state_save_failed?: boolean;
+  partial_state_save_error?: string | null;
   fanout_guard?: ExecutionFanoutGuard;
   provider_detail?: string;
   provider_status_code?: number;

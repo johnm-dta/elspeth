@@ -31,3 +31,8 @@ export type {
   BlobCategory,
   SecretInventoryItem,
 } from "./index";
+export type {
+  ComposerRecoveryErrorFields,
+  FailedTurn,
+  RecoveryTranscriptRow,
+} from "./recovery";

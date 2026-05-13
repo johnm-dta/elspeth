@@ -38,6 +38,7 @@ import type {
   GuidedRespondRequest,
   GuidedRespondResponse,
 } from "@/types/guided";
+import type { RecoveryTranscriptRow } from "@/types/recovery";
 
 // ── Token Management ────────────────────────────────────────────────────────
 
@@ -64,6 +65,20 @@ function authHeaders(contentType?: string): HeadersInit {
 }
 
 // ── Response Parsing ────────────────────────────────────────────────────────
+
+function ownField(source: unknown, field: string): unknown {
+  if (typeof source !== "object" || source === null) {
+    return undefined;
+  }
+  if (!Object.prototype.hasOwnProperty.call(source, field)) {
+    return undefined;
+  }
+  return (source as Record<string, unknown>)[field];
+}
+
+function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | undefined {
+  return primary !== undefined ? primary : secondary;
+}
 
 /**
  * Parse a response. Throws ApiError for non-2xx status codes.
@@ -96,6 +111,10 @@ async function parseResponse<T>(response: Response): Promise<T> {
     let providerStatusCode: number | undefined;
     let fanoutGuard: ExecutionFanoutGuard | undefined;
     let validationErrors: ApiError["validation_errors"];
+    let partialState: ApiError["partial_state"];
+    let failedTurn: ApiError["failed_turn"];
+    let partialStateSaveFailed: ApiError["partial_state_save_failed"];
+    let partialStateSaveError: ApiError["partial_state_save_error"];
     try {
       const body = await response.json();
       const nestedDetail =
@@ -138,6 +157,41 @@ async function parseResponse<T>(response: Response): Promise<T> {
 
       validationErrors =
         body.validation_errors ?? nestedDetail?.validation_errors;
+
+      const rawPartialState =
+        firstDefined(
+          ownField(body, "partial_state"),
+          ownField(nestedDetail, "partial_state"),
+        );
+      partialState = rawPartialState as ApiError["partial_state"];
+
+      const rawFailedTurn =
+        firstDefined(
+          ownField(body, "failed_turn"),
+          ownField(nestedDetail, "failed_turn"),
+        );
+      failedTurn = rawFailedTurn as ApiError["failed_turn"];
+
+      const rawPartialStateSaveFailed =
+        firstDefined(
+          ownField(body, "partial_state_save_failed"),
+          ownField(nestedDetail, "partial_state_save_failed"),
+        );
+      partialStateSaveFailed =
+        typeof rawPartialStateSaveFailed === "boolean"
+          ? rawPartialStateSaveFailed
+          : undefined;
+
+      const rawPartialStateSaveError =
+        firstDefined(
+          ownField(body, "partial_state_save_error"),
+          ownField(nestedDetail, "partial_state_save_error"),
+        );
+      partialStateSaveError =
+        typeof rawPartialStateSaveError === "string" ||
+        rawPartialStateSaveError === null
+          ? rawPartialStateSaveError
+          : undefined;
     } catch {
       // Response body wasn't JSON -- use statusText as detail fallback
     }
@@ -146,6 +200,10 @@ async function parseResponse<T>(response: Response): Promise<T> {
       status: response.status,
       detail,
       error_type: errorType,
+      partial_state: partialState,
+      failed_turn: failedTurn,
+      partial_state_save_failed: partialStateSaveFailed,
+      partial_state_save_error: partialStateSaveError,
       fanout_guard: fanoutGuard,
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
@@ -259,6 +317,25 @@ export async function fetchMessages(sessionId: string): Promise<ChatMessage[]> {
     headers: authHeaders(),
   });
   return parseResponse<ChatMessage[]>(response);
+}
+
+/** Fetch the audit-grade recovery transcript for a failed compose turn. */
+export async function fetchRecoveryTranscript(
+  sessionId: string,
+  opts: { limit?: number; offset?: number } = {},
+): Promise<RecoveryTranscriptRow[]> {
+  const params = new URLSearchParams({
+    include_tool_rows: "true",
+    limit: String(opts.limit ?? 500),
+    offset: String(opts.offset ?? 0),
+  });
+  const response = await fetch(
+    `/api/sessions/${sessionId}/messages?${params}`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  return parseResponse<RecoveryTranscriptRow[]>(response);
 }
 
 /** Get the latest provider-safe composer progress snapshot for a session. */

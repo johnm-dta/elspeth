@@ -831,3 +831,116 @@ class TestI2ChainSolverTransientFailure:
         # before reaching mark_solver_exhausted.
         drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
         assert drop_invocations == [], f"InvariantError must not trigger guided_dropped_to_freeform; got {drop_invocations}"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end LLM-call audit persistence
+#
+# These tests prove the drain wiring: a solve_chain invocation records a
+# ComposerLLMCall into the recorder, the route handler's ``finally`` block
+# fires ``_persist_llm_calls(recorder.llm_calls)``, and the audit row lands
+# in the session message table with ``_kind=llm_call_audit``.
+#
+# Mock-based unit tests cover the recorder side of that boundary
+# (test_chain_solver.py:TestSolveChainLLMCallAudit).  These tests cover the
+# persist side end-to-end against the route handler + session-service stack.
+# ---------------------------------------------------------------------------
+
+
+def _extract_llm_call_audits(client: TestClient, session_id: str) -> list[dict]:
+    """Return all ``_kind=llm_call_audit`` content payloads for this session.
+
+    Mirrors :func:`_extract_guided_drop_invocations` but filters on the
+    LLM-call audit channel (persisted by ``_persist_llm_calls``) rather
+    than the tool-invocation channel (persisted by
+    ``_persist_tool_invocations``).
+    """
+    tool_messages = _get_tool_messages(client, session_id)
+    rows: list[dict] = []
+    for msg in tool_messages:
+        # _persist_llm_calls writes the compact summary into ``content`` and
+        # the full envelope into ``tool_calls[0]``.  Parse content and filter
+        # by ``_kind`` so we don't accidentally match guided directive rows.
+        try:
+            content = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(content, dict):
+            continue
+        if content.get("_kind") == "llm_call_audit":
+            rows.append(content)
+    return rows
+
+
+class TestE2ELLMCallAuditPersisted:
+    """End-to-end persistence: solve_chain → recorder → _persist_llm_calls → DB."""
+
+    def test_successful_solve_chain_persists_audit_row_with_status_success(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """Driving to STEP_3_TRANSFORMS via a working chain fires solve_chain
+        exactly once; the SUCCESS audit row must appear in the DB after the
+        route handler exits."""
+        session_id = _create_session(composer_test_client)
+
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_response_for_passthrough(),
+        ):
+            _drive_to_step_3_propose_chain(composer_test_client, session_id)
+
+        audits = _extract_llm_call_audits(composer_test_client, session_id)
+        # The wizard fires solve_chain exactly once on the STEP_2_5 → STEP_3
+        # transition (no recipe matched because required_fields=["text"] has
+        # no classifier keyword).
+        assert len(audits) == 1, f"expected exactly one llm_call_audit row; got {audits}"
+        row = audits[0]
+        assert row["status"] == "success", row
+        # Model is whatever ``settings.composer_model`` resolves to in the
+        # test client.  We don't pin a specific string here — the existence
+        # of a non-empty value proves the contract is wired, the specific
+        # value is set by fixture config.
+        assert row["model_requested"], "model_requested must be present in the audit row"
+
+    def test_litellm_api_error_persists_audit_row_with_status_api_error(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """A LiteLLMAPIError at the initial solve_chain site fires the auto-drop
+        AND lands an api_error audit row.  Both audit channels (tool_invocations
+        for the drop directive, llm_calls for the LLM-call record) must drain
+        in the same ``finally`` block.
+        """
+        from litellm.exceptions import APIError as LiteLLMAPIError
+
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        api_err = LiteLLMAPIError(
+            status_code=500,
+            message="upstream provider failure",
+            llm_provider="openai",
+            model="gpt-4o",
+        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=api_err,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        # Sanity: the existing auto-drop behavior is preserved (200, dropped).
+        assert resp.status_code == 200, resp.json()
+
+        # The whole point of this fix: the LLM-call audit row exists alongside
+        # the existing drop invocation row.
+        audits = _extract_llm_call_audits(composer_test_client, session_id)
+        assert len(audits) == 1, f"expected exactly one llm_call_audit row; got {audits}"
+        assert audits[0]["status"] == "api_error", audits[0]
+
+        # And the sibling channel (drop invocation) still fired — proves the
+        # two drain calls inside the same finally block are independent.
+        drops = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert len(drops) == 1, f"expected exactly one drop invocation; got {drops}"

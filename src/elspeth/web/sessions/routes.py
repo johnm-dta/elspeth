@@ -4620,6 +4620,14 @@ def create_session_router() -> APIRouter:
                 # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
                 # ``exc_info`` (frames are bounded and value-free; the
                 # exception message can carry Tier-bearing strings).
+                #
+                # The two recorder channels (tool invocations and LLM calls)
+                # drain through TWO separate try blocks so that a failure
+                # persisting one does not skip the other.  ``_persist_llm_calls``
+                # covers the :class:`ComposerLLMCall` rows that ``solve_chain``
+                # buffers during guided Step 3 (chain solver) invocations.
+                # Without the second drain the LLM-call audit would be
+                # garbage-collected with the recorder at function exit.
                 try:
                     await _persist_tool_invocations(
                         service,
@@ -4633,6 +4641,24 @@ def create_session_router() -> APIRouter:
                         session_id=str(session_id),
                         user_id=user.user_id,
                         site="get_guided",
+                        channel="tool_invocations",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
+                try:
+                    await _persist_llm_calls(
+                        service,
+                        session_id,
+                        recorder.llm_calls,
+                        state_record_out.id if state_record_out is not None else None,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="get_guided",
+                        channel="llm_calls",
                         exc_class=type(persist_exc).__name__,
                         frames=_safe_frame_strings(persist_exc),
                     )
@@ -5109,6 +5135,14 @@ def create_session_router() -> APIRouter:
                 # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
                 # ``exc_info`` (frames are bounded and value-free; the
                 # exception message can carry Tier-bearing strings).
+                #
+                # The two recorder channels (tool invocations and LLM calls)
+                # drain through TWO separate try blocks so that a failure
+                # persisting one does not skip the other.  ``_persist_llm_calls``
+                # covers the :class:`ComposerLLMCall` rows that ``solve_chain``
+                # buffers during guided Step 3 (chain solver) invocations.
+                # Without the second drain the LLM-call audit would be
+                # garbage-collected with the recorder at function exit.
                 try:
                     await _persist_tool_invocations(
                         service,
@@ -5122,6 +5156,24 @@ def create_session_router() -> APIRouter:
                         session_id=str(session_id),
                         user_id=user.user_id,
                         site="post_guided_respond",
+                        channel="tool_invocations",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
+                try:
+                    await _persist_llm_calls(
+                        service,
+                        session_id,
+                        recorder.llm_calls,
+                        state_record_out.id if state_record_out is not None else None,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="post_guided_respond",
+                        channel="llm_calls",
                         exc_class=type(persist_exc).__name__,
                         frames=_safe_frame_strings(persist_exc),
                     )

@@ -1649,26 +1649,50 @@ allow_hits:
   safety: Exception is stored on RuntimePreflightFailure.original_exc and re-raised at the caller site with full chain preservation;
     no silent swallowing
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=f975e89752c0ea46
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=92ebbcd85d1bc1a9
   owner: composer-guided
-  reason: PR-review B3 finally-block drain — the broad except wraps _persist_tool_invocations inside the unconditional
-    finally so an audit-system failure during exception handling cannot mask the in-flight HTTPException. Python's default
-    behaviour is to let a finally-block raise replace the outer exception; allowing that here would surface a generic 500
-    instead of the intended 400/409 and lose the original audit trail. The handler must surface the original outcome to
-    the client unchanged. FP rotated again by I2 _guided_solve_chain.py module import.
+  reason: PR-review B3 finally-block drain (tool_invocations channel) — the broad except wraps _persist_tool_invocations
+    inside the unconditional finally so an audit-system failure during exception handling cannot mask the in-flight
+    HTTPException. Python's default behaviour is to let a finally-block raise replace the outer exception; allowing that
+    here would surface a generic 500 instead of the intended 400/409 and lose the original audit trail. The handler must
+    surface the original outcome to the client unchanged. FP rotated by the addition of the parallel _persist_llm_calls
+    try block at the same drain site (chain-solver audit recording).
   safety: Caught exception is logged via slog.error under the audit-system-failure exemption (CLAUDE.md telemetry primacy
     order) with exc_class + frames only (B1 convention — never str(exc) since the exception message may carry Tier-bearing
-    strings). The original HTTPException continues to propagate. No silent suppression; operators observe the audit-persist
-    failure via the structured log event.
+    strings). The original HTTPException continues to propagate. The sibling try-block (llm_calls channel) still runs
+    even if this one fails. No silent suppression; operators observe the audit-persist failure via the structured log event.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=3fe8f16aa5674a5e
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=811ea54d2f691af7
   owner: composer-guided
-  reason: PR-review B3 finally-block drain — same rationale as get_guided above. The post_guided_respond handler emits
-    guided_turn_answered before the dispatcher's try-block can raise 400; the finally-drain ensures that audit event lands
-    even on rejection paths, and the broad except prevents a persist failure from masking the original 400/409/500. FP rotated again by I2 _guided_solve_chain.py module import.
-  safety: Caught exception is logged via slog.error under the audit-system-failure exemption with exc_class + frames only
-    (B1 convention). The original HTTPException continues to propagate. No silent suppression; operators observe the
-    audit-persist failure via the structured log event.
+  reason: PR-review B3 finally-block drain (llm_calls channel) — the broad except wraps _persist_llm_calls inside the
+    same unconditional finally as the sibling tool_invocations drain. Same rationale — a persist failure here must not
+    mask the in-flight HTTPException. Separate try block from the tool_invocations drain so a failure persisting one
+    channel does not skip the other.
+  safety: Caught exception is logged via slog.error under the audit-system-failure exemption with exc_class + frames
+    only (B1 convention) and a channel=llm_calls discriminator so operators can distinguish which audit channel failed.
+    The original HTTPException continues to propagate. No silent suppression.
+  expires: null
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=78b99a411314f76e
+  owner: composer-guided
+  reason: PR-review B3 finally-block drain (tool_invocations channel) — same rationale as get_guided above. The
+    post_guided_respond handler emits guided_turn_answered before the dispatcher's try-block can raise 400; the finally-
+    drain ensures that audit event lands even on rejection paths, and the broad except prevents a persist failure from
+    masking the original 400/409/500. FP rotated by the addition of the parallel _persist_llm_calls try block at the
+    same drain site (chain-solver audit recording).
+  safety: Caught exception is logged via slog.error under the audit-system-failure exemption with exc_class + frames
+    only (B1 convention). The original HTTPException continues to propagate. The sibling try-block (llm_calls channel)
+    still runs even if this one fails. No silent suppression; operators observe the audit-persist failure via the
+    structured log event.
+  expires: null
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=b741471802b76531
+  owner: composer-guided
+  reason: PR-review B3 finally-block drain (llm_calls channel) — the broad except wraps _persist_llm_calls inside the
+    same unconditional finally as the sibling tool_invocations drain. Same rationale — a persist failure here must not
+    mask the in-flight HTTPException. Separate try block from the tool_invocations drain so a failure persisting one
+    channel does not skip the other.
+  safety: Caught exception is logged via slog.error under the audit-system-failure exemption with exc_class + frames
+    only (B1 convention) and a channel=llm_calls discriminator so operators can distinguish which audit channel failed.
+    The original HTTPException continues to propagate. No silent suppression.
   expires: null
 - key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=3c9b05232e0eee8f
   owner: web-execution

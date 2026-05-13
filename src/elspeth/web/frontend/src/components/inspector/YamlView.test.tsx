@@ -94,4 +94,26 @@ describe("YamlView", () => {
       expect(copyButton).toHaveAttribute("data-copied", "true");
     });
   });
+
+  it("hides visual line numbers from assistive technology", async () => {
+    const { fetchYaml } = await import("@/api/client");
+    vi.mocked(fetchYaml).mockResolvedValue({
+      yaml: "source:\n  plugin: text\n",
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+    });
+
+    const { container } = render(<YamlView />);
+
+    await screen.findByRole("button", { name: "Copy YAML to clipboard" });
+    const lineNumbers = container.querySelectorAll(".yaml-view-line-number");
+
+    expect(lineNumbers.length).toBeGreaterThan(0);
+    lineNumbers.forEach((lineNumber) => {
+      expect(lineNumber).toHaveAttribute("aria-hidden", "true");
+    });
+  });
 });

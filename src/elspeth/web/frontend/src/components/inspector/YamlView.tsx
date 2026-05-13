@@ -191,7 +191,7 @@ export function YamlView() {
             <pre className="yaml-view-pre">
               {tokens.map((line, i) => (
                 <div key={i} {...getLineProps({ line })} className="yaml-view-line">
-                  <span className="yaml-view-line-number">{i + 1}</span>
+                  <span className="yaml-view-line-number" aria-hidden="true">{i + 1}</span>
                   <span className="yaml-view-line-content">
                     {line.map((token, key) => (
                       <span key={key} {...getTokenProps({ token })} />

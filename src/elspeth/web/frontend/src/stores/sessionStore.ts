@@ -14,6 +14,7 @@ import type {
   TurnPayload,
   TerminalState,
   GuidedRespondRequest,
+  GuidedChatHistoryEntry,
 } from "@/types/guided";
 import * as api from "@/api/client";
 import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
@@ -110,9 +111,14 @@ interface SessionState {
   guidedSession: GuidedSession | null;
   guidedNextTurn: TurnPayload | null;
   guidedTerminal: TerminalState | null;
+  // Per-step chat (Phase A slice 4) — in-memory only; slice 5 replaces this
+  // with a wire-level `chat_history` field on GuidedSession.
+  guidedChatHistory: GuidedChatHistoryEntry[];
+  guidedChatPending: boolean;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  chatGuided: (message: string) => Promise<void>;
   exitToFreeform: () => Promise<void>;
   clearError: () => void;
   injectSystemMessage: (content: string, stableId?: string) => void;
@@ -133,6 +139,8 @@ const initialState = {
   guidedSession: null as GuidedSession | null,
   guidedNextTurn: null as TurnPayload | null,
   guidedTerminal: null as TerminalState | null,
+  guidedChatHistory: [] as GuidedChatHistoryEntry[],
+  guidedChatPending: false,
 };
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -163,6 +171,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: null,
         guidedNextTurn: null,
         guidedTerminal: null,
+        guidedChatHistory: [],
+        guidedChatPending: false,
       }));
       // Auto-start guided mode.  New sessions are created with
       // GuidedSession.initial() already attached by the backend (spec §5.2,
@@ -198,6 +208,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 guidedSession: null,
                 guidedNextTurn: null,
                 guidedTerminal: null,
+                guidedChatHistory: [],
+                guidedChatPending: false,
               }
             : {}),
         };
@@ -225,6 +237,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
+      guidedChatHistory: [],
+      guidedChatPending: false,
     });
 
     try {
@@ -540,6 +554,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: null,
         guidedNextTurn: null,
         guidedTerminal: null,
+        guidedChatHistory: [],
+        guidedChatPending: false,
       }));
 
       // Fire-and-forget: refresh blob list for the NEW forked session
@@ -618,6 +634,76 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
     } catch {
       set({ error: "Failed to submit guided response. Please try again." });
+    }
+  },
+
+  async chatGuided(message: string) {
+    const { activeSessionId, guidedSession } = get();
+    // Offensive guards: caller must not invoke without an active session
+    // or before guidedSession is loaded.  Per CLAUDE.md "proactively detect
+    // invalid states and throw meaningful exceptions" — silent ?. would
+    // mask a UI bug (ChatInput rendered with no guided session attached).
+    if (activeSessionId === null) {
+      throw new Error("chatGuided called without active session");
+    }
+    if (guidedSession === null) {
+      throw new Error("chatGuided called before guidedSession loaded");
+    }
+    // Capture session + step identity before the await (stale-fetch guard
+    // mirroring respondGuided / startGuided).  If the user switches
+    // session or the wizard advances mid-flight, the response is dropped.
+    const requestedSessionId = activeSessionId;
+    const requestedStep = guidedSession.step;
+
+    // Append the user turn immediately and mark pending.  The assistant
+    // turn is appended on response.  Phase A keeps chat history entirely
+    // client-side; slice 5 replaces this with a wire-level chat_history
+    // field on GuidedSession.
+    set((state) => ({
+      guidedChatHistory: [
+        ...state.guidedChatHistory,
+        { role: "user", content: message, step: requestedStep },
+      ],
+      guidedChatPending: true,
+    }));
+
+    try {
+      const response = await api.chatGuided(activeSessionId, {
+        message,
+        step_index: requestedStep,
+      });
+      // Stale-fetch guard: drop the response if session changed mid-flight.
+      // We still leave the user message in history (visible record of what
+      // they typed) but skip the assistant append + pending flip.
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      set((state) => ({
+        guidedChatHistory: [
+          ...state.guidedChatHistory,
+          {
+            role: "assistant",
+            content: response.assistant_message,
+            step: requestedStep,
+          },
+        ],
+        // Echo guided_session back into store — Phase A returns it
+        // unchanged but the wire contract may carry slice-5 chat_history
+        // updates in future.
+        guidedSession: response.guided_session,
+        guidedChatPending: false,
+      }));
+    } catch {
+      // Transient failure: surface an error and clear pending.  The
+      // backend's auto-drop helper already returns 200 with a synthetic
+      // assistant message on LLM-side transients, so reaching this catch
+      // means an HTTP-layer failure (network, 4xx/5xx from a stale
+      // server, etc.) — not the same as LLM-unavailable.  Leave the
+      // user message in history as a visible record of what they typed.
+      set({
+        error: "Failed to send chat message. Please try again.",
+        guidedChatPending: false,
+      });
     }
   },
 

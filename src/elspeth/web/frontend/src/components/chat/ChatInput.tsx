@@ -22,6 +22,12 @@ interface ChatInputProps {
   value?: string;
   /** Controlled mode: callback when value changes */
   onChange?: (value: string) => void;
+  /**
+   * Optional placeholder override.  Used by the guided-mode chat input
+   * (Phase A slice 4) to surface a per-step nudge.  Defaults to the
+   * freeform composer wording when absent.
+   */
+  placeholder?: string;
 }
 
 export function ChatInput({
@@ -33,6 +39,7 @@ export function ChatInput({
   onOpenSecrets,
   value: controlledValue,
   onChange: controlledOnChange,
+  placeholder,
 }: ChatInputProps) {
   // Support both controlled and uncontrolled modes
   const [internalText, setInternalText] = useState("");
@@ -150,7 +157,7 @@ export function ChatInput({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Describe the pipeline you want to build..."
+          placeholder={placeholder ?? "Describe the pipeline you want to build..."}
           aria-label="Message input"
           rows={2}
           className="chat-input-textarea"

@@ -13,6 +13,27 @@ import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import type { BlobMetadata, ChatMessage } from "@/types/api";
+import type { GuidedStep } from "@/types/guided";
+
+/**
+ * Per-step placeholder text for the chat input in guided mode (Phase A slice 4).
+ *
+ * The wording frames what's *useful* to ask at each wizard step.  This is a
+ * UX nudge, not a server-enforced scope — the backend still validates
+ * step_index against the live session.step and the per-step skill briefing
+ * shapes what the LLM will engage with.  Mirrors the playbook fragments in
+ * src/elspeth/web/composer/guided/skills/step_*.md.
+ *
+ * CLOSED LIST — must cover every GuidedStep member.  Adding a new step
+ * member without extending this map produces a TypeScript exhaustiveness
+ * error at the lookup site (see assertion in the lookup below).
+ */
+const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
+  step_1_source: "Ask about source options, columns, or paste a sample row…",
+  step_2_sink: "Ask about sink config, outputs, or schema mode…",
+  step_2_5_recipe_match: "Ask about the suggested recipe or alternatives…",
+  step_3_transforms: "Ask about the proposed transform chain…",
+};
 
 interface ChatPanelProps {
   onOpenSecrets?: () => void;
@@ -38,6 +59,8 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const guidedNextTurn = useSessionStore((s) => s.guidedNextTurn);
   const respondGuided = useSessionStore((s) => s.respondGuided);
+  const chatGuided = useSessionStore((s) => s.chatGuided);
+  const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
   const { sendMessage, retryMessage, isComposing, error } = useComposer();
@@ -236,6 +259,31 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
           />
         </div>
         <ExitToFreeformButton />
+        {/*
+          Per-step conversational chat input (Phase A slice 4).
+
+          Lives below the active wizard turn widget so the widget remains the
+          primary control surface; chat is a sidecar.  The textarea is its
+          own ChatInput instance separate from the freeform composer's
+          ChatInput at the bottom of the freeform branch — they have
+          independent uncontrolled state.
+
+          `placeholder` is keyed on the live `guidedSession.step` via the
+          GUIDED_CHAT_PLACEHOLDERS map (closed list at module top).  The
+          per-step skill briefing on the backend already scopes what the
+          LLM will engage with; the placeholder text is a UX nudge that
+          mirrors the playbook framing.
+
+          `disabled={guidedChatPending}` blocks rapid double-submits while
+          a chat round-trip is in flight.  The store's chatGuided action
+          flips the flag back on response (or error).
+        */}
+        <ChatInput
+          onSend={(content) => void chatGuided(content)}
+          disabled={guidedChatPending}
+          inputRef={inputRef}
+          placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
+        />
       </div>
     );
   }

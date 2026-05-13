@@ -103,6 +103,51 @@ export interface GuidedRespondResponse {
   composition_state: CompositionState | null;
 }
 
+/**
+ * Request body for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatRequest).
+ *
+ * `step_index` is the wire form of the user's current step. The server
+ * validates it against the live session.step and returns 409 on mismatch
+ * (wizard advanced under the client). `message` is capped at 4096 chars
+ * server-side; the frontend lets ChatInput's native maxLength enforce the
+ * same limit before submit.
+ */
+export interface GuidedChatRequest {
+  message: string;
+  step_index: GuidedStep;
+}
+
+/**
+ * Response for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatResponse).
+ *
+ * `assistant_message` is the LLM's advisory reply, or the synthetic "I'm
+ * unavailable" message on transient LLM failure (Phase A does not yet
+ * distinguish the two on the wire; slice 5's ComposerChatTurn audit shape
+ * adds that discriminator).
+ *
+ * `guided_session` is echoed verbatim in Phase A — chat does not mutate
+ * session state. Slice 5 adds a `chat_history` field that will carry
+ * incremental turns once persistence lands.
+ */
+export interface GuidedChatResponse {
+  assistant_message: string;
+  guided_session: GuidedSession;
+}
+
+/**
+ * Client-side per-message record for the in-memory guided chat history.
+ *
+ * Phase A keeps chat history entirely client-side; slice 5 will replace
+ * this with the wire-level `chat_history` field on `GuidedSession`. The
+ * shape mirrors the eventual server-side ChatTurn TypedDict so the slice-5
+ * migration is a near drop-in.
+ */
+export interface GuidedChatHistoryEntry {
+  role: "user" | "assistant";
+  content: string;
+  step: GuidedStep;
+}
+
 // ── Per-turn payload shapes ───────────────────────────────────────────────────
 // Each widget owns its payload type; add yours when you implement the widget.
 // Field names use snake_case to mirror the wire (GuidedRespondRequest does too).

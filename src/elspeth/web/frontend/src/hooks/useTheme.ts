@@ -42,13 +42,17 @@ function getSystemTheme(): ResolvedTheme {
     : "dark";
 }
 
+function isValidTheme(value: string): value is Theme {
+  return value === "light" || value === "dark" || value === "system";
+}
+
 /**
  * Load theme preference from localStorage.
  */
 function loadStoredTheme(): Theme | null {
   if (typeof window === "undefined") return null;
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
-  if (stored === "light" || stored === "dark" || stored === "system") {
+  if (stored !== null && isValidTheme(stored)) {
     return stored;
   }
   return null;
@@ -107,6 +111,21 @@ export function useTheme(): UseThemeReturn {
 
     window.addEventListener(THEME_CHANGE_EVENT, handleThemeChange);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, handleThemeChange);
+  }, []);
+
+  // Synchronize theme changes made in other tabs/windows.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== THEME_STORAGE_KEY || e.newValue === null) return;
+      if (isValidTheme(e.newValue)) {
+        setThemeState(e.newValue);
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
   // Apply theme to document whenever it changes

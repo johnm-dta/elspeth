@@ -4916,6 +4916,17 @@ def create_session_router() -> APIRouter:
                                 for r in new_guided.history
                             ],
                             terminal=new_terminal_response,
+                            chat_history=[
+                                ChatTurnResponse(
+                                    role=ChatRole(t["role"]).value,
+                                    content=t["content"],
+                                    seq=t["seq"],
+                                    step=GuidedStep(t["step"]).value,
+                                    ts_iso=t["ts_iso"],
+                                )
+                                for t in new_guided.chat_history
+                            ],
+                            chat_turn_seq=new_guided.chat_turn_seq,
                         ),
                         next_turn=None,
                         terminal=new_terminal_response,

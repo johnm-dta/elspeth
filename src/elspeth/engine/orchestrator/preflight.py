@@ -39,6 +39,7 @@ from elspeth.contracts.value_source import (
     get_catalog_missing_dep_hint,
     get_catalog_values,
 )
+from elspeth.core.config import resolve_config
 from elspeth.engine.orchestrator.types import (
     PipelineConfig,
     ValueSourceFinding,
@@ -114,6 +115,7 @@ def assemble_and_validate_pipeline_config(
         source=source,
         transforms=all_transforms,
         sinks=sinks,
+        config=resolve_config(settings),
         gates=list(settings.gates),
         aggregation_settings=aggregation_settings,
         coalesce_settings=(list(settings.coalesce) if settings.coalesce else []),

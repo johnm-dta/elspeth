@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import json
 import threading
 from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import Future
@@ -36,7 +37,7 @@ from elspeth.core.config import (
     TelemetrySettings,
 )
 from elspeth.core.landscape import LandscapeDB
-from elspeth.core.landscape.schema import run_attributions_table
+from elspeth.core.landscape.schema import run_attributions_table, runs_table
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
     RunAccounting,
@@ -542,12 +543,16 @@ sinks:
         db = LandscapeDB.from_url(mock_settings.get_landscape_url.return_value, create_tables=False)
         try:
             with db.read_only_connection() as conn:
-                row = conn.execute(select(run_attributions_table).where(run_attributions_table.c.run_id == run_id)).one()
+                attribution_row = conn.execute(select(run_attributions_table).where(run_attributions_table.c.run_id == run_id)).one()
+                run_row = conn.execute(select(runs_table.c.settings_json).where(runs_table.c.run_id == run_id)).one()
         finally:
             db.close()
 
-        assert row.initiated_by_user_id == "alice"
-        assert row.auth_provider_type == "local"
+        settings_json = json.loads(run_row.settings_json)
+        assert settings_json["source"]["plugin"] == "text"
+        assert settings_json["sinks"]["output"]["plugin"] == "json"
+        assert attribution_row.initiated_by_user_id == "alice"
+        assert attribution_row.auth_provider_type == "local"
         assert output_path.exists()
 
     def test_web_scrape_pipeline_receives_rate_limit_registry(

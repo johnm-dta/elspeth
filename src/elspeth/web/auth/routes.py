@@ -180,7 +180,9 @@ def create_auth_router() -> APIRouter:
         claims = request.state.auth_claims
         if claims is None:
             raise HTTPException(status_code=401, detail="Token claims could not be parsed — re-authenticate")
-        original_iat: int | None = claims.get("iat")
+        original_iat = claims.get("iat")
+        if type(original_iat) is not int:
+            raise HTTPException(status_code=401, detail="Token missing required iat claim — re-authenticate")
 
         provider: CredentialAuthProvider = request.app.state.auth_provider
         try:

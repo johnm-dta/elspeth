@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import jwt as pyjwt
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -312,6 +313,34 @@ class TestTokenRefreshEndpoint:
                 )
         assert response.status_code == 401
         assert "claims could not be parsed" in response.json()["detail"]
+
+    async def test_token_refresh_missing_iat_rejected(self, tmp_path) -> None:
+        """Refresh must reject valid local tokens whose chain origin is absent."""
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        provider.create_user("alice", "pw", display_name="Alice")
+        app = _create_test_app(provider)
+        token_without_iat = pyjwt.encode(
+            {
+                "sub": "alice",
+                "username": "alice",
+                "exp": 9_999_999_999,
+            },
+            "test-key",
+            algorithm="HS256",
+        )
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/token",
+                headers={"Authorization": f"Bearer {token_without_iat}"},
+            )
+
+        assert response.status_code == 401
+        assert "iat" in response.json()["detail"]
+        assert "re-authenticate" in response.json()["detail"]
 
     async def test_token_refresh_invalid_token(self, tmp_path) -> None:
         provider = LocalAuthProvider(

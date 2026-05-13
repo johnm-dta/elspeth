@@ -955,6 +955,55 @@ class TestB7ExceptionHandling:
             service._on_pipeline_done(future)
             mock_slog.error.assert_not_called()
 
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_pydantic_validation_error_emits_schema_contract_diagnostic(
+        self,
+        mock_payload: MagicMock,
+        mock_landscape: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Strict schema crashes need operator diagnostics, not just generic failure."""
+        from pydantic import BaseModel
+        from pydantic import ValidationError as PydanticValidationError
+
+        class SchemaContractProbe(BaseModel):
+            internal_required_field: int
+
+        try:
+            SchemaContractProbe()
+        except PydanticValidationError as exc:
+            validation_error = exc
+        else:
+            raise AssertionError("expected SchemaContractProbe() to raise")
+
+        run_id = str(uuid4())
+        mock_session_service.get_run.return_value = MagicMock(status="running")
+
+        with (
+            patch(
+                "elspeth.web.execution.service.load_settings_from_yaml_string",
+                side_effect=validation_error,
+            ),
+            patch("elspeth.web.execution.service.slog") as mock_slog,
+            pytest.raises(PydanticValidationError),
+        ):
+            service._run_pipeline(run_id, "source:\n  plugin: csv\n", threading.Event())
+
+        schema_calls = [call for call in mock_slog.error.call_args_list if call.args[0] == "run_schema_contract_violation"]
+        assert len(schema_calls) == 1
+        schema_kwargs = schema_calls[0].kwargs
+        assert schema_kwargs["run_id"] == run_id
+        assert schema_kwargs["exc_class"] == "ValidationError"
+        assert schema_kwargs["error_count"] == 1
+        assert schema_kwargs["schema_errors"] == [{"loc": "internal_required_field", "type": "missing"}]
+
+        failed_calls = [call for call in mock_session_service.update_run_status.call_args_list if call.kwargs.get("status") == "failed"]
+        assert failed_calls
+        assert failed_calls[-1].kwargs["error"] == "Pipeline execution failed (ValidationError)"
+        assert "internal_required_field" not in failed_calls[-1].kwargs["error"]
+
 
 # ── Cancel Mechanism ───────────────────────────────────────────────────
 

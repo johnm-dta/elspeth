@@ -24,6 +24,7 @@ from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 import structlog
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.audit import SecretResolutionInput
@@ -94,6 +95,17 @@ def _sanitize_error_for_client(exc: BaseException) -> str:
     if isinstance(exc, SecretResolutionError):
         return "One or more secret references could not be resolved. Check the Secrets panel."
     return f"Pipeline execution failed ({type(exc).__name__})"
+
+
+def _schema_contract_violation_errors(exc: PydanticValidationError) -> list[dict[str, str]]:
+    """Extract field-level schema diagnostics without raw input values."""
+    return [
+        {
+            "loc": ".".join(str(part) for part in error["loc"]) or "<root>",
+            "type": str(error["type"]),
+        }
+        for error in exc.errors(include_url=False, include_input=False)
+    ]
 
 
 # Phase 2.2 (elspeth-0de989c56d): mapping from the engine's L0 RunStatus
@@ -1166,6 +1178,14 @@ class ExecutionServiceImpl:
             self._finalize_output_blobs(run_id, success=False)
 
             client_msg = _sanitize_error_for_client(exc)
+            if type(exc) is PydanticValidationError:
+                slog.error(
+                    "run_schema_contract_violation",
+                    run_id=run_id,
+                    exc_class=type(exc).__name__,
+                    error_count=exc.error_count(),
+                    schema_errors=_schema_contract_violation_errors(exc),
+                )
 
             # elspeth-879f6de6bd: when an exception fires AFTER the success
             # path has already committed a terminal status (post-completion

@@ -2049,7 +2049,7 @@ This task closes the §11 done-when checklist by ensuring every CL-PP-* scenario
 
 These scenarios exist in the characterization test surface (some in skeletal pre-Phase-3 form). They each need updating to assert the new `failed_turn` field on the response body and the new per-row columns on transcript responses.
 
-- [ ] **Step 1: Audit `tests/integration/pipeline/test_composer_llm_eval_characterization.py` for existing CL-PP-1..8 cases.**
+- [x] **Step 1: Audit `tests/integration/pipeline/test_composer_llm_eval_characterization.py` for existing CL-PP-1..8 cases.**
 
 ```bash
 grep -n "CL-PP-1\|CL-PP-2\|CL-PP-3\|CL-PP-4a\|CL-PP-4b\|CL-PP-4c\|CL-PP-4d\|CL-PP-5\|CL-PP-6\|CL-PP-7\|CL-PP-8" tests/integration/pipeline/test_composer_llm_eval_characterization.py
@@ -2061,11 +2061,11 @@ For each existing case:
 - If the case predates the `composition_states.provenance` discriminator, add the discriminator check.
 - If the case is missing (CL-PP-4d, e.g.), author it new.
 
-- [ ] **Step 2: Each case follows the same TDD cycle.**
+- [x] **Step 2: Each case follows the same TDD cycle.**
 
 Run the case → confirm RED on the new assertions → update the implementation only if a defect surfaces (the loop should now pass) → confirm GREEN.
 
-- [ ] **Step 3: Mechanical assertion-churn gate before any CL-PP commit.**
+- [x] **Step 3: Mechanical assertion-churn gate before any CL-PP commit.**
 
 Before committing any CL-PP-* re-baseline, dump the tests diff and categorize every modified assertion:
 
@@ -2080,6 +2080,8 @@ Write a one-paragraph note in the implementation log with three buckets:
 - `other` — any assertion change not explained by the two categories above.
 
 If the `other` bucket is non-empty, stop and surface it to the operator before committing. This is the procedural gate against assertion-churn laundering: the CL-PP re-baseline may update expected shapes and counters, but it must not quietly weaken unrelated behavior.
+
+Implementation log (2026-05-14): the CL-PP-1..8 grep found no labelled cases in `test_composer_llm_eval_characterization.py`; the live Phase 3 surface instead exposed one characterization harness failure where the composition-budget replay reached `_compose_loop` persistence without a wired `SessionServiceProtocol`. The fix wires a real `SessionServiceImpl` with `create_session_engine(..., StaticPool)` and `initialize_session_schema()` for that replay. Assertion-churn buckets from `git diff -- tests/`: `shape-now-correct` = none; `counter-now-correct` = none; `other` = none (no assertions changed, only real-DB harness wiring).
 
 - [ ] **Step 4: Commit (one commit per scenario or per coherent batch).**
 

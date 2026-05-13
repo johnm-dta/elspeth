@@ -15,7 +15,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
 import yaml
+from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.secrets import SecretInventoryItem
@@ -44,7 +46,12 @@ from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.fixtures.factories import make_context
+from tests.integration.web.conftest import _make_session
 
 pytestmark = pytest.mark.composer_llm_eval
 
@@ -176,6 +183,28 @@ def _web_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     }
     defaults.update(overrides)
     return WebSettings(**defaults)
+
+
+def _session_service_for_characterization(
+    *,
+    data_dir: Path,
+    session_id: str,
+) -> SessionServiceImpl:
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    initialize_session_schema(engine)
+    service = SessionServiceImpl(
+        engine,
+        data_dir=data_dir,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.composer-llm-eval"),
+    )
+    with engine.begin() as conn:
+        _make_session(conn, session_id=session_id, user_id=EVAL_USER_ID)
+    return service
 
 
 def _write_scenario_csv(path: Path) -> None:
@@ -574,8 +603,17 @@ async def _failed_progress_for_timeout(tmp_path: Path, monkeypatch: pytest.Monke
 
 async def _failed_progress_for_composition_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ComposerProgressEvent:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    settings = _web_settings(tmp_path / "data", composer_max_composition_turns=1)
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+    data_dir = tmp_path / "data"
+    settings = _web_settings(data_dir, composer_max_composition_turns=1)
+    sessions_service = _session_service_for_characterization(
+        data_dir=data_dir,
+        session_id=SCENARIO_1A_SESSION_ID,
+    )
+    service = ComposerServiceImpl(
+        catalog=_mock_catalog(),
+        settings=settings,
+        sessions_service=sessions_service,
+    )
     events: list[ComposerProgressEvent] = []
 
     async def record_progress(event: ComposerProgressEvent) -> None:

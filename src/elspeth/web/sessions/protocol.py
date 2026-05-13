@@ -18,6 +18,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 
@@ -149,7 +150,7 @@ class SessionRecord:
 
     id: UUID
     user_id: str
-    auth_provider_type: str
+    auth_provider_type: AuthProviderType
     title: str
     created_at: datetime
     updated_at: datetime
@@ -480,7 +481,7 @@ class SessionServiceProtocol(Protocol):
         self,
         user_id: str,
         title: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
         forked_from_session_id: UUID | None = None,
         forked_from_message_id: UUID | None = None,
     ) -> SessionRecord: ...
@@ -490,7 +491,7 @@ class SessionServiceProtocol(Protocol):
     async def list_sessions(
         self,
         user_id: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
         limit: int = 50,
         offset: int = 0,
     ) -> list[SessionRecord]: ...
@@ -650,7 +651,7 @@ class SessionServiceProtocol(Protocol):
         fork_message_id: UUID,
         new_message_content: str,
         user_id: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
     ) -> tuple[SessionRecord, list[ChatMessageRecord], CompositionStateRecord | None]:
         """Fork a session from a specific user message.
 

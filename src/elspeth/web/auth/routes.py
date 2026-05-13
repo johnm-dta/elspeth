@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
@@ -78,7 +79,7 @@ class UserProfileResponse(_StrictResponse):
 class AuthConfigResponse(_StrictResponse):
     """Response for GET /api/auth/config."""
 
-    provider: str
+    provider: AuthProviderType
     registration_mode: str
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None

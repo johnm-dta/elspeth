@@ -22,6 +22,7 @@ from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, in
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
@@ -1036,7 +1037,7 @@ class SessionServiceImpl:
         self,
         user_id: str,
         title: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
         forked_from_session_id: UUID | None = None,
         forked_from_message_id: UUID | None = None,
     ) -> SessionRecord:
@@ -1098,7 +1099,7 @@ class SessionServiceImpl:
     async def list_sessions(
         self,
         user_id: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
         limit: int = 50,
         offset: int = 0,
     ) -> list[SessionRecord]:
@@ -2044,7 +2045,7 @@ class SessionServiceImpl:
         fork_message_id: UUID,
         new_message_content: str,
         user_id: str,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
     ) -> tuple[SessionRecord, list[ChatMessageRecord], CompositionStateRecord | None]:
         """Fork a session from a specific user message.
 

@@ -55,6 +55,7 @@ from elspeth.contracts.audit import (
     TransformErrorRecord,
     ValidationErrorRecord,
 )
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.call_data import (
     CallPayload,
     HTTPCallError,
@@ -353,6 +354,8 @@ __all__ = [  # Grouped by category for readability
     "TokenParent",
     "TransformErrorRecord",
     "ValidationErrorRecord",
+    # auth
+    "AuthProviderType",
     # config - Runtime protocols (contracts, not core)
     "RuntimeCheckpointProtocol",
     "RuntimeConcurrencyProtocol",

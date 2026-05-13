@@ -43,7 +43,7 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 plugin_type from URL path parameter, lookup in constant dict"
   safety: Returns None on miss, handled by 404 response
   expires: null
-- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=a2a02a4cfa344c13
+- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=cf03280afcdd992e
   owner: architecture
   reason: "Pydantic before-validator at Tier 3 config boundary \u2014 isinstance(v, str) distinguishes raw YAML string input\
     \ (which may be all-whitespace) from already-coerced Path values or None, rejecting blank strings before Pydantic's str\u2192\
@@ -350,7 +350,7 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 request.headers.get('Authorization') reads untrusted HTTP header"
   safety: Missing header returns 401; malformed header returns 401; no default fabrication
   expires: null
-- key: web/auth/routes.py:R1:create_auth_router:refresh_token:fp=c6db2676f6c05f60
+- key: web/auth/routes.py:R1:create_auth_router:refresh_token:fp=af2cbb7036bacb33
   owner: web-auth
   reason: "Tier 3 boundary \u2014 JWT claims dict .get() for optional iat claim"
   safety: Missing iat returns None; no fabrication
@@ -712,19 +712,19 @@ allow_hits:
   safety: Returns SecretInventoryItem with closed-list Literal reason field; no secret value or env content can reach the
     response (the Literal type makes free-form interpolation a structural impossibility).
   expires: null
-- key: web/secrets/user_store.py:R1:_fingerprint_key_available:fp=9ec1dd9710d48731
+- key: web/secrets/user_store.py:R1:_fingerprint_key_available:fp=a93da1679d15525e
   owner: web-secrets
   reason: "Tier 3 boundary \u2014 os.environ.get() checks deployment env var presence for fingerprint key"
   safety: Returns bool only; deployment readiness check; no default fabrication
   expires: null
-- key: web/secrets/user_store.py:R6:UserSecretStore:_row_is_resolvable:fp=54cac57e74b91be4
+- key: web/secrets/user_store.py:R6:UserSecretStore:_row_is_resolvable:fp=7bb1d0561d96dc27
   owner: web-secrets
   reason: "Decryptability probe \u2014 Fernet InvalidToken is the expected signal for key rotation or ciphertext corruption\
     \ when computing browser-safe availability metadata"
   safety: Exception is converted only into available=False; get_secret() still raises SecretNotFoundError with explicit cause
     on the resolution path
   expires: null
-- key: web/secrets/service.py:R6:WebSecretService:resolve:fp=2d6278e2028d9ca9
+- key: web/secrets/service.py:R6:WebSecretService:resolve:fp=e201cb7204d089d8
   owner: web-secrets
   reason: 'FingerprintKeyMissingError is handled separately so resolve() can keep
 
@@ -757,7 +757,7 @@ allow_hits:
 
     '
   expires: null
-- key: web/secrets/service.py:R6:WebSecretService:resolve:fp=8d55ebb145f117de
+- key: web/secrets/service.py:R6:WebSecretService:resolve:fp=2661d9a427c7a309
   owner: web-secrets
   reason: 'SecretDecryptionError is handled separately from TOCTOU misses so
 
@@ -786,7 +786,7 @@ allow_hits:
 
     '
   expires: null
-- key: web/secrets/service.py:R6:WebSecretService:resolve:fp=2cea54aac2ba1b32
+- key: web/secrets/service.py:R6:WebSecretService:resolve:fp=00a3b8aa94bc1df2
   owner: web-secrets
   reason: "TOCTOU boundary \u2014 resolve() runs has-check and get-call across multiple\nindependent DB connections (user\
     \ path) or env-var reads (server path).\nA concurrent DELETE /api/secrets/{name} or env-var clear landing in the\nrace\
@@ -844,7 +844,7 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan blob_id and target session_id;
     storage file unlinked best-effort; primary copy exception remains the headline
   expires: null
-- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=adc3df54af29f2be
+- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=69331ac6f3f1f4d5
   owner: web-sessions
   reason: Type check for envelope format in composition state deserialization
   safety: Handles both raw and enveloped formats
@@ -859,26 +859,26 @@ allow_hits:
     \ \u2014 production code never imports observed_value."
   safety: Raises TypeError with explicit error message naming the invariant violation; no silent fallback or coerced default
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=9efcce3bebe32a0d
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=827868cc6b40c07a
   owner: web-sessions
   reason: "Narrow OSError during staged blob-directory restore after archive rollback \u2014 compensation disk faults must\
     \ not bury the primary archive failure"
   safety: Restore failure is attached via add_note() to primary_exc and the original archive exception is re-raised unchanged
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=2bf9aae8d34d6dbc
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=a62c5e690b7548d0
   owner: web-sessions
   reason: "Narrow OSError around post-commit quarantine purge \u2014 once session rows are deleted, staged blob cleanup is\
     \ best-effort only"
   safety: Returns after leaving the staged directory in quarantine for manual cleanup; it does not fabricate a rollback or
     mask the already-completed archive
   expires: null
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=bd1571698c1ff7bb
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=8691c0a1140ef94c
   owner: web-sessions
   reason: "Best-effort quarantine-root cleanup after staged blob purge \u2014 the parent directory may still contain other\
     \ files or be recreated concurrently"
   safety: Failing to remove the parent leaves only a manual-cleanup directory behind; session archival has already succeeded
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=d28772bc5f36e2c2
+- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=26c9b8474b108c9f
   owner: web-sessions
   reason: "Async-loop discriminator \u2014 narrow ``except RuntimeError`` around\n``asyncio.get_running_loop()`` to detect\
     \ whether the calling\nthread has a running event loop. The standard library raises\n``RuntimeError`` precisely when there\
@@ -1113,22 +1113,22 @@ allow_hits:
     \ (AttributeError terminates the task) and the recoverable-failure path by test_continues_after_exception (OperationalError\
     \ logged, loop continues, no traceback text leaked)."
   expires: null
-- key: web/secrets/user_store.py:R1:_compute_fingerprint:fp=d88552191c8b792f
+- key: web/secrets/user_store.py:R1:_compute_fingerprint:fp=35bf7c1e6d3def8f
   owner: web-secrets
   reason: "Tier 3 \u2014 fingerprint key from deployment environment; os.environ.get followed by check-and-crash"
   safety: Missing key raises RuntimeError immediately; no silent default
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=1e97e118038003a5
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=9720fd80cefc03dc
   owner: web-sessions
   reason: "derived_from_map.get() on seed_id \u2014 seed may not exist in derived_from_map (states without derived_from parents)"
   safety: Returns None, while-loop terminates naturally
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=eb19c2819d2e06a4
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=542a03725d365541
   owner: web-sessions
   reason: "derived_from_map.get() traversing parent chain \u2014 parent may reference state outside session or not in map"
   safety: Returns None, terminates transitive closure walk
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=79083fec45118fea
+- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=fa063434fd596fca
   owner: web-sessions
   reason: "source_to_copied_assistant_id.get() in \xA714.6 fork sweep \u2014 looks up the new id minted for an in-slice assistant.\
     \ None means the source row's parent assistant is OUTSIDE the [:fork_idx] slice, which is detected immediately and converted\
@@ -1377,7 +1377,7 @@ allow_hits:
 
     '
   expires: null
-- key: web/secrets/service.py:R6:WebSecretService:check_user_ref_resolvable:fp=a0d2b2cc298d4b0c
+- key: web/secrets/service.py:R6:WebSecretService:check_user_ref_resolvable:fp=c1e9289fa7f9c2d9
   owner: web-secrets
   reason: "Narrow catch by design. check_user_ref_resolvable is the typed-error\nvariant of has_ref for the HTTP /api/secrets/{name}/validate\
     \ route.\nIt catches SecretNotFoundError ONLY (server-store allowlist / env-var\nmiss \u2192 \"absent\" \u2192 return\
@@ -1397,7 +1397,7 @@ allow_hits:
 
     '
   expires: null
-- key: web/secrets/service.py:R6:WebSecretService:check_user_ref_resolvable:fp=2a6dac757cd54d12
+- key: web/secrets/service.py:R6:WebSecretService:check_user_ref_resolvable:fp=d86f66826e90d353
   owner: web-secrets
   reason: 'Narrow TOCTOU catch by design. On the validate route, a user-scope
 
@@ -2095,7 +2095,7 @@ allow_hits:
   safety: The guard emits only the secret_ref name marker and never resolves or logs the secret value; invalid shapes remain
     unknown for the guard.
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=291f6f4e3ff88c06
+- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=521fccf04b3c959c
   owner: web-sessions
   reason: "ContextVar.get() \u2014 false-positive R1 match on the method name. ContextVar exposes .get() as the SOLE read\
     \ API for its current value; there is no contextvar[key] subscript alternative. The tier-model rule's \"Access dict keys\
@@ -2104,7 +2104,7 @@ allow_hits:
   safety: Returns the frozenset value (default empty if no token has been set in this context), feeding directly into the
     "not in" membership check. No KeyError is possible from a ContextVar read.
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=cd7cfb6de42d2f60
+- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=c6e33b622089c1a4
   owner: web-sessions
   reason: "ContextVar.get() \u2014 false-positive R1 match on the method name. Same as the _assert_session_write_lock_held\
     \ entry above; ContextVar.get() is the only read API. Used to read the current set of held locks, union with the new (id(conn),\

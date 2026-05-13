@@ -1258,7 +1258,7 @@ git commit -am "feat(composer): _compose_loop Step 3 — AuditOutcome dispatch +
 - Modify: `src/elspeth/web/sessions/service.py` (translate audit-access-log write failures to `AuditAccessLogWriteError`, increment the failure counter from Task 11)
 - Create: `tests/unit/web/test_composer_exception_handlers.py`
 
-- [ ] **Step 1: Write the failing route-handler tests.**
+- [x] **Step 1: Write the failing route-handler tests.**
 
 In `tests/unit/web/test_composer_exception_handlers.py`:
 
@@ -1346,7 +1346,7 @@ Run:
 
 Expected: FAIL — the handlers are not registered and audit-access-log write failure is not yet translated.
 
-- [ ] **Step 2: Register handlers in `create_app`.**
+- [x] **Step 2: Register handlers in `create_app`.**
 
 Add handlers with static, scrubbed bodies:
 
@@ -1403,7 +1403,7 @@ async def _audit_access_log_write_error_handler(request: Request, exc: AuditAcce
 
 Do not include `str(exc)`, SQL text, provider payloads, request-id fallback logic, or tool rows in these responses. `AuditIntegrityError.failed_turn is None` is a typed route-boundary state meaning the exception originated outside `_compose_loop`'s catch-and-annotate scope; it is not an attribute-absence fallback. Compose-loop-origin audit failures must populate `FailedTurnMetadata`; non-compose-loop audit failures get the typed degraded body above. Do not use `getattr`, `hasattr`, default dicts, or catch-and-fill behavior in the handler. Logging policy: route handlers may emit telemetry and class-name-only diagnostics for the audit subsystem failure, but must not log row-level content or tool payloads.
 
-- [ ] **Step 3: Re-run the handler tests.**
+- [x] **Step 3: Re-run the handler tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/test_composer_exception_handlers.py -v
@@ -1411,7 +1411,7 @@ Do not include `str(exc)`, SQL text, provider payloads, request-id fallback logi
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(web): add compose persistence exception handlers (composer-progress-persistence phase 3)"

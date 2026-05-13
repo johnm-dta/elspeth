@@ -1,6 +1,6 @@
 {
   "verdict": "NO_GO_REV_3",
-  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
   "reviewed_at": "2026-05-14",
   "baseline_reviewed": "RC5.2 current checkout",
   "reviewers": ["reality", "architecture", "quality", "systems"],

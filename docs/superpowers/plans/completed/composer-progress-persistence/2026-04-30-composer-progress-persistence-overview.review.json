@@ -1,12 +1,12 @@
 {
   "verdict": "APPROVED",
   "summary": "Go for the overview and Phase 1 handoff after the repair pass. The overview now names the concrete sync primitive plus protocol-public async dispatcher, stale-state compare-and-set protection, audit-access cascade, CI testcontainer aggregation, and supported Python versions without inheriting the earlier advisory-lock, protocol, parentage, CI-gating, or spec-cleanup blockers.",
-  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md",
   "related_plan_files": [
-    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1-data-layer.md",
+    "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1-data-layer.md",
     "/home/john/elspeth/docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md"
   ],
-  "detailed_review_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1-data-layer.review.json",
+  "detailed_review_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1-data-layer.review.json",
   "reviewed_at": "2026-05-06T00:01:06Z",
   "reviewers": [
     "reality",

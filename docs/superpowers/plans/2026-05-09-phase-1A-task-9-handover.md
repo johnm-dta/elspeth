@@ -4,7 +4,7 @@
 **Successor entry point:** Task 9 (`_insert_chat_message` helper)
 **Branch:** `feat/composer-progress-persistence-1a`
 **Worktree:** `/home/john/elspeth/.worktrees/composer-progress-1a`
-**Plan:** `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
+**Plan:** `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
 **Sidecar:** `…review.json` — verdict `APPROVED_WITH_WARNINGS / GO_WITH_WARNINGS` as of 2026-05-08; 11 blocking issues resolved, 4 operational warnings preserved (W1 audit_access_log inert in 1A, W2 SQLite single-process locking, W3 PostgreSQL deferred to 1C, W4 IntegrityError retry loops).
 
 ---

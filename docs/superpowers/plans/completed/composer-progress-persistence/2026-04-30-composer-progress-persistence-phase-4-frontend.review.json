@@ -1,9 +1,9 @@
 {
   "verdict": "IMPLEMENTED_WITH_VERIFICATION_NOTES",
   "summary": "Phase 4A and Phase 4B implementation is complete through the local recovery panel wiring. The implementation preserves the rev-4 constraints: no constructor fallback, backend gate coverage, sessionStore-owned recovery state with recoveryStartedCompositionVersion, structural recovery clearing, active-session transcript fetches with include_tool_rows=true, local-only Apply/Discard, no feature flag, and existing dialog/useFocusTrap patterns. Final verification is green. The only operational gap is tracker access: Filigree CLI/MCP cannot open the local project database because the installed client expects schema v8 and .filigree is schema v14.",
-  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-4-frontend.md",
-  "overview_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md",
-  "prior_review": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-4-frontend.review-rev3.json",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-4-frontend.md",
+  "overview_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md",
+  "prior_review": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-4-frontend.review-rev3.json",
   "updated_at": "2026-05-14",
   "implementation_commits": [
     {

@@ -14,7 +14,7 @@ The work touches `src/elspeth/web/composer/redaction.py` (extension), a new `red
 
 - **Worktree:** `/home/john/elspeth/.worktrees/composer-progress-1a`
 - **Branch:** `feat/composer-progress-persistence-1a`
-- **Plan file:** `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.md`
+- **Plan file:** `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.md`
 - **Spec (rev 5):** `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`
 
 The plan has been through **five review passes**. Each pass surfaced findings folded into the plan body. The institutional memory chain is non-negotiable reading before you touch any code — see the next section.
@@ -46,7 +46,7 @@ Read these IN ORDER. Do not skip. Each item is load-bearing for the next.
    - Tasks 1–20 in order. **The TDD discipline applies to EVERY task** — Tasks 1–4 spell out the six-step protocol; Tasks 5+ use compressed notation but the six-step sequence is mandatory regardless (the Preflight section says so explicitly).
 
 4. **The review JSONs** at:
-   - `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json` (rev-1)
+   - `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json` (rev-1)
    - `…-redaction.review-rev2.json`
    - `…-redaction.review-rev3.json`
    - `…-redaction.review-rev4.json`

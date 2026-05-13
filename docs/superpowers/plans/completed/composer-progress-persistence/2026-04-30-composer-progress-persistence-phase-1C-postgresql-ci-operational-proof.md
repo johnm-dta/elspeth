@@ -962,7 +962,7 @@ Tier-1 alert/dashboard/runbook visibility.
 
 ```bash
 git add docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md \
-        docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md
+        docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md
 git commit -m "docs(composer): align progress-persistence spec with phase 1 execution plan"
 ```
 

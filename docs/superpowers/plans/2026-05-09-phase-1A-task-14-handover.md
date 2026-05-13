@@ -2,7 +2,7 @@
 
 **Branch:** `feat/composer-progress-persistence-1a`
 **Worktree:** `/home/john/elspeth/.worktrees/composer-progress-1a`
-**Plan:** `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
+**Plan:** `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
 **Prior handovers (still valid for standing context):**
 - `docs/superpowers/plans/2026-05-09-phase-1A-task-9-handover.md`
 - `docs/superpowers/plans/2026-05-09-phase-1A-task-10-handover.md`
@@ -208,7 +208,7 @@ Same as the prior handovers: **plan and code are ground truth**. If anything in 
 
 Cross-reference points-of-truth:
 
-- **Plan:** `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
+- **Plan:** `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
 - **Atomicity rule:** plan §23
 - **Scanner allowlist requirement:** plan §94
 - **Task 14 spec proper:** plan §2749 onwards (the longest 1A task)

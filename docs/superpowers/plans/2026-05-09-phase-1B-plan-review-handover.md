@@ -25,7 +25,7 @@ git log --oneline -3
 git status --short
 # Expected: only this file (1B handover) untracked. Working tree otherwise clean.
 
-wc -l docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md
+wc -l docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md
 # Expected: 3337 lines.
 ```
 
@@ -47,7 +47,7 @@ If any of those don't match, something has shifted between sessions — investig
 ### A) Execute Phase 1B plan, starting with Task 1
 
 The plan file is the source of truth:
-`docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md`
+`docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md`
 
 It contains 15 tasks across:
 

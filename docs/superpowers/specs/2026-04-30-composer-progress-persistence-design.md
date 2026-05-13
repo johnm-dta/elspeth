@@ -4,7 +4,7 @@
 **Parent epic:** [elspeth-528bde62bb](filigree:elspeth-528bde62bb) — Composer LLM evaluation remediation
 **Related future epic:** [elspeth-f0460a6594](filigree:elspeth-f0460a6594) — Composer async/background execution model (deferred to Future release)
 **Date:** 2026-04-30
-**Status:** Proposed (revision 5 — addresses four-reviewer plan-review pass on the Phase 2 plan derived from rev 4: reality, architecture, quality, systems. Closes the four BLOCKERs identified at `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json` and re-derives the redaction design from the actual `tools.py` architecture.)
+**Status:** Proposed (revision 5 — addresses four-reviewer plan-review pass on the Phase 2 plan derived from rev 4: reality, architecture, quality, systems. Closes the four BLOCKERs identified at `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json` and re-derives the redaction design from the actual `tools.py` architecture.)
 **Branch:** RC5-UX (or successor)
 **Tier-artifact match:** **M-tier** change delivered as a four-phase plan. Revision 1 labelled XS; revision 2 grew to S; revision 3 retained S; revision 4 demotes to M and explicitly splits delivery (see §11) because the `SessionsTransaction` primitive (Phase 1), the redaction framework (Phase 2), the compose-loop persistence (Phase 3), and the frontend recovery surface (Phase 4) are independently reviewable, independently testable, and independently deployable. Each phase is a separate PR against the parent epic.
 
@@ -3295,7 +3295,7 @@ concurrently would re-create the rev-3 tier-artifact mismatch.
 > spec amendments listed below have been applied in-place to §4.1.1,
 > §4.5, §5.2 / §5.2.1, §5.2.2, §5.7.1, §6.3, §8.5.1, §8.6, and §10
 > OQ-4. The Phase 1A/1B/1C implementation plans
-> ([`phase-1A-schema-current-writer-safety.md`](../plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md),
+> ([`phase-1A-schema-current-writer-safety.md`](../plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md),
 > the 1B handover at
 > [`2026-05-09-phase-1B-plan-review-handover.md`](../plans/2026-05-09-phase-1B-plan-review-handover.md),
 > and the 1C postgresql-ci-operational-proof plan) remain the
@@ -3656,7 +3656,7 @@ specific concern without re-reading the entire panel response.
 ### 12.2 Revision 5 reviewer-finding traceability
 
 The four-reviewer plan-review pass on the rev-4-derived Phase 2 plan
-(`docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json`)
+(`docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json`)
 returned `CHANGES_REQUESTED` with four BLOCKERs and twelve warnings.
 Revision 5 closes each finding at the spec level so the plan rewrite
 can be derived cleanly. Implementers should consult this table
@@ -3688,7 +3688,7 @@ alongside §12.1.
 ### 12.3 Revision 5 rev-2 plan-review finding traceability
 
 The four-reviewer plan-review pass on the rev-5-derived Phase 2 plan rev-2
-(`docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review-rev2.json`)
+(`docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review-rev2.json`)
 returned `CHANGES_REQUESTED` with three new BLOCKERs and five bundled MAJOR
 groups. The rev-2 rewrite closed all four prior BLOCKERs (B1–B4) and all twelve
 prior warnings (W1–W12). This section documents the rev-2 findings and where

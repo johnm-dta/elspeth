@@ -2,7 +2,7 @@
   "verdict": "APPROVED_WITH_WARNINGS",
   "go_no_go": "GO_WITH_WARNINGS",
   "summary": "Day-of-cutover preflight on 2026-05-08 against the live tree on branch feat/composer-progress-persistence-1a (base RC5.1 @ 79cf7ddf, in sync with origin/RC5.1) confirmed the §57-68 reviewed direct-writer snapshot still matches reality with no new writers added since 2026-05-06. One additional blocking issue (B11) was found in the plan's preflight grep wording itself: ripgrep's recursive traversal applies the root .gitignore lib/ directory exclude before the !tests/unit/evals/lib/ negation, so the literal §38, §39, §49, §50 greps silently skip the standalone eval-decode chat_messages writers at tests/unit/evals/lib/test_decode_tools.py lines 107-108 and 186. The plan was patched to require --no-ignore-vcs in all four preflight grep invocations, with an inline rationale block describing the .gitignore directory-negation footgun. Inventory still matches §57-68 with the corrected grep. Operational warnings (audit_access_log inert in 1A, SQLite single-process locking, PostgreSQL deferred to 1C, IntegrityError retry loop debt) remain unchanged. W2 deployment-shape recheck confirms /home/john/elspeth/deploy/elspeth-web.service runs uvicorn without --workers and without WEB_CONCURRENCY, so the SQLite single-process locking assumption holds.",
-  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
   "reviewed_at": "2026-05-08T00:00:00Z",
   "reviewed_by": "claude-opus-4-7",
   "reviewers": [

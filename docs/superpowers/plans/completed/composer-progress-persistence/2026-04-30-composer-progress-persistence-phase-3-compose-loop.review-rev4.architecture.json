@@ -2,7 +2,7 @@
   "verdict": "NO_GO_REV_4",
   "scope": "single-axis architecture re-review",
   "reviewer": "axiom-planning:plan-review-architecture",
-  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
   "reviewed_at": "2026-05-14",
   "baseline_reviewed": "RC5.2 current checkout; plan rev-4 (2452 lines)",
   "prior_verdict": "NO_GO_REV_3 (see .review.json) — four-axis review; six blockers (B1–B6).",

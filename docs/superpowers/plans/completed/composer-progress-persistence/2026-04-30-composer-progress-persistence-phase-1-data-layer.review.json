@@ -1,29 +1,29 @@
 {
   "verdict": "CHANGES_REQUESTED",
   "summary": "Do not execute this Phase 1 plan as one large PR. A fresh review found concrete blockers in schema portability, schema-breaking write inventory, plan-authored tests, compose-turn transcript integrity, async cancellation semantics, audit-failure handling, and concurrency-test assertions. The plan now requires three risk-first schedules: schema/current-writer safety, compose-turn/audit semantics, and PostgreSQL/CI operational proof.",
-  "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1-data-layer.md",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1-data-layer.md",
   "related_plan_files": [
-    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md",
+    "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md",
     "/home/john/elspeth/docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md",
-    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
-    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md",
-    "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md"
+    "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
+    "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md",
+    "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md"
   ],
   "split_plan_files": [
     {
       "schedule": "1A",
       "name": "Schema and current writer safety",
-      "path": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md"
+      "path": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md"
     },
     {
       "schedule": "1B",
       "name": "Compose-turn primitive and audit semantics",
-      "path": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md"
+      "path": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md"
     },
     {
       "schedule": "1C",
       "name": "PostgreSQL, CI, and operational proof",
-      "path": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md"
+      "path": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md"
     }
   ],
   "reviewed_at": "2026-05-06T00:41:22Z",
@@ -171,7 +171,7 @@
     "required_three_schedule_split": [
       {
         "name": "Schedule A - schema and current writer safety",
-        "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
+        "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md",
         "risk_controlled": "Destructive schema changes, stale staging DB bootstrap, and regressions in existing message/state writers.",
         "scope": [
           "Task 0 spec supersession marker plus blocker-ID and stale-anchor cleanup",
@@ -191,7 +191,7 @@
       },
       {
         "name": "Schedule B - compose-turn primitive and audit semantics",
-        "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md",
+        "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md",
         "risk_controlled": "Atomic compose-turn persistence, audit primacy, tool-call transcript consistency, and async cancellation/idempotency.",
         "scope": [
           "Telemetry/payload dataclasses for the dormant primitive",
@@ -210,7 +210,7 @@
       },
       {
         "name": "Schedule C - PostgreSQL, CI, and operational proof",
-        "plan_file": "/home/john/elspeth/docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md",
+        "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md",
         "risk_controlled": "Dialect drift, Docker/testcontainer dependency drift, deadlock/hang detection, CI gating, and final handoff accuracy.",
         "scope": [
           "PostgreSQL/testcontainer lane after metadata is made portable or scope is explicitly constrained",

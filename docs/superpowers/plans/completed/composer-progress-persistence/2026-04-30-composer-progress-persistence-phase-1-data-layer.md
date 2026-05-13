@@ -27,9 +27,9 @@ implementer finds a blocker that belongs to a later schedule, they file
 it against that later schedule instead of broadening the active PR.
 
 **Canonical review files:**
-- Schedule A: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
-- Schedule B: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md`
-- Schedule C: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md`
+- Schedule A: `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1A-schema-current-writer-safety.md`
+- Schedule B: `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1B-compose-turn-primitive-audit-semantics.md`
+- Schedule C: `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-1C-postgresql-ci-operational-proof.md`
 
 Use those files for agent review. This parent file remains the
 traceability source for the original full Phase 1 task numbering.
@@ -7039,7 +7039,7 @@ Tier-1 alert/dashboard/runbook visibility.
 
 ```bash
 git add docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md \
-        docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md
+        docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md
 git commit -m "docs(composer): align progress-persistence spec with phase 1 execution plan"
 ```
 

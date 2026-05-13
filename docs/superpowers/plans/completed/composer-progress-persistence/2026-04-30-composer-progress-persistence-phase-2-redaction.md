@@ -11,7 +11,7 @@
 > - rev-4 → `…-redaction.review-rev4.json` (1 BLOCKER, 2 MAJORs; closures applied — see Appendix D)
 > - rev-5 → `…-redaction.review-rev5.json` (no BLOCKERs across all four reviewers — first review pass to break the property-test convergence pattern; warnings folded — see Appendix E)
 
-**Goal.** Introduce a manifest-keyed redaction primitive (`MANIFEST: dict[str, ToolRedaction]`) that mirrors the project's existing `_TOOL_REQUIRED_PATHS: dict[str, ...]` precedent at `src/elspeth/web/composer/service.py:702`, alongside the function-pointer dispatch dicts at `src/elspeth/web/composer/tools.py:5250–5314`. Promote ~6–8 sensitive-touching composer tools to type-driven manifest entries with `Sensitive[T]`-annotated Pydantic argument models and `Model.model_validate` dispatch validation; promoted handlers catch `pydantic.ValidationError` and re-raise as `ToolArgumentError` (per `tools.py:2668–2801` pattern), which is caught at `service.py:2480` and routes to ARG_ERROR. Cover the remaining ~29–31 tools with declarative manifest entries. Enforce coverage and weakening with a single shared traversal iterator consumed by both the CI-time adequacy guard and the runtime walker, plus a content-keyed policy-hash snapshot and a direction-aware CI-enforced PR-label gate. Close all prior BLOCKERs and warnings, plus the rev-2 BLOCKERs and MAJORs from `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review-rev2.json`, plus the rev-3 and rev-4 findings tracked in Appendices C and D.
+**Goal.** Introduce a manifest-keyed redaction primitive (`MANIFEST: dict[str, ToolRedaction]`) that mirrors the project's existing `_TOOL_REQUIRED_PATHS: dict[str, ...]` precedent at `src/elspeth/web/composer/service.py:702`, alongside the function-pointer dispatch dicts at `src/elspeth/web/composer/tools.py:5250–5314`. Promote ~6–8 sensitive-touching composer tools to type-driven manifest entries with `Sensitive[T]`-annotated Pydantic argument models and `Model.model_validate` dispatch validation; promoted handlers catch `pydantic.ValidationError` and re-raise as `ToolArgumentError` (per `tools.py:2668–2801` pattern), which is caught at `service.py:2480` and routes to ARG_ERROR. Cover the remaining ~29–31 tools with declarative manifest entries. Enforce coverage and weakening with a single shared traversal iterator consumed by both the CI-time adequacy guard and the runtime walker, plus a content-keyed policy-hash snapshot and a direction-aware CI-enforced PR-label gate. Close all prior BLOCKERs and warnings, plus the rev-2 BLOCKERs and MAJORs from `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review-rev2.json`, plus the rev-3 and rev-4 findings tracked in Appendices C and D.
 
 **Architecture.** Pure redaction-layer work. Phase 1 schema is in place; this phase does not modify the database, the compose loop's transactional structure, or the frontend. The redaction layer is L3 (alongside the composer tools). The promotion wave touches handler dispatch within `tools.py` (still L3) — no upward layer hops. Tier-model and freeze-guard CI gates apply unchanged.
 
@@ -37,7 +37,7 @@ Before starting Task 1, verify the worktree is in a clean Phase 2 starting state
   - `.venv/bin/python -m ruff check src/` (clean)
   - `.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model` (no findings beyond allowlisted)
   - `.venv/bin/python scripts/cicd/enforce_freeze_guards.py` (clean)
-- [ ] **Spec rev-5 landed.** `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md` Status line reads "revision 5"; §4.2, §4.4, §11 Phase 2, §12.2 reflect the manifest architecture (not the rev-4 class-hierarchy assumption). The plan-review JSON at `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json` is no longer load-bearing — this rewrite supersedes it.
+- [ ] **Spec rev-5 landed.** `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md` Status line reads "revision 5"; §4.2, §4.4, §11 Phase 2, §12.2 reflect the manifest architecture (not the rev-4 class-hierarchy assumption). The plan-review JSON at `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json` is no longer load-bearing — this rewrite supersedes it.
 
 If any of the above is red, **stop and surface to operator.** Do not begin Task 1.
 
@@ -105,7 +105,7 @@ If any of the above is red, **stop and surface to operator.** Do not begin Task 
   Covers every container shape the iterator must descend into. Both the
   adequacy guard and the runtime walker consume this iterator; gaps here
   silently allow gaps in either consumer. See plan-review B2 in
-  docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json.
+  docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review.json.
   """
 
   from __future__ import annotations

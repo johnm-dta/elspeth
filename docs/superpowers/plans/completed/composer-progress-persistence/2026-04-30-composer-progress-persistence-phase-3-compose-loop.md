@@ -61,7 +61,7 @@
 - `src/elspeth/web/sessions/protocol.py` — `SessionServiceProtocol` gains `count_tool_responses_for_assistant_async` and `record_audit_grade_view_async`; defines the dedicated `AuditAccessLogWriteError` route-boundary exception if Task 11 chooses that type.
 - `src/elspeth/web/sessions/telemetry.py` — `_SessionsTelemetry` extended with `tool_call_cap_exceeded_total`, `audit_grade_view_total`, and `audit_access_log_write_failed_total`; `build_sessions_telemetry` wires all three in both fake and real branches.
 - `src/elspeth/web/sessions/schemas.py` — response model for the messages endpoint gains `tool_call_id`, `parent_assistant_id`, `sequence_no` fields (Phase 1 already added the columns; Phase 3 exposes them on the API surface).
-- `docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md` — Task 14 below updates the overview to rev-5 wording (currently still says "revision 4" / `Sensitive[T]` in its spec, architecture, phase-table, and dependency prose).
+- `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md` — Task 14 below updates the overview to rev-5 wording (currently still says "revision 4" / `Sensitive[T]` in its spec, architecture, phase-table, and dependency prose).
 - `tests/unit/web/composer/test_audit_failure_primacy.py` — exists at rev-3 baseline; extend in place for compose-loop route-stack propagation, do not recreate.
 - `tests/integration/web/test_inv_audit_ahead_backward.py` — exists at rev-3 baseline; extend in place for cancellation/backward-direction coverage, do not recreate.
 - `tests/unit/web/composer/conftest.py`, `tests/unit/web/conftest.py`, `tests/integration/web/conftest.py`, and `tests/property/web/composer/conftest.py` as needed — Task 0 either defines or cites every fixture/helper used by red tests; no red test may reference an undefined fixture.
@@ -2311,10 +2311,10 @@ Or, if scoped to follow-up tickets, no commit — just the PR-description block 
 
 ## Task 14: Overview update — rev-5 / manifest-keyed framing (standalone docs commit)
 
-The overview at `docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md` still references rev-4 / `Sensitive[T]` in five places. This is a documentation sync, not an engineering dependency for the compose-loop PR. Run it as a standalone docs-only commit outside the engineering PR after normal docs verification passes.
+The overview at `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md` still references rev-4 / `Sensitive[T]` in five places. This is a documentation sync, not an engineering dependency for the compose-loop PR. Run it as a standalone docs-only commit outside the engineering PR after normal docs verification passes.
 
 **Files:**
-- Modify: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md`
+- Modify: `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md`
 
 - [x] **Step 1: Update the spec-revision pointer.**
 
@@ -2436,7 +2436,7 @@ Expected: no required-constructor-parameter fallout remains, every red-test fixt
 
 - [x] **Step 5: Surface to operator for PR-open decision. Do NOT run `gh pr create`.**
 
-Per Phase 2 rev-5 BLOCKER B4 closure pattern (per `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.md` "Phase 2 done-when removes PR-open from scope; plan rewrite ends at 'gate green; await operator PR-open instruction'"), and per project memory `feedback_default_to_worktree.md` (worktree-default policy revision 2026-05-11) and `project_phase2_plan_review_verdict.md`: Phase 3 implementation ends at "gate green; await operator PR-open instruction." The implementer captures the readiness state in the conversation and stops; the operator decides when (and whether) to open the PR. (Rev-1 of this plan ran `gh pr create` unconditionally here; that was a re-introduction of the Phase 2 rev-1 BLOCKER B4 pattern. Rev-2 removes it.)
+Per Phase 2 rev-5 BLOCKER B4 closure pattern (per `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.md` "Phase 2 done-when removes PR-open from scope; plan rewrite ends at 'gate green; await operator PR-open instruction'"), and per project memory `feedback_default_to_worktree.md` (worktree-default policy revision 2026-05-11) and `project_phase2_plan_review_verdict.md`: Phase 3 implementation ends at "gate green; await operator PR-open instruction." The implementer captures the readiness state in the conversation and stops; the operator decides when (and whether) to open the PR. (Rev-1 of this plan ran `gh pr create` unconditionally here; that was a re-introduction of the Phase 2 rev-1 BLOCKER B4 pattern. Rev-2 removes it.)
 
 The implementer surfaces the following to the operator after the gate runs are green:
 

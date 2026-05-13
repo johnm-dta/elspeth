@@ -530,10 +530,8 @@ function TabularPreview({ text, contentType }: TabularPreviewProps) {
       >
         <tbody>
           {rows.map((row, rowIdx) => (
-            // eslint-disable-next-line react/no-array-index-key
             <tr key={rowIdx}>
               {Array.from({ length: columnCount }, (_, colIdx) => (
-                // eslint-disable-next-line react/no-array-index-key
                 <td
                   key={colIdx}
                   style={{

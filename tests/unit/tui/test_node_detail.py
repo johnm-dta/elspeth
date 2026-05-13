@@ -38,6 +38,39 @@ class TestNodeDetailPanel:
         assert "abc123" in content
         assert "12.5" in content
 
+    def test_display_success_reason_and_context_after(self) -> None:
+        """Display success provenance and post-execution context."""
+        from elspeth.tui.widgets.node_detail import NodeDetailPanel
+
+        node_state = cast(
+            NodeStateInfo,
+            {
+                "state_id": "state-success",
+                "node_id": "node-001",
+                "token_id": "token-001",
+                "plugin_name": "mapper",
+                "node_type": "transform",
+                "status": "completed",
+                "input_hash": "abc123",
+                "output_hash": "def456",
+                "duration_ms": 12.5,
+                "started_at": "2024-01-01T10:00:00Z",
+                "completed_at": "2024-01-01T10:00:00.012Z",
+                "success_reason_json": '{"action": "mapped", "fields_added": ["normalized_name"], "metadata": {"strategy": "trim"}}',
+                "context_after_json": '{"route_label": "accepted", "condition": "score > 0.8", "result": "True"}',
+            },
+        )
+
+        panel = NodeDetailPanel(node_state)
+        content = panel.render_content()
+
+        assert "Success Reason:" in content
+        assert "mapped" in content
+        assert "normalized_name" in content
+        assert "Context After:" in content
+        assert "route_label" in content
+        assert "accepted" in content
+
     def test_display_failed_state_execution_error(self) -> None:
         """Display details for a failed node state with ExecutionError."""
         from elspeth.tui.widgets.node_detail import NodeDetailPanel

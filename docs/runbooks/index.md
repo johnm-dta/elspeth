@@ -13,6 +13,7 @@ Operational procedures for ELSPETH pipeline management.
 | [Database Maintenance](database-maintenance.md) | Audit DB growing large, need cleanup |
 | [Incident Response](incident-response.md) | Production issue needs investigation |
 | [Backup and Recovery](backup-and-recovery.md) | Backup audit trail, restore from backup |
+| [Audit Tier-1 Violation](audit-tier1-violation.md) | Compose-loop audit counters or audit-grade transcript logging fail |
 
 ---
 

@@ -2280,7 +2280,7 @@ Overview done-when item 5: "before Phase 3 ships the Tier-1 audit counters have 
 - Modify or create: alert config and dashboard config — exact files depend on existing infra
 - Create: `docs/runbooks/audit-tier1-violation.md`
 
-- [ ] **Step 1: Survey existing alert/dashboard infra.**
+- [x] **Step 1: Survey existing alert/dashboard infra.**
 
 ```bash
 find config infra -type f \( -name '*.yml' -o -name '*.yaml' -o -name '*.json' \) 2>/dev/null \
@@ -2297,7 +2297,7 @@ If existing infra is found, append the new alert routes + dashboard panel + runb
 
 The overview done-when requires that the artifacts exist before Phase 3 **ships** (production deploy). The runbook exists in this PR; only alert/dashboard wiring may be ticketed if the repository has no place to land it.
 
-- [ ] **Step 2: Commit (or comment in PR if scoped to tickets).**
+- [x] **Step 2: Commit (or comment in PR if scoped to tickets).**
 
 ```bash
 git commit -am "ops(audit): alert routes / dashboard / runbook entries for Tier-1 audit counters (composer-progress-persistence phase 3)"

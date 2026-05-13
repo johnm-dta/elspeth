@@ -5379,14 +5379,39 @@ def create_session_router() -> APIRouter:
 
                 settings = request.app.state.settings
                 started_at = datetime.now(UTC)
-                chat_result = await solve_step_chat_with_auto_drop(
-                    site="post_guided_chat",
-                    session_id=str(session_id),
-                    user_id=user.user_id,
-                    model=settings.composer_model,
-                    step=guided.step,
-                    user_message=body.message,
-                )
+                # InvariantError from solve_step_chat (empty / whitespace LLM
+                # content) indicates a defective model response we cannot
+                # recover from.  Mirror of the post_guided_respond pattern at
+                # the step_advance call site (line ~5044): sanitize to a
+                # static 500 detail, emit slog with safe frame strings only
+                # (no str(exc) since the InvariantError message embeds the
+                # model name and step value — class + frames only, B1
+                # convention), and re-raise so the audit-drain finally still
+                # fires.  The chat handler being inconsistent with
+                # post_guided_respond's InvariantError discipline was the
+                # original gap surfaced by elspeth-obs-ac603d4e03.
+                try:
+                    chat_result = await solve_step_chat_with_auto_drop(
+                        site="post_guided_chat",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        model=settings.composer_model,
+                        step=guided.step,
+                        user_message=body.message,
+                    )
+                except InvariantError as exc:
+                    slog.error(
+                        "guided.invariant_violated",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        exc_class=type(exc).__name__,
+                        site="solve_step_chat",
+                        frames=_safe_frame_strings(exc),
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Server invariant violated. See application audit log for diagnostic detail.",
+                    ) from exc
                 finished_at = datetime.now(UTC)
 
                 # Append both turns (user + assistant) to chat_history with

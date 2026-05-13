@@ -527,3 +527,80 @@ class TestStepChatTransientFailure:
 
         assert status == 200, body
         assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+
+
+class TestStepChatServerInvariants:
+    """Offensive-programming paths — defective LLM responses we cannot recover from.
+
+    Distinct from :class:`TestStepChatTransientFailure`: transient failures
+    (network, auth, malformed-response-shape) are absorbed by
+    ``solve_step_chat_with_auto_drop`` into the synthetic unavailable
+    message and surface as HTTP 200.  Server-invariant violations
+    (empty / whitespace content from an otherwise well-shaped LLM
+    response) are NOT absorbed — they raise :class:`InvariantError` from
+    ``solve_step_chat``, which the route converts to a B1-sanitized HTTP
+    500 with a structured slog event carrying only ``exc_class`` and
+    safe frame strings (no ``str(exc)`` — the InvariantError message
+    embeds the model name + step value).
+
+    Mirror of the ``post_guided_respond`` InvariantError handling at
+    ``routes.py``'s ``step_advance`` call site.
+    """
+
+    _STATIC_DETAIL = "Server invariant violated. See application audit log for diagnostic detail."
+
+    def test_empty_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
+        """Empty content string → InvariantError → 500 with B1-sanitized detail + slog."""
+        from structlog.testing import capture_logs
+
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with (
+            patch(
+                "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+                new=AsyncMock(return_value=_fake_llm_reply("")),
+            ),
+            capture_logs() as cap_logs,
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 500, body
+        assert body["detail"] == self._STATIC_DETAIL
+        # Locate the slog event from the route's InvariantError handler.
+        # Asserting site="solve_step_chat" pins this to the chat path
+        # (the post_guided_respond handler emits site="step_advance"
+        # from an identically named "guided.invariant_violated" event).
+        invariant_events = [e for e in cap_logs if e.get("event") == "guided.invariant_violated" and e.get("site") == "solve_step_chat"]
+        assert len(invariant_events) == 1, f"expected one guided.invariant_violated event from chat path, got: {cap_logs!r}"
+        event = invariant_events[0]
+        assert event["exc_class"] == "InvariantError"
+        # Frames are tuple-shaped and start with the safe-frame format.
+        # No source lines, no locals reprs, no exception message — only
+        # the path:line:func triple (B1 convention).
+        assert isinstance(event["frames"], tuple) and len(event["frames"]) > 0
+        assert all(f.startswith("frame=") for f in event["frames"])
+
+    def test_whitespace_only_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
+        """Whitespace-only content → same path as empty content (``.strip()`` is empty)."""
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("   \n\t  ")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 500, body
+        assert body["detail"] == "Server invariant violated. See application audit log for diagnostic detail."

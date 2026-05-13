@@ -8,12 +8,136 @@ All notable changes to ELSPETH are documented here.
 
 ### Added
 
+#### Composer Guided Mode
+
 - **Composer guided mode** — new structured-protocol wizard for first-time
   pipeline authors. Source → sink → transforms in three steps; closed
   six-turn taxonomy; deterministic recipe pre-match; LLM-read-only with
   respect to pipeline state. Ships alongside the unmodified freeform
   composer; mode transition uses progressive disclosure.
   See `docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`.
+- **ComposerLLMCall audit channel** — every `solve_chain` invocation in
+  guided mode now records a `ComposerLLMCall` audit row (provider, model,
+  status, latency, prompt/completion tokens). Pairs with the existing
+  `ComposerToolInvocation` audit channel so an auditor can reconstruct
+  both what the model was asked and what tools it then dispatched.
+
+#### Composer Progress Persistence — Phase 1A (schema)
+
+- **`chat_messages` audit columns** — `tool_call_id`, `sequence_no`,
+  `writer_principal`, `parent_assistant_id` are now required by the
+  schema, with biconditional CHECK constraints
+  (`ck_chat_messages_tool_call_id_role`, `ck_chat_messages_parent_role`)
+  pinning the OpenAI-shaped tool-call linkage. `role` now permits the
+  `audit` value alongside the prior four for breadcrumb rows that have
+  no parent assistant.
+- **`composition_states.provenance` column** — every composition-state
+  write declares one of `tool_call`, `convergence_persist`,
+  `plugin_crash_persist`, `preflight_persist`, `session_seed`,
+  `session_fork`. The enum is enforced by
+  `ck_composition_states_provenance`.
+- **`run_events` table** — new SQLAlchemy table for per-run event
+  records (`progress` / `error` / `completed` / `cancelled` / `failed`)
+  with `ck_run_events_type` CHECK.
+- **`audit_access_log` table** — scaffolded INERT for Phase 3+
+  read-side audit (`requesting_principal`, `request_path`,
+  `query_args`, `ip_address`, `writer_principal`).
+- **Per-session indices** — `ix_audit_access_log_session_timestamp`
+  and new partial uniqueness on `chat_messages(session_id, sequence_no)`.
+
+#### Composer Progress Persistence — Phase 1B (single-transaction primitive)
+
+- **`SessionServiceImpl.persist_compose_turn` / `persist_compose_turn_async`** —
+  new single-transaction primitive that writes assistant message,
+  redacted tool rows, and composition state atomically. Sync primitive
+  for in-thread tests; async wrapper for production.
+  See `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`.
+- **`_persist_payload.py` DTOs** — `StatePayload`, `_ToolOutcome`,
+  `RedactedToolRow`, `AuditOutcome` formalize the turn payload shape.
+- **Advisory-lock primitive** — `contracts/advisory_locks.py` typed
+  helpers; Postgres `pg_advisory_xact_lock` for cross-session
+  serialization, SQLite per-session `RLock` for testcontainer parity.
+- **Sequence-number reservation** — `_reserve_sequence_range` allocates
+  a contiguous `sequence_no` block under the session write lock to
+  preserve per-session monotonicity under concurrent writers.
+
+#### Composer Progress Persistence — Phase 1C (Postgres portability lane)
+
+- **Testcontainer-backed integration tests** — a new `@pytest.mark.testcontainer`
+  lane spins up an ephemeral Postgres container per test. Exercises
+  `pg_advisory_xact_lock` semantics, commit-wins concurrency, and
+  Postgres-specific blob `ready_hash` partial uniqueness that SQLite
+  cannot model. `psycopg2-binary` and `testcontainers[postgres]` are
+  shipped as opt-in deps.
+
+#### Composer Progress Persistence — Phase 2 (redaction walker + MANIFEST)
+
+- **Redaction walker** — `web/composer/redaction.py` grew from a
+  42-line stub to a 2,752-line walker. Recursively descends LLM-supplied
+  argument and response payloads, applies `Sensitive[T]` typed markers
+  with per-field summarizers, and produces a redacted payload safe for
+  Tier-1 audit storage and Tier-3 LLM echo.
+- **38-entry MANIFEST** — every composer tool now has an explicit
+  redaction policy: 10 type-driven entries with Pydantic argument
+  models (`CreateBlobArgumentsModel`, `UpdateBlobArgumentsModel`,
+  `SetSourceArgumentsModel`, `SetSourceFromBlobArgumentsModel`,
+  `SetPipelineArgumentsModel`, `ApplyPipelineRecipeArgumentsModel`,
+  `PatchSourceOptionsArgumentsModel`, `PatchNodeOptionsArgumentsModel`,
+  `PatchOutputOptionsArgumentsModel`) plus 28 declarative entries for
+  discovery and inspection tools.
+- **Pydantic-first ARG_ERROR routing** — promoted tools now validate
+  arguments via their argument model first; `pydantic.ValidationError`
+  is re-raised as `ToolArgumentError` so the compose loop's ARG_ERROR
+  channel receives the right exception class. LLM-facing error message
+  names the argument-bundle + model name only, never per-field detail
+  (rev-2 BLOCKER_A leak discipline). Structured Pydantic detail
+  survives on `__cause__` for auditors via
+  `canonicalize_pydantic_cause`.
+- **Adequacy guard** — `test_adequacy_guard.py` pins manifest-registry
+  parity (every registered tool must have a MANIFEST entry) and a
+  byte-identical redaction snapshot (`redaction_policy_snapshot.json`).
+  Any MANIFEST change must regenerate the snapshot via
+  `scripts/cicd/bootstrap_redaction_snapshot.py`.
+- **F1–F6 hardening** — completeness Hypothesis property tests,
+  walker-guard parity, summarizer contract Hypothesis, label-gate
+  CI workflow, drift guards for Hypothesis strategy overrides.
+
+### Changed
+
+- **`SessionServiceImpl.add_message()` requires `writer_principal=`** —
+  one of `compose_loop`, `route_user_message`, `route_system_message`,
+  `admin_tool`, `session_fork`. Enforced by `ck_chat_messages_writer_principal`.
+- **`SessionServiceImpl.save_composition_state()` requires `provenance=`** —
+  one of the 6 values above. Enforced by `ck_composition_states_provenance`.
+- **`SessionServiceImpl.__init__()` requires `telemetry=` and `log=`** —
+  callers construct via `build_sessions_telemetry()` from
+  `web/sessions/telemetry.py`.
+- **Composer chain-solver tool response shape** — guided-mode chain
+  solver now constrains tool response shape and surfaces malformed
+  responses via the auto-drop channel rather than masking them.
+- **Exit-from-COMPLETED terminal returns 200** — guided sessions in
+  `kind=completed` terminal accept `control_signal=exit_to_freeform`
+  via POST `/api/sessions/{id}/guided/respond` and transition to
+  `kind=exited_to_freeform` (previously returned 409).
+
+### Removed
+
+- **Composer replacement-shape machinery** —
+  `_runtime_preflight_failure_message`,
+  `_enforce_replacement_non_prefix_invariant`, `_ReplacementBranch`,
+  and `_INTERCEPTED_ASSISTANT_HISTORY_PREFIX` are deleted along with
+  the 7 tests pinning the removed behaviour. The compose loop's
+  augmentation shape (state-claim grounding correction + non-empty-state
+  preflight) is now the sole codepath.
+
+### Operational
+
+- **Sessions DB schema deployment requires recreation** — Phase 1A's
+  new columns, tables, CHECKs, and partial unique indices are not
+  applied via Alembic. Per `project_db_migration_policy`: stop the
+  service, archive the old `sessions.db`, restart. The bootstrap
+  creates the new schema on first start. Procedure documented in
+  `docs/runbooks/staging-session-db-recreation.md`.
 
 ---
 

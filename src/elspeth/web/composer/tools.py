@@ -31,7 +31,7 @@ from sqlalchemy import Engine, delete, func, select, update
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.config import TriggerConfig
-from elspeth.core.secrets import collect_credential_field_violations
+from elspeth.core.secrets import collect_credential_field_violations, collect_disallowed_secret_ref_markers
 from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.blobs.service import _guard_blob_row_literals, _source_references_blob, content_hash, sanitize_filename
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
@@ -76,6 +76,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
+from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
 
 # Module-level OTel counter for authoring validation outcomes in preview_pipeline.
@@ -2222,6 +2223,19 @@ def _prevalidate_plugin_options(
         get_source_config_model,
         get_transform_config_model,
     )
+
+    secret_ref_placement_violations = collect_disallowed_secret_ref_markers(
+        options,
+        additional_allowed_fields=allowed_secret_ref_fields(plugin_type, plugin_name),
+    )
+    if secret_ref_placement_violations:
+        violation_text = ", ".join(f"{v.field_path} -> {v.secret_name}" for v in secret_ref_placement_violations)
+        allowed_text = allowed_secret_ref_fields_text(plugin_type, plugin_name)
+        return (
+            f"Invalid secret_ref placement for {plugin_type} '{plugin_name}': {violation_text}; "
+            "only credential-bearing fields may carry secret_ref markers. "
+            f"Allowed credential-bearing fields: {allowed_text}."
+        )
 
     try:
         if plugin_type == "source":

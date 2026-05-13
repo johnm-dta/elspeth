@@ -459,7 +459,7 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=7c3e82fb37e046c6
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=f271e95b732ae8b9
   owner: web-composer
   reason: "Narrow OSError around storage_path.write_bytes(old_content) rollback \u2014 disk faults during post-replace divergence\
     \ rollback expected; programmer bugs still propagate"
@@ -467,13 +467,13 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=5888ba3f1c2fbf1b
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=b68310f9248a2303
   owner: web-composer
   reason: "Narrow OSError around tombstone restore after a failed blob delete \u2014 compensation disk faults must not bury\
     \ the primary DB exception"
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=ae604775045ea882
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=d9d808465822d080
   owner: web-composer
   reason: "Tier-3 trust boundary \u2014 UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure\
     \ mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content). Failure\
@@ -667,22 +667,22 @@ allow_hits:
   safety: None branch raises RecipeValidationError listing available recipe names; never silently fabricates a recipe or coerces
     a missing entry.
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=b7d91134b5bfc706
+- key: web/execution/validation.py:R5:validate_pipeline:fp=68d0135939361036
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to extract plugin_name attribute
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=6f4e67822581fe4b
+- key: web/execution/validation.py:R5:validate_pipeline:fp=c295dbde75991fa9
   owner: web-execution
   reason: isinstance(exc, PluginConfigError) discriminates exception type to prefer cause detail over generic str(exc)
   safety: Type dispatch for error formatting, not contract masking; both branches produce validation checks
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=c6903597690d892e
+- key: web/execution/validation.py:R1:validate_pipeline:fp=ae09d495cc3e2a5a
   owner: web-execution
   reason: Validation checks optional source path/file keys supplied by composition state
   safety: Absent keys are treated honestly as 'no path provided' and the check is recorded as skipped/passed
   expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=be655085e074f73a
+- key: web/execution/validation.py:R1:validate_pipeline:fp=73cd4b67e956dbf5
   owner: web-execution
   reason: Validation checks optional output path/file keys supplied by composition state
   safety: Absent keys treated as 'no path provided'; check recorded as skipped/passed
@@ -798,28 +798,28 @@ allow_hits:
 
     '
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=c9f04d71c92aa668
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=7e5b99531032e74a
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance(Mapping) dispatches dict/list/scalar branches in recursive config traversal"
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=016598c8c3151d58
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=fa5f50a7ff7daa0e
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance(ref, str) validates secret_ref marker value type"
   safety: Non-string ref is silently skipped (malformed marker); no crash masking
   expires: null
-- key: web/execution/validation.py:R5:_collect_secret_refs:fp=d3d34fed237ded0f
+- key: web/execution/validation.py:R5:_collect_secret_refs:fp=368b443168857bf1
   owner: web-execution
   reason: "Tree-walk \u2014 isinstance() dispatches list/tuple branch in recursive config traversal"
   safety: No contract masking; structural dispatch on deserialized YAML (Tier 3 data)
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=f0ed91863378771b
+- key: web/execution/validation.py:R5:validate_pipeline:fp=bc103c5093e64aa9
   owner: web-execution
   reason: "isinstance(config_dict, dict) validates YAML parse output before resolve_secret_refs \u2014 yaml.safe_load can\
     \ return non-dict for malformed input"
   safety: Raises TypeError with diagnostic message; no error suppression
   expires: null
-- key: web/execution/validation.py:R5:validate_pipeline:fp=10045d5841840f5d
+- key: web/execution/validation.py:R5:validate_pipeline:fp=4a80fbabba26872f
   owner: web-execution
   reason: EdgeContractError is the schema-validation subtype carrying component attribution and LLM repair suggestion data.
   safety: Type dispatch only selects richer error formatting; all GraphValidationError cases still append a failed validation
@@ -1243,7 +1243,7 @@ allow_hits:
     \ \u2014 absent leaves are correctly omitted from the substitution set, matching the audit semantics (no leaf exists,\
     \ no substitution needed)."
   expires: null
-- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=0a36998f74801109
+- key: web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=6fb2108cdda0ca11
   owner: web-validation
   reason: "Union type dispatch \u2014 function receives PluginNotFoundError | PluginConfigError, isinstance needed to read\
     \ component_type attribute only present on PluginConfigError"
@@ -2139,54 +2139,54 @@ allow_hits:
   safety: Missing-key paths return None (no error reported), letting the plugin's pydantic schema validator surface the missing-required-field
     defect. The rule's own error path fires only when the value is shape-valid AND the domain is reserved.
   expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=307627249b718317
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=99a30a7ad626913b
   owner: web-execution
   reason: "Tier-3 inspection \u2014 node.options is operator/LLM-supplied (Mapping[str, Any]); options['schema'] is optional\
     \ and absent for transforms with no declared schema. .get() returns None honestly when the key is missing; treated as\
     \ \"no schema declared\"."
   safety: Absence is a meaningful state (no Concept-5 anchor); no error is suppressed, no value is fabricated.
   expires: null
-- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=cc2f6dfb9e7c9e5a
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=326d2e4cd04d4df6
   owner: web-execution
   reason: "Tier-3 dispatch \u2014 schema_block came from a node.options['schema'] value (Any type); isinstance(Mapping) discriminates\
     \ well-formed schema dict from malformed or absent input. Same pattern as _collect_secret_refs."
   safety: Non-Mapping value falls through to "no schema fields found"; structural validators elsewhere catch malformed schema
     declarations.
   expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=1074192e98f892c5
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=6296b94a1c2b4bba
   owner: web-execution
   reason: "Tier-3 inspection \u2014 schema_block['fields'] is optional inside the schema block; absent for schema declarations\
     \ that only specify mode (e.g., {mode: observed}). .get() returns None honestly; treated as \"no fields declared\"."
   safety: Absence is a meaningful state; the surrounding rule treats no-fields as "not Concept-5 anchoring" and proceeds to
     flag the node.
   expires: null
-- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=2b37c14cbc4c50b7
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=d618567d73ab24a3
   owner: web-execution
   reason: "Tier-3 dispatch \u2014 fields value came from schema_block['fields'] (Any type); isinstance((list, tuple)) discriminates\
     \ a real fields sequence from a malformed scalar/dict value."
   safety: Non-sequence value falls through to "not Concept-5 anchoring"; the advisory fires (operator gets visibility into
     a misshapen schema).
   expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=ed973530b03f9d8b
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=0c4024b6d8f35a0a
   owner: web-execution
   reason: "Tier-3 inspection \u2014 sink.options is operator-supplied (Mapping[str, Any]); options['schema'] is optional and\
     \ absent for sinks that don't declare a schema. .get() returns None honestly."
   safety: Absence yields sink_schema_mode=None; advisory detail string omits the mode suffix.
   expires: null
-- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=529465d7847d0b95
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=6c7bfe83093d5ad3
   owner: web-execution
   reason: "Tier-3 dispatch \u2014 sink_schema_block came from sink.options['schema'] (Any type); isinstance(Mapping) discriminates\
     \ a well-formed schema dict from a malformed or absent value."
   safety: Non-Mapping value yields sink_schema_mode=None; advisory still emits with no mode suffix, and the operator can investigate
     the malformed schema separately.
   expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=4d6d9875290c5253
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=111433f1cee61921
   owner: web-execution
   reason: "Tier-3 inspection \u2014 sink_schema_block['mode'] is optional inside the schema block; .get() returns None honestly\
     \ when the key is missing."
   safety: Absence yields sink_schema_mode=None and an advisory detail string with no mode suffix; no value is fabricated.
   expires: null
-- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=b4fb2c8e991b71f9
+- key: web/execution/validation.py:R5:_find_identity_node_advisories:fp=26a205961ee0a201
   owner: web-execution
   reason: "Tier-3 dispatch \u2014 mode value came from sink_schema_block['mode'] (Any type); isinstance(str) discriminates\
     \ a real mode string from a malformed value (e.g., dict, int)."

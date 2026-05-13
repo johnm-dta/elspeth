@@ -1476,6 +1476,32 @@ class TestSetOutput:
         assert result.success is False
         assert result.updated_state.version == 1  # unchanged
 
+    def test_set_output_rejects_secret_ref_in_non_credential_field(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {
+                    "path": {"secret_ref": "ANY_SECRET"},
+                    "schema": {"mode": "observed"},
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "csv" in result.data["error"]
+        assert "path" in result.data["error"]
+        assert "ANY_SECRET" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
+
 
 class TestRemoveOutput:
     def test_removes_output(self) -> None:
@@ -5603,6 +5629,71 @@ class TestSetPipeline:
         assert result.success is True
         node = result.updated_state.nodes[0]
         assert node.options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+
+    def test_set_pipeline_rejects_secret_ref_in_non_credential_field(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "scrape_pages",
+            "node_type": "transform",
+            "plugin": "web_scrape",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {
+                "url_field": "url",
+                "http": {
+                    "abuse_contact": {"secret_ref": "ANY_SECRET"},
+                    "scraping_reason": "research",
+                    "allowed_hosts": ["example.com"],
+                },
+            },
+        }
+        args["edges"][0]["to_node"] = "scrape_pages"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "web_scrape" in result.data["error"]
+        assert "http.abuse_contact" in result.data["error"]
+        assert "ANY_SECRET" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
+        assert "api_key" in result.data["error"]
+
+    def test_upsert_node_rejects_secret_ref_in_non_credential_field(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "scrape_pages",
+                "node_type": "transform",
+                "plugin": "web_scrape",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {
+                    "url_field": "url",
+                    "http": {
+                        "scraping_reason": {"secret_ref": "ANY_SECRET"},
+                        "abuse_contact": "ops@example.com",
+                        "allowed_hosts": ["example.com"],
+                    },
+                },
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "web_scrape" in result.data["error"]
+        assert "http.scraping_reason" in result.data["error"]
+        assert "ANY_SECRET" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
 
     def test_upsert_node_rejects_literal_credential_value_without_mutating_state(self) -> None:
         state = _empty_state()

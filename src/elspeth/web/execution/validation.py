@@ -30,10 +30,15 @@ from typing import Any
 import yaml
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError
-from elspeth.core.secrets import collect_credential_field_violations, resolve_secret_refs, secret_env_ref_name
+from elspeth.core.secrets import (
+    collect_credential_field_violations,
+    collect_disallowed_secret_ref_markers,
+    resolve_secret_refs,
+    secret_env_ref_name,
+)
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.engine.orchestrator.types import (
     RouteValidationError,
@@ -67,6 +72,7 @@ from elspeth.web.execution.schemas import (
     ValidationError,
     ValidationResult,
 )
+from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
 _CHECK_PATH_ALLOWLIST = "path_allowlist"
@@ -657,6 +663,7 @@ def validate_pipeline(
     all_refs: list[str] = []
     env_ref_names: set[str] = set()
     fabricated_components: list[tuple[str | None, str | None, list[str]]] = []
+    disallowed_secret_ref_components: list[tuple[str | None, str, str, list[SecretRefPlacementViolation]]] = []
     if secret_service is not None and user_id is not None:
         env_ref_names = {item.name for item in secret_service.list_refs(user_id)}
         # Walk source options, node configs, and output options for secret refs
@@ -665,19 +672,41 @@ def validate_pipeline(
             fabricated = collect_credential_field_violations(state.source.options, env_ref_names)
             if fabricated:
                 fabricated_components.append(("source", "source", fabricated))
+            disallowed = collect_disallowed_secret_ref_markers(
+                state.source.options,
+                env_ref_names,
+                additional_allowed_fields=allowed_secret_ref_fields("source", state.source.plugin),
+            )
+            if disallowed:
+                disallowed_secret_ref_components.append(("source", "source", state.source.plugin, disallowed))
         for node in state.nodes or ():
             all_refs.extend(_collect_secret_refs(node.options, env_ref_names))
             fabricated = collect_credential_field_violations(node.options, env_ref_names)
             if fabricated:
                 fabricated_components.append((node.id, "transform", fabricated))
+            node_plugin = node.plugin or "<unset>"
+            disallowed = collect_disallowed_secret_ref_markers(
+                node.options,
+                env_ref_names,
+                additional_allowed_fields=allowed_secret_ref_fields("transform", node_plugin),
+            )
+            if disallowed:
+                disallowed_secret_ref_components.append((node.id, "transform", node_plugin, disallowed))
         for output in state.outputs or ():
             all_refs.extend(_collect_secret_refs(output.options, env_ref_names))
             fabricated = collect_credential_field_violations(output.options, env_ref_names)
             if fabricated:
                 fabricated_components.append((output.name, "sink", fabricated))
+            disallowed = collect_disallowed_secret_ref_markers(
+                output.options,
+                env_ref_names,
+                additional_allowed_fields=allowed_secret_ref_fields("sink", output.plugin),
+            )
+            if disallowed:
+                disallowed_secret_ref_components.append((output.name, "sink", output.plugin, disallowed))
 
         missing_refs = [ref for ref in all_refs if not secret_service.has_ref(user_id, ref)]
-        if missing_refs or fabricated_components:
+        if missing_refs or fabricated_components or disallowed_secret_ref_components:
             detail_parts: list[str] = []
             if missing_refs:
                 names = ", ".join(missing_refs)
@@ -710,6 +739,27 @@ def validate_pipeline(
                             ),
                         )
                     )
+            if disallowed_secret_ref_components:
+                for component_id, component_type, plugin_name, violations in disallowed_secret_ref_components:
+                    violation_text = ", ".join(f"{v.field_path} -> {v.secret_name}" for v in violations)
+                    allowed_text = allowed_secret_ref_fields_text(component_type, plugin_name)
+                    detail_parts.append(f"Disallowed secret_ref for {plugin_name} {component_id}: {violation_text}")
+                    for violation in violations:
+                        errors.append(
+                            ValidationError(
+                                component_id=component_id,
+                                component_type=component_type,
+                                message=(
+                                    f"Plugin '{plugin_name}' field '{violation.field_path}' contains secret_ref "
+                                    f"'{violation.secret_name}', but only credential-bearing fields may carry secret_ref "
+                                    f"markers. Allowed credential-bearing fields for this plugin: {allowed_text}."
+                                ),
+                                suggestion=(
+                                    "Move the secret_ref marker to an actual credential field, or use a literal "
+                                    "non-secret value for wire-visible identity/configuration fields."
+                                ),
+                            )
+                        )
             checks.append(
                 ValidationCheck(
                     name=_CHECK_SECRET_REFS,
@@ -960,11 +1010,11 @@ def validate_pipeline(
         )
     except (PluginNotFoundError, PluginConfigError) as exc:
         comp_type = _infer_component_type_from_plugin_error(exc)
-        plugin_name = exc.plugin_name if isinstance(exc, PluginConfigError) else None
+        plugin_error_name: str | None = exc.plugin_name if isinstance(exc, PluginConfigError) else None
         # Prefer cause (validation detail) over str(exc) which includes the
         # internal class name prefix (e.g. "Invalid configuration for CSVSourceConfig: ...").
-        if isinstance(exc, PluginConfigError) and exc.cause is not None and plugin_name is not None:
-            detail = f"Invalid configuration for {comp_type} '{plugin_name}': {exc.cause}"
+        if isinstance(exc, PluginConfigError) and exc.cause is not None and plugin_error_name is not None:
+            detail = f"Invalid configuration for {comp_type} '{plugin_error_name}': {exc.cause}"
         else:
             detail = str(exc)
         checks.append(
@@ -976,7 +1026,7 @@ def validate_pipeline(
         )
         errors.append(
             ValidationError(
-                component_id=plugin_name,
+                component_id=plugin_error_name,
                 component_type=comp_type,
                 message=detail,
                 suggestion=None,

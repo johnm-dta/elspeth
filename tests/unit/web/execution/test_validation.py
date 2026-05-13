@@ -49,12 +49,12 @@ def _make_source(options: dict[str, Any] | None = None) -> SourceSpec:
     )
 
 
-def _make_node(options: dict[str, Any] | None = None) -> NodeSpec:
+def _make_node(options: dict[str, Any] | None = None, plugin: str = "value_transform") -> NodeSpec:
     """Build a NodeSpec with sensible defaults for validation tests."""
     return NodeSpec(
         id="test_node",
         node_type="transform",
-        plugin="value_transform",
+        plugin=plugin,
         input="transform_in",
         on_success="results",
         on_error="discard",
@@ -71,11 +71,12 @@ def _make_node(options: dict[str, Any] | None = None) -> NodeSpec:
 def _make_output(
     options: dict[str, Any] | None = None,
     name: str = "primary",
+    plugin: str = "csv",
 ) -> OutputSpec:
     """Build an OutputSpec with sensible defaults for validation tests."""
     return OutputSpec(
         name=name,
-        plugin="csv",
+        plugin=plugin,
         options=options or {},
         on_write_failure="discard",
     )
@@ -1295,8 +1296,8 @@ class TestValidatePipelineSecretRefs:
         """All missing refs are collected and reported at once."""
         state = _make_state(
             source_options={
-                "key1": {"secret_ref": "REF_A"},
-                "key2": {"secret_ref": "REF_B"},
+                "api_key": {"secret_ref": "REF_A"},
+                "token": {"secret_ref": "REF_B"},
             },
         )
         settings = _make_settings()
@@ -1544,6 +1545,83 @@ class TestValidatePipelineFabricatedCredentials:
         mock_yaml_gen = MagicMock()
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs={"REAL_KEY"})
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        assert _check(result, "secret_refs").passed is True
+
+    def test_secret_ref_in_non_credential_web_scrape_field_rejected(self) -> None:
+        """A wired secret marker in wire-visible non-credential text is a leak."""
+        state = _make_state(
+            source_options={},
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options={
+                        "url_field": "url",
+                        "http": {
+                            "abuse_contact": {"secret_ref": "ANY_SECRET"},
+                            "scraping_reason": "research",
+                            "allowed_hosts": ["example.com"],
+                        },
+                    },
+                ),
+            ),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        secret_svc = FakeSecretService(available_refs={"ANY_SECRET"})
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        secret_check = _check(result, "secret_refs")
+        assert secret_check.passed is False
+        assert "web_scrape" in secret_check.detail
+        assert "http.abuse_contact" in secret_check.detail
+        assert "ANY_SECRET" in secret_check.detail
+        errors = [e for e in result.errors if "secret_ref" in e.message]
+        assert errors
+        assert any(e.component_id == "test_node" and e.component_type == "transform" for e in errors)
+        assert any("credential-bearing fields" in e.message for e in errors)
+        assert any("api_key" in e.message for e in errors)
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_database_sink_url_secret_ref_passes(self) -> None:
+        """Database sink URL is a credential-bearing DSN field."""
+        state = _make_state(
+            source_options={},
+            outputs=(
+                _make_output(
+                    name="db_out",
+                    plugin="database",
+                    options={
+                        "url": {"secret_ref": "DATABASE_URL"},
+                        "table": "audit_rows",
+                        "schema": {"mode": "observed"},
+                    },
+                ),
+            ),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        secret_svc = FakeSecretService(available_refs={"DATABASE_URL"})
 
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")

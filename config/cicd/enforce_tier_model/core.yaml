@@ -4,7 +4,7 @@ per_file_rules:
   - R5
   reason: Tree-walk over Tier-3 config dicts requires isinstance() for structural dispatch (dict/list/leaf), and exact ${NAME} secret-env marker detection requires confirming scalar strings before regex parsing. The entire point of this module is to inspect an arbitrary config dict whose shape is external/user-provided.
   expires: null
-  max_hits: 10
+  max_hits: 13
 - pattern: core/expression_parser.py
   rules:
   - R5

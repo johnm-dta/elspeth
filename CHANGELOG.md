@@ -6,6 +6,20 @@ All notable changes to ELSPETH are documented here.
 
 ## [Unreleased]
 
+_No unreleased changes recorded._
+
+---
+
+## [0.5.2] - 2026-05-14 (RC-5.2 — Guided Composer, Durable Progress, and Recovery UX)
+
+RC-5.2 is the large Web Composer release train that folds the guided-mode
+wizard, composer progress persistence, manifest-keyed redaction, per-step chat,
+frontend recovery UX, and RC5.2 hardening back onto `main`. The branch contains
+347 commits over `main` and moves the composer from a best-effort interactive
+surface toward an audited, recoverable authoring system: model calls, tool
+dispatch, redacted tool payloads, persisted transcript rows, recovery diffs, and
+operator-visible failure causes now share one evidence story.
+
 ### Added
 
 #### Composer Guided Mode
@@ -102,6 +116,57 @@ All notable changes to ELSPETH are documented here.
   walker-guard parity, summarizer contract Hypothesis, label-gate
   CI workflow, drift guards for Hypothesis strategy overrides.
 
+#### Composer Progress Persistence — Phase 3 (compose loop persistence)
+
+- **Atomic compose-loop tool turns** — `_compose_loop` now persists assistant
+  messages, tool-call breadcrumbs, redacted tool payloads, and composition-state
+  snapshots through `persist_compose_turn`, preserving the audit-first contract
+  even when tools fail, cancellation lands mid-turn, or a plugin crash triggers
+  recovery handling.
+- **Per-turn tool-call cap** — composer turns enforce a bounded tool-call count
+  and emit a `tool_call_cap_exceeded` reason code instead of allowing unbounded
+  tool recursion.
+- **Audit-grade transcript access** — session message reads can opt into
+  `include_tool_rows=true` and record access through `audit_access_log`, giving
+  auditors a path to reconstruct tool rows without exposing them in normal chat
+  history.
+- **Compose-loop invariant coverage** — property and integration tests now pin
+  audit counter conservation, manifest redaction, cancellation commit windows,
+  failed-turn tool-response counts, no-op behaviour, and the compose-loop
+  persistence harness.
+
+#### Composer Progress Persistence — Phase 4 (frontend recovery)
+
+- **Recovery panel** — the frontend now detects recoverable composer failures
+  and opens a dedicated recovery surface with the assistant transcript, redacted
+  tool rows, and before/after state diff for operator inspection.
+- **Recovery transcript and diff rendering** — recovery payloads are parsed,
+  stored in the session store, fetched with `include_tool_rows=true`, and
+  rendered through focused `RecoveryTranscript`, `RecoveryDiff`, and
+  `RecoveryPanel` components.
+- **Frontend lint gate** — the frontend package now ships an ESLint config and
+  `npm run lint` gate so recovery/guided-mode UI changes have a static quality
+  check alongside tests, typecheck, and build.
+
+#### RC5.2 Hotfix Integration
+
+- **Auth and audit hardening** — local/Entra auth flows now audit token
+  issuance, auth failure classes, local login outcomes, refresh-provider
+  invariants, provider outages, and web-run attribution into Landscape while
+  redacting JWKS failure detail and suppressing token-response caching.
+- **Execution and validation hardening** — web execution now classifies
+  validation errors, sanitizes broad execution errors, persists resolved run
+  config, rejects misplaced secret refs, and preserves guided audit persistence
+  failures.
+- **Engine/plugin correctness fixes** — checkpoint resume parsing, empty
+  coalesce checkpoint state, pending batch row identities, JSON sink parent
+  creation, sink preflight collision timing, Web Scrape fail-closed boundaries,
+  LLM provider preflight, and shared LLM telemetry helpers were tightened.
+- **Frontend accessibility and theming fixes** — guided/catalog/run UI now has
+  improved contrast, forced-colors fallbacks, theme initialization and cross-tab
+  sync, screen-reader-safe status symbols, catalog retry controls, keyboard
+  shortcut support, and preserved plugin descriptions.
+
 ### Changed
 
 - **`SessionServiceImpl.add_message()` requires `writer_principal=`** —
@@ -119,6 +184,14 @@ All notable changes to ELSPETH are documented here.
   `kind=completed` terminal accept `control_signal=exit_to_freeform`
   via POST `/api/sessions/{id}/guided/respond` and transition to
   `kind=exited_to_freeform` (previously returned 409).
+- **Per-step guided chat** — guided mode now has a separate per-step advisory
+  chat channel with persisted `chat_history`, `ComposerChatTurn` audit rows,
+  route-level invariant auditing, and a `GuidedChatHistory` frontend component.
+- **Guided-mode prompt loading** — the guided composer skill pack is split into
+  base plus step-specific prompt files, preserving the deployment overlay and
+  allowing step-scoped context without flattening all guidance into one prompt.
+- **Finite status typing** — MCP finite status fields and guided wire shapes use
+  narrower literals/enums, with cross-language SlotType drift checked by CI.
 
 ### Removed
 

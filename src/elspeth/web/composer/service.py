@@ -27,7 +27,10 @@ from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
 
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
+    from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
+    from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
     from elspeth.web.sessions.protocol import SessionServiceProtocol
+    from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 import structlog
 from opentelemetry import metrics
@@ -1151,15 +1154,16 @@ class ComposerServiceImpl:
         self._runtime_preflight_coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
         self._availability = self._compute_availability()
         from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
+        from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
-        self._max_tool_calls_per_turn = self._settings.composer_max_tool_calls_per_turn
-        self._telemetry = None
-        self._redaction_telemetry = OtelRedactionTelemetry()
-        self._phase3_last_tool_outcomes = ()
-        self._phase3_last_expected_current_state_id = None
-        self._phase3_last_redacted_assistant_tool_calls = ()
-        self._phase3_last_redacted_tool_rows = ()
-        self._phase3_last_audit_outcome = None
+        self._max_tool_calls_per_turn: int = self._settings.composer_max_tool_calls_per_turn
+        self._telemetry: _SessionsTelemetry = build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer"))
+        self._redaction_telemetry: RedactionTelemetry = OtelRedactionTelemetry()
+        self._phase3_last_tool_outcomes: tuple[_ToolOutcome, ...] = ()
+        self._phase3_last_expected_current_state_id: str | None = None
+        self._phase3_last_redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...] = ()
+        self._phase3_last_redacted_tool_rows: tuple[RedactedToolRow, ...] = ()
+        self._phase3_last_audit_outcome: AuditOutcome | None = None
 
     async def _run_one_turn_for_test(
         self,
@@ -1987,10 +1991,8 @@ class ComposerServiceImpl:
             assistant_message = response.choices[0].message
             raw_assistant_content = assistant_message.content
             assistant_tool_calls = assistant_message.tool_calls or ()
-            if len(assistant_tool_calls) > self._max_tool_calls_per_turn:  # type: ignore[attr-defined]
-                telemetry = self._telemetry  # type: ignore[attr-defined]
-                if telemetry is not None:
-                    telemetry.tool_call_cap_exceeded_total.add(1)
+            if len(assistant_tool_calls) > self._max_tool_calls_per_turn:
+                self._telemetry.tool_call_cap_exceeded_total.add(1)
                 raise ComposerConvergenceError.capture(
                     max_turns=composition_turns_used + discovery_turns_used,
                     budget_exhausted="composition",
@@ -2001,7 +2003,7 @@ class ComposerServiceImpl:
                     reason="tool_call_cap_exceeded",
                     evidence={
                         "observed": len(assistant_tool_calls),
-                        "cap": self._max_tool_calls_per_turn,  # type: ignore[attr-defined]
+                        "cap": self._max_tool_calls_per_turn,
                     },
                 )
 
@@ -2112,7 +2114,7 @@ class ComposerServiceImpl:
             tool_outcomes: list[_ToolOutcome] = []
             plugin_crash: ComposerPluginCrashError | None = None
             plugin_crash_cause: Exception | None = None
-            pre_state_id = current_state_id
+            pre_state_id: str | None = current_state_id
             self._phase3_last_expected_current_state_id = pre_state_id
             decoded_args_by_call_id: dict[str, dict[str, Any]] = {}
 

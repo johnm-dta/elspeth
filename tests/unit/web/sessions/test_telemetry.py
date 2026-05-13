@@ -8,18 +8,16 @@ from elspeth.web.sessions.telemetry import (
     observed_value,
 )
 
-# Spec §1.4 NFR table — production OTel metric strings for Phase 1 + Phase 3 cap.
-# Verified end-to-end by ``test_production_meter_registers_named_metrics``
-# below.
-#
-# Phase 3 adds ``tool_call_cap_exceeded_total`` with its emitter in the compose
-# loop. Remaining spec-§1.4 counters land with the code paths that emit them.
+# Spec §1.4 NFR table plus Phase 3 audit-grade transcript access counters.
+# Verified end-to-end by ``test_production_meter_registers_named_metrics`` below.
 EXPECTED_METRIC_NAMES = {
     "composer.audit.tool_row_tier1_violation_total",
     "composer.audit.state_rolled_back_during_persist_total",
     "composer.audit.tool_row_persist_failed_during_unwind_total",
     "composer.audit.tool_row_integrity_violation_total",
     "composer.tool_call_cap_exceeded_total",
+    "composer.audit.audit_grade_view_total",
+    "composer.audit.audit_access_log_write_failed_total",
 }
 
 
@@ -35,6 +33,8 @@ def test_telemetry_field_names_match_spec_exactly():
         "tool_row_persist_failed_during_unwind_total",
         "tool_row_integrity_violation_total",
         "tool_call_cap_exceeded_total",
+        "audit_grade_view_total",
+        "audit_access_log_write_failed_total",
     }
     actual = set(telem.__dataclass_fields__)
     assert actual == expected_fields, f"field-name mismatch — added: {actual - expected_fields}; removed: {expected_fields - actual}"

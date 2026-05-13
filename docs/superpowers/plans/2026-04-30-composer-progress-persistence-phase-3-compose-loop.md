@@ -2261,7 +2261,7 @@ The fixture `populated_audit_db` exercises the compose loop end-to-end with mixe
 
 Expected: PASS. The property test runs the §8.3.2 OTel-counter post-conditions across the campaign.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git commit -am "test(integration): CL-PP-9/10/12/13 + property + schema-level backward-direction (composer-progress-persistence phase 3)"

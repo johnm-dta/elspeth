@@ -9,18 +9,22 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts import NodeID, RunStatus
+from elspeth.contracts import Checkpoint, NodeID, ResumePoint, RunStatus
+from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import prepare_for_run
 from elspeth.engine.orchestrator.core import Orchestrator
+from elspeth.engine.orchestrator.types import ResumeState
 from tests.fixtures.landscape import make_landscape_db
+from tests.fixtures.stores import MockPayloadStore
 
 
 def _make_orchestrator(db: LandscapeDB | None = None) -> Orchestrator:
@@ -104,6 +108,65 @@ class TestResumeFinalizesAsFailed:
         assert found_failed, (
             f"Run should be finalized as FAILED when resume fails with non-shutdown exception. finalize_run calls: {finalize_calls}"
         )
+
+    def test_resume_treats_empty_coalesce_checkpoint_as_all_rows_processed(self) -> None:
+        """Empty restored coalesce state must not force a resume processing pass."""
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-empty-coalesce-state"
+        empty_coalesce_state = CoalesceCheckpointState(version="4.0", pending=(), completed_keys=())
+        mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
+        mock_factory.run_lifecycle.finalize_run = MagicMock()
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-empty-coalesce-state",
+            run_id=run_id,
+            token_id="tok-empty-coalesce-state",
+            node_id="node-empty-coalesce-state",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            checkpoint_node_config_hash="b" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(
+            checkpoint=checkpoint,
+            token_id=checkpoint.token_id,
+            node_id=checkpoint.node_id,
+            sequence_number=checkpoint.sequence_number,
+            coalesce_state=empty_coalesce_state,
+        )
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            restored_aggregation_state={},
+            restored_coalesce_state=empty_coalesce_state,
+            unprocessed_rows=(),
+            schema_contract=MagicMock(),
+        )
+
+        with (
+            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
+            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")),
+            patch.object(
+                orch,
+                "_derive_resume_terminal_status_from_audit",
+                return_value=(RunStatus.COMPLETED, 3, 3, 0, 0, 0, 0),
+            ),
+            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch, "_delete_checkpoints"),
+        ):
+            result = orch.resume(
+                resume_point,
+                MagicMock(),
+                MagicMock(),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 3
+        mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED)
 
 
 class TestBuildProcessorCallsCleanupOnFailure:

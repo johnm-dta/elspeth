@@ -3271,6 +3271,8 @@ class Orchestrator:
         factory = state.factory
         restored_state = state.restored_aggregation_state
         restored_coalesce_state = state.restored_coalesce_state
+        if restored_coalesce_state is not None and not restored_coalesce_state.has_resumable_state:
+            restored_coalesce_state = None
         schema_contract = state.schema_contract
         unprocessed_rows = state.unprocessed_rows
         resume_start_time = time.perf_counter()

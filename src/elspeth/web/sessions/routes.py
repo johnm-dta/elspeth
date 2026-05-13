@@ -112,6 +112,7 @@ from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.protocol import (
+    AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
     ChatMessageRole,
@@ -4169,6 +4170,15 @@ def create_session_router() -> APIRouter:
         """
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
+        if include_tool_rows:
+            audit_query_args = {key: value for key, value in request.query_params.items() if key in AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST}
+            await service.record_audit_grade_view_async(
+                session_id=str(session.id),
+                requesting_principal=user.user_id,
+                request_path=request.url.path,
+                query_args=audit_query_args,
+                ip_address=request.client.host if request.client else None,
+            )
         # Fetch before slicing so hidden audit rows cannot skew normal-chat
         # pagination. The service remains the durable audit store; this route
         # is the user-facing conversation channel. The eval harness can opt in

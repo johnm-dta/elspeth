@@ -1799,7 +1799,7 @@ async def list_messages(
 
 Expected: PASS for the three default-vs-true tests. The audit-grade-view assertion belongs to Task 11.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git commit -am "feat(sessions): include_tool_rows query parameter on messages endpoint (composer-progress-persistence phase 3)"
@@ -1818,7 +1818,7 @@ When `include_tool_rows=true`, emit an `audit_access_log` row (writer_principal=
 - Modify: `src/elspeth/web/sessions/routes.py` (the messages endpoint emits the row before returning when `include_tool_rows=true`)
 - Create: `tests/unit/web/sessions/test_record_audit_grade_view.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 ```python
 """record_audit_grade_view — write-helper for the audit_access_log
@@ -1923,7 +1923,7 @@ def test_endpoint_fails_closed_when_audit_access_log_write_fails(
 
 Expected: FAIL.
 
-- [ ] **Step 2: Add the counter to `_SessionsTelemetry`.**
+- [x] **Step 2: Add the counter to `_SessionsTelemetry`.**
 
 In `src/elspeth/web/sessions/telemetry.py`, extend the dataclass and the build function:
 
@@ -1942,7 +1942,7 @@ audit_access_log_write_failed_total=meter.create_counter(
 
 Update the `_SessionsTelemetry` docstring to drop the "Phase 3 (compose loop + audit-grade view) adds ... `audit_grade_view_total`" forward-looking line.
 
-- [ ] **Step 3: Add `record_audit_grade_view` to SessionsService.**
+- [x] **Step 3: Add `record_audit_grade_view` to SessionsService.**
 
 ```python
 def record_audit_grade_view(
@@ -2003,7 +2003,7 @@ async def record_audit_grade_view_async(
 
 Wrap only the database write in a narrow `except SQLAlchemyError as exc:` block that increments `audit_access_log_write_failed_total` and raises `AuditAccessLogWriteError from exc`. This is a route-boundary translation, not defensive recovery: the request still fails closed and returns no transcript rows. Add `record_audit_grade_view_async` to `SessionServiceProtocol` so the route layer types via the protocol.
 
-- [ ] **Step 4: Wire the emission into the messages endpoint.**
+- [x] **Step 4: Wire the emission into the messages endpoint.**
 
 In the `list_messages` route handler from Task 10, at the marked insertion point:
 
@@ -2025,7 +2025,7 @@ if include_tool_rows:
 
 No broad `except Exception: pass` is permitted around this call. The fail-closed test above must fail if an implementer swallows the write failure and returns rows anyway.
 
-- [ ] **Step 5: Re-run the tests.**
+- [x] **Step 5: Re-run the tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/sessions/test_record_audit_grade_view.py -v

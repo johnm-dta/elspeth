@@ -28,15 +28,20 @@ from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
+    audit_access_log_table,
     chat_messages_table,
     composition_states_table,
     runs_table,
     sessions_table,
 )
 from elspeth.web.sessions.protocol import (
+    AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
+    AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
     LEGAL_RUN_TRANSITIONS,
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
+    AuditAccessLogRecord,
+    AuditAccessLogWriteError,
     ChatMessageRecord,
     ChatMessageRole,
     ChatMessageWriterPrincipal,
@@ -1375,6 +1380,97 @@ class SessionServiceImpl:
                 assistant_message_id=assistant_message_id,
             ),
         )
+
+    @staticmethod
+    def _validate_audit_grade_query_args(query_args: Mapping[str, str]) -> dict[str, str]:
+        """Return an owned dict after enforcing the privacy allowlist."""
+
+        unexpected = frozenset(query_args) - AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST
+        if unexpected:
+            raise ValueError(f"unallowlisted audit-grade query args: {sorted(unexpected)}")
+        return dict(query_args)
+
+    def record_audit_grade_view(
+        self,
+        *,
+        session_id: str,
+        requesting_principal: str,
+        request_path: str,
+        query_args: Mapping[str, str],
+        ip_address: str | None,
+    ) -> None:
+        """Append one row to ``audit_access_log`` before returning tool rows.
+
+        The writer principal is pinned to ``audit_grade_view``; admin-tool
+        writes use a separate path. The privacy posture is mechanical:
+        ``query_args`` must already be reduced to the closed allowlist in
+        ``AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST``, and ``ip_address`` is
+        either stored literally or omitted as ``None``.
+        """
+
+        allowed_query_args = self._validate_audit_grade_query_args(query_args)
+        now = self._now()
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    audit_access_log_table.insert().values(
+                        id=str(uuid.uuid4()),
+                        timestamp=now,
+                        session_id=session_id,
+                        requesting_principal=requesting_principal,
+                        request_path=request_path,
+                        query_args=allowed_query_args,
+                        ip_address=ip_address,
+                        writer_principal=AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
+                    )
+                )
+        except SQLAlchemyError as exc:
+            self._telemetry.audit_access_log_write_failed_total.add(1)
+            raise AuditAccessLogWriteError("audit_access_log write failed for audit-grade messages view") from exc
+        self._telemetry.audit_grade_view_total.add(1)
+
+    async def record_audit_grade_view_async(
+        self,
+        *,
+        session_id: str,
+        requesting_principal: str,
+        request_path: str,
+        query_args: Mapping[str, str],
+        ip_address: str | None,
+    ) -> None:
+        """Async dispatcher for :meth:`record_audit_grade_view`."""
+
+        await self._run_sync(
+            self.record_audit_grade_view,
+            session_id=session_id,
+            requesting_principal=requesting_principal,
+            request_path=request_path,
+            query_args=query_args,
+            ip_address=ip_address,
+        )
+
+    def list_audit_access_log(self, *, session_id: str) -> list[AuditAccessLogRecord]:
+        """Return audit-access log rows for tests and operator diagnostics."""
+
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(audit_access_log_table)
+                .where(audit_access_log_table.c.session_id == session_id)
+                .order_by(audit_access_log_table.c.timestamp)
+            ).fetchall()
+        return [
+            AuditAccessLogRecord(
+                id=row.id,
+                timestamp=self._ensure_utc(row.timestamp),
+                session_id=row.session_id,
+                requesting_principal=row.requesting_principal,
+                request_path=row.request_path,
+                query_args=row.query_args,
+                ip_address=row.ip_address,
+                writer_principal=row.writer_principal,
+            )
+            for row in rows
+        ]
 
     async def save_composition_state(
         self,

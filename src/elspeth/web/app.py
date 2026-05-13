@@ -50,7 +50,7 @@ from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.protocol import RunAlreadyActiveError, StaleComposeStateError
+from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -343,6 +343,16 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             content={
                 "error_type": "stale_compose_state",
                 "detail": "The session changed while the compose turn was running.",
+            },
+        )
+
+    @app.exception_handler(AuditAccessLogWriteError)
+    async def _audit_access_log_write_error_handler(_request: Request, _exc: AuditAccessLogWriteError) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "audit_access_log_write_failed",
+                "detail": "Audit-grade transcript access could not be recorded; no audit-grade data returned.",
             },
         )
 

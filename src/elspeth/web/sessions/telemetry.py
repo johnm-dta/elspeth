@@ -26,10 +26,10 @@ composer-progress surface, but metric naming does not justify an
 import from ``web/sessions/service.py`` up into ``web/composer``.
 Composer code may import the sessions-owned container or receive it
 from app wiring; sessions code must not import composer-owned modules.
-Phase 2 (redaction counters) and Phase 3 (compose-loop and
-audit-grade counters) may extend this container only if ownership
-still belongs to the sessions persistence surface; otherwise those
-phases add composer-owned telemetry separately.
+Phase 2 (redaction counters) and Phase 3 (compose-loop counters) may
+extend this container only if ownership still belongs to the sessions
+persistence surface; otherwise those phases add composer-owned
+telemetry separately.
 """
 
 from __future__ import annotations
@@ -128,6 +128,8 @@ class _SessionsTelemetry:
     tool_row_persist_failed_during_unwind_total: _Counter
     tool_row_integrity_violation_total: _Counter
     tool_call_cap_exceeded_total: _Counter
+    audit_grade_view_total: _Counter
+    audit_access_log_write_failed_total: _Counter
 
 
 def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemetry:
@@ -147,6 +149,8 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             tool_row_persist_failed_during_unwind_total=_FakeCounter(),
             tool_row_integrity_violation_total=_FakeCounter(),
             tool_call_cap_exceeded_total=_FakeCounter(),
+            audit_grade_view_total=_FakeCounter(),
+            audit_access_log_write_failed_total=_FakeCounter(),
         )
 
     # Production wiring against the real OTel meter. The ``_Meter``
@@ -159,4 +163,6 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         tool_row_persist_failed_during_unwind_total=meter.create_counter("composer.audit.tool_row_persist_failed_during_unwind_total"),
         tool_row_integrity_violation_total=meter.create_counter("composer.audit.tool_row_integrity_violation_total"),
         tool_call_cap_exceeded_total=meter.create_counter("composer.tool_call_cap_exceeded_total"),
+        audit_grade_view_total=meter.create_counter("composer.audit.audit_grade_view_total"),
+        audit_access_log_write_failed_total=meter.create_counter("composer.audit.audit_access_log_write_failed_total"),
     )

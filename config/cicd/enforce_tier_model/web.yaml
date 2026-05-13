@@ -809,7 +809,7 @@ allow_hits:
   safety: Type dispatch only selects richer error formatting; all GraphValidationError cases still append a failed validation
     check and surface to the caller.
   expires: null
-- key: web/app.py:R1:create_app:fp=9a476e928bef0406
+- key: web/app.py:R1:create_app:fp=88307d5d1c848839
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional WEB_CONCURRENCY env var"
   safety: Defaults to "1" when absent
@@ -821,7 +821,7 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan blob_id and target session_id;
     storage file unlinked best-effort; primary copy exception remains the headline
   expires: null
-- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=da88f0ae4bdb2349
+- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=42d3462a5af92296
   owner: web-sessions
   reason: Type check for envelope format in composition state deserialization
   safety: Handles both raw and enveloped formats
@@ -874,7 +874,7 @@ allow_hits:
 
     correct API to use; no caller can silently misuse the primitive.'
   expires: null
-- key: web/app.py:R1:create_app:fp=f71aeef2a061339e
+- key: web/app.py:R1:create_app:fp=ac4def58895142ba
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional ELSPETH_ENV"
   safety: Returns None when absent; only used for test guard
@@ -1095,17 +1095,17 @@ allow_hits:
   reason: "Tier 3 \u2014 fingerprint key from deployment environment; os.environ.get followed by check-and-crash"
   safety: Missing key raises RuntimeError immediately; no silent default
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=ab4a54d499b95381
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=19dda88ab08acfed
   owner: web-sessions
   reason: "derived_from_map.get() on seed_id \u2014 seed may not exist in derived_from_map (states without derived_from parents)"
   safety: Returns None, while-loop terminates naturally
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=cdc8e2d695bc6ea2
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=546925e628f654a0
   owner: web-sessions
   reason: "derived_from_map.get() traversing parent chain \u2014 parent may reference state outside session or not in map"
   safety: Returns None, terminates transitive closure walk
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=7f1f50a47d254b4e
+- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=d228c28401011c03
   owner: web-sessions
   reason: "source_to_copied_assistant_id.get() in \xA714.6 fork sweep \u2014 looks up the new id minted for an in-slice assistant.\
     \ None means the source row's parent assistant is OUTSIDE the [:fork_idx] slice, which is detected immediately and converted\
@@ -1325,7 +1325,7 @@ allow_hits:
   reason: "Tier 3 \u2014 isinstance check on pipeline_yaml argument type"
   safety: Raises TypeError with diagnostic; no silent default
   expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=51295084f4b2d908
+- key: web/app.py:R2:create_app:_request_id:fp=b70a21188e4a6164
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
 

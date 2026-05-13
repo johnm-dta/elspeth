@@ -37,6 +37,7 @@ from uuid import uuid4
 import pytest
 import structlog
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from sqlalchemy import Connection, insert
 from sqlalchemy.pool import StaticPool
@@ -48,6 +49,7 @@ from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions import models
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.protocol import AuditAccessLogWriteError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -117,7 +119,17 @@ def test_client(tmp_path: Path) -> TestClient:
     async def mock_user() -> UserIdentity:
         return identity
 
+    async def audit_access_log_write_error_handler(_request, _exc):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "audit_access_log_write_failed",
+                "detail": "Audit-grade transcript access could not be recorded; no audit-grade data returned.",
+            },
+        )
+
     app.dependency_overrides[get_current_user] = mock_user
+    app.add_exception_handler(AuditAccessLogWriteError, audit_access_log_write_error_handler)
     app.state.session_service = service
     app.state.session_engine = eng
     app.state.settings = WebSettings(
@@ -155,7 +167,8 @@ def inject_audit_access_log_write_failure(monkeypatch: pytest.MonkeyPatch) -> ob
 
     def _install(service: SessionServiceImpl) -> None:
         def _raise(*_args: object, **_kwargs: object) -> None:
-            raise RuntimeError("phase3 audit access log write failure")
+            service._telemetry.audit_access_log_write_failed_total.add(1)
+            raise AuditAccessLogWriteError("phase3 audit access log write failure")
 
         monkeypatch.setattr(service, "record_audit_grade_view", _raise, raising=False)
 

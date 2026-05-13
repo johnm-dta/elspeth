@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.app import create_app
 from elspeth.web.config import WebSettings
-from elspeth.web.sessions.protocol import StaleComposeStateError
+from elspeth.web.sessions.protocol import AuditAccessLogWriteError, StaleComposeStateError
 
 
 def _settings(tmp_path: Path) -> WebSettings:
@@ -88,3 +88,17 @@ async def test_stale_compose_state_error_handler_returns_409(tmp_path: Path) -> 
     assert isinstance(response, JSONResponse)
     assert response.status_code == 409
     assert json.loads(response.body)["error_type"] == "stale_compose_state"
+
+
+@pytest.mark.asyncio
+async def test_audit_access_log_write_error_handler_returns_static_500(tmp_path: Path) -> None:
+    app = create_app(_settings(tmp_path))
+    handler = app.exception_handlers[AuditAccessLogWriteError]
+
+    response = await handler(cast(Request, object()), AuditAccessLogWriteError("hidden db path"))
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 500
+    body = json.loads(response.body)
+    assert body["error_type"] == "audit_access_log_write_failed"
+    assert "hidden db path" not in response.body.decode()

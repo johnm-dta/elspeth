@@ -225,7 +225,7 @@ The §1.4 NFR caps tool calls per assistant turn at 16 (default), env-tunable. T
 - Modify: `src/elspeth/config.py` and the matching Settings→Runtime contract (see `config-contracts-guide` skill) for the env-tunable `MAX_TOOL_CALLS_PER_TURN`
 - Create: `tests/unit/web/composer/test_compose_loop_tool_call_cap.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 In `tests/unit/web/composer/test_compose_loop_tool_call_cap.py`:
 
@@ -305,7 +305,7 @@ Run the test:
 
 Expected: FAIL — `ComposerProgressEvent.Reason.tool_call_cap_exceeded` does not exist; `_max_tool_calls_per_turn` is not an attribute on the service; `tool_call_cap_exceeded_total` is not a field on `_SessionsTelemetry`.
 
-- [ ] **Step 2: Add the reason code + telemetry counter.**
+- [x] **Step 2: Add the reason code + telemetry counter.**
 
 In `src/elspeth/web/composer/protocol.py`, extend `ComposerProgressEvent.Reason` (or its current `Literal[...]` equivalent — verify against the file's current shape) with `"tool_call_cap_exceeded"`. Update `ComposerConvergenceError.capture` to accept the reason and `evidence: Mapping[str, Any]` extension carrying `observed` and `cap`.
 
@@ -327,7 +327,7 @@ tool_call_cap_exceeded_total=meter.create_counter(
 
 Update the `_SessionsTelemetry` docstring comment to drop the "Phase 3 (compose loop + audit-grade view) adds" forward-looking line, since this PR is delivering it.
 
-- [ ] **Step 3: Wire `_max_tool_calls_per_turn` into the composer service.**
+- [x] **Step 3: Wire `_max_tool_calls_per_turn` into the composer service.**
 
 Add `max_tool_calls_per_turn: int = 16` to `ComposerServiceImpl.__init__`, store as `self._max_tool_calls_per_turn`. Source the value from runtime config via the existing `from_settings(...)` mapping (see `config-contracts-guide` skill): add `MAX_TOOL_CALLS_PER_TURN: int = 16` to the Composer settings dataclass, route it through the contract, and confirm the `check_contracts` script passes:
 
@@ -335,7 +335,7 @@ Add `max_tool_calls_per_turn: int = 16` to `ComposerServiceImpl.__init__`, store
 .venv/bin/python -m scripts.check_contracts
 ```
 
-- [ ] **Step 4: Re-run the test to verify GREEN.**
+- [x] **Step 4: Re-run the test to verify GREEN.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_tool_call_cap.py -v
@@ -343,7 +343,7 @@ Add `max_tool_calls_per_turn: int = 16` to `ComposerServiceImpl.__init__`, store
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add -p src/elspeth/web/composer/protocol.py \

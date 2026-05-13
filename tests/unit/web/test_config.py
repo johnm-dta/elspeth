@@ -84,6 +84,26 @@ class TestWebSettingsValidation:
                 composer_rate_limit_per_minute=10,
             )
 
+    def test_composer_max_tool_calls_per_turn_defaults_to_16(self) -> None:
+        settings = WebSettings(
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+        )
+
+        assert settings.composer_max_tool_calls_per_turn == 16
+
+    def test_composer_max_tool_calls_per_turn_zero_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_max_tool_calls_per_turn=0,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+            )
+
     def test_composer_timeout_zero_rejected(self) -> None:
         with pytest.raises(ValueError):
             WebSettings(

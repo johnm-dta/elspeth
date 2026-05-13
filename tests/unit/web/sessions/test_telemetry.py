@@ -8,31 +8,18 @@ from elspeth.web.sessions.telemetry import (
     observed_value,
 )
 
-# Spec §1.4 NFR table — production OTel metric strings for Phase 1.
+# Spec §1.4 NFR table — production OTel metric strings for Phase 1 + Phase 3 cap.
 # Verified end-to-end by ``test_production_meter_registers_named_metrics``
 # below.
 #
-# Phase 1 ships ONLY the four audit-primacy counters that
-# persist_compose_turn writes. The remaining four spec-§1.4 counters
-# (``summarizer_errors_total``, ``unknown_response_key_total``,
-# ``tool_call_cap_exceeded_total``, ``audit_grade_view_total``) are
-# Phase 2/3 territory:
-#
-#   - summarizer_errors_total + unknown_response_key_total → Phase 2
-#     (redaction primitives produce them).
-#   - tool_call_cap_exceeded_total + audit_grade_view_total → Phase 3
-#     (compose-loop cap and audit-grade view emit them).
-#
-# Adding them to Phase 1 would ship eight metric names of which four
-# never increment — operationally indistinguishable from broken
-# counters. Each Phase introduces its own counters when the code
-# paths that emit them ship. Closes synthesised review finding M14
-# / SA-4 (phase scope leak).
+# Phase 3 adds ``tool_call_cap_exceeded_total`` with its emitter in the compose
+# loop. Remaining spec-§1.4 counters land with the code paths that emit them.
 EXPECTED_METRIC_NAMES = {
     "composer.audit.tool_row_tier1_violation_total",
     "composer.audit.state_rolled_back_during_persist_total",
     "composer.audit.tool_row_persist_failed_during_unwind_total",
     "composer.audit.tool_row_integrity_violation_total",
+    "composer.tool_call_cap_exceeded_total",
 }
 
 
@@ -47,6 +34,7 @@ def test_telemetry_field_names_match_spec_exactly():
         "state_rolled_back_during_persist_total",
         "tool_row_persist_failed_during_unwind_total",
         "tool_row_integrity_violation_total",
+        "tool_call_cap_exceeded_total",
     }
     actual = set(telem.__dataclass_fields__)
     assert actual == expected_fields, f"field-name mismatch — added: {actual - expected_fields}; removed: {expected_fields - actual}"

@@ -41,6 +41,7 @@ class WebSettings(BaseModel):
     composer_model: str = "gpt-5.5"
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
+    composer_max_tool_calls_per_turn: int = Field(default=16, ge=1)
     composer_timeout_seconds: float = Field(..., gt=0)
     composer_transport_idle_ceiling_seconds: float = Field(
         default=_DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 if TYPE_CHECKING:
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
-from elspeth.web.composer.progress import ComposerProgressSink
+from elspeth.web.composer.progress import ComposerProgressReason, ComposerProgressSink
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
 
@@ -188,6 +189,18 @@ class ComposerServiceError(Exception):
     """Base exception for composer service errors."""
 
 
+def _convergence_reason_for_budget(
+    budget_exhausted: Literal["composition", "discovery", "timeout"],
+) -> ComposerProgressReason:
+    """Map the private convergence budget discriminator to public reason code."""
+
+    if budget_exhausted == "composition":
+        return "convergence_composition_budget"
+    if budget_exhausted == "discovery":
+        return "convergence_discovery_budget"
+    return "convergence_wall_clock_timeout"
+
+
 class ComposerConvergenceError(ComposerServiceError):
     """Raised when the LLM tool-use loop exhausts its budget or times out.
 
@@ -213,7 +226,9 @@ class ComposerConvergenceError(ComposerServiceError):
             route-handler branches.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"max_turns", "budget_exhausted", "partial_state", "tool_invocations", "llm_calls"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset(
+        {"max_turns", "budget_exhausted", "partial_state", "tool_invocations", "llm_calls", "reason", "evidence"}
+    )
 
     def __init__(
         self,
@@ -223,6 +238,8 @@ class ComposerConvergenceError(ComposerServiceError):
         partial_state: CompositionState | None = None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        reason: ComposerProgressReason | None = None,
+        evidence: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(
             f"Composer did not converge within {max_turns} turns "
@@ -232,6 +249,8 @@ class ComposerConvergenceError(ComposerServiceError):
         self.max_turns = max_turns
         self.budget_exhausted = budget_exhausted
         self.partial_state = partial_state
+        self.reason = reason or _convergence_reason_for_budget(budget_exhausted)
+        self.evidence = MappingProxyType(dict(evidence or {}))
         # Per-tool-call audit trail accumulated up to the convergence
         # event. Includes the tool calls that did NOT cause a state
         # mutation (cache hits, ARG_ERROR, discovery-only). The route
@@ -263,6 +282,8 @@ class ComposerConvergenceError(ComposerServiceError):
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        reason: ComposerProgressReason | None = None,
+        evidence: Mapping[str, Any] | None = None,
     ) -> ComposerConvergenceError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -289,6 +310,8 @@ class ComposerConvergenceError(ComposerServiceError):
             partial_state=partial,
             tool_invocations=tool_invocations,
             llm_calls=llm_calls,
+            reason=reason,
+            evidence=evidence,
         )
 
 
@@ -577,6 +600,9 @@ class ComposerSettings(Protocol):
 
     @property
     def composer_max_discovery_turns(self) -> int: ...
+
+    @property
+    def composer_max_tool_calls_per_turn(self) -> int: ...
 
     @property
     def composer_timeout_seconds(self) -> float: ...

@@ -1,0 +1,49 @@
+{
+  "scenario_id": "colour_teal_rate",
+  "summary": "Authored 2026-05-14 in response to staging session e06f591f-c564-4bf0-885d-13149457001d turn-1 failure. The composer was asked to build an inline-data → LLM → JSON pipeline (colours rated for teal compatibility) and failed in three ways: (1) misnarrated OPENROUTER_API_KEY as 'needs to be wired in' when list_user_secrets returned available:true for it; (2) used create_blob as a terminal action after set_source/upsert_node rejections, instead of following up with set_source_from_blob; (3) wrote prose narrating failures rather than retrying corrected mutations. Skill amendments H1 (create_blob never terminal — §71 operational consequences) and H2 (credentials narration discipline — §6 convergence guardrails) landed 2026-05-14; this scenario is the RGR verification target. Cost: ~$0.20–$0.50 per run on gpt-5.4-mini depending on convergence depth.",
+  "opening_prompt": "please create a pipeline which takes 10 random colours (you pick) and sends them to a large language model to rate them for their ability to go with the colour teal (e.g. in interior design) and then save the outputs to a json file",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i ",
+      "let me know if"
+    ],
+    "passivity_phrases_note": "Standard catch-list. The original turn-1 failure did not use passivity phrases per se, but bailed with a 'I hit a configuration issue' prose — the must_be_valid:true + build_failure_sentinels rules below catch that shape.",
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed",
+      "succeeded without mutating compositionstate",
+      "the pipeline is still empty",
+      "missing fields: teal_pairing_rating",
+      "missing fields: llm_response",
+      "incompatible with consumer schema 'llmschema'"
+    ],
+    "build_failure_note": "First two are server-injected on completion-claim with failed preflight. The 'create_blob/the-pipeline-is-still-empty' pair guard against the H1 failure mode (service.py _blocking_result_from_tool_invocations). The remaining three catch the H3 failure mode: LLM transform configured with mode:fixed and an output field listed in schema.fields, which the runtime preflight surfaces as 'Edge from source to llm invalid: producer schema X incompatible with consumer schema llmSchema: Missing fields: <output_field>'.",
+    "credential_misnarration_phrases": [
+      "needs a credential wired in",
+      "the llm step needs a credential",
+      "the llm requires a credential",
+      "needs an api key",
+      "missing credentials",
+      "no credentials are configured"
+    ],
+    "credential_misnarration_note": "RED if any of these phrases appear in the final assistant content. OPENROUTER_API_KEY is available on the staging deploy, so any narration claiming the LLM step lacks credentials is a Tier-1 audit-integrity misstatement per skill §6 'Credential narration discipline'.",
+    "must_be_valid": true,
+    "must_be_valid_note": "Final state must have is_valid=true."
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["llm"]
+    ],
+    "must_have_node_kinds_substring_any_of_note": "An LLM transform must be wired between the source and the JSON sink. The colour-rating prompt is the whole point of the request.",
+    "must_have_outputs_min": 1,
+    "must_have_outputs_min_note": "At least one JSON sink output must be configured.",
+    "must_not_contain_passivity": true,
+    "must_not_contain_passivity_note": "Standard passivity-phrase prohibition."
+  }
+}

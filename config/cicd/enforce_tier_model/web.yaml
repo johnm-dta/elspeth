@@ -117,6 +117,13 @@ allow_hits:
   reason: "False positive \u2014 httpx.AsyncClient.get() is an HTTP GET request, not dict.get()"
   safety: HTTP errors caught by raise_for_status() and except block
   expires: null
+- key: web/auth/local.py:R5:_required_visible_string_claim:fp=c14910a0090fd290
+  owner: web-auth
+  reason: "Tier 3 boundary \u2014 signed local JWT payload claims are still external token data, and sub/username must be\
+    \ validated as visible strings before database lookup or UserIdentity construction"
+  safety: Non-string, missing, or blank required claims raise AuthenticationError(\"Invalid token\"); no coercion, fallback,
+    or claim fabrication occurs
+  expires: null
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=593e0af0074215d6
   owner: web-auth
   reason: "Tier 3 boundary \u2014 JWT header kid field is optional per RFC 7515"

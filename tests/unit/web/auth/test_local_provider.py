@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
+import jwt as pyjwt
 import pytest
 
 from elspeth.web.auth.local import LocalAuthProvider
@@ -18,6 +20,11 @@ def provider(tmp_path):
         secret_key="test-secret-key-for-unit-tests",
         token_expiry_hours=24,
     )
+
+
+def _signed_local_token(provider: LocalAuthProvider, claims: dict[str, Any]) -> str:
+    """Create a signed local JWT for boundary-shape tests."""
+    return pyjwt.encode(claims, provider._secret_key, algorithm="HS256")
 
 
 class TestCreateUser:
@@ -127,8 +134,6 @@ class TestAuthenticate:
     @pytest.mark.asyncio
     async def test_authenticate_wrong_secret_key(self, tmp_path) -> None:
         """Token signed with a different key should fail."""
-        import jwt as pyjwt
-
         provider = LocalAuthProvider(
             db_path=tmp_path / "auth.db",
             secret_key="correct-key",
@@ -141,6 +146,66 @@ class TestAuthenticate:
         bad_token = pyjwt.encode(payload, "wrong-key", algorithm="HS256")
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await provider.authenticate(bad_token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_missing_username_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens without username must not escape as KeyError."""
+        provider.create_user("alice", "pw", display_name="Alice")
+        token = _signed_local_token(
+            provider,
+            {
+                "sub": "alice",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_missing_sub_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens without sub must not escape as KeyError."""
+        token = _signed_local_token(
+            provider,
+            {
+                "username": "alice",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_non_string_username_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens with non-string username must not reach UserIdentity."""
+        provider.create_user("alice", "pw", display_name="Alice")
+        token = _signed_local_token(
+            provider,
+            {
+                "sub": "alice",
+                "username": {"name": "alice"},
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_non_string_sub_claim_raises_authentication_error(self, provider) -> None:
+        """Signed local tokens with non-string sub must not reach the user lookup."""
+        token = _signed_local_token(
+            provider,
+            {
+                "sub": {"id": "alice"},
+                "username": "alice",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+
+        with pytest.raises(AuthenticationError, match="Invalid token"):
+            await provider.authenticate(token)
 
 
 class TestGetUserInfo:

@@ -16,6 +16,18 @@ from jwt.exceptions import PyJWTError
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import AuthenticationError, UserIdentity, UserProfile
+from elspeth.web.validation import has_visible_content
+
+
+def _required_visible_string_claim(payload: dict[str, object], claim_name: str) -> str:
+    """Extract a required local-JWT claim as a visible string."""
+    try:
+        value = payload[claim_name]
+    except KeyError as exc:
+        raise AuthenticationError("Invalid token") from exc
+    if not isinstance(value, str) or not has_visible_content(value):
+        raise AuthenticationError("Invalid token")
+    return value
 
 
 class LocalAuthProvider:
@@ -188,7 +200,8 @@ class LocalAuthProvider:
         except PyJWTError as exc:
             raise AuthenticationError("Invalid token") from exc
 
-        user_id = payload["sub"]
+        user_id = _required_visible_string_claim(payload, "sub")
+        username = _required_visible_string_claim(payload, "username")
 
         # Verify user still exists — deleted users must not retain access
         exists = await run_sync_in_worker(self._user_exists, user_id)
@@ -197,7 +210,7 @@ class LocalAuthProvider:
 
         return UserIdentity(
             user_id=user_id,
-            username=payload["username"],
+            username=username,
         )
 
     def _user_exists(self, user_id: str) -> bool:

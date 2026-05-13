@@ -315,6 +315,11 @@ class TransformProtocol(Protocol):
     # time. Empty frozenset = no required-input declaration.
     declared_input_fields: frozenset[str]
 
+    # Runtime preflight opt-in. The orchestrator checks this explicit flag
+    # instead of probing for optional methods, preserving a closed lifecycle
+    # surface.
+    requires_runtime_preflight: bool
+
     # DAG contract: output schema for transforms that declare output fields.
     # Set by BaseTransform._build_output_schema_config() after declared_output_fields
     # is populated. None for shape-preserving transforms that add no fields.
@@ -379,6 +384,10 @@ class TransformProtocol(Protocol):
 
     def on_complete(self, ctx: "LifecycleContext") -> None:
         """Called after all rows processed or on error, before close(). Individually protected."""
+        ...
+
+    def runtime_preflight(self, ctx: "LifecycleContext") -> None:
+        """Optional engine-time readiness check before source iteration."""
         ...
 
     @classmethod
@@ -492,6 +501,11 @@ class BatchTransformProtocol(Protocol):
     # ADR-013 pre-emission declaration surface.
     declared_input_fields: frozenset[str]
 
+    # Runtime preflight opt-in. The orchestrator checks this explicit flag
+    # instead of probing for optional methods, preserving a closed lifecycle
+    # surface.
+    requires_runtime_preflight: bool
+
     # Error routing configuration
     # Injected by cli_helpers.py bridge from AggregationSettings/TransformSettings.
     on_error: str | None
@@ -532,6 +546,10 @@ class BatchTransformProtocol(Protocol):
 
     def on_complete(self, ctx: "LifecycleContext") -> None:
         """Called after all rows processed or on error, before close(). Individually protected."""
+        ...
+
+    def runtime_preflight(self, ctx: "LifecycleContext") -> None:
+        """Optional engine-time readiness check before source iteration."""
         ...
 
     @classmethod

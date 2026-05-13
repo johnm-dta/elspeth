@@ -221,6 +221,11 @@ class BaseTransform(ABC):
     # transform declares no pre-emission required-input contract.
     declared_input_fields: frozenset[str] = frozenset()
 
+    # Runtime preflight opt-in. Transforms that need an engine-time external
+    # readiness check before source iteration set this True and override
+    # runtime_preflight(). The default remains closed and side-effect free.
+    requires_runtime_preflight: bool = False
+
     # Error routing configuration.
     # Transforms extending TransformDataConfig override this from config.
     # Always non-None at runtime (TransformSettings requires on_error).
@@ -619,6 +624,15 @@ class BaseTransform(ABC):
         Subclasses MUST call super().on_complete(ctx) to set the lifecycle flag.
         """
         self._on_complete_called = True
+
+    def runtime_preflight(self, ctx: LifecycleContext) -> None:  # noqa: B027 - optional override, not abstract
+        """Run an optional transform readiness check before source iteration.
+
+        Only called when requires_runtime_preflight is True. Implementations may
+        make bounded external calls through the injected audit context; failures
+        abort the run before any source rows are loaded.
+        """
+        pass
 
     # ── Plugin-declared semantics (Phase 1: optional, default empty) ──
     # Override on a subclass to declare what the plugin emits / requires.

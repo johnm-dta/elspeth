@@ -184,6 +184,9 @@ class LifecycleContext(Protocol):
     def node_id(self) -> str | None: ...  # [R1] Set by orchestrator before on_start()
 
     @property
+    def operation_id(self) -> str | None: ...
+
+    @property
     def landscape(self) -> PluginAuditWriter | None: ...
 
     @property

@@ -264,7 +264,7 @@ allow_hits:
     trail preserves both. No silent drops. Burndown: filigree elspeth-550362f760
     (closed)."
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=caf0857946e52341
+- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=28abc6a4bd80595e
   owner: bugfix
   reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity
     rejected by stable_hash. Coercion at the source/quarantine boundary is the one

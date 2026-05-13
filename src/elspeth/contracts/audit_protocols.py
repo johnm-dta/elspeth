@@ -42,36 +42,7 @@ class CallRecorder(Protocol):
 
     def allocate_call_index(self, state_id: str) -> int: ...
 
-    def record_call(
-        self,
-        state_id: str,
-        call_index: int,
-        call_type: CallType,
-        status: CallStatus,
-        request_data: CallPayload,
-        response_data: CallPayload | None = None,
-        error: CallPayload | None = None,
-        latency_ms: float | None = None,
-        *,
-        request_ref: str | None = None,
-        response_ref: str | None = None,
-    ) -> Call: ...
-
-
-@runtime_checkable
-class PluginAuditWriter(Protocol):
-    """Protocol for plugin-facing audit recording operations.
-
-    Composes methods from ExecutionRepository, DataFlowRepository, and
-    RunLifecycleRepository into a single interface that plugins can depend
-    on without importing core/.
-
-    Method-count budget: Do not exceed 20 methods.
-    """
-
-    # ── ExecutionRepository methods ──────────────────────────────────────
-
-    def allocate_call_index(self, state_id: str) -> int: ...
+    def allocate_operation_call_index(self, operation_id: str) -> int: ...
 
     def record_call(
         self,
@@ -98,6 +69,55 @@ class PluginAuditWriter(Protocol):
         error: CallPayload | None = None,
         latency_ms: float | None = None,
         *,
+        call_index: int | None = None,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+    ) -> Call: ...
+
+
+@runtime_checkable
+class PluginAuditWriter(Protocol):
+    """Protocol for plugin-facing audit recording operations.
+
+    Composes methods from ExecutionRepository, DataFlowRepository, and
+    RunLifecycleRepository into a single interface that plugins can depend
+    on without importing core/.
+
+    Method-count budget: Do not exceed 20 methods.
+    """
+
+    # ── ExecutionRepository methods ──────────────────────────────────────
+
+    def allocate_call_index(self, state_id: str) -> int: ...
+
+    def allocate_operation_call_index(self, operation_id: str) -> int: ...
+
+    def record_call(
+        self,
+        state_id: str,
+        call_index: int,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: CallPayload,
+        response_data: CallPayload | None = None,
+        error: CallPayload | None = None,
+        latency_ms: float | None = None,
+        *,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+    ) -> Call: ...
+
+    def record_operation_call(
+        self,
+        operation_id: str,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: CallPayload,
+        response_data: CallPayload | None = None,
+        error: CallPayload | None = None,
+        latency_ms: float | None = None,
+        *,
+        call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
     ) -> Call: ...

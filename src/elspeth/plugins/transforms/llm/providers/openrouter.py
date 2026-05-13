@@ -334,6 +334,44 @@ class OpenRouterLLMProvider:
         finally:
             self._release_http_client(snapshot_state_id)
 
+    def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+        """Run a minimal audited OpenRouter call under an operation parent."""
+        http_client = AuditedHTTPClient(
+            execution=self._recorder,
+            state_id=None,
+            operation_id=operation_id,
+            run_id=self._run_id,
+            telemetry_emit=self._telemetry_emit,
+            timeout=self._timeout,
+            base_url=self._base_url,
+            headers=self._request_headers,
+            limiter=self._limiter,
+        )
+        try:
+            request_body: dict[str, Any] = {
+                "model": model,
+                "messages": [{"role": "user", "content": "Respond with OK only."}],
+                "temperature": 0.0,
+                "max_tokens": 4,
+            }
+            response = http_client.post(
+                "/chat/completions",
+                json=request_body,
+                headers={"Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            if status_code == 429:
+                raise RateLimitError(f"Rate limited: {e}") from e
+            if status_code >= 500:
+                raise ServerError(f"Server error ({status_code}): {e}") from e
+            raise LLMClientError(f"HTTP {status_code}: {e}", retryable=False) from e
+        except httpx.RequestError as e:
+            raise NetworkError(f"Network error: {e}") from e
+        finally:
+            http_client.close()
+
     def _get_http_client(self, state_id: str, *, token_id: str | None = None) -> AuditedHTTPClient:
         """Get or create AuditedHTTPClient for a state_id (thread-safe).
 

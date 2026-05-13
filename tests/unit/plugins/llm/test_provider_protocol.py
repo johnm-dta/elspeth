@@ -191,6 +191,9 @@ class TestLLMProviderProtocol:
                     model=model,
                 )
 
+            def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+                del operation_id, model
+
             def close(self) -> None:
                 pass
 

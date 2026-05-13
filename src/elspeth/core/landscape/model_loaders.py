@@ -692,7 +692,7 @@ class OperationLoader:
         oid = row.operation_id
 
         # Tier 1: validate constrained literal fields
-        allowed_types = ("source_load", "sink_write")
+        allowed_types = ("runtime_preflight", "source_load", "sink_write")
         if row.operation_type not in allowed_types:
             raise AuditIntegrityError(
                 f"Operation {oid} has invalid operation_type={row.operation_type!r} "

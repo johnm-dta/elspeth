@@ -77,6 +77,9 @@ class _PluginAuditWriterAdapter:
     def allocate_call_index(self, state_id: str) -> int:
         return self._execution.allocate_call_index(state_id)
 
+    def allocate_operation_call_index(self, operation_id: str) -> int:
+        return self._execution.allocate_operation_call_index(operation_id)
+
     def record_call(
         self,
         state_id: str,
@@ -114,9 +117,23 @@ class _PluginAuditWriterAdapter:
         error: CallPayload | None = None,
         latency_ms: float | None = None,
         *,
+        call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
     ) -> Call:
+        if call_index is not None:
+            return self._execution.record_operation_call(
+                operation_id,
+                call_type,
+                status,
+                request_data,
+                response_data,
+                error,
+                latency_ms,
+                call_index=call_index,
+                request_ref=request_ref,
+                response_ref=response_ref,
+            )
         return self._execution.record_operation_call(
             operation_id,
             call_type,

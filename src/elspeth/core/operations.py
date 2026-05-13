@@ -1,7 +1,8 @@
 """Operation lifecycle management for source/sink I/O.
 
-Operations are the source/sink equivalent of node_states - they provide
-a parent context for external calls made during source.load() or sink.write().
+Operations are the run/node equivalent of node_states - they provide
+a parent context for external calls made outside per-row transform state,
+including source.load(), sink.write(), and runtime preflight checks.
 
 This module provides the track_operation context manager which handles:
 - Operation creation and completion
@@ -74,7 +75,7 @@ def track_operation(
     recorder: ExecutionRepository,
     run_id: str,
     node_id: str,
-    operation_type: Literal["source_load", "sink_write"],
+    operation_type: Literal["source_load", "sink_write", "runtime_preflight"],
     ctx: PluginContext,
     *,
     input_data: dict[str, Any] | None = None,
@@ -120,7 +121,8 @@ def track_operation(
         recorder: ExecutionRepository for audit recording
         run_id: Run ID this operation belongs to
         node_id: Source or sink node performing the operation
-        operation_type: Type of operation ('source_load' or 'sink_write')
+        operation_type: Type of operation ('source_load', 'sink_write', or
+            'runtime_preflight')
         ctx: PluginContext to wire with operation_id
         input_data: Optional input context to record
 

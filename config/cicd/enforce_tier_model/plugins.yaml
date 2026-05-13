@@ -306,7 +306,7 @@ allow_hits:
     be missing
   safety: Falls back to binary encoding if content-type absent
   expires: '2026-07-02'
-- key: plugins/infrastructure/clients/http.py:R4:AuditedHTTPClient:_emit_telemetry_after_audit:fp=91c1cd21a0368986
+- key: plugins/infrastructure/clients/http.py:R4:AuditedHTTPClient:_emit_telemetry_after_audit:fp=588df931d0f0d1f1
   owner: architecture
   reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
     operational telemetry failures from corrupting the main HTTP call path once programmer
@@ -363,7 +363,7 @@ allow_hits:
   safety: Missing attributes become None in TokenUsage.from_dict; no fabricated counts
     are introduced
   expires: null
-- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=52b9845ad6995c97
+- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=bcb37b188197d7f9
   owner: architecture
   reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
     operational telemetry failures from corrupting the audited LLM error path once
@@ -372,7 +372,7 @@ allow_hits:
     before this handler; remaining exceptions are logged and the audited LLM result
     is preserved
   expires: null
-- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=1d9927748b7579fb
+- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=6f49fd2afcb62733
   owner: architecture
   reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
     operational telemetry failures from corrupting the audited LLM error path once
@@ -381,7 +381,7 @@ allow_hits:
     before this handler; remaining exceptions are logged and the audited LLM result
     is preserved
   expires: null
-- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=dbcb564d7f24962b
+- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=369b5c198983a3e5
   owner: architecture
   reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
     operational telemetry failures from corrupting the audited LLM error path once
@@ -390,7 +390,7 @@ allow_hits:
     before this handler; remaining exceptions are logged and the audited LLM result
     is preserved
   expires: null
-- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=b5f64a7d87e28337
+- key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:chat_completion:fp=9f00f16205160b4f
   owner: architecture
   reason: Telemetry emission happens only after Landscape succeeds; broad catch keeps
     operational telemetry failures from corrupting the audited LLM success path once

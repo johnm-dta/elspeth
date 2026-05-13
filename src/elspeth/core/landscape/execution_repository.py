@@ -845,7 +845,7 @@ class ExecutionRepository:
         self,
         run_id: str,
         node_id: str,
-        operation_type: Literal["source_load", "sink_write"],
+        operation_type: Literal["source_load", "sink_write", "runtime_preflight"],
         *,
         input_data: Mapping[str, object] | None = None,
     ) -> Operation:
@@ -1017,6 +1017,7 @@ class ExecutionRepository:
         error: CallPayload | None = None,
         latency_ms: float | None = None,
         *,
+        call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
     ) -> Call:
@@ -1039,7 +1040,8 @@ class ExecutionRepository:
         Returns:
             The recorded Call model
         """
-        call_index = self.allocate_operation_call_index(operation_id)
+        if call_index is None:
+            call_index = self.allocate_operation_call_index(operation_id)
         call_id = f"call_{operation_id}_{call_index}"
         timestamp = now()
         prepared = self._prepare_call_payloads(

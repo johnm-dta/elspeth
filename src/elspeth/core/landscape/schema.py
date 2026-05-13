@@ -283,7 +283,7 @@ operations_table = Table(
     Column("operation_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False, index=True),
     Column("node_id", String(64), nullable=False),
-    Column("operation_type", String(32), nullable=False),  # 'source_load' | 'sink_write'
+    Column("operation_type", String(32), nullable=False),  # 'source_load' | 'sink_write' | 'runtime_preflight'
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
     Column("status", String(16), nullable=False),  # 'open' | 'completed' | 'failed' | 'pending'

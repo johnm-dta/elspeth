@@ -2058,6 +2058,37 @@ class Orchestrator:
             agg_transform_lookup=agg_transform_lookup,
         )
 
+    def _run_transform_runtime_preflights(
+        self,
+        factory: RecorderFactory,
+        run_id: str,
+        config: PipelineConfig,
+        ctx: PluginContext,
+    ) -> None:
+        """Run transform-declared external readiness checks before source load."""
+        for transform in config.transforms:
+            if not transform.requires_runtime_preflight:
+                continue
+            if transform.node_id is None:
+                raise OrchestrationInvariantError(
+                    f"Transform {transform.name!r} requires runtime preflight before its node_id was assigned"
+                )
+
+            previous_node_id = ctx.node_id
+            ctx.node_id = transform.node_id
+            try:
+                with track_operation(
+                    recorder=factory.execution,
+                    run_id=run_id,
+                    node_id=transform.node_id,
+                    operation_type="runtime_preflight",
+                    ctx=ctx,
+                    input_data={"transform_plugin": transform.name},
+                ):
+                    transform.runtime_preflight(ctx)
+            finally:
+                ctx.node_id = previous_node_id
+
     def _setup_resume_context(
         self,
         factory: RecorderFactory,
@@ -2983,6 +3014,7 @@ class Orchestrator:
             payload_store,
             shutdown_event=shutdown_event,
         )
+        self._run_transform_runtime_preflights(factory, run_id, config, run_ctx.ctx)
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
@@ -3453,6 +3485,7 @@ class Orchestrator:
 
         # Restore contract from parameter (already retrieved by resume() caller)
         run_ctx.ctx.contract = schema_contract
+        self._run_transform_runtime_preflights(factory, run_id, config, run_ctx.ctx)
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),

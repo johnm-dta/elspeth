@@ -928,6 +928,38 @@ class PluginRetryableError(Exception):
         self.status_code = status_code
 
 
+class RuntimePreflightFailedError(Exception):
+    """Provider/runtime readiness check failed before row processing."""
+
+    error_class = "pre_flight_failed"
+
+    def __init__(
+        self,
+        *,
+        plugin_name: str,
+        provider: str,
+        cause: BaseException,
+    ) -> None:
+        self.plugin_name = plugin_name
+        self.provider = provider
+        self.cause_type = type(cause).__name__
+        message = (
+            f"{self.error_class}: {plugin_name} provider {provider} failed runtime preflight "
+            f"before row processing: {self.cause_type}: {cause}"
+        )
+        super().__init__(message)
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        """Canonical structured payload for audit/event consumers."""
+        return {
+            "error_class": self.error_class,
+            "plugin_name": self.plugin_name,
+            "provider": self.provider,
+            "cause_type": self.cause_type,
+            "message": str(self),
+        }
+
+
 # TIER-2: Plugin contract violation — plugin bug (row-level failure). Recording FAILED state is accurate; not system corruption. Base class excluded from TIER_1_ERRORS (ADR-008).
 class PluginContractViolation(AuditEvidenceBase, RuntimeError):
     """Raised when a plugin violates its contract with the framework.

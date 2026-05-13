@@ -31,7 +31,7 @@ from pydantic import TypeAdapter
 from elspeth.contracts import Determinism, TransformErrorReason, TransformResult, propagate_contract
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
-from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.errors import FrameworkBugError, RuntimePreflightFailedError
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -1041,8 +1041,9 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     """
 
     name = "llm"
+    requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:070f87f5e115a2b9"
+    source_file_hash: str | None = "sha256:10a49e19d8c4419c"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1180,6 +1181,9 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                     model="probe-model",
                     finish_reason=FinishReason.STOP,
                 )
+
+            def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+                del operation_id, model
 
             def close(self) -> None:
                 return None
@@ -1482,6 +1486,22 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 provider="azure_ai",
                 content_recording=self._tracing_config.enable_content_recording,
             )
+
+    def runtime_preflight(self, ctx: LifecycleContext) -> None:
+        """Fail fast if the configured LLM provider/model cannot be reached."""
+        if self._provider is None:
+            raise FrameworkBugError("LLMTransform runtime_preflight called before provider initialization")
+        if ctx.operation_id is None:
+            raise FrameworkBugError("LLMTransform runtime_preflight requires an operation audit parent")
+
+        try:
+            self._provider.runtime_preflight(operation_id=ctx.operation_id, model=self._model)
+        except LLMClientError as exc:
+            raise RuntimePreflightFailedError(
+                plugin_name=self.name,
+                provider=self._config.provider,
+                cause=exc,
+            ) from exc
 
     def _create_provider(self) -> LLMProvider:
         """Instantiate the provider with all required dependencies.

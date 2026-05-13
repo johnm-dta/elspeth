@@ -219,6 +219,28 @@ class AzureLLMProvider:
             with self._llm_clients_lock:
                 self._llm_clients.pop(snapshot_state_id, None)
 
+    def runtime_preflight(self, *, operation_id: str, model: str) -> None:
+        """Run a minimal audited Azure OpenAI call under an operation parent."""
+        client = AuditedLLMClient(
+            execution=self._recorder,
+            state_id=None,
+            operation_id=operation_id,
+            run_id=self._run_id,
+            telemetry_emit=self._telemetry_emit,
+            underlying_client=self._get_underlying_client(),
+            provider="azure",
+            limiter=self._limiter,
+        )
+        try:
+            client.chat_completion(
+                model=model,
+                messages=[{"role": "user", "content": "Respond with OK only."}],
+                temperature=0.0,
+                max_tokens=4,
+            )
+        finally:
+            client.close()
+
     def _get_underlying_client(self) -> Any:
         """Get or create the underlying AzureOpenAI SDK client (thread-safe)."""
         with self._underlying_client_lock:

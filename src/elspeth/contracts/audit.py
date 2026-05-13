@@ -850,7 +850,7 @@ class Operation:
     operation_id: str
     run_id: str
     node_id: str
-    operation_type: Literal["source_load", "sink_write"]
+    operation_type: Literal["source_load", "sink_write", "runtime_preflight"]
     started_at: datetime
     status: Literal["open", "completed", "failed", "pending"]
     completed_at: datetime | None = None
@@ -861,7 +861,7 @@ class Operation:
     error_message: str | None = None
     duration_ms: float | None = None
 
-    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset({"source_load", "sink_write"})
+    _ALLOWED_OPERATION_TYPES: ClassVar[frozenset[str]] = frozenset({"runtime_preflight", "source_load", "sink_write"})
     _ALLOWED_STATUSES: ClassVar[frozenset[str]] = frozenset({"open", "completed", "failed", "pending"})
 
     def __post_init__(self) -> None:

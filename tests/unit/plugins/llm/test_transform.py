@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from elspeth.contracts.errors import RuntimePreflightFailedError
 from elspeth.contracts.results import TransformResult
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
@@ -149,6 +150,33 @@ class TestTransformProperties:
         transform = LLMTransform(_make_config())
         with pytest.raises(NotImplementedError, match="accept"):
             transform.process(Mock(), Mock())
+
+    def test_llm_transform_requires_runtime_preflight(self) -> None:
+        """LLM transforms must opt into engine-time provider checks."""
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        assert LLMTransform.requires_runtime_preflight is True
+
+    def test_runtime_preflight_delegates_to_provider_with_operation_parent(self) -> None:
+        transform, mock_provider = _make_transform_with_mock_provider()
+        ctx = Mock()
+        ctx.operation_id = "op-runtime-preflight"
+
+        transform.runtime_preflight(ctx)
+
+        mock_provider.runtime_preflight.assert_called_once_with(
+            operation_id="op-runtime-preflight",
+            model="gpt-4o",
+        )
+
+    def test_runtime_preflight_wraps_provider_failure(self) -> None:
+        transform, mock_provider = _make_transform_with_mock_provider()
+        mock_provider.runtime_preflight.side_effect = LLMClientError("401 unauthorized", retryable=False)
+        ctx = Mock()
+        ctx.operation_id = "op-runtime-preflight"
+
+        with pytest.raises(RuntimePreflightFailedError, match=r"pre_flight_failed.*401 unauthorized"):
+            transform.runtime_preflight(ctx)
 
 
 # ---------------------------------------------------------------------------

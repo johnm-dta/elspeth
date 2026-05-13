@@ -1,6 +1,6 @@
-# Per-step conversational LLM — Phase A handover (slices 1–2 landed, 3–6 pending)
+# Per-step conversational LLM — Phase A handover (historical)
 
-**Status: Phase A in flight, route + frontend remain.** Two of ~6 slices have landed on `feat/composer-per-step-chat` (worktree at `/home/john/elspeth/.worktrees/per-step-chat`, branched from `RC5.2`). The architectural seam (per-step skill briefings + a working `solve_step_chat` solver) is in place and tested. What remains is the HTTP route, frontend `ChatInput` wiring, and conversation-history persistence — all known seams, no further design work.
+**Status update:** this handover is a historical pickup note from the point where only slices 1-2 had landed. Phase A has since landed on `feat/composer-per-step-chat`: the route, frontend `ChatInput` wiring, `GuidedChatHistory`, persisted `GuidedSession.chat_history`, and `ComposerChatTurn` audit rows exist in-branch. Treat the slice sections below as implementation history, not a current remaining-work inventory.
 
 ## TL;DR
 

@@ -1,10 +1,10 @@
 """Per-step chat solver: invoke LLM with step-scoped skill briefing, return advisory text.
 
-Phase A is intentionally **advisory-only** — no tools, no state mutation.  The
-LLM receives the base preamble + the playbook for the user's current wizard
-step, plus the user's typed message, and replies with prose.  Per the plan
-file at /home/john/.claude/plans/please-investigate-the-new-fizzy-kite.md,
-Phase B introduces the per-step tool palette + Tier-3 args validation.
+The solver is intentionally **advisory-only**: no tools and no state mutation.
+It receives the base preamble + the playbook for the user's current wizard step,
+plus the user's typed message, and replies with prose.  Per the plan file at
+/home/john/.claude/plans/please-investigate-the-new-fizzy-kite.md, Phase B
+introduces the per-step tool palette + Tier-3 args validation.
 
 Audit: ``solve_step_chat`` itself does not record. The route handler
 (``post_guided_chat`` in ``web/sessions/routes.py``) constructs a

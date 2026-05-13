@@ -541,40 +541,25 @@ summary:focus-visible {
   background-color: rgba(122, 154, 154, 0.15);
   color: var(--color-status-pending);
 }
-.status-badge-pending::before {
-  content: "\25CB "; /* ○ hollow circle */
-}
 
 .status-badge-running {
   background-color: rgba(97, 218, 255, 0.15);
   color: var(--color-status-running);
-}
-.status-badge-running::before {
-  content: "\21BB "; /* ↻ clockwise arrow */
 }
 
 .status-badge-completed {
   background-color: rgba(20, 176, 174, 0.15);
   color: var(--color-status-completed);
 }
-.status-badge-completed::before {
-  content: "\2713 "; /* ✓ checkmark */
-}
 
 .status-badge-failed {
   background-color: rgba(232, 86, 83, 0.15);
   color: var(--color-status-failed);
 }
-.status-badge-failed::before {
-  content: "\2717 "; /* ✗ cross */
-}
 
 .status-badge-cancelled {
   background-color: rgba(227, 132, 68, 0.15);
   color: var(--color-status-cancelled);
-}
-.status-badge-cancelled::before {
-  content: "\2014 "; /* — em dash */
 }
 
 /* Cancel-pending badge — same colour family as cancelled but distinguished
@@ -586,14 +571,19 @@ summary:focus-visible {
   background-color: rgba(227, 132, 68, 0.15);
   color: var(--color-status-cancelled);
 }
-.status-badge-cancelling::before {
-  content: "\25CF "; /* ● filled circle */
+
+.status-badge-icon {
+  display: inline-block;
+  line-height: 1;
+}
+
+.status-badge-icon--cancelling {
   display: inline-block;
   animation: pulse-dot 1.2s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .status-badge-cancelling::before {
+  .status-badge-icon--cancelling {
     animation: none;
     opacity: 0.7;
   }
@@ -611,16 +601,10 @@ summary:focus-visible {
   background-color: rgba(20, 176, 174, 0.15);
   color: var(--color-status-completed);
 }
-.status-badge-completed-with-failures::before {
-  content: "\26A0  "; /* ⚠ warning sign */
-}
 
 .status-badge-empty {
   background-color: rgba(128, 128, 128, 0.15);
   color: var(--color-status-empty);
-}
-.status-badge-empty::before {
-  content: "\2205  "; /* ∅ empty set */
 }
 
 /* ---------------------------------------------------------------------------

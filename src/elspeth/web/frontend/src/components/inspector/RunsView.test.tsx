@@ -195,6 +195,28 @@ describe("RunsView", () => {
     expect(screen.queryByText(/Pipeline execution failed/i)).not.toBeInTheDocument();
   });
 
+  it("renders status badge symbols as aria-hidden DOM text", () => {
+    useExecutionStore.setState({
+      runs: [
+        makeRun({
+          status: "completed",
+          error: null,
+        }),
+      ],
+    });
+
+    render(<RunsView />);
+
+    const label = screen.getByText("completed");
+    expect(label).toHaveClass("status-badge-label");
+    const badge = label.closest(".status-badge");
+    expect(badge).not.toBeNull();
+
+    const icon = badge!.querySelector(".status-badge-icon");
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(icon).toHaveTextContent("\u2713");
+  });
+
   it("renders rows routed to the virtual discard sink", () => {
     useExecutionStore.setState({
       runs: [
@@ -437,7 +459,7 @@ describe("RunsView cancelling badge", () => {
     // Get all status badge elements (excluding the duration label which also contains "cancelling")
     const badges = screen.getAllByText(/cancelling/i);
     // The first one is the badge; the second one is the duration span
-    const badge = badges[0].closest("[class*='status-badge']");
+    const badge = badges[0].closest(".status-badge");
     expect(badge).not.toBeNull();
     // Distinct class — NOT status-badge-cancelled.  This pins the visual
     // differentiation invariant: cancel-pending uses a pulsing-dot glyph,

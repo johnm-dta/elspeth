@@ -38,6 +38,16 @@ const STATUS_BADGE_CLASSES: Record<RunStatus, string> = {
   cancelled: "status-badge status-badge-cancelled",
 };
 
+const STATUS_BADGE_ICONS: Record<RunStatus, string> = {
+  pending: "\u25CB",
+  running: "\u21BB",
+  completed: "\u2713",
+  completed_with_failures: "\u26A0",
+  failed: "\u2717",
+  empty: "\u2205",
+  cancelled: "\u2014",
+};
+
 // Human-readable badge labels.  Same exhaustiveness guarantee as the class
 // map: a missing entry is a compile error.  Underscored identifiers like
 // `completed_with_failures` become "completed with failures" for display
@@ -240,6 +250,15 @@ export function RunsView() {
         const displayStatus = run.cancel_requested && run.status === "running"
           ? "cancelling"
           : STATUS_DISPLAY_LABELS[run.status];
+        const statusBadgeClass = run.cancel_requested && run.status === "running"
+          ? "status-badge status-badge-cancelling"
+          : STATUS_BADGE_CLASSES[run.status];
+        const statusBadgeIcon = run.cancel_requested && run.status === "running"
+          ? "\u25CF"
+          : STATUS_BADGE_ICONS[run.status];
+        const statusBadgeIconClass = run.cancel_requested && run.status === "running"
+          ? "status-badge-icon status-badge-icon--cancelling"
+          : "status-badge-icon";
 
         return (
           <div key={run.id}>
@@ -267,13 +286,12 @@ export function RunsView() {
                     pulsing dot glyph so it is visually distinguishable from
                     a fully cancelled run that uses the same colour. */}
                 <span
-                  className={
-                    run.cancel_requested && run.status === "running"
-                      ? "status-badge status-badge-cancelling"
-                      : STATUS_BADGE_CLASSES[run.status]
-                  }
+                  className={statusBadgeClass}
                 >
-                  {displayStatus}
+                  <span className={statusBadgeIconClass} aria-hidden="true">
+                    {statusBadgeIcon}
+                  </span>
+                  <span className="status-badge-label">{displayStatus}</span>
                 </span>
                 <span
                   style={{

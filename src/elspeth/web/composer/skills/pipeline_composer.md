@@ -64,7 +64,7 @@ If any tool you intend to call still shows a placeholder signature in a deferred
 1. `preview_pipeline` last returned `is_valid: true` (and any blocking warnings are resolved). You may now write a final reply summarising what you built.
 2. You have **made another tool call** — patching a node, fetching a schema, asking `explain_validation_error`, or any other forward step. Then loop: act, re-preview, judge again.
 
-**You may not** end your turn by writing prose that describes a problem and stops there. The server runs runtime preflight on every "no more tool calls" reply. If the pipeline is invalid at that moment, the server **silently replaces your reply** with a synthetic "I cannot mark this pipeline complete yet because runtime preflight failed: …" message and the user never sees what you wrote. From the user's perspective you have produced nothing.
+**You may not** end your turn by writing prose that describes a problem and stops there. The server runs runtime preflight on every "no more tool calls" reply. If the pipeline is invalid at that moment, the server appends an `[ELSPETH-SYSTEM]` suffix naming the runtime-preflight failure, and the user sees that the build is still invalid. Your prose may be preserved for diagnosis, but it is not a successful completion message.
 
 **Operational consequences — read these literally:**
 

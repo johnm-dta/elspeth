@@ -6,11 +6,14 @@ step, plus the user's typed message, and replies with prose.  Per the plan
 file at /home/john/.claude/plans/please-investigate-the-new-fizzy-kite.md,
 Phase B introduces the per-step tool palette + Tier-3 args validation.
 
-Audit: every call goes through ``_litellm_acompletion`` which records into
-``ComposerLLMCall``.  The dedicated ``ComposerChatTurn`` record (with
-``step_scope``, ``initiator``, ``chat_turn_seq`` discriminators) lands in a
-separate slice; until then, chat calls are auditable but not yet
-distinguishable from chain-solver calls except by message content.
+Audit: ``solve_step_chat`` itself does not record. The route handler
+(``post_guided_chat`` in ``web/sessions/routes.py``) constructs a
+``ComposerChatTurn`` from the ``StepChatResult`` returned by
+``solve_step_chat_with_auto_drop`` and persists it via the
+``BufferingRecorder`` drain. No ``ComposerLLMCall`` row is currently emitted
+for chat calls; this is a known asymmetry with the chain-solver path, which
+emits ``ComposerLLMCall`` via explicit ``recorder.record_llm_call`` calls in
+``_guided_solve_chain.py``. Closing that asymmetry is Phase B work.
 """
 
 from __future__ import annotations

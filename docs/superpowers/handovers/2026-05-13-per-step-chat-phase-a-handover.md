@@ -45,7 +45,7 @@ Both pre-commit hook chains green: ruff format/lint, mypy, secret scan, tier mod
 - Wrap call in `_guided_solve_chain.py`-style auto-drop on transient LLM failure (`asyncio.TimeoutError`, LiteLLM connection errors) — **see memory `feedback_fix_errors_you_encounter.md`**: the auto-drop pattern at three sites in `solve_chain` is the template
 - Response: `{assistant_message: str, guided_session: GuidedSession}` (the guided_session is unchanged in Phase A but echoed for client-store consistency)
 
-**Audit:** `solve_step_chat` invokes `_litellm_acompletion` which records into `ComposerLLMCall` automatically. No new audit shape needed for slice 3 (`ComposerChatTurn` lands in slice 5).
+**Audit:** `solve_step_chat` itself does not record. The route handler (`post_guided_chat` in `web/sessions/routes.py`) constructs a `ComposerChatTurn` from the `StepChatResult` returned by `solve_step_chat_with_auto_drop` and persists it via the `BufferingRecorder` drain. No `ComposerLLMCall` row is currently emitted for chat calls; this is a known asymmetry with the chain-solver path, which emits `ComposerLLMCall` via explicit `recorder.record_llm_call` calls in `_guided_solve_chain.py`. Closing that asymmetry is Phase B work.
 
 **Don't:** add a `control_signal` field to the chat body — chat is *not* a turn-answer; it does not advance step state.
 

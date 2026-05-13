@@ -2376,7 +2376,7 @@ Filed follow-up: `elspeth-dbeb1fbbe9`.
 
 ## Task 16: Final Phase 3 CI run + PR
 
-- [ ] **Step 1: Run the full Phase 3 test surface.**
+- [x] **Step 1: Run the full Phase 3 test surface.**
 
 ```bash
 .venv/bin/python -m pytest \
@@ -2395,7 +2395,9 @@ Filed follow-up: `elspeth-dbeb1fbbe9`.
 
 Expected: PASS for all. CL-PP-11 (commit `eca88974`) runs only on the Docker-enabled CI lane via the `testcontainer` marker.
 
-- [ ] **Step 2: Run static-analysis gates.**
+Verification run on this branch: the plan's `tests/integration/web/test_compose_loop_failed_turn_field.py` path no longer exists, so the live equivalent used `tests/unit/web/sessions/test_failed_turn_handlers.py` and `tests/unit/web/test_composer_exception_handlers.py` alongside the other listed paths. Result: 74 passed.
+
+- [x] **Step 2: Run static-analysis gates.**
 
 ```bash
 .venv/bin/python -m mypy src/
@@ -2407,7 +2409,9 @@ Expected: PASS for all. CL-PP-11 (commit `eca88974`) runs only on the Docker-ena
 
 Expected: all green.
 
-- [ ] **Step 3: Verify counter post-conditions match the §1.4 SLO claims.**
+Verification run on this branch: mypy, ruff, `scripts.check_contracts`, tier-model enforcement, and freeze-guard enforcement all passed. The freeze-guard command requires the current `--root src/elspeth --allowlist config/cicd/enforce_freeze_guards` arguments.
+
+- [x] **Step 3: Verify counter post-conditions match the §1.4 SLO claims.**
 
 ```bash
 .venv/bin/python -m pytest tests/property/web/composer/ -v -k "otel_counter_postconditions"
@@ -2415,7 +2419,7 @@ Expected: all green.
 
 Expected: PASS. `composer.audit.tool_row_tier1_violation_total == 0` across the property-test campaign (the counter only increments when the test explicitly injects a Tier-1 fault and asserts the increment).
 
-- [ ] **Step 4: Re-run signature-change sweeps before final PR summary.**
+- [x] **Step 4: Re-run signature-change sweeps before final PR summary.**
 
 ```bash
 rg -n "ComposerServiceImpl\\(" src tests
@@ -2430,7 +2434,7 @@ rg -n "_run_one_turn_for_test" src tests
 
 Expected: no required-constructor-parameter fallout remains, every red-test fixture/helper resolves to a definition, `_run_one_turn_for_test` is defined before use, and there is no defensive `getattr`/`hasattr` for `AuditIntegrityError.failed_turn`. Any remaining `ComposerServiceImpl(` callers without `sessions_service=` are constructor-only/non-persistence callers covered by the sentinel default, or tests that deliberately assert `RuntimeError("sessions_service not wired")` at first persistence use. The seam-contract grep returns no stale "does not depend" wording after Task 6.
 
-- [ ] **Step 5: Surface to operator for PR-open decision. Do NOT run `gh pr create`.**
+- [x] **Step 5: Surface to operator for PR-open decision. Do NOT run `gh pr create`.**
 
 Per Phase 2 rev-5 BLOCKER B4 closure pattern (per `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.md` "Phase 2 done-when removes PR-open from scope; plan rewrite ends at 'gate green; await operator PR-open instruction'"), and per project memory `feedback_default_to_worktree.md` (worktree-default policy revision 2026-05-11) and `project_phase2_plan_review_verdict.md`: Phase 3 implementation ends at "gate green; await operator PR-open instruction." The implementer captures the readiness state in the conversation and stops; the operator decides when (and whether) to open the PR. (Rev-1 of this plan ran `gh pr create` unconditionally here; that was a re-introduction of the Phase 2 rev-1 BLOCKER B4 pattern. Rev-2 removes it.)
 

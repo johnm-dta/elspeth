@@ -16,7 +16,7 @@ import os
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet, InvalidToken
@@ -79,6 +79,21 @@ def _derive_fernet_key(master_key: str, salt: bytes) -> bytes:
     )
     # Fernet requires url-safe base64 encoded 32-byte key
     return base64.urlsafe_b64encode(raw)
+
+
+def _secret_binary_to_bytes(name: str, field_name: str, value: object) -> bytes:
+    """Normalize DB-returned binary column values before cryptographic use."""
+    value_type = type(value)
+    if value_type is bytes:
+        return cast(bytes, value)
+    if value_type is bytearray:
+        return bytes(cast(bytearray, value))
+    if value_type is memoryview:
+        return cast(memoryview, value).tobytes()
+    raise SecretDecryptionError(
+        f"Secret {name!r} is not resolvable — stored {field_name} is not binary data "
+        "(possible row corruption or unsupported database driver result type)"
+    )
 
 
 _UpsertBuilder = Callable[[sa.Table, dict[str, Any]], Any]
@@ -369,20 +384,21 @@ class UserSecretStore:
         with self._engine.connect() as conn:
             return conn.execute(stmt).first()
 
-    def _decrypt_secret_value(self, name: str, *, encrypted_value: bytes, salt: bytes) -> str:
-        key = _derive_fernet_key(self._master_key, salt)
+    def _decrypt_secret_value(self, name: str, *, encrypted_value: object, salt: object) -> str:
+        encrypted_bytes = _secret_binary_to_bytes(name, "encrypted_value", encrypted_value)
+        salt_bytes = _secret_binary_to_bytes(name, "salt", salt)
+        key = _derive_fernet_key(self._master_key, salt_bytes)
         try:
-            return Fernet(key).decrypt(encrypted_value).decode("utf-8")
-        except InvalidToken as exc:
+            return Fernet(key).decrypt(encrypted_bytes).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError) as exc:
             raise SecretDecryptionError(
                 f"Secret {name!r} is not resolvable — stored value cannot be decrypted "
                 "with the current web secret_key (possible key rotation or row corruption)"
             ) from exc
 
     def _row_is_resolvable(self, name: str, *, row: Any) -> bool:
-        key = _derive_fernet_key(self._master_key, row.salt)
         try:
-            Fernet(key).decrypt(row.encrypted_value)
-        except InvalidToken:
+            self._decrypt_secret_value(name, encrypted_value=row.encrypted_value, salt=row.salt)
+        except SecretDecryptionError:
             return False
         return True

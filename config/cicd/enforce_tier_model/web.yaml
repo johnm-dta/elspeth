@@ -692,12 +692,12 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 os.environ.get() checks deployment env var presence for fingerprint key"
   safety: Returns bool only; deployment readiness check; no default fabrication
   expires: null
-- key: web/secrets/user_store.py:R6:UserSecretStore:_row_is_resolvable:fp=7bb1d0561d96dc27
+- key: web/secrets/user_store.py:R6:UserSecretStore:_row_is_resolvable:fp=43dce80c56a84dc0
   owner: web-secrets
-  reason: "Decryptability probe \u2014 Fernet InvalidToken is the expected signal for key rotation or ciphertext corruption\
-    \ when computing browser-safe availability metadata"
-  safety: Exception is converted only into available=False; get_secret() still raises SecretNotFoundError with explicit cause
-    on the resolution path
+  reason: "Decryptability probe \u2014 SecretDecryptionError is the expected typed signal for key rotation, ciphertext corruption,\
+    \ or unsupported DB binary result types when computing browser-safe availability metadata"
+  safety: Exception is converted only into available=False for metadata; get_secret() still raises SecretDecryptionError with
+    explicit cause on the resolution path
   expires: null
 - key: web/secrets/service.py:R6:WebSecretService:resolve:fp=e201cb7204d089d8
   owner: web-secrets

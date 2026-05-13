@@ -121,6 +121,7 @@ class _TraceOutcome:
     tool_call_ids: frozenset[str]
     rows: tuple[Any, ...]
     state_rows: tuple[Any, ...]
+    tool_row_tier1_violations: int
     tool_row_integrity_violations: int
     tool_call_cap_exceeded: int
 
@@ -514,6 +515,7 @@ def _drive_single_example_trace(
         tool_call_ids=frozenset(row.tool_call_id for row in _chat_rows(harness) if row.role == "tool"),
         rows=_chat_rows(harness),
         state_rows=_state_rows(harness),
+        tool_row_tier1_violations=observed_value(harness.sessions_service._telemetry.tool_row_tier1_violation_total),
         tool_row_integrity_violations=observed_value(harness.sessions_service._telemetry.tool_row_integrity_violation_total),
         tool_call_cap_exceeded=observed_value(harness.service._telemetry.tool_call_cap_exceeded_total),  # type: ignore[attr-defined]
     )
@@ -701,6 +703,7 @@ class ComposeLoopAuditMachine(RuleBasedStateMachine):
     @invariant()
     def counters_stay_non_negative(self) -> None:
         for outcome in self.outcomes:
+            assert outcome.tool_row_tier1_violations >= 0
             assert outcome.tool_row_integrity_violations >= 0
             assert outcome.tool_call_cap_exceeded >= 0
 
@@ -762,3 +765,28 @@ def test_failure_injection_arms_are_mechanically_drivable(failure_injection_poin
         "tool_call_cap_exceeded",
     }:
         assert outcome.rows == ()
+
+
+def test_otel_counter_postconditions() -> None:
+    """§1.4 SLO counters stay dark except for explicit injected faults."""
+
+    success = _drive_single_example_trace(cancellation_arrival_time="after_response_yielded")
+    assert success.tool_row_tier1_violations == 0
+    assert success.tool_row_integrity_violations == 0
+    assert success.tool_call_cap_exceeded == 0
+
+    cap = _drive_single_example_trace(
+        cancellation_arrival_time="after_response_yielded",
+        failure_injection_point="tool_call_cap_exceeded",
+    )
+    assert cap.tool_row_tier1_violations == 0
+    assert cap.tool_row_integrity_violations == 0
+    assert cap.tool_call_cap_exceeded == 1
+
+    tier1 = _drive_single_example_trace(
+        cancellation_arrival_time="after_response_yielded",
+        failure_injection_point="audit_raises_OperationalError_on_commit",
+    )
+    assert tier1.tool_row_tier1_violations == 1
+    assert tier1.tool_row_integrity_violations == 0
+    assert tier1.rows == ()

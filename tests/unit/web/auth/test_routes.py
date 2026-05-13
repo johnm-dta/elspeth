@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import jwt as pyjwt
 import pytest
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
 
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.models import AuthenticationError, UserIdentity
@@ -49,6 +49,12 @@ def _client_for(app: FastAPI) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
+def _assert_token_response_uncacheable(response: Response) -> None:
+    """Token responses carry bearer credentials and must not be cacheable."""
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
+
+
 @pytest.mark.asyncio
 class TestLoginEndpoint:
     """Tests for POST /api/auth/login."""
@@ -67,6 +73,7 @@ class TestLoginEndpoint:
                 json={"username": "alice", "password": "password123"},
             )
         assert response.status_code == 200
+        _assert_token_response_uncacheable(response)
         body = response.json()
         assert "access_token" in body
         assert body["token_type"] == "bearer"
@@ -127,6 +134,7 @@ class TestRegisterEndpoint:
                 json={"username": "bob", "password": "pw123", "display_name": "Bob"},
             )
         assert response.status_code == 200
+        _assert_token_response_uncacheable(response)
         body = response.json()
         assert "access_token" in body
         assert body["token_type"] == "bearer"
@@ -266,6 +274,7 @@ class TestTokenRefreshEndpoint:
                 headers={"Authorization": f"Bearer {old_token}"},
             )
         assert refresh_resp.status_code == 200
+        _assert_token_response_uncacheable(refresh_resp)
         new_body = refresh_resp.json()
         assert "access_token" in new_body
         assert new_body["token_type"] == "bearer"

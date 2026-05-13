@@ -9,7 +9,7 @@ GET /me returns the full UserProfile for any auth provider.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from elspeth.contracts.auth import AuthProviderType
@@ -86,6 +86,12 @@ class AuthConfigResponse(_StrictResponse):
     authorization_endpoint: str | None = None
 
 
+def _mark_token_response_uncacheable(response: Response) -> None:
+    """Bearer-token responses must not be retained by shared or browser caches."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
 def create_auth_router() -> APIRouter:
     """Create the auth router with /api/auth prefix."""
     router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -94,6 +100,7 @@ def create_auth_router() -> APIRouter:
     async def login(
         body: LoginRequest,
         request: Request,
+        response: Response,
         _rate_limit: None = Depends(check_auth_rate_limit),
     ) -> TokenResponse:
         """Authenticate with username/password (local auth only).
@@ -115,12 +122,14 @@ def create_auth_router() -> APIRouter:
         except AuthenticationError as exc:
             raise HTTPException(status_code=401, detail=exc.detail) from exc
 
+        _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
     @router.post("/register", response_model=TokenResponse)
     async def register(
         body: RegisterRequest,
         request: Request,
+        response: Response,
         _rate_limit: None = Depends(check_auth_rate_limit),
     ) -> TokenResponse:
         """Register a new user account (local auth, open registration only).
@@ -155,11 +164,13 @@ def create_auth_router() -> APIRouter:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         token = await provider.login(body.username, body.password)
+        _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
     @router.post("/token", response_model=TokenResponse)
     async def refresh_token(
         request: Request,
+        response: Response,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
     ) -> TokenResponse:
         """Re-issue a JWT from a valid existing token (local auth only).
@@ -181,7 +192,9 @@ def create_auth_router() -> APIRouter:
         claims = request.state.auth_claims
         if claims is None:
             raise HTTPException(status_code=401, detail="Token claims could not be parsed — re-authenticate")
-        original_iat = claims.get("iat")
+        if "iat" not in claims:
+            raise HTTPException(status_code=401, detail="Token missing required iat claim — re-authenticate")
+        original_iat = claims["iat"]
         if type(original_iat) is not int:
             raise HTTPException(status_code=401, detail="Token missing required iat claim — re-authenticate")
 
@@ -190,6 +203,7 @@ def create_auth_router() -> APIRouter:
             new_token = await provider.refresh(user.user_id, user.username, original_iat=original_iat)
         except AuthenticationError as exc:
             raise HTTPException(status_code=401, detail=exc.detail) from exc
+        _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=new_token)
 
     @router.get("/config", response_model=AuthConfigResponse)

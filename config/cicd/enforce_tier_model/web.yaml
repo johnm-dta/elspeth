@@ -330,11 +330,6 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 request.headers.get('Authorization') reads untrusted HTTP header"
   safety: Missing header returns 401; malformed header returns 401; no default fabrication
   expires: null
-- key: web/auth/routes.py:R1:create_auth_router:refresh_token:fp=af2cbb7036bacb33
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 JWT claims dict .get() for optional iat claim"
-  safety: Missing iat returns None; no fabrication
-  expires: null
 - key: web/composer/state.py:R5:_declared_input_fields_option:fp=502f741cded36b7f
   owner: web-composer
   reason: Composer state options are Tier 3 LLM/user-supplied plugin config; wrapper-shaped aggregation options may carry

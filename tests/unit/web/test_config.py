@@ -341,6 +341,28 @@ class TestAuthFieldValidation:
         )
         assert settings.auth_provider == "local"
 
+    @pytest.mark.parametrize(
+        "field_name",
+        [
+            "oidc_issuer",
+            "oidc_audience",
+            "oidc_client_id",
+            "oidc_authorization_endpoint",
+            "entra_tenant_id",
+        ],
+    )
+    def test_local_provider_rejects_oidc_entra_fields(self, field_name: str) -> None:
+        """Local auth must not accept inert OIDC/Entra configuration."""
+        with pytest.raises(ValidationError, match=field_name):
+            WebSettings(
+                auth_provider="local",
+                **{field_name: "https://issuer.example.com"},
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+            )
+
     def test_oidc_provider_missing_fields_raises(self) -> None:
         """OIDC provider without required fields should raise."""
         with pytest.raises(ValidationError, match="OIDC auth requires"):

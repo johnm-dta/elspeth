@@ -203,7 +203,21 @@ class WebSettings(BaseModel):
     @model_validator(mode="after")
     def _validate_auth_fields(self) -> WebSettings:
         """Enforce that OIDC/Entra providers have their required fields."""
-        if self.auth_provider == "oidc":
+        if self.auth_provider == "local":
+            configured = [
+                name
+                for name, val in (
+                    ("oidc_issuer", self.oidc_issuer),
+                    ("oidc_audience", self.oidc_audience),
+                    ("oidc_client_id", self.oidc_client_id),
+                    ("oidc_authorization_endpoint", self.oidc_authorization_endpoint),
+                    ("entra_tenant_id", self.entra_tenant_id),
+                )
+                if val is not None
+            ]
+            if configured:
+                raise ValueError(f"Local auth does not use OIDC/Entra fields: {', '.join(configured)}")
+        elif self.auth_provider == "oidc":
             missing = [
                 name
                 for name, val in (

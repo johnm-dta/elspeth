@@ -1240,7 +1240,7 @@ These asserts are intentional Tier-1 invariants, not defensive recovery. They gu
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 3 — AuditOutcome dispatch + plugin-crash raise-after-audit (composer-progress-persistence phase 3)"
@@ -1427,7 +1427,7 @@ Add `failed_turn` to the response body of `_handle_convergence_error`, `_handle_
 - Modify: `src/elspeth/web/sessions/routes.py` (three handler functions)
 - Create: `tests/integration/web/test_compose_loop_failed_turn_field.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 In `tests/integration/web/test_compose_loop_failed_turn_field.py`:
 
@@ -1501,7 +1501,7 @@ The fixtures above are names for the integration harness implementer to bind to 
 
 Expected: FAIL — none of the helpers emits `failed_turn` yet.
 
-- [ ] **Step 2: Add the field to each helper.**
+- [x] **Step 2: Add the field to each helper.**
 
 In each of `_handle_convergence_error`, `_handle_plugin_crash`, `_handle_runtime_preflight_failure`, after `partial_state` is computed and before `response_body` is returned:
 
@@ -1527,7 +1527,7 @@ response_body["failed_turn"] = {
 
 Task 9 below adds `count_tool_responses_for_assistant_async`; this task wires the call site.
 
-- [ ] **Step 3: Re-run the test (after Task 9 lands the helper).**
+- [x] **Step 3: Re-run the test (after Task 9 lands the helper).**
 
 Expected: PASS once Task 9 is in.
 
@@ -1546,7 +1546,7 @@ This task's commit is paired with Task 9 because the route-layer wiring is meani
 - Modify: `src/elspeth/web/sessions/protocol.py` (add the async method to `SessionServiceProtocol`)
 - Create: `tests/unit/web/sessions/test_count_tool_responses_for_assistant.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 ```python
 """count_tool_responses_for_assistant — read helper used by the route
@@ -1608,7 +1608,7 @@ async def test_async_dispatcher_runs_in_worker_thread(sessions_service, persiste
 
 Expected: FAIL — method does not exist.
 
-- [ ] **Step 2: Add the sync helper.**
+- [x] **Step 2: Add the sync helper.**
 
 In `src/elspeth/web/sessions/service.py`, after the existing read helpers:
 
@@ -1644,7 +1644,7 @@ def count_tool_responses_for_assistant(
     return int(result)
 ```
 
-- [ ] **Step 3: Add the async dispatcher.**
+- [x] **Step 3: Add the async dispatcher.**
 
 In `src/elspeth/web/sessions/service.py`:
 
@@ -1664,7 +1664,7 @@ async def count_tool_responses_for_assistant_async(
 
 In `src/elspeth/web/sessions/protocol.py`, add the method to `SessionServiceProtocol` so the route layer types it via the protocol, not the concrete class.
 
-- [ ] **Step 4: Re-run Task 8 + Task 9 tests.**
+- [x] **Step 4: Re-run Task 8 + Task 9 tests.**
 
 ```bash
 .venv/bin/python -m pytest \

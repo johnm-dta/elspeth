@@ -1257,13 +1257,23 @@ async def _verify_session_ownership(
     return session
 
 
-def _failed_turn_response_body(failed_turn: FailedTurnMetadata) -> dict[str, object]:
+async def _failed_turn_response_body(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    failed_turn: FailedTurnMetadata,
+) -> dict[str, object]:
     """Return the stable response fragment for a persisted failed compose turn."""
 
+    tool_responses_persisted = failed_turn.tool_responses_persisted
+    if tool_responses_persisted is None:
+        tool_responses_persisted = await service.count_tool_responses_for_assistant_async(
+            session_id=str(session_id),
+            assistant_message_id=failed_turn.assistant_message_id,
+        )
     return {
         "assistant_message_id": failed_turn.assistant_message_id,
         "tool_calls_attempted": failed_turn.tool_calls_attempted,
-        "tool_responses_persisted": failed_turn.tool_responses_persisted,
+        "tool_responses_persisted": tool_responses_persisted,
         "transcript_url": None,
     }
 
@@ -1334,7 +1344,7 @@ async def _handle_convergence_error(
         "recovery_text": progress.likely_next,
     }
     if exc.failed_turn is not None:
-        response_body["failed_turn"] = _failed_turn_response_body(exc.failed_turn)
+        response_body["failed_turn"] = await _failed_turn_response_body(service, session_id, exc.failed_turn)
     persisted_state_id: UUID | None = None
     if exc.partial_state is not None:
         # Persistence guard: DB write failure should not upgrade the
@@ -1476,7 +1486,7 @@ async def _handle_plugin_crash(
         ),
     }
     if exc.failed_turn is not None:
-        response_body["failed_turn"] = _failed_turn_response_body(exc.failed_turn)
+        response_body["failed_turn"] = await _failed_turn_response_body(service, session_id, exc.failed_turn)
 
     persisted_state_id_pc: UUID | None = None
     if exc.partial_state is not None:
@@ -1709,7 +1719,7 @@ async def _handle_runtime_preflight_failure(
         ),
     }
     if exc.failed_turn is not None:
-        response_body["failed_turn"] = _failed_turn_response_body(exc.failed_turn)
+        response_body["failed_turn"] = await _failed_turn_response_body(service, session_id, exc.failed_turn)
 
     persisted_state_id_rpf: UUID | None = None
     if exc.partial_state is not None:

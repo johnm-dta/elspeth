@@ -65,6 +65,43 @@ async def test_handle_plugin_crash_returns_failed_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_plugin_crash_counts_persisted_tool_responses() -> None:
+    class _CountingService:
+        async def count_tool_responses_for_assistant_async(
+            self,
+            *,
+            session_id: str,
+            assistant_message_id: str | None,
+        ) -> int:
+            assert assistant_message_id == "assistant_counted"
+            assert session_id
+            return 4
+
+    failed_turn = FailedTurnMetadata(
+        assistant_message_id="assistant_counted",
+        tool_calls_attempted=4,
+        tool_responses_persisted=None,
+    )
+    body = await _handle_plugin_crash(
+        ComposerPluginCrashError(RuntimeError("boom"), failed_turn=failed_turn),
+        service=cast(Any, _CountingService()),
+        session_id=uuid4(),
+        user_id="user_1",
+        log_prefix="test",
+        llm_composition_state_id=None,
+        settings=object(),
+        secret_service=None,
+    )
+
+    assert body["failed_turn"] == {
+        "assistant_message_id": "assistant_counted",
+        "tool_calls_attempted": 4,
+        "tool_responses_persisted": 4,
+        "transcript_url": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_handle_runtime_preflight_failure_returns_failed_turn() -> None:
     failed_turn = FailedTurnMetadata(
         assistant_message_id=None,

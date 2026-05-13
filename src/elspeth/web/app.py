@@ -330,7 +330,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
                 "failed_turn": {
                     "assistant_message_id": failed_turn.assistant_message_id,
                     "tool_calls_attempted": failed_turn.tool_calls_attempted,
-                    "tool_responses_persisted": failed_turn.tool_responses_persisted,
+                    "tool_responses_persisted": failed_turn.tool_responses_persisted or 0,
                     "transcript_url": None,
                 },
             },

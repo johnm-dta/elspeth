@@ -1335,6 +1335,43 @@ class SessionServiceImpl:
             for row in rows
         ]
 
+    def count_tool_responses_for_assistant(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str | None,
+    ) -> int:
+        """Count role='tool' rows linked to the given assistant message."""
+
+        if assistant_message_id is None:
+            return 0
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                select(func.count())
+                .select_from(chat_messages_table)
+                .where(chat_messages_table.c.session_id == session_id)
+                .where(chat_messages_table.c.parent_assistant_id == assistant_message_id)
+                .where(chat_messages_table.c.role == "tool")
+            ).scalar_one()
+        return int(result)
+
+    async def count_tool_responses_for_assistant_async(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str | None,
+    ) -> int:
+        """Async dispatcher for :meth:`count_tool_responses_for_assistant`."""
+
+        return cast(
+            int,
+            await self._run_sync(
+                self.count_tool_responses_for_assistant,
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+            ),
+        )
+
     async def save_composition_state(
         self,
         session_id: UUID,

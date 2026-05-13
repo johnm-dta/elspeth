@@ -519,6 +519,15 @@ class SessionServiceProtocol(Protocol):
         offset: int = 0,
     ) -> list[ChatMessageRecord]: ...
 
+    async def count_tool_responses_for_assistant_async(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str | None,
+    ) -> int:
+        """Count persisted tool rows linked to an assistant message."""
+        ...
+
     async def save_composition_state(
         self,
         session_id: UUID,

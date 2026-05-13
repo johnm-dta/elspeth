@@ -41,6 +41,15 @@ function extractTokenFromBlock(tokenName: string, block: string, blockName: stri
   return tokenMatch[1];
 }
 
+function extractCssRule(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const ruleMatch = new RegExp(`${escaped}\\s*\\{([\\s\\S]*?)\\n\\}`).exec(appCss);
+  if (!ruleMatch) {
+    throw new Error(`Could not find CSS rule for ${selector}`);
+  }
+  return ruleMatch[1];
+}
+
 function channelToLinear(value: number): number {
   const normalized = value / 255;
   if (normalized <= 0.04045) {
@@ -95,6 +104,52 @@ describe("light theme colour contrast", () => {
     expect(focusRing).not.toBe(gateBadge);
     expect(contrastRatio(focusRing, gateBadge)).toBeGreaterThanOrEqual(2);
     expect(contrastRatio(focusRing, background)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps primary button text at WCAG AA contrast in both themes", () => {
+    const darkText = extractRootToken("--color-text-inverse");
+    const darkBg = extractRootToken("--color-btn-primary-bg");
+    const lightText = extractLightThemeToken("--color-text-inverse");
+    const lightBg = extractLightThemeToken("--color-btn-primary-bg");
+
+    expect(contrastRatio(darkText, darkBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightText, lightBg)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps danger button text at WCAG AA contrast in both themes", () => {
+    const darkText = extractRootToken("--color-text-inverse");
+    const darkBg = extractRootToken("--color-btn-danger-bg");
+    const lightText = extractLightThemeToken("--color-text-inverse");
+    const lightBg = extractLightThemeToken("--color-btn-danger-bg");
+
+    expect(contrastRatio(darkText, darkBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightText, lightBg)).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe("base interaction tokens", () => {
+  it("uses a 16px base font size token", () => {
+    expect(appCss).toMatch(/--font-size-base:\s*16px;/);
+  });
+
+  it("sets the base button hit target to at least 44px", () => {
+    expect(extractCssRule(".btn")).toMatch(/min-height:\s*44px;/);
+  });
+
+  it("uses solid primary button tokens instead of low-alpha text-on-tint styling", () => {
+    const primaryRule = extractCssRule(".btn-primary");
+
+    expect(primaryRule).toContain("background-color: var(--color-btn-primary-bg);");
+    expect(primaryRule).toContain("color: var(--color-text-inverse);");
+    expect(primaryRule).not.toContain("rgba(");
+  });
+
+  it("uses solid danger button tokens instead of low-alpha text-on-tint styling", () => {
+    const dangerRule = extractCssRule(".btn-danger");
+
+    expect(dangerRule).toContain("background-color: var(--color-btn-danger-bg);");
+    expect(dangerRule).toContain("color: var(--color-text-inverse);");
+    expect(dangerRule).not.toContain("rgba(");
   });
 });
 

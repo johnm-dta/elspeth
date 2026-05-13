@@ -54,9 +54,11 @@ class TestTurnRecord:
             turn_type=TurnType.SINGLE_SELECT,
             payload_hash="abc123",
             response_hash="def456",
+            summary="Selected source: csv",
             emitter="server",
         )
         assert rec.emitter == "server"
+        assert rec.summary == "Selected source: csv"
 
     def test_turn_record_frozen(self) -> None:
         rec = TurnRecord(
@@ -68,6 +70,17 @@ class TestTurnRecord:
         )
         with pytest.raises(AttributeError):
             rec.emitter = "llm"  # type: ignore[misc]
+
+    def test_turn_record_summary_roundtrip(self) -> None:
+        rec = TurnRecord(
+            step=GuidedStep.STEP_1_SOURCE,
+            turn_type=TurnType.SINGLE_SELECT,
+            payload_hash="abc",
+            response_hash="def",
+            summary="Selected source: csv",
+            emitter="server",
+        )
+        assert TurnRecord.from_dict(rec.to_dict()) == rec
 
 
 class TestChatTurn:
@@ -301,6 +314,46 @@ class TestGuidedSession:
         restored = GuidedSession.from_dict(d)
         assert restored == sess
         assert restored.step_2_chosen_plugin is None
+
+    def test_guided_session_to_dict_includes_schema_version(self) -> None:
+        sess = GuidedSession.initial()
+        assert sess.to_dict()["schema_version"] == 3
+
+    def test_guided_session_requires_schema_version(self) -> None:
+        current = GuidedSession.initial().to_dict()
+        del current["schema_version"]
+
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(current)
+
+    def test_guided_session_rejects_old_schema_version(self) -> None:
+        old = GuidedSession.initial().to_dict()
+        old["schema_version"] = 2
+
+        with pytest.raises(InvariantError, match="unsupported schema_version 2"):
+            GuidedSession.from_dict(old)
+
+    def test_guided_session_current_history_requires_summary(self) -> None:
+        current = GuidedSession.initial().to_dict()
+        current["history"] = [
+            {
+                "step": GuidedStep.STEP_1_SOURCE.value,
+                "turn_type": TurnType.SINGLE_SELECT.value,
+                "payload_hash": "abc",
+                "response_hash": "def",
+                "emitter": "server",
+            }
+        ]
+
+        with pytest.raises(InvariantError, match=r"TurnRecord\.from_dict"):
+            GuidedSession.from_dict(current)
+
+    def test_guided_session_v3_requires_step_3_edit_index(self) -> None:
+        current = GuidedSession.initial().to_dict()
+        del current["step_3_edit_index"]
+
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(current)
 
 
 # ---------------------------------------------------------------------------
@@ -689,12 +742,12 @@ class TestStepAdvance:
         assert directives == []
 
     def test_step_3_unexpected_turn_type_raises(self) -> None:
-        """Any turn type other than PROPOSE_CHAIN or SINGLE_SELECT at Step 3 is an InvariantError.
+        """Any turn type outside the Step 3 closed set is an InvariantError.
 
-        Step 3 only ever emits PROPOSE_CHAIN and SINGLE_SELECT turns from the
-        server.  A different turn type in the history record means the emitter
-        stamped an invalid type — that is a server-side bug (InvariantError),
-        not a client protocol violation (ValueError).  Maps to HTTP 500, not 400.
+        Step 3 only ever emits PROPOSE_CHAIN, SINGLE_SELECT, and SCHEMA_FORM
+        turns from the server. A different turn type in the history record means
+        the emitter stamped an invalid type — that is a server-side bug
+        (InvariantError), not a client protocol violation (ValueError).
         """
         sess = GuidedSession(
             step=GuidedStep.STEP_3_TRANSFORMS,
@@ -712,6 +765,38 @@ class TestStepAdvance:
         response = _make_response()
         with pytest.raises(InvariantError, match="_advance_step_3"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
+
+    def test_step_3_schema_form_is_intra_step_for_edit_flow(self) -> None:
+        proposal = ChainProposal(
+            steps=({"plugin": "rename", "options": {}, "rationale": "normalise names"},),
+            why="The source columns need renaming before sink.",
+        )
+        sess = GuidedSession(
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            history=(),
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("a",),
+                sample_rows=({},),
+            ),
+            step_2_result=SinkResolved(outputs=()),
+            step_3_proposal=proposal,
+            terminal=None,
+            step_3_edit_index=0,
+        )
+        response = _make_response(edited_values={"plugin": "rename", "options": {}})
+
+        new_sess, next_turn, terminal, directives = step_advance(
+            sess,
+            response,
+            current_turn_type=TurnType.SCHEMA_FORM,
+        )
+
+        assert new_sess is sess
+        assert next_turn is None
+        assert terminal is None
+        assert directives == []
 
     def test_step_advance_unhandled_step_raises_invariant_error_not_assertion(self) -> None:
         """Dispatcher fall-through is gated by InvariantError, not AssertionError.

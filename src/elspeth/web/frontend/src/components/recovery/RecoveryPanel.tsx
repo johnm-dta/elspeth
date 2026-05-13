@@ -43,7 +43,7 @@ export function RecoveryPanel({
   const dialogRef = useRef<HTMLDivElement>(null);
   const [needsConfirmation, setNeedsConfirmation] = useState(false);
   const [showTranscriptControls, setShowTranscriptControls] = useState(false);
-  useFocusTrap(dialogRef, recoveryError !== null, ".recovery-panel-discard");
+  useFocusTrap(dialogRef, recoveryError !== null, ".recovery-panel-apply");
 
   if (recoveryError === null || activeSessionId === null) {
     return null;
@@ -68,7 +68,6 @@ export function RecoveryPanel({
     <>
       <div
         className="recovery-panel-backdrop"
-        onClick={onDiscard}
         role="presentation"
       />
       <div
@@ -81,7 +80,6 @@ export function RecoveryPanel({
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.preventDefault();
-            onDiscard();
           }
           if (event.key === "Enter" && event.target === event.currentTarget) {
             event.preventDefault();
@@ -180,7 +178,7 @@ export function RecoveryPanel({
             Discard recovery
           </button>
           <button
-            className="btn btn-primary"
+            className="btn btn-primary recovery-panel-apply"
             type="button"
             onClick={requestApply}
           >

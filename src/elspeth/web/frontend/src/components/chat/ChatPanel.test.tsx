@@ -295,6 +295,7 @@ describe("ChatPanel mode discriminator", () => {
         turn_type: "single_select",
         payload_hash: "h1",
         response_hash: "r1",
+        summary: "Source selected: csv",
         emitter: "server",
       },
     ];
@@ -320,9 +321,9 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    // CompletionSummary renders both action buttons.
+    // CompletionSummary renders the single backend-aligned exit action.
     expect(
-      screen.getByRole("button", { name: "Save and exit" }),
+      screen.getByRole("button", { name: "Save and exit guided mode" }),
     ).toBeInTheDocument();
 
     // Container carries the per-branch CSS hook AND preserves the skip-link anchor.

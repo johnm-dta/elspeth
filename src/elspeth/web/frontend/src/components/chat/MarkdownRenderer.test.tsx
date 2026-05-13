@@ -40,6 +40,15 @@ describe("MarkdownRenderer", () => {
     expect(screen.getByText("Col A")).toBeInTheDocument();
   });
 
+  it("renders external links with safe new-tab attributes", () => {
+    render(<MarkdownRenderer content="[Docs](https://example.com/docs)" />);
+
+    const link = screen.getByRole("link", { name: "Docs" });
+    expect(link).toHaveAttribute("href", "https://example.com/docs");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
   it("renders a mermaid container for mermaid code blocks", () => {
     const content = "```mermaid\ngraph TD\n  A --> B\n```";
     const { container } = render(<MarkdownRenderer content={content} />);

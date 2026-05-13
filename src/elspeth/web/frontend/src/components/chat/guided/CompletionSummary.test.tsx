@@ -6,16 +6,10 @@
 //      string appears in the document when terminal.kind === "completed" and
 //      pipeline_yaml is non-null.  (Does NOT assert Prism token structure --
 //      that is Prism's contract, not ours.)
-//   2. Both action buttons render as <button type="button"> -- "Save and exit"
-//      (committed-state framing) and "Drop to freeform to keep editing"
-//      (further-edit framing).  Both are visible and have type="button".
-//   3. Save-and-exit click invokes useSessionStore.exitToFreeform once.
-//   4. Keep-editing click also invokes useSessionStore.exitToFreeform once.
-//      WIRE-IDENTITY PIN: Both buttons call the same parameterless
-//      exitToFreeform() action.  The backend has no separate handler for
-//      "committed" vs "further edit" framing; the differentiation is pure UX.
-//      A future implementer must NOT introduce two separate wire paths without
-//      a backend protocol change.
+//   2. Exactly one action button renders as <button type="button">. The
+//      terminal backend has one exit-to-freeform path, so the UI must not offer
+//      two differently worded actions that do the same thing.
+//   3. The exit click invokes useSessionStore.exitToFreeform once.
 //   5. pipeline_yaml === null -> widget returns null (nothing rendered).
 //      This is the strict gate: no defensive ?? "" coercion to silently
 //      render an empty highlight block.
@@ -97,79 +91,49 @@ describe("CompletionSummary -- YAML rendering", () => {
   });
 });
 
-// ── Contract 2: Both buttons render with type="button" ───────────────────────
+// ── Contract 2: Single button renders with type="button" ─────────────────────
 
 describe("CompletionSummary -- button identity", () => {
-  it("renders a 'Save and exit' button with type='button'", () => {
-    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    const btn = screen.getByRole("button", { name: /save and exit/i });
-    expect(btn).toBeInTheDocument();
-    expect(btn.getAttribute("type")).toBe("button");
-  });
-
-  it("renders a 'Drop to freeform to keep editing' button with type='button'", () => {
+  it("renders a single 'Save and exit guided mode' button with type='button'", () => {
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     const btn = screen.getByRole("button", {
-      name: /drop to freeform to keep editing/i,
+      name: /save and exit guided mode/i,
     });
     expect(btn).toBeInTheDocument();
     expect(btn.getAttribute("type")).toBe("button");
   });
 
-  it("renders exactly two action buttons", () => {
+  it("does not render a second wire-identical keep-editing button", () => {
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    // Precisely two buttons -- no phantom controls
+    expect(
+      screen.queryByRole("button", {
+        name: /drop to freeform to keep editing/i,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders exactly one action button", () => {
+    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     const buttons = screen.getAllByRole("button");
-    expect(buttons).toHaveLength(2);
+    expect(buttons).toHaveLength(1);
   });
 });
 
-// ── Contract 3: Save-and-exit calls exitToFreeform ────────────────────────────
+// ── Contract 3: Exit calls exitToFreeform ────────────────────────────────────
 
-describe("CompletionSummary -- save-and-exit action", () => {
-  it("clicking 'Save and exit' calls exitToFreeform once", async () => {
-    const user = userEvent.setup();
-    const mockExit = vi.fn().mockResolvedValue(undefined);
-    useSessionStore.setState({ exitToFreeform: mockExit });
-
-    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    await user.click(screen.getByRole("button", { name: /save and exit/i }));
-
-    expect(mockExit).toHaveBeenCalledTimes(1);
-    expect(mockExit).toHaveBeenCalledWith();
-  });
-});
-
-// ── Contract 4: Keep-editing calls exitToFreeform (wire-identity pin) ─────────
-
-describe("CompletionSummary -- keep-editing action (wire-identity pin)", () => {
-  it("clicking 'Drop to freeform to keep editing' calls the same exitToFreeform", async () => {
+describe("CompletionSummary -- exit action", () => {
+  it("clicking 'Save and exit guided mode' calls exitToFreeform once", async () => {
     const user = userEvent.setup();
     const mockExit = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({ exitToFreeform: mockExit });
 
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     await user.click(
-      screen.getByRole("button", { name: /drop to freeform to keep editing/i }),
+      screen.getByRole("button", { name: /save and exit guided mode/i }),
     );
 
-    // Wire-identity: same action, same call count expectation as save-and-exit
     expect(mockExit).toHaveBeenCalledTimes(1);
     expect(mockExit).toHaveBeenCalledWith();
-  });
-
-  it("each button independently fires exitToFreeform once when clicked separately", async () => {
-    const user = userEvent.setup();
-    const mockExit = vi.fn().mockResolvedValue(undefined);
-    useSessionStore.setState({ exitToFreeform: mockExit });
-
-    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    await user.click(screen.getByRole("button", { name: /save and exit/i }));
-    await user.click(
-      screen.getByRole("button", { name: /drop to freeform to keep editing/i }),
-    );
-
-    expect(mockExit).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -234,13 +198,11 @@ describe("CompletionSummary -- distinctness pin (Task 7.4 I4 inheritance)", () =
 // ── Contract 8: no auto-focus on mount ────────────────────────────────────────
 
 describe("CompletionSummary -- no auto-focus on initial render", () => {
-  it("neither button has focus immediately after render", () => {
+  it("the exit button does not have focus immediately after render", () => {
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    const saveBtn = screen.getByRole("button", { name: /save and exit/i });
-    const keepBtn = screen.getByRole("button", {
-      name: /drop to freeform to keep editing/i,
+    const saveBtn = screen.getByRole("button", {
+      name: /save and exit guided mode/i,
     });
     expect(document.activeElement).not.toBe(saveBtn);
-    expect(document.activeElement).not.toBe(keepBtn);
   });
 });

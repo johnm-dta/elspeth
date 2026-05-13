@@ -524,6 +524,34 @@ describe("RecipeOfferTurn — unsatisfied_slots editable form", () => {
     expect(modelInput).toHaveAttribute("type", "text");
   });
 
+  it("surfaces audit-trail warning microcopy for secret-like slot names", () => {
+    renderWidget(UNSATISFIED_PAYLOAD);
+
+    expect(screen.getByText("Lock")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /secret values are written to the audit trail exactly as typed/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/api_key_secret/i),
+    ).toHaveAccessibleDescription(
+      /they will appear in operator logs/i,
+    );
+  });
+
+  it("surfaces audit-trail warning microcopy for pre-filled secret-like slots", () => {
+    renderWidget(COMPLEX_SLOTS_PAYLOAD);
+
+    expect(screen.getByText("api_key")).toBeInTheDocument();
+    expect(screen.getByText("Lock")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /secret values are written to the audit trail exactly as typed/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("renders slot description as hint text", () => {
     renderWidget(UNSATISFIED_PAYLOAD);
     expect(screen.getByText(/jinja2 template/i)).toBeInTheDocument();

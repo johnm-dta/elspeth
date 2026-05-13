@@ -5,21 +5,19 @@
 // Pinned contracts:
 //   1. Card-list rendering of payload.steps — each step becomes a card showing
 //      plugin name, rationale, and a key-value options list.
-//   2. Accept-all wire-shape contract — clicking "Accept proposal" emits
-//      chosen: ["accept"] and all other fields null.  This is the ONLY submit
-//      path implemented: Edit, Reject, and Ask-advisor buttons are absent because
-//      the backend handler (routes.py:2030-2137) only processes chosen==["accept"]
-//      today.  Per-step Edit returns HTTP 400; Reject returns HTTP 501.
-//      Tracker: filigree elspeth-2c08408170 (Step-3 backend handler completion).
+//   2. Step-3 wire-shape contract — Accept all, per-step Edit, Reject, and
+//      Ask advisor each emit the explicit GuidedRespondRequest shape that the
+//      backend consumes.
 //   3. payload.blockers show/hide based on emptiness — blockers list renders when
 //      non-empty; absent from DOM when blockers is [].
 //   4. DOM-ID distinctness pin — two simultaneous instances produce element IDs
 //      that are NOT the same node (per-instance useId() scoping).
 //
-// Wire-shape verification (routes.py:2030-2137):
-//   chosen: ["accept"] -> pipeline committed (success path)
-//   chosen: ["reject"] -> HTTP 501 (Phase 5 stub, not wired in widget)
-//   accepted_step_index / edit_step_index / control_signal -> not read by handler
+// Wire-shape verification:
+//   chosen: ["accept"]                  -> pipeline committed
+//   edit_step_index: n                   -> edit the nth proposed transform
+//   control_signal: "reject"             -> regenerate proposal
+//   control_signal: "request_advisor"    -> advisor-guided regeneration
 
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -138,12 +136,12 @@ describe("ProposeChainTurn — card-list rendering", () => {
 // ---------------------------------------------------------------------------
 
 describe("ProposeChainTurn — accept-all submit", () => {
-  it("clicking Accept proposal fires onSubmit with chosen: ['accept'] and other fields null", async () => {
+  it("clicking Accept all steps fires onSubmit with chosen: ['accept'] and other fields null", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     renderWidget(TWO_STEP_PAYLOAD, onSubmit);
 
-    await user.click(screen.getByRole("button", { name: /accept proposal/i }));
+    await user.click(screen.getByRole("button", { name: /accept all steps/i }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit).toHaveBeenCalledWith(
@@ -172,7 +170,7 @@ describe("ProposeChainTurn — accept-all submit", () => {
     };
     renderWidget(single, onSubmit);
 
-    await user.click(screen.getByRole("button", { name: /accept proposal/i }));
+    await user.click(screen.getByRole("button", { name: /accept all steps/i }));
 
     expect(onSubmit).toHaveBeenCalledWith({
       ...nullResponse(),
@@ -186,7 +184,7 @@ describe("ProposeChainTurn — accept-all submit", () => {
     const onSubmit = vi.fn();
     renderWidget(WITH_BLOCKERS_PAYLOAD, onSubmit);
 
-    await user.click(screen.getByRole("button", { name: /accept proposal/i }));
+    await user.click(screen.getByRole("button", { name: /accept all steps/i }));
 
     expect(onSubmit).toHaveBeenCalledWith({
       ...nullResponse(),
@@ -201,14 +199,69 @@ describe("ProposeChainTurn — accept-all submit", () => {
     renderWidget(TWO_STEP_PAYLOAD, onSubmit);
 
     // Click once, then click again — each call must be independent.
-    await user.click(screen.getByRole("button", { name: /accept proposal/i }));
-    await user.click(screen.getByRole("button", { name: /accept proposal/i }));
+    await user.click(screen.getByRole("button", { name: /accept all steps/i }));
+    await user.click(screen.getByRole("button", { name: /accept all steps/i }));
 
     expect(onSubmit).toHaveBeenCalledTimes(2);
     expect(onSubmit.mock.calls[1][0]).toEqual({
       ...nullResponse(),
       chosen: ["accept"],
       custom_inputs: null,
+    });
+  });
+});
+
+describe("ProposeChainTurn — remediation submit paths", () => {
+  it("renders an Edit button for each proposed step", () => {
+    renderWidget(TWO_STEP_PAYLOAD);
+
+    expect(screen.getAllByRole("button", { name: /edit step/i })).toHaveLength(
+      TWO_STEP_PAYLOAD.steps.length,
+    );
+  });
+
+  it("clicking a per-step Edit button submits edit_step_index with other fields null", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    renderWidget(TWO_STEP_PAYLOAD, onSubmit);
+
+    await user.click(screen.getByRole("button", { name: /edit step 2/i }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
+      chosen: null,
+      custom_inputs: null,
+      edit_step_index: 1,
+    });
+  });
+
+  it("clicking Reject submits control_signal='reject'", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    renderWidget(TWO_STEP_PAYLOAD, onSubmit);
+
+    await user.click(screen.getByRole("button", { name: /^reject$/i }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
+      chosen: null,
+      custom_inputs: null,
+      control_signal: "reject",
+    });
+  });
+
+  it("clicking Ask advisor submits control_signal='request_advisor'", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    renderWidget(TWO_STEP_PAYLOAD, onSubmit);
+
+    await user.click(screen.getByRole("button", { name: /ask advisor/i }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
+      chosen: null,
+      custom_inputs: null,
+      control_signal: "request_advisor",
     });
   });
 });

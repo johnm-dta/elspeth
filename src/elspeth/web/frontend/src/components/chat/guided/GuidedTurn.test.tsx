@@ -175,7 +175,7 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
-  it("propose_chain: renders ProposeChainTurn ('Accept proposal' button)", () => {
+  it("propose_chain: renders ProposeChainTurn ('Accept all steps' button)", () => {
     render(
       <GuidedTurn
         turn={makeTurn("propose_chain", PROPOSE_CHAIN_PAYLOAD)}
@@ -183,7 +183,7 @@ describe("GuidedTurn dispatcher — routing", () => {
       />,
     );
     expect(
-      screen.getByRole("button", { name: "Accept proposal" }),
+      screen.getByRole("button", { name: "Accept all steps" }),
     ).toBeTruthy();
   });
 

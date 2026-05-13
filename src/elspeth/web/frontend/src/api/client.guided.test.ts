@@ -62,6 +62,7 @@ function makeRespondResponse(): GuidedRespondResponse {
           turn_type: "single_select",
           payload_hash: "abc123",
           response_hash: "def456",
+          summary: "Source selected: csv",
           emitter: "server",
         },
       ],

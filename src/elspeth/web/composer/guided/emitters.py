@@ -14,6 +14,7 @@ Exported:
     build_step_2_multi_select_turn — multi_select_with_custom for required fields.
     build_step_2_5_recipe_offer_turn — recipe_offer from a RecipeMatch.
     build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
+    build_step_3_schema_form_turn — schema_form for editing one proposed transform.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
 data constructed from system-owned state; the Turn dict itself is not persisted
@@ -22,7 +23,7 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from elspeth.web.composer.guided.protocol import (
@@ -317,6 +318,26 @@ def build_step_3_propose_chain_turn(
     }
     return Turn(
         type=TurnType.PROPOSE_CHAIN.value,
+        step_index=_step_index(GuidedStep.STEP_3_TRANSFORMS),
+        payload=payload,
+    )
+
+
+def build_step_3_schema_form_turn(
+    *,
+    plugin: str,
+    options: Mapping[str, Any],
+    catalog: CatalogServiceProtocol,
+) -> Turn:
+    """Build a ``schema_form`` Turn for editing a proposed transform step."""
+    schema_info = catalog.get_schema("transform", plugin)
+    payload: SchemaFormPayload = {
+        "plugin": plugin,
+        "schema_block": dict(schema_info.json_schema),
+        "prefilled": dict(options),
+    }
+    return Turn(
+        type=TurnType.SCHEMA_FORM.value,
         step_index=_step_index(GuidedStep.STEP_3_TRANSFORMS),
         payload=payload,
     )

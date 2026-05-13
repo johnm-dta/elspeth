@@ -111,6 +111,25 @@ function inputTypeForSlot(slotType: RecipeSlotInput["slot_type"]): "text" | "num
   return "text";
 }
 
+function isSecretLikeSlotName(name: string): boolean {
+  return /_(secret|password|token|key)$/i.test(name);
+}
+
+function SecretAuditWarning({ id }: { id?: string }) {
+  return (
+    <p id={id} className="guided-recipe-input-warning">
+      <span className="guided-recipe-input-warning-icon" aria-hidden="true">
+        <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+          <path d="M4.5 7V5.5a3.5 3.5 0 0 1 7 0V7h.5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h.5Zm1.5 0h4V5.5a2 2 0 0 0-4 0V7Z" />
+        </svg>
+        <span className="sr-only">Lock</span>
+      </span>
+      Secret values are written to the audit trail exactly as typed. They will appear
+      in operator logs.
+    </p>
+  );
+}
+
 export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
   // useId scopes DOM IDs per-instance so multiple RecipeOfferTurns rendered
   // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
@@ -195,6 +214,7 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
                 <dd className="guided-recipe-slot-val">
                   {formatSlotValue(payload.slots[key])}
                 </dd>
+                {isSecretLikeSlotName(key) && <SecretAuditWarning />}
               </div>
             ))}
           </dl>
@@ -211,7 +231,15 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
             {payload.unsatisfied_slots.map((slot) => {
               const inputId = `${reactId}-input-${slot.name}`;
               const descriptionId = `${reactId}-desc-${slot.name}`;
+              const warningId = `${reactId}-warning-${slot.name}`;
               const inputType = inputTypeForSlot(slot.slot_type);
+              const showAuditWarning = isSecretLikeSlotName(slot.name);
+              const describedBy = [
+                slot.description ? descriptionId : null,
+                showAuditWarning ? warningId : null,
+              ]
+                .filter(Boolean)
+                .join(" ");
               return (
                 <div key={slot.name} className="guided-recipe-input-row">
                   <label htmlFor={inputId} className="guided-recipe-input-label">
@@ -229,7 +257,7 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
                     value={slotInputs[slot.name] ?? ""}
                     onChange={(event) => setSlotInput(slot.name, event.target.value)}
                     required
-                    aria-describedby={slot.description ? descriptionId : undefined}
+                    aria-describedby={describedBy || undefined}
                     aria-required="true"
                   />
                   {slot.description && (
@@ -237,6 +265,7 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
                       {slot.description}
                     </p>
                   )}
+                  {showAuditWarning && <SecretAuditWarning id={warningId} />}
                 </div>
               );
             })}

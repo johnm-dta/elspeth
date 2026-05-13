@@ -19,20 +19,12 @@
 // excludes propose_chain from the chip-group family).  Each step is a card.
 // No <fieldset>/<legend>.  The accept button is at the bottom of the card list.
 //
-// SCOPE -- submitted buttons (verified against routes.py:2030-2137):
-//   WIRED:   "Accept proposal" -> chosen: ["accept"] -> pipeline committed
-//   DROPPED: per-step Edit  -> backend has no handler; would HTTP 400
-//   DROPPED: Reject         -> backend returns HTTP 501 (Phase 5 stub)
-//   DROPPED: Ask advisor    -> backend has no handler; would HTTP 400
-// The three dropped paths must be added in Phase 5 once the backend handlers
-// are wired.
-//
-// Tracker: filigree elspeth-2c08408170 (Step-3 backend handler completion)
-//
-// WIRE-SHAPE (single submit path):
-//   Accept proposal: { chosen: ["accept"], custom_inputs: null, edited_values: null,
-//                      accepted_step_index: null, edit_step_index: null, control_signal: null }
-// All 6 GuidedRespondRequest fields are explicit on the one handler.
+// WIRE-SHAPES:
+//   Accept all steps: chosen ["accept"].
+//   Edit step N:      edit_step_index = N.
+//   Reject:           control_signal = "reject".
+//   Ask advisor:      control_signal = "request_advisor".
+// All GuidedRespondRequest fields are explicit on every handler.
 //
 // OPTIONS RENDERING:
 //   step.options is an arbitrary mapping (Mapping[str, Any] on the wire).  Each
@@ -95,6 +87,39 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
       accepted_step_index: null,
       edit_step_index: null,
       control_signal: null,
+    });
+  }
+
+  function handleEdit(index: number) {
+    onSubmit({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: index,
+      control_signal: null,
+    });
+  }
+
+  function handleReject() {
+    onSubmit({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "reject",
+    });
+  }
+
+  function handleAskAdvisor() {
+    onSubmit({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "request_advisor",
     });
   }
 
@@ -162,23 +187,41 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
               )}
 
               <p className="guided-propose-step-rationale">{step.rationale}</p>
+              <div className="guided-propose-step-actions">
+                <button
+                  type="button"
+                  className="guided-propose-edit-btn"
+                  onClick={() => handleEdit(idx)}
+                >
+                  Edit step {idx + 1}
+                </button>
+              </div>
             </li>
           );
         })}
       </ol>
 
-      {/* Action row -- Accept proposal only.
-          Reject, per-step Edit, and Ask advisor are deferred to Phase 5:
-          the backend returns HTTP 501 / HTTP 400 for those paths today.
-          Tracker: filigree elspeth-2c08408170 (Step-3 backend handler
-          completion). */}
       <div className="guided-propose-actions">
+        <button
+          type="button"
+          className="guided-propose-secondary-btn"
+          onClick={handleReject}
+        >
+          Reject
+        </button>
+        <button
+          type="button"
+          className="guided-propose-secondary-btn"
+          onClick={handleAskAdvisor}
+        >
+          Ask advisor
+        </button>
         <button
           type="button"
           className="guided-propose-accept-btn"
           onClick={handleAccept}
         >
-          Accept proposal
+          Accept all steps
         </button>
       </div>
     </div>

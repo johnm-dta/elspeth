@@ -19,16 +19,6 @@
 //     InspectAndConfirmTurn.tsx): the widget appears because a turn was
 //     completed, not because the user requested focus.
 //
-// SCOPE REDUCTION (wire-shape gap):
-//   The plan body described rich summaries like "Step 1: CSV with cols [price, qty]".
-//   The actual TurnRecordResponse wire shape (schemas.py:213-220) carries only
-//   step, turn_type, payload_hash, response_hash, and emitter — no summary field.
-//   GuidedHistory therefore renders only step label + turn type + emitter.
-//   To enable rich summaries, the backend would need a cross-layer protocol
-//   change (adding a denormalized summary string to TurnRecordResponse), which
-//   requires operator adjudication before implementation.
-//   Tracker: filigree elspeth-611fc01d94 (rich step summaries — wire extension or payload-fetch endpoint)
-
 import { useId, useState } from "react";
 import type { GuidedStep, TurnRecord, TurnType } from "@/types/guided";
 
@@ -51,12 +41,12 @@ const STEP_LABELS: Record<GuidedStep, string> = {
  * CLOSED LIST — mirrors TurnType in types/guided.ts:15-21.
  */
 const TURN_TYPE_LABELS: Record<TurnType, string> = {
-  inspect_and_confirm: "inspect_and_confirm",
-  single_select: "single_select",
-  multi_select_with_custom: "multi_select_with_custom",
-  schema_form: "schema_form",
-  propose_chain: "propose_chain",
-  recipe_offer: "recipe_offer",
+  inspect_and_confirm: "Inspect and confirm",
+  single_select: "Single select",
+  multi_select_with_custom: "Multi-select with custom fields",
+  schema_form: "Schema form",
+  propose_chain: "Proposed chain",
+  recipe_offer: "Recipe offer",
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -130,7 +120,7 @@ export function GuidedHistory({ history, initiallyExpanded = false }: Props): Re
                   ·
                 </span>
                 <span className="guided-history-turn-type">
-                  {TURN_TYPE_LABELS[turn.turn_type]}
+                  {turn.summary ?? TURN_TYPE_LABELS[turn.turn_type]}
                 </span>
                 <span className="guided-history-separator" aria-hidden="true">
                   ·

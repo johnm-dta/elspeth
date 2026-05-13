@@ -107,6 +107,7 @@ class ControlSignal(StrEnum):
     EXIT_TO_FREEFORM = "exit_to_freeform"
     REQUEST_ADVISOR = "request_advisor"
     REJECT = "reject"
+    BACK = "back"
 
 
 class TurnResponse(TypedDict):
@@ -221,6 +222,7 @@ _LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {
         {
             TurnType.PROPOSE_CHAIN,
             TurnType.SINGLE_SELECT,
+            TurnType.SCHEMA_FORM,
         }
     ),
 }

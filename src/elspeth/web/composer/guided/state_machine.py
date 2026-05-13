@@ -26,6 +26,8 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 
+GUIDED_SESSION_SCHEMA_VERSION = 3
+
 if TYPE_CHECKING:
     # Imported for type annotations only — avoids a circular dependency.
     # recipe_match.py imports state_machine.py (SourceResolved, SinkResolved);
@@ -89,6 +91,7 @@ class TurnRecord:
     payload_hash: str
     response_hash: str | None
     emitter: str  # "server" | "llm"
+    summary: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
@@ -98,6 +101,7 @@ class TurnRecord:
             "payload_hash": self.payload_hash,
             "response_hash": self.response_hash,
             "emitter": self.emitter,
+            "summary": self.summary,
         }
 
     @classmethod
@@ -110,6 +114,7 @@ class TurnRecord:
                 payload_hash=d["payload_hash"],
                 response_hash=d["response_hash"],
                 emitter=d["emitter"],
+                summary=d["summary"],
             )
         except (KeyError, ValueError) as exc:
             raise InvariantError(f"TurnRecord.from_dict: malformed record {d!r}") from exc
@@ -396,6 +401,7 @@ class GuidedSession:
     step_2_sink_intent: SinkIntent | None = None
     step_2_5_recipe_offer: RecipeMatch | None = None
     step_2_chosen_plugin: str | None = None
+    step_3_edit_index: int | None = None
     # Phase A slice 5 — per-step chat history persistence.
     # `chat_history` is a tuple of frozen ChatTurn dataclasses containing
     # scalars and enums only. The tuple plus frozen element type is already
@@ -429,6 +435,7 @@ class GuidedSession:
         output never carries enum reprs.
         """
         return {
+            "schema_version": GUIDED_SESSION_SCHEMA_VERSION,
             "step": self.step.value,
             "history": [r.to_dict() for r in self.history],
             "step_1_result": self.step_1_result.to_dict() if self.step_1_result is not None else None,
@@ -440,6 +447,7 @@ class GuidedSession:
             "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
             "step_2_5_recipe_offer": self.step_2_5_recipe_offer.to_dict() if self.step_2_5_recipe_offer is not None else None,
             "step_2_chosen_plugin": self.step_2_chosen_plugin,
+            "step_3_edit_index": self.step_3_edit_index,
             "chat_history": [
                 {
                     "role": t.role.value,
@@ -461,6 +469,10 @@ class GuidedSession:
         KeyError, ValueError, and TypeError all indicate Tier 1 corruption.
         """
         try:
+            schema_version = int(d["schema_version"])
+            if schema_version != GUIDED_SESSION_SCHEMA_VERSION:
+                raise InvariantError(f"GuidedSession.from_dict: unsupported schema_version {schema_version}")
+            history = tuple(TurnRecord.from_dict(r) for r in d["history"])
             step_1_raw = d["step_1_result"]
             step_2_raw = d["step_2_result"]
             step_3_raw = d["step_3_proposal"]
@@ -469,6 +481,7 @@ class GuidedSession:
             sink_intent_raw = d["step_2_sink_intent"]
             recipe_offer_raw = d["step_2_5_recipe_offer"]
             step_2_chosen_plugin_raw = d["step_2_chosen_plugin"]
+            step_3_edit_index_raw = d["step_3_edit_index"]
             # Deferred import to avoid a circular dependency at module level.
             # recipe_match.py imports from state_machine.py; importing RecipeMatch
             # at module level here would create a cycle.
@@ -494,7 +507,7 @@ class GuidedSession:
             )
             return cls(
                 step=GuidedStep(d["step"]),
-                history=tuple(TurnRecord.from_dict(r) for r in d["history"]),
+                history=history,
                 step_1_result=SourceResolved.from_dict(step_1_raw) if step_1_raw is not None else None,
                 step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
@@ -504,6 +517,7 @@ class GuidedSession:
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
                 step_2_5_recipe_offer=_RecipeMatch.from_dict(recipe_offer_raw) if recipe_offer_raw is not None else None,
                 step_2_chosen_plugin=str(step_2_chosen_plugin_raw) if step_2_chosen_plugin_raw is not None else None,
+                step_3_edit_index=int(step_3_edit_index_raw) if step_3_edit_index_raw is not None else None,
                 chat_history=chat_history,
                 chat_turn_seq=int(chat_turn_seq_raw),
             )
@@ -799,13 +813,15 @@ def _advance_step_3(
     handler (Task 4.4), which runs preview_pipeline and commits via tools.py.
     step_advance is pure and does not mutate state on accept; the handler does.
 
-    Two legal turn types at Step 3:
+    Legal turn types at Step 3:
     - PROPOSE_CHAIN: The LLM has proposed a chain. Accept/reject is decided
       by the endpoint handler after running preview_pipeline. step_advance
       passes through unchanged.
     - SINGLE_SELECT: A clarifying question was answered — no step change.
       The handler interprets the response and either re-emits propose_chain
       or asks another question.
+    - SCHEMA_FORM: The operator edited one proposed transform's options.
+      The handler patches the staged proposal and re-emits propose_chain.
 
     Any other turn type is a server-side invariant violation: Step 3 only ever
     emits PROPOSE_CHAIN or SINGLE_SELECT turns, so a different turn type in
@@ -818,9 +834,11 @@ def _advance_step_3(
         # Clarifying question answered — no step change. The handler interprets
         # the response and either re-emits propose_chain or asks another question.
         return (session, None, None, [])
+    if turn_type is TurnType.SCHEMA_FORM:
+        return (session, None, None, [])
     raise InvariantError(
         f"_advance_step_3: unexpected turn_type {turn_type!r} — Step 3 only "
-        "emits PROPOSE_CHAIN and SINGLE_SELECT turns; any other type in the "
+        "emits PROPOSE_CHAIN, SINGLE_SELECT, and SCHEMA_FORM turns; any other type in the "
         "history record indicates a server-side emitter bug."
     )
 

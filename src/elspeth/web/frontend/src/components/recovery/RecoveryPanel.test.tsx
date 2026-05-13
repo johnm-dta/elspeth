@@ -146,6 +146,26 @@ describe("RecoveryPanel", () => {
     expect(onApply).not.toHaveBeenCalled();
   });
 
+  it("does not discard when the backdrop is clicked", async () => {
+    const user = userEvent.setup();
+    const onDiscard = vi.fn();
+    const { container } = renderPanel({ onDiscard });
+
+    const backdrop = container.querySelector(".recovery-panel-backdrop");
+    expect(backdrop).not.toBeNull();
+    await user.click(backdrop!);
+
+    expect(onDiscard).not.toHaveBeenCalled();
+  });
+
+  it("initial focus lands on the safe apply action", async () => {
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Apply partial draft" })).toHaveFocus(),
+    );
+  });
+
   it("restores focus after discard apply confirm and cancel confirmation", async () => {
     const user = userEvent.setup();
 

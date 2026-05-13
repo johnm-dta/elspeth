@@ -136,6 +136,7 @@ class TestTurnResponse:
             "exit_to_freeform",
             "request_advisor",
             "reject",
+            "back",
         }
 
     def test_turn_response_minimal(self) -> None:

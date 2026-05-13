@@ -14,6 +14,7 @@ import {
 } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { fuzzyMatch } from "@/utils/fuzzyScore";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -44,8 +45,10 @@ export function CommandPalette({
 }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const paletteRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(paletteRef, isOpen, ".command-palette-input");
 
   // Store hooks
   const sessions = useSessionStore((s) => s.sessions);
@@ -280,6 +283,7 @@ export function CommandPalette({
 
       {/* Palette */}
       <div
+        ref={paletteRef}
         className="command-palette"
         role="dialog"
         aria-modal="true"

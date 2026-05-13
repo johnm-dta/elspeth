@@ -91,6 +91,8 @@
   --color-focus-ring:        #ffffff;
   --color-btn-primary-bg:    #16664a;
   --color-btn-primary-bg-hover: #1a5840;
+  --color-btn-danger-bg:     #b23835;
+  --color-btn-danger-bg-hover: #912f2d;
   --color-link:              #61daff;
   --color-highlight:         rgba(26, 122, 82, 0.14);
   --color-selected-ring:     rgba(26, 122, 82, 0.55);
@@ -135,8 +137,8 @@
 
   --font-size-xs:   12px;
   --font-size-sm:   13px;
-  --font-size-base: 14px;
-  --font-size-lg:   16px;
+  --font-size-base: 16px;
+  --font-size-lg:   18px;
   --font-size-xl:   18px;
 
   --line-height-tight:   1.3;
@@ -662,8 +664,9 @@ summary:focus-visible {
   background-color: var(--color-surface-elevated);
   color: var(--color-text);
   font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
+  font-size: var(--font-size-base);
   font-weight: 500;
+  min-height: 44px;
   cursor: pointer;
   transition: background-color var(--transition-fast),
     border-color var(--transition-fast);
@@ -681,23 +684,25 @@ summary:focus-visible {
 }
 
 .btn-primary {
-  background-color: rgba(20, 176, 174, 0.2);
-  border-color: var(--color-success);
-  color: var(--color-success);
+  background-color: var(--color-btn-primary-bg);
+  border-color: var(--color-btn-primary-bg);
+  color: var(--color-text-inverse);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background-color: rgba(20, 176, 174, 0.3);
+  background-color: var(--color-btn-primary-bg-hover);
+  border-color: var(--color-btn-primary-bg-hover);
 }
 
 .btn-danger {
-  background-color: var(--color-error-bg);
-  border-color: var(--color-error);
-  color: var(--color-error);
+  background-color: var(--color-btn-danger-bg);
+  border-color: var(--color-btn-danger-bg);
+  color: var(--color-text-inverse);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background-color: rgba(232, 86, 83, 0.25);
+  background-color: var(--color-btn-danger-bg-hover);
+  border-color: var(--color-btn-danger-bg-hover);
 }
 
 .btn-small {
@@ -1561,6 +1566,8 @@ summary:focus-visible {
   --color-focus-ring:        #0f2d35;
   --color-btn-primary-bg:    #1a7a5a;
   --color-btn-primary-bg-hover: #156048;
+  --color-btn-danger-bg:     #b23835;
+  --color-btn-danger-bg-hover: #912f2d;
   --color-link:              #2890b8;
   --color-highlight:         rgba(21, 96, 72, 0.12);
   --color-selected-ring:     rgba(21, 96, 72, 0.45);
@@ -4632,6 +4639,7 @@ summary:focus-visible {
 /* Each slot row: key and value side-by-side */
 .guided-recipe-slot-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-sm);
   font-size: var(--font-size-sm);
 }
@@ -4674,6 +4682,36 @@ summary:focus-visible {
   color: var(--color-text-muted);
   font-family: var(--font-mono, monospace);
   margin-bottom: var(--space-xs);
+}
+
+.guided-recipe-input-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  margin: var(--space-xs) 0 0 0;
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.guided-recipe-input-warning-icon {
+  display: inline-flex;
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.guided-recipe-input-warning-icon svg {
+  display: block;
+  width: 1rem;
+  height: 1rem;
+  fill: currentColor;
+}
+
+.guided-recipe-slot-row .guided-recipe-input-warning {
+  flex-basis: 100%;
+  margin-left: calc(120px + var(--space-sm));
 }
 
 /* Action row: Apply recipe + Build manually buttons */

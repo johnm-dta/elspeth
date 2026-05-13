@@ -9,14 +9,10 @@
 //     Returns null otherwise.  No defensive ?? "" coercion: an absent yaml is
 //     evidence (absence), not an invitation to render empty syntax-highlighted
 //     content.
-//   - Two action buttons, both calling useSessionStore.exitToFreeform():
-//       "Save and exit"                   -- committed-state UX framing.
-//       "Drop to freeform to keep editing" -- further-edit UX framing.
-//     WIRE-IDENTITY: Both buttons call the same parameterless exitToFreeform().
-//     The backend (routes.py + sessionStore.ts:572-583) has ONE handler for
-//     control_signal="exit_to_freeform" -- it does NOT distinguish between the
-//     two mental models above.  Do NOT introduce two separate wire paths without
-//     a backend protocol change (see sessionStore.ts:116).
+//   - One action button calls useSessionStore.exitToFreeform().  The backend
+//     has one handler for control_signal="exit_to_freeform", so the UI presents
+//     one matching action instead of two differently worded, wire-identical
+//     buttons.
 //   - useTheme() for Prism theme-awareness, matching YamlView.tsx:164.
 //   - <button type="button"> (never <div onClick>).
 //   - CSS via App.css guided-completion-* classes with design tokens.
@@ -67,11 +63,7 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
   const highlightTheme =
     resolvedTheme === "dark" ? themes.vsDark : themes.vsLight;
 
-  function handleSaveAndExit(): void {
-    void exitToFreeform();
-  }
-
-  function handleKeepEditing(): void {
+  function handleExit(): void {
     void exitToFreeform();
   }
 
@@ -101,23 +93,14 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
         </Highlight>
       </div>
 
-      {/* Action row.
-          Both buttons call exitToFreeform() -- wire-identical by design.
-          See WIRE-IDENTITY note in file-level docstring. */}
+      {/* Action row. One backend exit signal, one visible action. */}
       <div className="guided-completion-actions">
         <button
           type="button"
           className="guided-completion-save-btn"
-          onClick={handleSaveAndExit}
+          onClick={handleExit}
         >
-          Save and exit
-        </button>
-        <button
-          type="button"
-          className="guided-completion-edit-btn"
-          onClick={handleKeepEditing}
-        >
-          Drop to freeform to keep editing
+          Save and exit guided mode
         </button>
       </div>
     </div>

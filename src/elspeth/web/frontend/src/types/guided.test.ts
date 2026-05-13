@@ -93,6 +93,7 @@ describe("guided protocol types", () => {
       turn_type: "inspect_and_confirm",
       payload_hash: "abc123",
       response_hash: null,
+      summary: null,
       emitter: "server",
     };
     expect(rec.response_hash).toBeNull();

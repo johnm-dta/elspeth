@@ -57,12 +57,33 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          a: SafeLink,
           code: CodeBlock,
         }}
       >
         {content}
       </ReactMarkdown>
     </div>
+  );
+}
+
+function SafeLink({
+  href,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"a">) {
+  const isExternal =
+    typeof href === "string" &&
+    (href.startsWith("http://") || href.startsWith("https://"));
+  return (
+    <a
+      href={href}
+      target={isExternal ? "_blank" : undefined}
+      rel={isExternal ? "noopener noreferrer" : undefined}
+      {...props}
+    >
+      {children}
+    </a>
   );
 }
 

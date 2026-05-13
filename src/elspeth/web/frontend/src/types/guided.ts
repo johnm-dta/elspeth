@@ -23,7 +23,8 @@ export type TurnType =
 export type ControlSignal =
   | "exit_to_freeform"
   | "request_advisor"
-  | "reject";
+  | "reject"
+  | "back";
 
 export type GuidedStep =
   | "step_1_source"
@@ -46,6 +47,7 @@ export interface TurnRecord {
   turn_type: TurnType;
   payload_hash: string;
   response_hash: string | null;
+  summary: string | null;
   /** Closed value domain (state_machine.py:75-82): server-emitted or LLM-emitted. */
   emitter: "server" | "llm";
 }

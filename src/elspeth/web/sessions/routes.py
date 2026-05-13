@@ -64,11 +64,13 @@ from elspeth.web.composer.guided.emitters import (
     build_step_2_schema_form_turn,
     build_step_2_single_select_turn,
     build_step_3_propose_chain_turn,
+    build_step_3_schema_form_turn,
 )
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
+    ChainProposal,
     GuidedSession,
     SinkIntent,
     SourceResolved,
@@ -1948,6 +1950,80 @@ def _validate_step_indices(
             )
 
 
+def _summarize_guided_response(
+    turn_type: TurnType,
+    response: TurnResponse,
+) -> str | None:
+    """Return a UI-safe summary for a completed guided turn.
+
+    Summaries are denormalized display text for GuidedHistory. They deliberately
+    avoid option values and slot values because schema forms and recipe slots may
+    carry secret references or operator-provided sensitive text.
+    """
+    control_signal = response["control_signal"]
+    if control_signal is ControlSignal.REJECT:
+        return "Rejected proposed chain"
+    if control_signal is ControlSignal.REQUEST_ADVISOR:
+        return "Asked advisor to review proposal"
+    if control_signal is ControlSignal.EXIT_TO_FREEFORM:
+        return "Exited guided mode"
+    if control_signal is ControlSignal.BACK:
+        return "Went back to revise"
+
+    if turn_type is TurnType.SINGLE_SELECT:
+        chosen = response["chosen"] or []
+        if chosen:
+            return f"Selected: {', '.join(str(item) for item in chosen)}"
+        return None
+
+    if turn_type is TurnType.INSPECT_AND_CONFIRM:
+        edited = response["edited_values"]
+        if edited is None:
+            return None
+        if "columns" not in edited:
+            return None
+        columns = edited["columns"]
+        if type(columns) is list:
+            return f"Confirmed columns: {', '.join(str(c) for c in columns)}"
+        return None
+
+    if turn_type is TurnType.MULTI_SELECT_WITH_CUSTOM:
+        chosen = tuple(str(item) for item in (response["chosen"] or ()))
+        custom = tuple(str(item) for item in (response["custom_inputs"] or ()))
+        fields = (*chosen, *custom)
+        if fields:
+            return f"Required fields: {', '.join(fields)}"
+        return "No required fields selected"
+
+    if turn_type is TurnType.SCHEMA_FORM:
+        edited = response["edited_values"]
+        if edited is None:
+            return None
+        if "plugin" not in edited:
+            return None
+        plugin = edited["plugin"]
+        return f"Configured: {plugin}" if type(plugin) is str and plugin else None
+
+    if turn_type is TurnType.RECIPE_OFFER:
+        chosen = response["chosen"] or []
+        if chosen == ["accept"]:
+            edited = response["edited_values"]
+            if edited is not None and "recipe_name" in edited and type(edited["recipe_name"]) is str:
+                return f"Accepted recipe: {edited['recipe_name']}"
+            return "Accepted recipe"
+        if chosen == ["build_manually"]:
+            return "Build manually"
+        return None
+
+    if turn_type is TurnType.PROPOSE_CHAIN:
+        if response["edit_step_index"] is not None:
+            return f"Editing proposed step {int(response['edit_step_index']) + 1}"
+        chosen = response["chosen"] or []
+        if chosen == ["accept"]:
+            return "Accepted proposed chain"
+        return None
+
+
 async def _dispatch_guided_respond(
     *,
     state: CompositionState,
@@ -2683,6 +2759,97 @@ async def _dispatch_guided_respond(
     # deferred to Phase 5 (which adds re-solve, repair, and advisor flows).
     if current_step is GuidedStep.STEP_3_TRANSFORMS:
         if current_turn_type is TurnType.PROPOSE_CHAIN:
+            control = turn_response["control_signal"]
+            if control in (ControlSignal.REJECT, ControlSignal.REQUEST_ADVISOR):
+                if guided.step_1_result is None:
+                    raise InvariantError("step 3 regenerate: step_1_result is None — STEP_3 unreachable without Step 1 commit")
+                if guided.step_2_result is None:
+                    raise InvariantError("step 3 regenerate: step_2_result is None — STEP_3 unreachable without Step 2 commit")
+                repair_context = (
+                    "The operator rejected the proposed transform chain. Generate a materially different valid proposal."
+                    if control is ControlSignal.REJECT
+                    else "The operator requested an advisor review. Reconsider the proposal carefully and generate the strongest valid chain."
+                )
+                proposal, guided = await solve_chain_with_auto_drop(
+                    site=f"step_3_{control.value}_solve",
+                    session=guided,
+                    session_id=session_id,
+                    user_id=user_id,
+                    composition_version=state.version,
+                    recorder=recorder,
+                    model=model,
+                    source=guided.step_1_result,
+                    sink=guided.step_2_result,
+                    recipe_match=None,
+                    repair_context=repair_context,
+                )
+                if proposal is None:
+                    return state, guided, None
+                guided = _replace(guided, step_3_proposal=proposal, step_3_edit_index=None)
+                next_turn = build_step_3_propose_chain_turn(proposal)
+                new_record = TurnRecord(
+                    step=GuidedStep.STEP_3_TRANSFORMS,
+                    turn_type=TurnType.PROPOSE_CHAIN,
+                    payload_hash=stable_hash(next_turn["payload"]),
+                    response_hash=None,
+                    emitter="server",
+                )
+                emit_turn_emitted(
+                    recorder,
+                    step=GuidedStep.STEP_3_TRANSFORMS,
+                    turn_type=TurnType.PROPOSE_CHAIN,
+                    payload_hash=stable_hash(next_turn["payload"]),
+                    payload_payload_id="",
+                    emitter="server",
+                    composition_version=state.version,
+                    actor=user_id,
+                )
+                guided = _replace(guided, history=(*guided.history, new_record))
+                return state, guided, next_turn
+
+            edit_step_index = turn_response["edit_step_index"]
+            if edit_step_index is not None:
+                if guided.step_3_proposal is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="propose_chain edit_step_index sent but no chain proposal is staged.",
+                    )
+                step = dict(guided.step_3_proposal.steps[edit_step_index])
+                plugin = step["plugin"]
+                if not isinstance(plugin, str) or not plugin:
+                    raise InvariantError("step_3_proposal step plugin must be a non-empty string")
+                options = step["options"]
+                if not isinstance(options, Mapping):
+                    raise InvariantError("step_3_proposal step options must be a mapping")
+                next_turn = build_step_3_schema_form_turn(
+                    plugin=plugin,
+                    options=options,
+                    catalog=catalog,
+                )
+                new_record = TurnRecord(
+                    step=GuidedStep.STEP_3_TRANSFORMS,
+                    turn_type=TurnType.SCHEMA_FORM,
+                    payload_hash=stable_hash(next_turn["payload"]),
+                    response_hash=None,
+                    emitter="server",
+                )
+                emit_turn_emitted(
+                    recorder,
+                    step=GuidedStep.STEP_3_TRANSFORMS,
+                    turn_type=TurnType.SCHEMA_FORM,
+                    payload_hash=stable_hash(next_turn["payload"]),
+                    payload_payload_id="",
+                    emitter="server",
+                    composition_version=state.version,
+                    actor=user_id,
+                )
+                guided = _replace(
+                    guided,
+                    history=(*guided.history, new_record),
+                    step_3_edit_index=edit_step_index,
+                )
+                return state, guided, next_turn
+
             chosen = list(turn_response["chosen"] or [])
             if chosen == ["accept"]:
                 if guided.step_3_proposal is None:
@@ -2805,6 +2972,82 @@ async def _dispatch_guided_respond(
                 status_code=400,
                 detail=f"propose_chain response must have chosen=['accept'] or chosen=['reject'], got {chosen!r}.",
             )
+        if current_turn_type is TurnType.SCHEMA_FORM:
+            if guided.step_3_proposal is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="schema_form response at step 3 received but no chain proposal is staged.",
+                )
+            edit_index = guided.step_3_edit_index
+            if edit_index is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="schema_form response at step 3 received but no edit_step_index is staged.",
+                )
+            edited = turn_response["edited_values"]
+            if edited is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="schema_form response at step 3 requires edited_values; received null.",
+                )
+            missing = {"plugin", "options"} - edited.keys()
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 3 edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            plugin_name = edited["plugin"]
+            if type(plugin_name) is not str or not plugin_name:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 3 edited_values['plugin'] must be a non-empty string; got {plugin_name!r}"),
+                )
+            options_raw = edited["options"]
+            if type(options_raw) is not dict:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"schema_form response at step 3 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
+                )
+            existing_step = dict(guided.step_3_proposal.steps[edit_index])
+            if plugin_name != existing_step["plugin"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"schema_form response at step 3 plugin mismatch: editing {existing_step['plugin']!r} but received {plugin_name!r}."
+                    ),
+                )
+            updated_steps = [dict(step) for step in guided.step_3_proposal.steps]
+            updated_steps[edit_index] = {
+                **existing_step,
+                "options": options_raw,
+            }
+            proposal = ChainProposal(
+                steps=tuple(updated_steps),
+                why=guided.step_3_proposal.why,
+            )
+            guided = _replace(guided, step_3_proposal=proposal, step_3_edit_index=None)
+            next_turn = build_step_3_propose_chain_turn(proposal)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_CHAIN,
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                turn_type=TurnType.PROPOSE_CHAIN,
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id="",
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
         # SINGLE_SELECT clarifying-question response at STEP_3 — Phase 5.
         raise HTTPException(
             status_code=501,
@@ -4686,9 +4929,9 @@ def create_session_router() -> APIRouter:
           recipe matched (session stays at this step but no turn exists).
 
         - STEP_3_TRANSFORMS: if ``step_3_proposal`` is set, emit
-          ``propose_chain`` from the staged proposal (this is the normal
-          path — step_3_proposal is always set when the session reaches
-          STEP_3_TRANSFORMS via the LLM chain solver).  Returns ``None``
+          ``propose_chain`` from the staged proposal, unless
+          ``step_3_edit_index`` is set, in which case emit the transform
+          ``schema_form`` for the proposed step being revised.  Returns ``None``
           if the proposal is absent (LLM call has not completed; should
           not occur in practice — guarded defensively to avoid a crash).
 
@@ -4729,13 +4972,18 @@ def create_session_router() -> APIRouter:
             # No recipe matched — no initial turn for this step.
             return None
         if step is GuidedStep.STEP_3_TRANSFORMS:
-            # Finding 1 (Codex #5): rebuild propose_chain from the staged proposal.
-            # step_3_proposal is always set when the session reaches STEP_3_TRANSFORMS
-            # via the LLM chain solver (set atomically with the step pointer in the
-            # dispatcher at routes.py:2051 and routes.py:4063).  A None here would
-            # mean the proposal was never computed — guarded defensively to avoid
-            # crashing on a corrupt session rather than returning a misleading null.
             if guided.step_3_proposal is not None:
+                if guided.step_3_edit_index is not None:
+                    step_record = dict(guided.step_3_proposal.steps[guided.step_3_edit_index])
+                    plugin = step_record["plugin"]
+                    options = step_record["options"]
+                    if type(plugin) is not str or type(options) is not dict:
+                        raise InvariantError("STEP_3 edit rebuild requires proposal step plugin str and options mapping")
+                    return build_step_3_schema_form_turn(
+                        plugin=plugin,
+                        options=options,
+                        catalog=catalog,
+                    )
                 return build_step_3_propose_chain_turn(guided.step_3_proposal)
             # No proposal yet — LLM call has not completed; return None and let the
             # idempotency machinery handle it (no TurnRecord emitted; client retries).
@@ -4965,6 +5213,7 @@ def create_session_router() -> APIRouter:
                                 turn_type=r.turn_type.value,
                                 payload_hash=r.payload_hash,
                                 response_hash=r.response_hash,
+                                summary=r.summary,
                                 emitter=r.emitter,
                             )
                             for r in guided.history
@@ -5283,6 +5532,7 @@ def create_session_router() -> APIRouter:
                                     turn_type=r.turn_type.value,
                                     payload_hash=r.payload_hash,
                                     response_hash=r.response_hash,
+                                    summary=r.summary,
                                     emitter=r.emitter,
                                 )
                                 for r in new_guided.history
@@ -5359,7 +5609,11 @@ def create_session_router() -> APIRouter:
 
                 # Record the response_hash on the existing TurnRecord.
                 response_hash = stable_hash(turn_response)
-                updated_record = _replace(existing_record, response_hash=response_hash)
+                updated_record = _replace(
+                    existing_record,
+                    response_hash=response_hash,
+                    summary=_summarize_guided_response(current_turn_type, turn_response),
+                )
                 # Rebuild history tuple with response_hash stamped on this record.
                 updated_history = tuple(updated_record if r is existing_record else r for r in guided.history)
                 guided = _replace(guided, history=updated_history)
@@ -5554,6 +5808,7 @@ def create_session_router() -> APIRouter:
                                 turn_type=r.turn_type.value,
                                 payload_hash=r.payload_hash,
                                 response_hash=r.response_hash,
+                                summary=r.summary,
                                 emitter=r.emitter,
                             )
                             for r in guided.history
@@ -5943,6 +6198,7 @@ def create_session_router() -> APIRouter:
                                 turn_type=r.turn_type.value,
                                 payload_hash=r.payload_hash,
                                 response_hash=r.response_hash,
+                                summary=r.summary,
                                 emitter=r.emitter,
                             )
                             for r in new_guided.history

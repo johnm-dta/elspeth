@@ -21,13 +21,11 @@
 //      (history items are non-interactive read-only <li>s; moving focus into
 //      the list would require non-standard tabindex=-1 ref dance).
 //   9. Initial-mount no-auto-focus: rendering the widget does not steal focus.
-//  10. Scope reduction documented: wire carries only step/turn_type/emitter,
-//      not rich summary data.  See Tracker: filigree elspeth-611fc01d94
-//      (rich step summaries — wire extension or payload-fetch endpoint).
+//  10. Rich summaries render when the backend supplies TurnRecord.summary.
 //
 // Source of truth:
-//   - types/guided.ts:44-51 (TurnRecord wire shape — hashes only, no summary)
-//   - schemas.py:213-220 (TurnRecordResponse — confirms scope reduction)
+//   - types/guided.ts:44-51 (TurnRecord wire shape)
+//   - schemas.py:213-220 (TurnRecordResponse)
 //   - SchemaFormTurn.test.tsx:659-673 (aria-controls cross-state regression pin template)
 // ============================================================================
 
@@ -45,6 +43,7 @@ const TURN_1: TurnRecord = {
   payload_hash: "aabbcc001122",
   response_hash: "ddeeff334455",
   emitter: "server",
+  summary: "Source selected: csv",
 };
 
 const TURN_2: TurnRecord = {
@@ -53,6 +52,7 @@ const TURN_2: TurnRecord = {
   payload_hash: "112233aabbcc",
   response_hash: null,
   emitter: "llm",
+  summary: "Sink configured: jsonl",
 };
 
 const TWO_TURNS: TurnRecord[] = [TURN_1, TURN_2];
@@ -196,14 +196,14 @@ describe("per-entry rendering", () => {
     render(<GuidedHistory history={[TURN_1]} />);
     await user.click(screen.getByRole("button", { name: /show steps/i }));
     // Should render a human-readable step label, not the raw enum value.
-    expect(screen.getByText(/source/i)).toBeInTheDocument();
+    expect(screen.getByText("Source")).toBeInTheDocument();
   });
 
-  it("shows turn_type for each entry", async () => {
+  it("shows the turn-type fallback when an entry has no summary", async () => {
     const user = userEvent.setup();
-    render(<GuidedHistory history={[TURN_1]} />);
+    render(<GuidedHistory history={[{ ...TURN_1, summary: null }]} />);
     await user.click(screen.getByRole("button", { name: /show steps/i }));
-    expect(screen.getByText(/single_select/i)).toBeInTheDocument();
+    expect(screen.getByText("Single select")).toBeInTheDocument();
   });
 
   it("shows emitter for each entry", async () => {
@@ -213,13 +213,34 @@ describe("per-entry rendering", () => {
     expect(screen.getByText(/server/i)).toBeInTheDocument();
   });
 
+  it("renders backend-provided summaries for each entry", async () => {
+    const user = userEvent.setup();
+    render(<GuidedHistory history={TWO_TURNS} />);
+    await user.click(screen.getByRole("button", { name: /show steps/i }));
+
+    expect(screen.getByText("Source selected: csv")).toBeInTheDocument();
+    expect(screen.getByText("Sink configured: jsonl")).toBeInTheDocument();
+  });
+
+  it("falls back to turn type when a legacy entry has no summary", async () => {
+    const user = userEvent.setup();
+    const legacyTurn: TurnRecord = {
+      ...TURN_1,
+      summary: null,
+    };
+    render(<GuidedHistory history={[legacyTurn]} />);
+    await user.click(screen.getByRole("button", { name: /show steps/i }));
+
+    expect(screen.getByText(/single select/i)).toBeInTheDocument();
+  });
+
   it("renders entries for both turns with distinct step labels", async () => {
     const user = userEvent.setup();
     render(<GuidedHistory history={TWO_TURNS} />);
     await user.click(screen.getByRole("button", { name: /show steps/i }));
     // Both step labels should appear (Source and Sink).
-    expect(screen.getByText(/source/i)).toBeInTheDocument();
-    expect(screen.getByText(/sink/i)).toBeInTheDocument();
+    expect(screen.getByText("Source")).toBeInTheDocument();
+    expect(screen.getByText("Sink")).toBeInTheDocument();
   });
 
   it("shows ordinal step numbers (1-based index)", async () => {

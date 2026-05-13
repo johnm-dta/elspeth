@@ -220,6 +220,7 @@ class TurnRecordResponse(_StrictResponse):
     turn_type: str
     payload_hash: str
     response_hash: str | None
+    summary: str | None
     emitter: str
 
 

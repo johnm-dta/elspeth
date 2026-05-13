@@ -23,15 +23,12 @@ Every task follows this lifecycle:
 filigree ready                                      → find available work (no blockers)
 filigree show <issue-id>                            → read requirements and context
 filigree transitions <issue-id>                     → check valid status transitions
-filigree start-work <issue-id> --assignee <name>    → atomically claim + transition to the type's WIP status
+filigree start-work <issue-id> --assignee <name>    → atomically claim + transition to in_progress
 [do the work, commit code]
 filigree close <issue-id> --reason="summary of what was done"
 ```
 
-For autonomous pickup in a large hierarchy, inspect `filigree ready --json --include-context`
-before claiming so you do not accidentally grab a high-level epic or feature. Use
-`start-next-work` with a leaf-type filter such as `--type=bug` or `--type=task`
-when you intentionally want the highest-priority ready leaf item.
+Or skip steps 1–3 entirely with `filigree start-next-work --assignee <name>` to grab the highest-priority ready issue.
 
 Always close with a `--reason` — it becomes audit trail for the next agent.
 
@@ -52,15 +49,13 @@ When triaging, use `filigree batch-update <ids...> --priority=N` for bulk change
 ### Solo or Swarm — Same Tool
 
 Use `start-work` (or `start-next-work`) for the usual case. Both atomically
-claim the issue *and* transition it to the issue type's WIP status (`fixing`
-for bugs, `building` for features, `in_progress` for tasks/epics) in one DB
-transaction — optimistic-locking on the assignee, so concurrent callers can't
-both think they own the issue.
+claim the issue *and* transition it to `in_progress` in one DB transaction —
+optimistic-locking on the assignee, so concurrent callers can't both think
+they own the issue.
 
 ```bash
-filigree start-work <issue-id> --assignee <agent-name>          # specific issue
-filigree start-next-work --assignee <agent-name> --type=bug     # highest-priority ready bug
-filigree start-next-work --assignee <agent-name> --type=task    # highest-priority ready task
+filigree start-work <issue-id> --assignee <agent-name>     # specific issue
+filigree start-next-work --assignee <agent-name>           # highest-priority ready
 ```
 
 If another agent already owns the claim, the call fails with `code: CONFLICT`
@@ -84,7 +79,6 @@ filigree claim-next --assignee <agent-name>
 
 ```bash
 filigree ready                    # ready issues sorted by priority
-filigree ready --json --include-context
 filigree list --status=open       # all open issues
 filigree search "auth"            # full-text search
 filigree critical-path            # longest dependency chain
@@ -121,10 +115,9 @@ of the current conversation.
 
 ### Before Starting Work
 
-1. Run `filigree ready --json --include-context` to see available work with hierarchy context
+1. Run `filigree ready` to see available work
 2. Check `filigree critical-path` — unblocking the critical path has highest leverage
-3. Pick work that matches the current session's context, normally a leaf task or bug
-4. If using `start-next-work`, filter by type (`--type=bug` or `--type=task`)
+3. Pick work that matches the current session's context (e.g., if code is already open)
 
 ### When Finishing Work
 
@@ -170,12 +163,6 @@ and a full endpoint catalog. When linking issues to files, use file associations
 | `task_for` | Task related to this file |
 | `scan_finding` | Automated scan finding |
 | `mentioned_in` | File referenced in issue |
-
-Scanner findings are first-class triage records. Use `list-findings` or
-`get-finding` to inspect them, then `promote-finding` for real work or
-`dismiss-finding` for false positives and accepted non-issues. Do not convert
-scanner output into observations unless the item is truly incidental to the
-current task and still needs later human triage.
 
 ## Response Shapes (2.0)
 

@@ -200,7 +200,7 @@ The compose loop's per-iteration outcome record already exists at `src/elspeth/w
 **Files:**
 - Read-only: `src/elspeth/web/sessions/_persist_payload.py`
 
-- [ ] **Step 1: Confirm the field list matches §5.2.1's loop body.**
+- [x] **Step 1: Confirm the field list matches §5.2.1's loop body.**
 
 Required fields per spec §5.2.1: `call: Any`, `response: Any`, `error_class: str | None`, `error_message: str | None`, `pre_version: int`, `post_version: int`. Verify by reading `_ToolOutcome` directly in `_persist_payload.py`. The dataclass is `frozen=True, slots=True` with a `freeze_fields(self, "call", "response")` post-init guard.
 
@@ -208,9 +208,11 @@ If every field matches, this task is a verification-only no-op and is closed by 
 
 If a field is missing or has the wrong type, treat this as a Phase 1 hygiene defect: file a Filigree issue with reproducer steps, link from the PR, and add the missing field on this branch with a per-field test in `tests/unit/web/sessions/test_persist_payload.py` (extending the existing file). Do not add fields that §5.2.1 does not call for.
 
-- [ ] **Step 2: Commit (only if Step 1 added a field).**
+- [x] **Step 2: Commit (only if Step 1 added a field).**
 
 Commit message: `fix(sessions): add missing _ToolOutcome.<field> per spec §5.2.1 (composer-progress-persistence phase 3)`.
+
+Verification result: `_ToolOutcome` already exposes `call`, `response`, `error_class`, `error_message`, `pre_version`, and `post_version`; no payload change was required.
 
 ---
 
@@ -2348,7 +2350,7 @@ git commit -am "docs(plan): overview reflects rev-5 manifest-keyed framing + Pha
 
 Spec §10 OQ-3 and §11 cross-phase considerations: file a Filigree ticket for the integrity-hash chain (mechanism sketched in spec §10), cite the ID in the Phase 3 PR description. The integrity-hash chain is out of scope for Phase 3 itself. This is a session-end tracking action, not an implementation task; do it after code gates are green and before the operator PR-open summary.
 
-- [ ] **Step 1: File the ticket.**
+- [x] **Step 1: File the ticket.**
 
 ```bash
 filigree create "chat_messages integrity-hash chain — composer-progress-persistence OQ-3" \
@@ -2358,7 +2360,7 @@ filigree create "chat_messages integrity-hash chain — composer-progress-persis
 
 The ticket body should reference spec §10 OQ-3 and §11; include a short summary of the mechanism (per-row hash chain seeded by the previous row's hash, anchored at the session row).
 
-- [ ] **Step 2: Capture the ticket ID for the PR description.**
+- [x] **Step 2: Capture the ticket ID for the PR description.**
 
 ```bash
 filigree show <new-ticket-id>
@@ -2366,7 +2368,9 @@ filigree show <new-ticket-id>
 
 Cite the ticket ID in the Phase 3 PR description under the "Filed follow-ups" section.
 
-- [ ] **Step 3: No commit (Filigree state is outside the repo).**
+- [x] **Step 3: No commit (Filigree state is outside the repo).**
+
+Filed follow-up: `elspeth-dbeb1fbbe9`.
 
 ---
 

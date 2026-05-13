@@ -1061,7 +1061,7 @@ The service grep should show no compose-loop route-drain path. The routes grep s
 
 Expected: PASS for every Step 1 and Step 2 case including the plugin-crash test from Task 4 (now that the audit write runs before the raise).
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 2 — single sync dispatch via persist_compose_turn_async; delete legacy drain (composer-progress-persistence phase 3)"
@@ -1084,7 +1084,7 @@ The third historical `_AuditOutcome.tier1_violation` shape is removed (spec §5.
 - Modify: `tests/unit/web/composer/test_audit_failure_primacy.py` (exists at rev-3 baseline; extend in place)
 - Create or extend: `tests/integration/web/test_compose_loop_audit_integrity_route_stack.py` (end-to-end FastAPI route propagation)
 
-- [ ] **Step 1: Extend the failing red tests.**
+- [x] **Step 1: Extend the failing red tests.**
 
 Read the existing `tests/unit/web/composer/test_audit_failure_primacy.py` before editing. It already covers `persist_compose_turn` COMMIT-failure primacy with a dialect-level `do_commit` injection. Extend it for the compose-loop dispatch boundary; do not replace it with the older rev-2 draft.
 
@@ -1194,7 +1194,7 @@ def test_audit_integrity_error_from_sync_worker_returns_500_without_body_suppres
 
 Expected: FAIL — Step 3 dispatch logic not yet present.
 
-- [ ] **Step 2: Insert Step 3 dispatch.**
+- [x] **Step 2: Insert Step 3 dispatch.**
 
 After Task 6's `audit_outcome = await ...` line:
 
@@ -1231,7 +1231,7 @@ persisted_assistant_message_id = audit_outcome.assistant_id
 
 These asserts are intentional Tier-1 invariants, not defensive recovery. They guard future `AuditOutcome` shape changes from silently corrupting the loop and satisfy the plugin-crash branch check requested in rev-3 review. Do not replace them with a catch-and-continue branch.
 
-- [ ] **Step 3: Re-run the audit-failure-primacy tests.**
+- [x] **Step 3: Re-run the audit-failure-primacy tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_audit_failure_primacy.py -v

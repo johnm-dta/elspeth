@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 import structlog
@@ -308,3 +309,31 @@ def test_audit_fail_non_integrity_non_operational_raises_even_on_unwind_path(ser
         )
 
     assert isinstance(exc_info.value.__cause__, DataError)
+
+
+@pytest.mark.asyncio
+async def test_compose_loop_rejects_unwind_audit_failure_without_plugin_crash(
+    composer_service_with_real_sessions,
+    fake_llm_two_tool_calls,
+    result_session_id,
+) -> None:
+    """AuditOutcome(None, unwind=True) is invalid without an in-flight crash."""
+
+    from elspeth.contracts.errors import AuditIntegrityError
+    from elspeth.web.sessions._persist_payload import AuditOutcome
+
+    class _ImpossibleOutcomeSessionsService:
+        async def persist_compose_turn_async(self, **_kwargs: Any) -> AuditOutcome:
+            return AuditOutcome(assistant_id=None, unwind_audit_failed=True)
+
+    composer_service_with_real_sessions._sessions_service = _ImpossibleOutcomeSessionsService()
+
+    with pytest.raises(AuditIntegrityError) as exc_info:
+        await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_two_tool_calls,
+            session_id=result_session_id,
+        )
+
+    assert exc_info.value.failed_turn is not None
+    assert exc_info.value.failed_turn.assistant_message_id is None
+    assert exc_info.value.failed_turn.tool_calls_attempted == 2

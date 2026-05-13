@@ -2985,6 +2985,16 @@ class ComposerServiceImpl:
                     assistant_message_id=audit_outcome.assistant_id,
                     tool_calls_attempted=len(assistant_tool_calls),
                 )
+                if audit_outcome.assistant_id is None and plugin_crash is None:
+                    raise AuditIntegrityError(
+                        "persist_compose_turn_async returned unwind_audit_failed without an in-flight plugin crash",
+                        failed_turn=failed_turn,
+                    )
+                if audit_outcome.assistant_id is None and not audit_outcome.unwind_audit_failed:
+                    raise AuditIntegrityError(
+                        "persist_compose_turn_async returned no assistant id without the unwind-audit-failed disposition",
+                        failed_turn=failed_turn,
+                    )
                 persisted_assistant_message_id = audit_outcome.assistant_id
                 persisted_tool_call_turn = True
             if plugin_crash is not None:

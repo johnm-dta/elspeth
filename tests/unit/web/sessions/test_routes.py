@@ -173,11 +173,12 @@ class _BlockingRecordingComposer:
         state: CompositionState,
         *,
         session_id: str | None = None,
+        current_state_id: str | None = None,
         user_id: str | None = None,
         progress=None,
         guided_terminal=None,
     ) -> ComposerResult:
-        del state, session_id, user_id, progress, guided_terminal
+        del state, session_id, current_state_id, user_id, progress, guided_terminal
 
         self.calls.append(
             {
@@ -211,11 +212,12 @@ class _ProgressAwareComposer:
         state: CompositionState,
         *,
         session_id: str | None = None,
+        current_state_id: str | None = None,
         user_id: str | None = None,
         progress=None,
         guided_terminal=None,
     ) -> ComposerResult:
-        del message, chat_messages, session_id, user_id, guided_terminal
+        del message, chat_messages, session_id, current_state_id, user_id, guided_terminal
         assert progress is not None, "session routes must pass a composer progress sink"
         self.progress_sink_seen = True
         await progress(

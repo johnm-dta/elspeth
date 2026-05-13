@@ -110,7 +110,7 @@ def load_step_chat_skill(step: GuidedStep) -> str:
 
 
 def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill: str) -> str:
-    """Construct the layered guided→freeform transition prompt: guided skill + transition message + freeform skill.
+    """Construct the guided→freeform transition prompt: freeform skill + transition message.
 
     The ``freeform_skill`` parameter must be supplied by the caller — typically via
     ``build_system_prompt(data_dir, advisor_enabled=advisor_enabled)`` in
@@ -127,19 +127,18 @@ def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill:
             Produced by ``build_system_prompt(data_dir, advisor_enabled=...)``.
 
     Returns:
-        Layered prompt string: guided skill \\n\\n transition header \\n\\n freeform skill.
+        Layered prompt string: freeform skill \\n\\n transition header.
     """
-    guided = load_guided_skill()
     transition = (
         f"## Mode Transition — Guided → Freeform\n\n"
         f"You have just exited guided mode (reason: {terminal_reason}).\n\n"
-        "The protocol restrictions above (closed turn taxonomy, read-only state, "
-        "legal-turn matrix) are LIFTED for the remainder of this session. You now "
-        "have the full freeform tool surface detailed below. The guided session's "
-        "outcome is recorded in `composition_state.guided_session` — "
+        "Any previous guided-mode protocol restrictions (closed turn taxonomy, "
+        "read-only state, legal-turn matrix) are LIFTED for the remainder of this "
+        "session. Use the full freeform tool surface described above. The guided "
+        "session's outcome is recorded in `composition_state.guided_session` — "
         "do not re-run any work it already accomplished."
     )
-    return f"{guided}\n\n{transition}\n\n{freeform_skill}"
+    return f"{freeform_skill}\n\n{transition}"
 
 
 def build_repair_addendum(*, validation_error: str) -> str:

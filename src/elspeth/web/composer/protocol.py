@@ -680,6 +680,7 @@ class ComposerService(Protocol):
         messages: list[dict[str, Any]],
         state: CompositionState,
         session_id: str | None = None,
+        current_state_id: str | None = None,
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
         guided_terminal: TerminalState | None = None,
@@ -695,6 +696,9 @@ class ComposerService(Protocol):
                 SessionServiceProtocol for tool-call turn persistence (seam
                 contract B), but does not fetch history itself.
             state: The current CompositionState.
+            current_state_id: Database id of ``state`` when it came from a
+                persisted session row. Used as the stale-state guard for
+                compose-loop tool-call audit persistence.
             user_id: Current user ID. Passed through to secret tools.
             guided_terminal: When set, the resolved TerminalState from the
                 completed guided session; triggers the layered mode-transition

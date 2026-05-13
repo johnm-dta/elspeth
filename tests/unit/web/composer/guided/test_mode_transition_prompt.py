@@ -10,7 +10,6 @@ import pytest
 
 from elspeth.web.composer.guided.prompts import (
     build_mode_transition_system_prompt,
-    load_guided_skill,
 )
 
 # Sentinel freeform skill used across tests — unique enough to identify as
@@ -31,41 +30,45 @@ class TestBuildModeTransitionSystemPrompt:
         ],
     )
     def test_layered_content_all_reasons(self, reason: str) -> None:
-        """Returned prompt contains guided-skill content, LIFTED signal, reason, and freeform content."""
+        """Returned prompt contains transition context, reason, and freeform content."""
         result = build_mode_transition_system_prompt(
             terminal_reason=reason,
             freeform_skill=_SENTINEL_FREEFORM,
         )
 
-        # (a) guided-skill content present (guided_pipeline.md mentions "guided mode")
-        assert "guided mode" in result.lower(), "Missing guided-skill content marker"
-
-        # (b) rules-lifted signal present (spec §8.2 line 522)
+        # (a) rules-lifted signal present (spec §8.2 line 522)
         assert "LIFTED" in result, "Missing LIFTED signal"
 
-        # (c) the terminal reason string present
+        # (b) the terminal reason string present
         assert reason in result, f"Missing reason string: {reason}"
 
-        # (d) supplied freeform_skill present verbatim
+        # (c) supplied freeform_skill present verbatim
         assert _SENTINEL_FREEFORM in result, "Missing freeform_skill content in result"
 
     def test_layer_ordering(self) -> None:
-        """Guided-skill content appears before transition header, before freeform-skill content."""
+        """Freeform-skill content appears before transition context."""
         result = build_mode_transition_system_prompt(
             terminal_reason="user_pressed_exit",
             freeform_skill=_SENTINEL_FREEFORM,
         )
 
-        guided_pos = result.lower().find("guided mode")
         transition_pos = result.find("## Mode Transition")
         freeform_pos = result.find(_SENTINEL_FREEFORM)
 
-        assert guided_pos != -1, "guided-skill marker not found"
         assert transition_pos != -1, "transition header not found"
         assert freeform_pos != -1, "freeform-skill marker not found"
 
-        assert guided_pos < transition_pos, "Guided content must appear before transition header"
-        assert transition_pos < freeform_pos, "Transition header must appear before freeform content"
+        assert freeform_pos < transition_pos, "Freeform content must appear before transition header"
+
+    def test_transition_prompt_does_not_embed_guided_non_mutation_rule(self) -> None:
+        """The first freeform turn must not restate guided-mode mutation bans."""
+        result = build_mode_transition_system_prompt(
+            terminal_reason="user_pressed_exit",
+            freeform_skill=_SENTINEL_FREEFORM,
+        )
+
+        assert "You **cannot** mutate pipeline state" not in result
+        assert "Anything else is rejected" not in result
 
     def test_transition_header_literal(self) -> None:
         """Transition header matches spec §8.2 exactly."""
@@ -100,12 +103,11 @@ class TestBuildModeTransitionSystemPrompt:
 
         assert custom_skill in result
 
-    def test_guided_skill_from_load_guided_skill(self) -> None:
-        """The guided section equals load_guided_skill() exactly."""
-        guided = load_guided_skill()
+    def test_freeform_skill_is_first_layer(self) -> None:
+        """Freeform instructions must be the first layer of the returned prompt."""
         result = build_mode_transition_system_prompt(
             terminal_reason="completed_pipeline",
             freeform_skill=_SENTINEL_FREEFORM,
         )
 
-        assert result.startswith(guided), "Guided skill must be the first layer of the returned prompt"
+        assert result.startswith(_SENTINEL_FREEFORM), "Freeform skill must be the first layer of the returned prompt"

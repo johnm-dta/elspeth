@@ -207,7 +207,7 @@ def build_messages(
 
     When ``guided_terminal`` is set, this is the first freeform turn after
     a guided-mode exit.  The system prompt is replaced with a layered
-    prompt (guided skill → transition header → freeform skill) per spec §8.2.
+    prompt (freeform skill → transition header) per spec §8.2.
     The caller is responsible for the gate logic and the ``transition_consumed``
     flip; this function is pure (no state mutation).
 

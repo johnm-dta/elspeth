@@ -12,11 +12,18 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_tool_call_response
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.sessions.protocol import CompositionStateData
 
 
-async def _run_one_turn(service: ComposerServiceImpl, *, llm: Any, session_id: str) -> Any:
+async def _run_one_turn(
+    service: ComposerServiceImpl,
+    *,
+    llm: Any,
+    session_id: str,
+    current_state_id: str | None = None,
+) -> Any:
     driver = cast(Any, service)
-    return await driver._run_one_turn_for_test(llm=llm, session_id=session_id)
+    return await driver._run_one_turn_for_test(llm=llm, session_id=session_id, current_state_id=current_state_id)
 
 
 @pytest.mark.asyncio
@@ -178,6 +185,33 @@ async def test_step2_preserves_absent_raw_content_as_none(
             {"id": audit_outcome.assistant_id},
         ).one()
     assert row.raw_content is None
+
+
+@pytest.mark.asyncio
+async def test_step2_first_tool_turn_uses_existing_current_state_id(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_two_tool_calls: Any,
+    result_session_id: str,
+) -> None:
+    """First tool-call persistence must guard against the current state row."""
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    state_record = await sessions_service.save_composition_state(
+        result_session_id,
+        CompositionStateData(is_valid=False),
+        provenance="session_seed",
+    )
+
+    await _run_one_turn(
+        composer_service_with_real_sessions,
+        llm=fake_llm_two_tool_calls,
+        session_id=result_session_id,
+        current_state_id=str(state_record.id),
+    )
+
+    assert composer_service_with_real_sessions._phase3_last_expected_current_state_id == str(state_record.id)  # type: ignore[attr-defined]
+    audit_outcome = composer_service_with_real_sessions._phase3_last_audit_outcome  # type: ignore[attr-defined]
+    assert audit_outcome.current_state_id == str(state_record.id)
 
 
 @pytest.mark.asyncio

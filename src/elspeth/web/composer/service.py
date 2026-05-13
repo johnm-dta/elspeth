@@ -1170,6 +1170,7 @@ class ComposerServiceImpl:
         *,
         llm: Any | None = None,
         session_id: str | None = None,
+        current_state_id: str | None = None,
         initial_state: CompositionState | None = None,
         user_message_id: str | None = None,
     ) -> ComposeLoopTestResult:
@@ -1209,6 +1210,7 @@ class ComposerServiceImpl:
                 [],
                 state,
                 session_id=resolved_session_id,
+                initial_current_state_id=current_state_id,
                 deadline=asyncio.get_event_loop().time() + self._timeout_seconds,
             )
         finally:
@@ -1750,6 +1752,7 @@ class ComposerServiceImpl:
         messages: list[dict[str, Any]],
         state: CompositionState,
         session_id: str | None = None,
+        current_state_id: str | None = None,
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
         guided_terminal: TerminalState | None = None,
@@ -1761,6 +1764,9 @@ class ComposerServiceImpl:
             messages: Chat history as plain dicts (pre-converted from
                 ChatMessageRecord by route handler; seam contract B).
             state: The current CompositionState.
+            current_state_id: Database id of ``state`` when it came from a
+                persisted session row. Used as the stale-state guard for
+                compose-loop tool-call audit persistence.
             guided_terminal: When set, the resolved TerminalState from the
                 completed guided session; triggers the layered mode-transition
                 prompt for this first freeform turn (spec §8.2). The caller
@@ -1780,7 +1786,17 @@ class ComposerServiceImpl:
         from litellm.exceptions import APIError as LiteLLMAPIError
 
         try:
-            return await self._compose_loop(message, messages, state, session_id, user_id, deadline, progress, guided_terminal)
+            return await self._compose_loop(
+                message,
+                messages,
+                state,
+                session_id,
+                current_state_id,
+                user_id,
+                deadline,
+                progress,
+                guided_terminal,
+            )
         except ComposerConvergenceError as exc:
             await _emit_progress(
                 progress,
@@ -1877,6 +1893,7 @@ class ComposerServiceImpl:
         messages: list[dict[str, Any]],
         state: CompositionState,
         session_id: str | None = None,
+        initial_current_state_id: str | None = None,
         user_id: str | None = None,
         deadline: float = 0.0,
         progress: ComposerProgressSink | None = None,
@@ -1973,7 +1990,7 @@ class ComposerServiceImpl:
         persisted_assistant_message_id: str | None = None
         persisted_tool_call_turn = False
         failed_turn: FailedTurnMetadata | None = None
-        current_state_id: str | None = None
+        current_state_id: str | None = initial_current_state_id
 
         while True:
             # Phase 3 Step 1 captures the state id observed before the

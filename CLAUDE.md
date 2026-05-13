@@ -433,7 +433,7 @@ faster and return structured data. Key tools:
 - `get_ready` / `get_blocked` — find available work
 - `get_issue` / `list_issues` / `search_issues` — read issues
 - `create_issue` / `update_issue` / `close_issue` — manage issues
-- `start_work` / `start_next_work` — atomically claim and transition to in-progress (the usual way to pick up work in 2.0)
+- `start_work` / `start_next_work` — atomically claim and transition to the issue type's WIP status (the usual way to pick up work in 2.0)
 - `claim_issue` / `claim_next` — atomic claim only, no transition (niche; prefer `start_work`)
 - `add_comment` / `add_label` — metadata
 - `list_labels` / `get_label_taxonomy` — discover labels and reserved namespaces
@@ -497,7 +497,7 @@ filigree show <id> --with-files             # Include file associations (off by 
 
 # Creating & updating
 filigree create "Title" --type=task --priority=2          # New issue
-filigree update <id> --status=<status>                   # Update status (free-form; prefer `start-work` for open→in_progress)
+filigree update <id> --status=<status>                   # Update status (free-form; prefer `start-work` for open→WIP)
 filigree close <id>                                      # Mark complete
 filigree close <id> --reason="explanation"               # Close with reason
 
@@ -527,9 +527,9 @@ filigree guide <pack>                       # Display workflow guide for a pack
 
 # Atomic claiming
 filigree claim <id> --assignee <name>            # Claim issue (optimistic lock)
-filigree claim-next --assignee <name>            # Claim highest-priority ready issue
-filigree start-work <id> --assignee <name>       # Claim + transition to in_progress
-filigree start-next-work --assignee <name>       # Claim-next + transition to in_progress
+filigree claim-next --assignee <name>            # Claim only; no status transition
+filigree start-work <id> --assignee <name>       # Claim + transition to the type's WIP status
+filigree start-next-work --assignee <name> --type=bug   # Claim + start the highest-priority ready bug
 
 # Batch operations
 filigree batch-update <ids...> --priority=0      # Update multiple issues
@@ -566,9 +566,9 @@ filigree batch-update-findings <ids...> --status=...     # Update many at once
 
 # Scanners
 filigree list-scanners                                   # Registered scanners
-filigree trigger-scan <scanner>                          # Run a scanner
-filigree trigger-scan-batch <scanners...>                # Run several scanners
-filigree preview-scan <scanner>                          # Dry-run a scanner
+filigree trigger-scan <scanner> <file_path>              # Run a scanner for one file
+filigree trigger-scan-batch <scanner> <file_paths...>    # Run one scanner for several files
+filigree preview-scan <scanner> <file_path>              # Dry-run a scanner command
 filigree get-scan-status <scan_id>                       # Scan progress / results
 filigree report-finding ...                              # Report a finding from a scanner
 
@@ -606,17 +606,28 @@ Key endpoints:
 - `GET /api/loom/files/{file_id}` — File detail with associations and findings summary
 - `GET /api/loom/files/{file_id}/findings` — Findings for a specific file
 
+Scanner findings are first-class triage objects. Use `list-findings` /
+`get-finding`, then `promote-finding` or `dismiss-finding`; do not convert
+scanner findings into ad hoc observations unless they are truly incidental to
+the current task.
+
 ### Workflow
 1. `filigree ready` to find available work
 2. `filigree show <id>` to review details
 3. `filigree transitions <id>` to see valid status transitions
-4. `filigree start-work <issue-id> --assignee <name>` to atomically claim and transition to in-progress (or `filigree start-next-work --assignee <name>` to skip steps 1–3 and grab the highest-priority ready issue)
+4. `filigree start-work <issue-id> --assignee <name>` to atomically claim and transition to the issue type's WIP status
 5. Do the work, commit code
 6. `filigree close <id>` when done
 
+Prefer `filigree ready --json --include-context` before selecting work so parent
+scope is visible. In this repo, the ready queue includes high-level epics and
+features; do not use raw `start-next-work` unless the operator asked for that
+queue. For autonomous pickup, filter to the intended leaf type, e.g.
+`filigree start-next-work --assignee <name> --type=bug` or `--type=task`.
+
 ### Session Start
 When beginning a new session, run `filigree session-context` to load the project
-snapshot (ready work, in-progress items, critical path). This provides the
+snapshot (ready work, WIP items, critical path). This provides the
 context needed to pick up where the previous session left off.
 
 ### Priority Scale

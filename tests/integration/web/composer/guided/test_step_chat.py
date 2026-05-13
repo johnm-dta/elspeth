@@ -604,3 +604,117 @@ class TestStepChatServerInvariants:
 
         assert status == 500, body
         assert body["detail"] == "Server invariant violated. See application audit log for diagnostic detail."
+
+
+class TestStepChatCrossStep:
+    """chat_history persists across step transitions (Phase A integration coverage).
+
+    The slice 5 round-trip test exercises persistence within a single
+    step; this class exercises the cross-step invariant: a session that
+    chats at step_1, advances to step_2, then chats at step_2 must
+    accumulate four chat_history entries spanning two step values, in
+    seq order.  Documented gap from elspeth-obs-791077020c.
+
+    Step advance is via the existing ``/api/sessions/{id}/guided/respond``
+    seam.  The pattern mirrors helpers in ``test_audit_emission.py``
+    (``_seed_blob`` + two ``_respond`` calls drive step_1_source →
+    step_2_sink): seed a CSV blob, accept the CSV source plugin, then
+    submit an edited_values payload that closes the INSPECT_AND_CONFIRM
+    turn and advances to step_2_sink SINGLE_SELECT.
+    """
+
+    @staticmethod
+    def _seed_csv_blob(client: TestClient, session_id: str) -> str:
+        """Seed an inline CSV blob and return its storage_path on disk."""
+        content = "text,note\nHello,world\n"
+        resp = client.post(
+            f"/api/sessions/{session_id}/blobs/inline",
+            json={"filename": "data.csv", "content": content, "mime_type": "text/csv"},
+        )
+        assert resp.status_code == 201, resp.json()
+        blob_id = resp.json()["id"]
+        blob_service = client.app.state.blob_service
+        record = asyncio.run(blob_service.get_blob(UUID(blob_id)))
+        return record.storage_path
+
+    @staticmethod
+    def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
+        resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
+        assert resp.status_code == 200, resp.json()
+        return resp.json()
+
+    def test_chat_history_accumulates_across_step_transition(self, composer_test_client: TestClient) -> None:
+        """Chat at step_1, advance to step_2, chat at step_2, GET /guided → 4 entries with mixed step values."""
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+        storage_path = self._seed_csv_blob(composer_test_client, session_id)
+
+        # 1. Chat at step_1_source.  This records two ChatTurn entries
+        #    (user + assistant, seq 0 + 1, step=step_1_source).
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("step-1 advice")),
+        ):
+            _post_chat(
+                composer_test_client,
+                session_id,
+                message="how do I describe my CSV?",
+                step_index="step_1_source",
+            )
+
+        # 2. Advance through step_1 SINGLE_SELECT → INSPECT_AND_CONFIRM.
+        #    The wizard remains at step_1_source for the INSPECT turn.
+        self._respond(composer_test_client, session_id, chosen=["csv"])
+
+        # 3. Commit the source config — this transitions the wizard to
+        #    step_2_sink SINGLE_SELECT.  The chat_history persisted in
+        #    composer_meta carries through the to_dict / from_dict round
+        #    trip on the GuidedSession update.
+        self._respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                "observed_columns": ["text", "note"],
+                "sample_rows": [{"text": "Hello", "note": "world"}],
+            },
+        )
+
+        # Confirm the wizard advanced — load-bearing precondition for
+        # the cross-step assertion below.  Without this assertion, a
+        # silent revert to step_1_source would mask the test as passing
+        # while never exercising the cross-step transition.
+        guided_after_advance = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()
+        assert guided_after_advance["guided_session"]["step"] == "step_2_sink", guided_after_advance
+
+        # 4. Chat at step_2_sink.  Two more ChatTurn entries (user +
+        #    assistant, seq 2 + 3, step=step_2_sink).
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("step-2 advice")),
+        ):
+            _post_chat(
+                composer_test_client,
+                session_id,
+                message="which sink for JSON output?",
+                step_index="step_2_sink",
+            )
+
+        # 5. GET /guided and assert chat_history has 4 entries with the
+        #    expected step+seq+role+content pattern.  This is the
+        #    cross-step invariant: a single chat_history list, monotonic
+        #    seq, step values reflecting where each turn happened.
+        final = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()
+        chat_history = final["guided_session"]["chat_history"]
+        assert len(chat_history) == 4, chat_history
+        # Tuple-shaped assertion so a regression on any axis (step/seq/role/content)
+        # surfaces in the failure message.
+        observed = [(entry["role"], entry["step"], entry["seq"], entry["content"]) for entry in chat_history]
+        assert observed == [
+            ("user", "step_1_source", 0, "how do I describe my CSV?"),
+            ("assistant", "step_1_source", 1, "step-1 advice"),
+            ("user", "step_2_sink", 2, "which sink for JSON output?"),
+            ("assistant", "step_2_sink", 3, "step-2 advice"),
+        ]
+        assert final["guided_session"]["chat_turn_seq"] == 4

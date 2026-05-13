@@ -169,6 +169,7 @@ class AuditOutcome:
 
     assistant_id: str | None
     unwind_audit_failed: bool
+    current_state_id: str | None = None
 
     def __post_init__(self) -> None:
         # Success and unwind-failure are the only two valid shapes.

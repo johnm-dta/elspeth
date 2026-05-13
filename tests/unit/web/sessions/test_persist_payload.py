@@ -20,6 +20,7 @@ def test_audit_outcome_success_shape():
     )
     assert outcome.assistant_id == "abc"
     assert outcome.unwind_audit_failed is False
+    assert outcome.current_state_id is None
 
 
 def test_audit_outcome_unwind_failure_shape():
@@ -31,6 +32,7 @@ def test_audit_outcome_unwind_failure_shape():
     )
     assert outcome.assistant_id is None
     assert outcome.unwind_audit_failed is True
+    assert outcome.current_state_id is None
 
 
 def test_audit_outcome_rejects_ambiguous_shape():
@@ -52,7 +54,7 @@ def test_audit_outcome_no_tier1_violation_field():
     import dataclasses
 
     fields = {f.name for f in dataclasses.fields(AuditOutcome)}
-    assert fields == {"assistant_id", "unwind_audit_failed"}
+    assert fields == {"assistant_id", "unwind_audit_failed", "current_state_id"}
 
 
 def test_redacted_tool_row_with_state_advance():

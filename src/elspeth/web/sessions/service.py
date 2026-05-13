@@ -873,6 +873,7 @@ class SessionServiceImpl:
                                 provenance="tool_call",
                                 created_at=now,
                             )
+                            current_state_id = state_id
                         self._insert_chat_message(
                             conn,
                             session_id=session_id,
@@ -891,6 +892,7 @@ class SessionServiceImpl:
                 return AuditOutcome(
                     assistant_id=assistant_id,
                     unwind_audit_failed=False,
+                    current_state_id=current_state_id,
                 )
         except IntegrityError:
             self._telemetry.tool_row_integrity_violation_total.add(1)

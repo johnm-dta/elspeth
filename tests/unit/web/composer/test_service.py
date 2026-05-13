@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
@@ -47,6 +48,8 @@ from elspeth.web.execution.schemas import ValidationCheck, ValidationError, Vali
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
 @dataclass
@@ -230,6 +233,15 @@ def _session_engine_with_session() -> tuple[Any, str]:
     return engine, session_id
 
 
+def _test_sessions_service(engine: Any, data_dir: Path | None = None) -> SessionServiceImpl:
+    return SessionServiceImpl(
+        engine,
+        data_dir=data_dir,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.composer.sessions"),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _composer_available_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep service tests focused on compose behavior, not local API keys."""
@@ -373,7 +385,12 @@ class TestComposerTextOnlyResponse:
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
         settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
         state = _empty_state()
         create_blob_turn = _make_llm_response(
             tool_calls=[
@@ -505,7 +522,12 @@ class TestComposerSingleToolCall:
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
         settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
         state = _empty_state()
         output_path = tmp_path / "outputs" / "append.csv"
         pipeline_args = {
@@ -2907,6 +2929,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -2995,6 +3018,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3082,6 +3106,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3153,6 +3178,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3225,6 +3251,7 @@ class TestPluginCrashSessionPersistence:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3670,6 +3697,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -3735,6 +3763,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         service = ComposerServiceImpl(
             catalog=catalog,
             settings=settings,
+            sessions_service=_test_sessions_service(self.engine, self.data_dir),
             session_engine=self.engine,
         )
         state = _empty_state()
@@ -5028,7 +5057,12 @@ class TestAttemptProofRepair:
                 )
             )
 
-        self.service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        self.service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
 
     def _state_with_blocking_csv(self):
         """Build a state whose preview emits csv_fixed_schema_omits_observed_columns."""
@@ -5280,7 +5314,12 @@ class TestComposeLoopForcedRepair:
                 )
             )
 
-        self.service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        self.service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
 
     def _wire_blocking_pipeline_tool_calls(self) -> list[dict[str, Any]]:
         """Tool calls that establish the blocking csv_fixed_schema_omits_observed_columns state."""

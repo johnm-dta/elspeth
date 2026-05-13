@@ -106,6 +106,7 @@ slog = structlog.get_logger()
 _ARRAY_ITEM_SEGMENT = "[]"
 _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
+_INVALID_TOOL_ARGUMENTS_REDACTION_STATUS: Final[str] = "invalid_tool_arguments"
 
 # Composer LLM sampling constants. Hardcoded for deterministic tool-call
 # construction (RGR investigation 2026-05-06 §4.4 traced ~33% hard-GREEN
@@ -1149,6 +1150,131 @@ class ComposerServiceImpl:
         self._runtime_preflight_timeout_seconds = settings.composer_runtime_preflight_timeout_seconds
         self._runtime_preflight_coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
         self._availability = self._compute_availability()
+        from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
+
+        self._max_tool_calls_per_turn = self._settings.composer_max_tool_calls_per_turn
+        self._telemetry = None
+        self._redaction_telemetry = OtelRedactionTelemetry()
+        self._phase3_last_tool_outcomes = ()
+        self._phase3_last_expected_current_state_id = None
+        self._phase3_last_redacted_assistant_tool_calls = ()
+        self._phase3_last_redacted_tool_rows = ()
+        self._phase3_last_audit_outcome = None
+
+    async def _run_one_turn_for_test(
+        self,
+        *,
+        llm: Any | None = None,
+        session_id: str | None = None,
+        initial_state: CompositionState | None = None,
+        user_message_id: str | None = None,
+    ) -> ComposeLoopTestResult:
+        """Drive exactly one compose-loop turn for Phase 3 tests.
+
+        Test-only helper: it bypasses HTTP route setup but exercises the
+        same ``_compose_loop`` body, including ``_require_sessions_service()``.
+        Missing ``sessions_service`` must therefore fail with
+        ``RuntimeError("sessions_service not wired")``, not ``AttributeError``
+        or a constructor ``TypeError``.
+        """
+
+        from elspeth.web.composer.state import PipelineMetadata
+
+        del user_message_id
+        self._require_sessions_service()
+        state = initial_state or CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        resolved_session_id = session_id or "00000000-0000-0000-0000-000000000000"
+        original_call_llm = self._call_llm
+
+        async def _call_fake_llm(messages: Any, tools: Any) -> Any:
+            if llm is None:
+                return await original_call_llm(messages, tools)
+            return await llm(messages, tools)
+
+        self._call_llm = _call_fake_llm  # type: ignore[method-assign]
+        try:
+            result = await self._compose_loop(
+                "Phase 3 one-turn test driver",
+                [],
+                state,
+                session_id=resolved_session_id,
+                deadline=asyncio.get_event_loop().time() + self._timeout_seconds,
+            )
+        finally:
+            self._call_llm = original_call_llm  # type: ignore[method-assign]
+
+        return ComposeLoopTestResult(
+            assistant_message=result.message,
+            tool_outcomes=tuple(self._phase3_last_tool_outcomes),
+            persisted_assistant_tool_calls=tuple(self._phase3_last_redacted_assistant_tool_calls),
+            persisted_tool_row_content=tuple(row.content for row in self._phase3_last_redacted_tool_rows),
+        )
+
+    def _serialize_response_via_walker(
+        self,
+        outcome: Any,
+        *,
+        telemetry: Any,
+    ) -> str:
+        """Serialize one Step 1 outcome through the Phase 2 response walker."""
+
+        from elspeth.core.canonical import canonical_json
+        from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_response
+
+        if outcome.error_class is None:
+            result = cast(ToolResult, outcome.response)
+            if outcome.call.function.name not in MANIFEST:
+                return canonical_json(result.to_dict())
+            redacted = redact_tool_call_response(
+                tool_name=outcome.call.function.name,
+                response=result.to_dict(),
+                telemetry=telemetry,
+            )
+            return canonical_json(redacted)
+        return canonical_json(
+            {
+                "error_class": outcome.error_class,
+                "error_message": outcome.error_message,
+            }
+        )
+
+    def _state_payload_for_compose_turn_for_test(
+        self,
+        response: Any,
+    ) -> Any:
+        """Build a StatePayload for the current interim Step 2 redacted row."""
+
+        del self
+        from elspeth.web.sessions._persist_payload import StatePayload
+        from elspeth.web.sessions.protocol import CompositionStateData
+
+        result = cast(ToolResult, response)
+        state_d = result.updated_state.to_dict()
+        return StatePayload(
+            data=CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=result.validation.is_valid,
+                validation_errors=tuple(error.message for error in result.validation.errors),
+                composer_meta=None,
+            ),
+            # Phase 1 inserts composition state rows inside
+            # persist_compose_turn under the session write lock and re-derives
+            # lineage from per-session version ordering when this is None
+            # (spec §5.7.1). The async loop deliberately does not fabricate a
+            # predecessor id for a row that has not been allocated yet.
+            derived_from_state_id=None,
+        )
 
     def _require_sessions_service(self) -> SessionServiceProtocol:
         """Return the wired sessions service or fail at the persistence boundary."""
@@ -1843,12 +1969,12 @@ class ComposerServiceImpl:
         persisted_assistant_message_id: str | None = None
         persisted_tool_call_turn = False
         failed_turn: FailedTurnMetadata | None = None
+        current_state_id: str | None = None
 
         while True:
             # Phase 3 Step 1 captures the state id observed before the
             # provider call. Step 2 passes this exact value to
             # persist_compose_turn_async as expected_current_state_id.
-            current_state_id: str | None = None
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
                 llm_messages,
@@ -2910,6 +3036,8 @@ class ComposerServiceImpl:
             # Step 2a — redact in async land. The walkers are pure and
             # non-blocking; building this payload before the sync persistence
             # dispatch keeps the eventual worker transaction narrow.
+            from pydantic import ValidationError as PydanticValidationError
+
             from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
             from elspeth.web.sessions._persist_payload import RedactedToolRow
 
@@ -2920,14 +3048,27 @@ class ComposerServiceImpl:
                 tc = tool_outcome.call
                 if tc.id in decoded_args_by_call_id:
                     decoded_args = decoded_args_by_call_id[tc.id]
+                elif tool_outcome.error_class is not None:
+                    decoded_args = {
+                        "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+                        "error_class": tool_outcome.error_class,
+                    }
                 else:
                     decoded_args = {"_raw_arguments": tc.function.arguments}
                 if tc.function.name in MANIFEST:
-                    persisted_arguments = redact_tool_call_arguments(
-                        tc.function.name,
-                        decoded_args,
-                        telemetry=redaction_telemetry,
-                    )
+                    try:
+                        persisted_arguments = redact_tool_call_arguments(
+                            tc.function.name,
+                            decoded_args,
+                            telemetry=redaction_telemetry,
+                        )
+                    except PydanticValidationError:
+                        if tool_outcome.error_class is None:
+                            raise
+                        persisted_arguments = {
+                            "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+                            "error_class": tool_outcome.error_class,
+                        }
                 else:
                     # Unknown tool names are Tier-3 LLM hallucinations handled
                     # by execute_tool as a semantic failure ToolResult. The
@@ -2981,6 +3122,7 @@ class ComposerServiceImpl:
                     )
                     raise
                 self._phase3_last_audit_outcome = audit_outcome
+                current_state_id = audit_outcome.current_state_id
                 failed_turn = FailedTurnMetadata(
                     assistant_message_id=audit_outcome.assistant_id,
                     tool_calls_attempted=len(assistant_tool_calls),
@@ -4070,14 +4212,7 @@ def _arg_error_payload(exc: ToolArgumentError, tool_name: str) -> Mapping[str, A
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 test-only compose-loop driver.
-#
-# Appended at end-of-file for the same reason as ``_arg_error_payload``:
-# inserting helper code above the existing composer implementation rotates
-# tier-model allowlist fingerprints for unrelated trust-boundary code.
-# Task 6 moves the sessions-service dependency into the constructor when the
-# production persistence path is wired; Task 0 only needs the explicit test
-# harness and first-use guard.
+# Phase 3 test-only compose-loop driver result carrier.
 # ---------------------------------------------------------------------------
 
 
@@ -4096,152 +4231,3 @@ class ComposeLoopTestResult:
         """Backward-compatible assertion surface named by the Phase 3 plan."""
 
         return self.tool_outcomes
-
-
-async def _phase3_run_one_turn_for_test(
-    self: ComposerServiceImpl,
-    *,
-    llm: Any | None = None,
-    session_id: str | None = None,
-    initial_state: CompositionState | None = None,
-    user_message_id: str | None = None,
-) -> ComposeLoopTestResult:
-    """Drive exactly one compose-loop turn for Phase 3 tests.
-
-    Test-only helper: it bypasses HTTP route setup but exercises the
-    same ``_compose_loop`` body, including ``_require_sessions_service()``.
-    Missing ``sessions_service`` must therefore fail with
-    ``RuntimeError("sessions_service not wired")``, not ``AttributeError``
-    or a constructor ``TypeError``.
-    """
-
-    from elspeth.web.composer.state import PipelineMetadata
-
-    del user_message_id
-    self._require_sessions_service()
-    state = initial_state or CompositionState(
-        source=None,
-        nodes=(),
-        edges=(),
-        outputs=(),
-        metadata=PipelineMetadata(),
-        version=1,
-    )
-    resolved_session_id = session_id or "00000000-0000-0000-0000-000000000000"
-    original_call_llm = self._call_llm
-
-    async def _call_fake_llm(messages: Any, tools: Any) -> Any:
-        if llm is None:
-            return await original_call_llm(messages, tools)
-        return await llm(messages, tools)
-
-    self._call_llm = _call_fake_llm  # type: ignore[method-assign]
-    try:
-        result = await self._compose_loop(
-            "Phase 3 one-turn test driver",
-            [],
-            state,
-            session_id=resolved_session_id,
-            deadline=asyncio.get_event_loop().time() + self._timeout_seconds,
-        )
-    finally:
-        self._call_llm = original_call_llm  # type: ignore[method-assign]
-
-    return ComposeLoopTestResult(
-        assistant_message=result.message,
-        tool_outcomes=tuple(self._phase3_last_tool_outcomes),
-        persisted_assistant_tool_calls=tuple(self._phase3_last_redacted_assistant_tool_calls),
-        persisted_tool_row_content=tuple(row.content for row in self._phase3_last_redacted_tool_rows),
-    )
-
-
-ComposerServiceImpl._run_one_turn_for_test = _phase3_run_one_turn_for_test  # type: ignore[attr-defined]
-
-
-def _phase3_serialize_response_via_walker(
-    self: ComposerServiceImpl,
-    outcome: Any,
-    *,
-    telemetry: Any,
-) -> str:
-    """Serialize one Step 1 outcome through the Phase 2 response walker."""
-
-    from elspeth.core.canonical import canonical_json
-    from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_response
-
-    if outcome.error_class is None:
-        result = cast(ToolResult, outcome.response)
-        if outcome.call.function.name not in MANIFEST:
-            return canonical_json(result.to_dict())
-        redacted = redact_tool_call_response(
-            tool_name=outcome.call.function.name,
-            response=result.to_dict(),
-            telemetry=telemetry,
-        )
-        return canonical_json(redacted)
-    return canonical_json(
-        {
-            "error_class": outcome.error_class,
-            "error_message": outcome.error_message,
-        }
-    )
-
-
-def _phase3_state_payload_for_compose_turn_for_test(
-    self: ComposerServiceImpl,
-    response: Any,
-) -> Any:
-    """Build a StatePayload for the current interim Step 2 redacted row."""
-
-    del self
-    from elspeth.web.sessions._persist_payload import StatePayload
-    from elspeth.web.sessions.protocol import CompositionStateData
-
-    result = cast(ToolResult, response)
-    state_d = result.updated_state.to_dict()
-    return StatePayload(
-        data=CompositionStateData(
-            source=state_d["source"],
-            nodes=state_d["nodes"],
-            edges=state_d["edges"],
-            outputs=state_d["outputs"],
-            metadata_=state_d["metadata"],
-            is_valid=result.validation.is_valid,
-            validation_errors=tuple(error.message for error in result.validation.errors),
-            composer_meta=None,
-        ),
-        # Phase 1 inserts composition state rows inside
-        # persist_compose_turn under the session write lock and re-derives
-        # lineage from per-session version ordering when this is None
-        # (spec §5.7.1). The async loop deliberately does not fabricate a
-        # predecessor id for a row that has not been allocated yet.
-        derived_from_state_id=None,
-    )
-
-
-ComposerServiceImpl._serialize_response_via_walker = _phase3_serialize_response_via_walker  # type: ignore[attr-defined]
-ComposerServiceImpl._state_payload_for_compose_turn_for_test = _phase3_state_payload_for_compose_turn_for_test  # type: ignore[attr-defined]
-
-_PHASE3_ORIGINAL_COMPOSER_INIT = ComposerServiceImpl.__init__
-
-
-def _phase3_composer_init(self: ComposerServiceImpl, *args: Any, **kwargs: Any) -> None:
-    """Store the Phase 3 per-turn tool-call cap without moving class code."""
-
-    _PHASE3_ORIGINAL_COMPOSER_INIT(self, *args, **kwargs)
-    from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
-
-    try:
-        self._max_tool_calls_per_turn = self._settings.composer_max_tool_calls_per_turn  # type: ignore[attr-defined]
-    except AttributeError:
-        self._max_tool_calls_per_turn = 16  # type: ignore[attr-defined]
-    self._telemetry = None  # type: ignore[attr-defined]
-    self._redaction_telemetry = OtelRedactionTelemetry()  # type: ignore[attr-defined]
-    self._phase3_last_tool_outcomes = ()
-    self._phase3_last_expected_current_state_id = None
-    self._phase3_last_redacted_assistant_tool_calls = ()
-    self._phase3_last_redacted_tool_rows = ()
-    self._phase3_last_audit_outcome = None  # type: ignore[assignment]
-
-
-ComposerServiceImpl.__init__ = _phase3_composer_init  # type: ignore[method-assign]

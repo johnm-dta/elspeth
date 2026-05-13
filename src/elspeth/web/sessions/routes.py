@@ -11,6 +11,8 @@ import contextlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as _replace
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -21,7 +23,12 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
-from elspeth.contracts.composer_llm_audit import ComposerLLMCall
+from elspeth.contracts.composer_llm_audit import (
+    ComposerChatInitiator,
+    ComposerChatTurn,
+    ComposerChatTurnStatus,
+    ComposerLLMCall,
+)
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
@@ -35,7 +42,12 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
 from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
 from elspeth.web.composer import yaml_generator
-from elspeth.web.composer.audit import BufferingRecorder, audit_envelope, llm_call_audit_envelope
+from elspeth.web.composer.audit import (
+    BufferingRecorder,
+    audit_envelope,
+    chat_turn_audit_envelope,
+    llm_call_audit_envelope,
+)
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
     emit_step_advanced,
@@ -53,7 +65,7 @@ from elspeth.web.composer.guided.emitters import (
     build_step_3_propose_chain_turn,
 )
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
@@ -96,6 +108,7 @@ from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, Vali
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
+from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -110,11 +123,14 @@ from elspeth.web.sessions.protocol import (
 )
 from elspeth.web.sessions.schemas import (
     ChatMessageResponse,
+    ChatTurnResponse,
     CompositionStateResponse,
     CreateSessionRequest,
     ForkSessionRequest,
     ForkSessionResponse,
     GetGuidedResponse,
+    GuidedChatRequest,
+    GuidedChatResponse,
     GuidedRespondRequest,
     GuidedRespondResponse,
     GuidedSessionResponse,
@@ -996,7 +1012,7 @@ async def _persist_llm_calls(
     *,
     plugin_crash_pending: bool,
 ) -> None:
-    """Persist per-LLM-call audit records as audit-only ``role=tool`` rows.
+    """Persist per-LLM-call audit records as audit-only ``role=audit`` rows.
 
     Audit-primacy disposition mirrors :func:`_persist_tool_invocations`
     via the ``plugin_crash_pending`` flag — see that helper's docstring
@@ -1048,6 +1064,58 @@ async def _persist_llm_calls(
                 f"session_id={session_id!r} on success path — Tier-1 audit "
                 f"corruption (no recovery)"
             ) from save_err
+
+
+async def _persist_chat_turns(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    chat_turns: tuple[ComposerChatTurn, ...],
+    composition_state_id: UUID | None,
+) -> None:
+    """Persist per-chat-turn audit records as audit-only ``role=audit`` rows.
+
+    Sibling of :func:`_persist_llm_calls`.  Each ComposerChatTurn produces
+    one ``role=audit`` row tagged ``_kind=chat_turn_audit``; auditors query
+    by ``json_extract(content, '$._kind')='chat_turn_audit'`` and by
+    ``composition_state_id`` to scope to a particular composition snapshot.
+
+    SQLAlchemy failures are slogged (audit-system failure exemption per
+    CLAUDE.md logging primacy) but do NOT raise — a failed audit-row
+    insert must not also fail the request the audit is trying to record.
+    The pattern mirrors :func:`_persist_llm_calls` exactly; the only
+    differences are the envelope kind, the recorded summary fields, and
+    the slog event name.
+    """
+    for turn in chat_turns:
+        content = json.dumps(
+            {
+                "_kind": "chat_turn_audit",
+                "status": turn.status.value,
+                "step": turn.step,
+                "initiator": turn.initiator.value,
+                "chat_turn_seq": turn.chat_turn_seq,
+                "model": turn.model,
+                "latency_ms": turn.latency_ms,
+                "error_class": turn.error_class,
+            }
+        )
+        try:
+            await service.add_message(
+                session_id,
+                "audit",
+                content,
+                tool_calls=[chat_turn_audit_envelope(turn)],
+                composition_state_id=composition_state_id,
+                writer_principal="compose_loop",
+            )
+        except SQLAlchemyError as save_err:
+            slog.error(
+                "composer_chat_turn_persist_failed",
+                session_id=str(session_id),
+                step=turn.step,
+                status=turn.status.value,
+                exc_class=type(save_err).__name__,
+            )
 
 
 async def _state_data_from_composer_state(
@@ -4624,7 +4692,7 @@ def create_session_router() -> APIRouter:
                     state = _initial_composition_state_with_guided_session()
                 else:
                     state = _state_from_record(state_record)
-                state_record_out = state_record
+                    state_record_out = state_record
 
                 # Reject freeform sessions.
                 if state.guided_session is None:
@@ -4814,6 +4882,17 @@ def create_session_router() -> APIRouter:
                         )
                         if terminal is not None
                         else None,
+                        chat_history=[
+                            ChatTurnResponse(
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
+                            )
+                            for t in guided.chat_history
+                        ],
+                        chat_turn_seq=guided.chat_turn_seq,
                     ),
                     next_turn=TurnPayloadResponse(
                         type=turn["type"],
@@ -4870,15 +4949,17 @@ def create_session_router() -> APIRouter:
                         plugin_crash_pending=False,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="get_guided",
-                        channel="tool_invocations",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    # Terminal logger-of-last-resort: no safer channel exists if structlog itself raises here.
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="get_guided",
+                            channel="tool_invocations",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
                 try:
                     await _persist_llm_calls(
                         service,
@@ -4888,15 +4969,16 @@ def create_session_router() -> APIRouter:
                         plugin_crash_pending=False,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="get_guided",
-                        channel="llm_calls",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="get_guided",
+                            channel="llm_calls",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
 
     @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)
     async def post_guided_respond(
@@ -4953,6 +5035,7 @@ def create_session_router() -> APIRouter:
                     state = _initial_composition_state_with_guided_session()
                 else:
                     state = _state_from_record(state_record)
+                    state_record_out = state_record
 
                 if state.guided_session is None:
                     raise HTTPException(
@@ -5088,6 +5171,17 @@ def create_session_router() -> APIRouter:
                                 for r in new_guided.history
                             ],
                             terminal=new_terminal_response,
+                            chat_history=[
+                                ChatTurnResponse(
+                                    role=t.role.value,
+                                    content=t.content,
+                                    seq=t.seq,
+                                    step=t.step.value,
+                                    ts_iso=t.ts_iso,
+                                )
+                                for t in new_guided.chat_history
+                            ],
+                            chat_turn_seq=new_guided.chat_turn_seq,
                         ),
                         next_turn=None,
                         terminal=new_terminal_response,
@@ -5354,6 +5448,17 @@ def create_session_router() -> APIRouter:
                         )
                         if terminal is not None
                         else None,
+                        chat_history=[
+                            ChatTurnResponse(
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
+                            )
+                            for t in guided.chat_history
+                        ],
+                        chat_turn_seq=guided.chat_turn_seq,
                     ),
                     next_turn=TurnPayloadResponse(
                         type=next_turn["type"],
@@ -5410,15 +5515,16 @@ def create_session_router() -> APIRouter:
                         plugin_crash_pending=False,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="post_guided_respond",
-                        channel="tool_invocations",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="post_guided_respond",
+                            channel="tool_invocations",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
                 try:
                     await _persist_llm_calls(
                         service,
@@ -5428,15 +5534,325 @@ def create_session_router() -> APIRouter:
                         plugin_crash_pending=False,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="post_guided_respond",
+                            channel="llm_calls",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
+
+    @router.post("/{session_id}/guided/chat", response_model=GuidedChatResponse)
+    async def post_guided_chat(
+        session_id: UUID,
+        body: GuidedChatRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> GuidedChatResponse:
+        """Submit a free-text chat message scoped to the user's current wizard step.
+
+        **Not** a turn-answer — chat does not advance step state. The
+        backend resolves the per-step skill briefing via
+        :func:`elspeth.web.composer.guided.chat_solver.solve_step_chat`
+        and returns the LLM's advisory reply. The frontend renders the
+        reply inline in the guided history (slice 6's
+        ``GuidedChatHistory`` component).
+
+        Phase A is advisory-only; no tool palette, no state mutation.
+        Slice 5 introduces ``ComposerChatTurn`` audit + ``chat_history``
+        persistence on the ``GuidedSession``.
+
+        Raises 400 if the session has no ``guided_session`` attached.
+        Raises 400 if ``step_index`` is not a known ``GuidedStep`` value.
+        Raises 409 if the guided session is already in a terminal state.
+        Raises 409 if ``step_index`` does not match the session's current
+        step (the wizard advanced under the user — client must re-fetch
+        ``GET /guided`` and retry).
+        Raises 404 if the session does not exist or belong to the user.
+
+        Empty / oversize messages are rejected at the Pydantic boundary
+        (HTTP 422). The route never reaches ``solve_step_chat`` with an
+        invalid message; the solver's empty-string guard is a redundant
+        defense-in-depth invariant, not the boundary check.
+
+        Transient LLM failures (LiteLLM API/auth/bad-request, asyncio
+        timeout, malformed response shape) return 200 with a synthetic
+        unavailable message; the session is **not** terminated. This is
+        intentional: chat is a non-load-bearing helper. Wizard widgets
+        remain functional even when chat is offline.
+        """
+        await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+
+        # Tier-3 → Tier-2 coercion at the step_index boundary. A stale
+        # client sending an unknown value gets a 400 with a clear message
+        # rather than a Pydantic 422; the typed ``GuidedStep`` then flows
+        # into the equality check and the solver call site.
+        try:
+            requested_step = GuidedStep(body.step_index)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown step_index {body.step_index!r}. Valid values: {sorted(s.value for s in GuidedStep)}.",
+            ) from exc
+
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+        async with compose_lock:
+            # Audit drain (slice 5.1): every chat turn lands as a
+            # role=audit row tagged ``_kind=chat_turn_audit``.  The
+            # recorder buffers in-memory during the request body; the
+            # finally block drains it via _persist_chat_turns regardless
+            # of exit path (success, 409, 400, or unexpected).  This is
+            # the CLAUDE.md "no silent telemetry drop" contract: a
+            # ComposerChatTurn that was constructed but never persisted
+            # would be evidence tampering.  ``state_record_out`` is
+            # captured to thread the persisted composition_state.id
+            # into the audit envelope so an auditor can correlate the
+            # chat turn to the state version it ran against.
+            recorder = BufferingRecorder()
+            state_record_out: CompositionStateRecord | None = None
+            try:
+                state_record = await service.get_current_state(session_id)
+                if state_record is None:
+                    state = _initial_composition_state_with_guided_session()
+                else:
+                    state = _state_from_record(state_record)
+                    state_record_out = state_record
+
+                if state.guided_session is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                    )
+
+                guided = state.guided_session
+
+                if guided.terminal is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Guided session is already in a terminal state. No further chat accepted.",
+                    )
+
+                # Step-mismatch is a state-conflict (the wizard advanced under
+                # the user between client read and write), not a malformed
+                # request — 409 mirrors the ``terminal`` case. The detail
+                # carries both values so the client can re-fetch the right
+                # step without a separate round-trip.
+                if requested_step is not guided.step:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"step_index {requested_step.value!r} does not match the session's current step "
+                            f"{guided.step.value!r}. Re-fetch GET /api/sessions/{{id}}/guided and retry."
+                        ),
+                    )
+
+                settings = request.app.state.settings
+                started_at = datetime.now(UTC)
+                from time import perf_counter as _perf_counter
+
+                started_perf = _perf_counter()
+                # InvariantError from solve_step_chat (empty / whitespace LLM
+                # content) indicates a defective model response we cannot
+                # recover from.  Mirror of the post_guided_respond pattern at
+                # the step_advance call site (line ~5044): sanitize to a
+                # static 500 detail, emit slog with safe frame strings only
+                # (no str(exc) since the InvariantError message embeds the
+                # model name and step value — class + frames only, B1
+                # convention), and re-raise so the audit-drain finally still
+                # fires.  The chat handler being inconsistent with
+                # post_guided_respond's InvariantError discipline was the
+                # original gap surfaced by elspeth-obs-ac603d4e03.
+                try:
+                    chat_result = await solve_step_chat_with_auto_drop(
+                        site="post_guided_chat",
                         session_id=str(session_id),
                         user_id=user.user_id,
-                        site="post_guided_respond",
-                        channel="llm_calls",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
+                        model=settings.composer_model,
+                        step=guided.step,
+                        user_message=body.message,
                     )
+                except InvariantError as exc:
+                    finished_at = datetime.now(UTC)
+                    latency_ms = int((_perf_counter() - started_perf) * 1000)
+                    user_turn = ChatTurn(
+                        role=ChatRole.USER,
+                        content=body.message,
+                        seq=guided.chat_turn_seq,
+                        step=guided.step,
+                        ts_iso=finished_at.isoformat(),
+                    )
+                    recorder.record_chat_turn(
+                        ComposerChatTurn(
+                            step=guided.step.value,
+                            initiator=ComposerChatInitiator.USER,
+                            chat_turn_seq=user_turn.seq,
+                            user_message_hash=stable_hash(body.message),
+                            assistant_message_hash=stable_hash(""),
+                            latency_ms=latency_ms,
+                            model=settings.composer_model,
+                            status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            error_class=type(exc).__name__,
+                        )
+                    )
+                    slog.error(
+                        "guided.invariant_violated",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        exc_class=type(exc).__name__,
+                        site="solve_step_chat",
+                        frames=_safe_frame_strings(exc),
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Server invariant violated. See application audit log for diagnostic detail.",
+                    ) from exc
+                finished_at = datetime.now(UTC)
+
+                # Append both turns (user + assistant) to chat_history with
+                # consecutive seq values, then bump chat_turn_seq past the pair.
+                # Phase A keeps user and assistant turns in the same atomic
+                # state update — a half-applied history (user without assistant)
+                # would surface mid-flight on a concurrent /guided read.
+                ts_iso = finished_at.isoformat()
+                user_turn = ChatTurn(
+                    role=ChatRole.USER,
+                    content=body.message,
+                    seq=guided.chat_turn_seq,
+                    step=guided.step,
+                    ts_iso=ts_iso,
+                )
+                assistant_turn = ChatTurn(
+                    role=ChatRole.ASSISTANT,
+                    content=chat_result.assistant_message,
+                    seq=guided.chat_turn_seq + 1,
+                    step=guided.step,
+                    ts_iso=ts_iso,
+                )
+                new_guided = _replace(
+                    guided,
+                    chat_history=(*guided.chat_history, user_turn, assistant_turn),
+                    chat_turn_seq=guided.chat_turn_seq + 2,
+                )
+
+                # Emit the ComposerChatTurn audit record.  Hashes use the
+                # project canonical ``stable_hash`` over the literal message
+                # strings — never the raw text into the audit row.  The
+                # ``initiator`` is hard-coded to USER for Phase A; Phase A.5
+                # will set STEP_ENTRY_OPENER for proactive turns through the
+                # same record.
+                user_message_hash = stable_hash(body.message)
+                assistant_message_hash = stable_hash(chat_result.assistant_message)
+                recorder.record_chat_turn(
+                    ComposerChatTurn(
+                        step=guided.step.value,
+                        initiator=ComposerChatInitiator.USER,
+                        chat_turn_seq=user_turn.seq,
+                        user_message_hash=user_message_hash,
+                        assistant_message_hash=assistant_message_hash,
+                        latency_ms=chat_result.latency_ms,
+                        model=settings.composer_model,
+                        status=chat_result.status,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        error_class=chat_result.error_class,
+                    )
+                )
+
+                # Persist the updated GuidedSession.  Mirrors the persistence
+                # pattern in ``post_guided_respond``: replace state with the
+                # new guided_session, round-trip composer_meta through
+                # ``to_dict()`` so the field carries the new chat_history /
+                # chat_turn_seq values.
+                new_state = _replace(state, guided_session=new_guided)
+                existing_meta: dict[str, Any] = {}
+                if state_record is not None and state_record.composer_meta is not None:
+                    existing_meta = dict(deep_thaw(state_record.composer_meta))
+                new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
+
+                state_d = new_state.to_dict()
+                state_data = CompositionStateData(
+                    source=state_d["source"],
+                    nodes=state_d["nodes"],
+                    edges=state_d["edges"],
+                    outputs=state_d["outputs"],
+                    metadata_=state_d["metadata"],
+                    is_valid=False,
+                    validation_errors=None,
+                    composer_meta=new_composer_meta,
+                )
+                state_record_out = await service.save_composition_state(
+                    session_id,
+                    state_data,
+                    # Per-step chat persists guided-session metadata
+                    # (chat_history/chat_turn_seq) after the LLM response has
+                    # converged. The Phase 1A provenance enum predates guided
+                    # chat, so use the same closest category as sibling guided
+                    # state writes rather than widening the closed list mid-merge.
+                    provenance="convergence_persist",
+                )
+
+                return GuidedChatResponse(
+                    assistant_message=chat_result.assistant_message,
+                    guided_session=GuidedSessionResponse(
+                        step=new_guided.step.value,
+                        history=[
+                            TurnRecordResponse(
+                                step=r.step.value,
+                                turn_type=r.turn_type.value,
+                                payload_hash=r.payload_hash,
+                                response_hash=r.response_hash,
+                                emitter=r.emitter,
+                            )
+                            for r in new_guided.history
+                        ],
+                        terminal=None,
+                        chat_history=[
+                            ChatTurnResponse(
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
+                            )
+                            for t in new_guided.chat_history
+                        ],
+                        chat_turn_seq=new_guided.chat_turn_seq,
+                    ),
+                )
+            finally:
+                # Drain the recorder unconditionally — same B3 pattern as
+                # post_guided_respond.  The inner try prevents an audit-
+                # persist failure from masking the in-flight HTTPException
+                # (Python's default behaviour would let a finally-block
+                # exception replace the original 400/409).  Per CLAUDE.md
+                # telemetry/logging primacy, audit-system failures during
+                # exception handling are the one exemption where slog is
+                # the correct channel.  The chat-turns buffer may be
+                # empty (rejection paths exit before record_chat_turn);
+                # _persist_chat_turns iterates an empty tuple cleanly.
+                try:
+                    await _persist_chat_turns(
+                        service,
+                        session_id,
+                        recorder.chat_turns,
+                        state_record_out.id if state_record_out is not None else None,
+                    )
+                except Exception as persist_exc:
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.chat_turn_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="post_guided_chat",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
 
     return router
 

@@ -8,6 +8,10 @@ from datetime import UTC, datetime
 import pytest
 
 from elspeth.contracts.composer_llm_audit import (
+    ComposerChatInitiator,
+    ComposerChatTurn,
+    ComposerChatTurnRecorder,
+    ComposerChatTurnStatus,
     ComposerLLMCall,
     ComposerLLMCallRecorder,
     ComposerLLMCallStatus,
@@ -263,3 +267,127 @@ def test_recorder_protocol_runtime_check() -> None:
     rec: ComposerLLMCallRecorder = _StubRecorder()
     rec.record_llm_call(_make_call())
     rec.resolve_session("abc")
+
+
+# ---------------------------------------------------------------------------
+# ComposerChatTurn — Phase A slice 5
+# ---------------------------------------------------------------------------
+
+
+def _make_chat_turn(**overrides: object) -> ComposerChatTurn:
+    t = datetime(2026, 5, 13, 12, 0, 0, tzinfo=UTC)
+    defaults: dict[str, object] = {
+        "step": "step_1_source",
+        "initiator": ComposerChatInitiator.USER,
+        "chat_turn_seq": 0,
+        "user_message_hash": stable_hash("what columns?"),
+        "assistant_message_hash": stable_hash("col_a, col_b"),
+        "latency_ms": 250,
+        "model": "openrouter/openai/gpt-5.5",
+        "status": ComposerChatTurnStatus.SUCCESS,
+        "started_at": t,
+        "finished_at": t,
+        "error_class": None,
+    }
+    defaults.update(overrides)
+    return ComposerChatTurn(**defaults)  # type: ignore[arg-type]
+
+
+def test_chat_turn_status_strenum_values() -> None:
+    assert ComposerChatTurnStatus.SUCCESS.value == "success"
+    assert ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE.value == "synthetic_unavailable"
+    assert ComposerChatTurnStatus.INVARIANT_VIOLATED.value == "invariant_violated"
+
+
+def test_chat_turn_initiator_strenum_values() -> None:
+    assert ComposerChatInitiator.USER.value == "user"
+    assert ComposerChatInitiator.STEP_ENTRY_OPENER.value == "step_entry_opener"
+
+
+def test_chat_turn_to_dict_serializes_enum_and_datetimes() -> None:
+    turn = _make_chat_turn()
+
+    payload = turn.to_dict()
+
+    assert payload["status"] == "success"
+    assert payload["initiator"] == "user"
+    assert isinstance(payload["started_at"], str)
+    assert isinstance(payload["finished_at"], str)
+
+
+def test_chat_turn_negative_seq_rejected() -> None:
+    with pytest.raises(ValueError, match="chat_turn_seq"):
+        _make_chat_turn(chat_turn_seq=-1)
+
+
+def test_chat_turn_negative_latency_rejected() -> None:
+    with pytest.raises(ValueError, match="latency_ms"):
+        _make_chat_turn(latency_ms=-1)
+
+
+def test_chat_turn_unknown_initiator_rejected() -> None:
+    with pytest.raises(ValueError, match="opener"):
+        ComposerChatInitiator("opener")  # close but not exact
+
+
+def test_chat_turn_raw_initiator_string_rejected_at_construction() -> None:
+    with pytest.raises(TypeError, match="initiator"):
+        _make_chat_turn(initiator="user")
+
+
+def test_chat_turn_raw_status_string_rejected_at_construction() -> None:
+    with pytest.raises(TypeError, match="status"):
+        _make_chat_turn(status="success")
+
+
+def test_chat_turn_success_requires_no_error_class() -> None:
+    with pytest.raises(ValueError, match="error_class"):
+        _make_chat_turn(status=ComposerChatTurnStatus.SUCCESS, error_class="TimeoutError")
+
+
+def test_chat_turn_synthetic_requires_error_class() -> None:
+    with pytest.raises(ValueError, match="error_class"):
+        _make_chat_turn(status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE, error_class=None)
+
+
+def test_chat_turn_synthetic_with_error_class_succeeds() -> None:
+    turn = _make_chat_turn(
+        status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+        error_class="TimeoutError",
+    )
+
+    payload = turn.to_dict()
+
+    assert payload["status"] == "synthetic_unavailable"
+    assert payload["error_class"] == "TimeoutError"
+
+
+def test_chat_turn_invariant_violated_requires_error_class() -> None:
+    with pytest.raises(ValueError, match="error_class"):
+        _make_chat_turn(status=ComposerChatTurnStatus.INVARIANT_VIOLATED, error_class=None)
+
+
+def test_chat_turn_invariant_violated_with_error_class_succeeds() -> None:
+    turn = _make_chat_turn(
+        status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
+        error_class="InvariantError",
+    )
+
+    payload = turn.to_dict()
+
+    assert payload["status"] == "invariant_violated"
+    assert payload["error_class"] == "InvariantError"
+
+
+def test_chat_turn_recorder_protocol_runtime_check() -> None:
+    class _StubChatRecorder:
+        def __init__(self) -> None:
+            self.calls: list[ComposerChatTurn] = []
+
+        def record_chat_turn(self, turn: ComposerChatTurn) -> None:
+            self.calls.append(turn)
+
+    rec: ComposerChatTurnRecorder = _StubChatRecorder()
+    chat_turn = _make_chat_turn()
+    rec.record_chat_turn(chat_turn)
+    assert rec.calls == [chat_turn]  # type: ignore[attr-defined]

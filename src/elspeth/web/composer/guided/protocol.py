@@ -6,6 +6,7 @@ See docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md §4.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypedDict
 
@@ -134,6 +135,70 @@ class GuidedStep(StrEnum):
     STEP_2_SINK = "step_2_sink"
     STEP_2_5_RECIPE_MATCH = "step_2_5_recipe_match"
     STEP_3_TRANSFORMS = "step_3_transforms"
+
+
+class ChatRole(StrEnum):
+    """Closed taxonomy of chat-turn authors.
+
+    A second author class for Phase A.5 — ``step_entry_opener`` (proactive
+    server-initiated turn) — is intentionally absent here.  Phase A only
+    distinguishes user-initiated and assistant-reply turns.  When openers
+    land, the discriminator moves to ``ComposerChatTurn.initiator`` (audit
+    record), not the ``ChatRole`` enum on the user-visible history — both
+    a user prompt and a step-entry opener produce an ``assistant`` turn
+    on the wire.  The plan §"Opener-specific invariant" relies on this
+    separation.
+    """
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurn:
+    """One conversational message in the per-step chat history (Phase A slice 5).
+
+    Persisted in ``GuidedSession.chat_history``.  Trust tier: Tier 1
+    (audit) — every field is server-authoritative.  ``seq`` is monotonic
+    per session across all chat turns (user + assistant share the
+    counter); on reload the frontend renders entries in ``seq`` order.
+
+    ``ts_iso`` is the server-recorded ISO 8601 timestamp at which the
+    turn entered the history.  It is informational for the UI; chrono
+    ordering should still be driven by ``seq`` to avoid sort drift when
+    the same wall clock-second carries two turns.
+
+    ``step`` records the wizard step the user was on when the turn was
+    produced.  Slice 5 keeps the same step for both user message and
+    assistant reply (chat does not advance step state); the field is
+    load-bearing for Phase A.5 openers and Phase B tool palettes where
+    the step at *emission* may differ from the step at *display* if the
+    user back-buttons.
+    """
+
+    role: ChatRole
+    content: str
+    seq: int
+    step: GuidedStep
+    ts_iso: str
+
+    def __post_init__(self) -> None:
+        if type(self.role) is not ChatRole:
+            raise TypeError(f"role must be ChatRole, got {type(self.role).__name__}")
+        if type(self.step) is not GuidedStep:
+            raise TypeError(f"step must be GuidedStep, got {type(self.step).__name__}")
+        if type(self.seq) is not int:
+            raise TypeError(f"seq must be int, got {type(self.seq).__name__}")
+        if self.seq < 0:
+            raise ValueError("seq must be >= 0")
+        if type(self.content) is not str:
+            raise TypeError(f"content must be str, got {type(self.content).__name__}")
+        if self.content == "":
+            raise ValueError("content must be non-empty")
+        if type(self.ts_iso) is not str:
+            raise TypeError(f"ts_iso must be str, got {type(self.ts_iso).__name__}")
+        if self.ts_iso == "":
+            raise ValueError("ts_iso must be non-empty")
 
 
 _LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {

@@ -33,6 +33,8 @@ import type {
 } from "@/types/index";
 import type {
   GetGuidedResponse,
+  GuidedChatRequest,
+  GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
 } from "@/types/guided";
@@ -356,6 +358,34 @@ export async function respondGuided(
     signal,
   });
   return parseResponse<GuidedRespondResponse>(response);
+}
+
+/**
+ * Post a free-text chat message scoped to the user's current wizard step.
+ *
+ * Phase A is advisory-only: the server invokes the per-step chat solver
+ * with the step-scoped skill briefing and returns the LLM's reply.  Chat
+ * does not advance step state — `guided_session` is echoed unchanged in
+ * the response.  Server-side: see _guided_step_chat.solve_step_chat_with_auto_drop;
+ * on transient LLM failure the server returns 200 with a synthetic
+ * "I'm unavailable" message rather than failing the request.
+ *
+ * The `step_index` carried in the body lets the server detect that the
+ * wizard has advanced under the client (returns 409) so a stale chat
+ * does not arrive at the wrong step's skill briefing.
+ */
+export async function chatGuided(
+  sessionId: string,
+  body: GuidedChatRequest,
+  signal?: AbortSignal,
+): Promise<GuidedChatResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/chat`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse<GuidedChatResponse>(response);
 }
 
 /** Fork a session from a specific user message. */

@@ -77,6 +77,27 @@ function formatLlmAuthError(apiErr: ApiError): string {
   return `${LLM_AUTH_ERROR_MESSAGE}${formatProviderDiagnostic(apiErr)}`;
 }
 
+// Resetting guided-mode state landed in five places: initialState plus
+// the four navigation actions that switch session context (createSession,
+// archiveSession's active-session branch, selectSession, forkFromMessage).
+// Phase A slice 4 grew this from three fields to four (added
+// guidedChatPending); a future per-step opener field would grow it again.
+// Pulling the literal into a single helper means adding a future field
+// updates one place — TypeScript exhaustiveness over the Pick<> return
+// then forces every call site through the type system instead of through
+// grep-and-edit discipline.  See elspeth-obs-01f85f94b5.
+function clearedGuidedState(): Pick<
+  SessionState,
+  "guidedSession" | "guidedNextTurn" | "guidedTerminal" | "guidedChatPending"
+> {
+  return {
+    guidedSession: null,
+    guidedNextTurn: null,
+    guidedTerminal: null,
+    guidedChatPending: false,
+  };
+}
+
 interface SessionState {
   sessions: Session[];
   activeSessionId: string | null;
@@ -110,9 +131,15 @@ interface SessionState {
   guidedSession: GuidedSession | null;
   guidedNextTurn: TurnPayload | null;
   guidedTerminal: TerminalState | null;
+  // Per-step chat (Phase A slice 5).  The history itself lives on
+  // `guidedSession.chat_history` (server-authoritative); only the in-flight
+  // pending flag is local state.  Slice 4 carried an in-memory
+  // guidedChatHistory array; slice 5 replaced it with the wire field.
+  guidedChatPending: boolean;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  chatGuided: (message: string) => Promise<void>;
   exitToFreeform: () => Promise<void>;
   clearError: () => void;
   injectSystemMessage: (content: string, stableId?: string) => void;
@@ -130,9 +157,7 @@ const initialState = {
   isLoadingVersions: false,
   error: null as string | null,
   selectedNodeId: null as string | null,
-  guidedSession: null as GuidedSession | null,
-  guidedNextTurn: null as TurnPayload | null,
-  guidedTerminal: null as TerminalState | null,
+  ...clearedGuidedState(),
 };
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -160,9 +185,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         stateVersions: [],
         error: null,
         selectedNodeId: null, // Clear selection for new session
-        guidedSession: null,
-        guidedNextTurn: null,
-        guidedTerminal: null,
+        ...clearedGuidedState(),
       }));
       // Auto-start guided mode.  New sessions are created with
       // GuidedSession.initial() already attached by the backend (spec §5.2,
@@ -195,9 +218,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 stateVersions: [],
                 isComposing: false,
                 selectedNodeId: null,
-                guidedSession: null,
-                guidedNextTurn: null,
-                guidedTerminal: null,
+                ...clearedGuidedState(),
               }
             : {}),
         };
@@ -222,9 +243,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       isComposing: false,
       error: null,
       selectedNodeId: null, // Clear selection when switching sessions
-      guidedSession: null,
-      guidedNextTurn: null,
-      guidedTerminal: null,
+      ...clearedGuidedState(),
     });
 
     try {
@@ -536,10 +555,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         selectedNodeId: null, // Clear selection for forked session
         // Clear guided state synchronously — the fork is a new session context;
         // the parent's guidedSession must not bleed into the fork's UI before
-        // startGuided resolves.  Mirrors selectSession lines 225-228.
-        guidedSession: null,
-        guidedNextTurn: null,
-        guidedTerminal: null,
+        // startGuided resolves.  Mirrors selectSession.
+        ...clearedGuidedState(),
       }));
 
       // Fire-and-forget: refresh blob list for the NEW forked session
@@ -618,6 +635,61 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
     } catch {
       set({ error: "Failed to submit guided response. Please try again." });
+    }
+  },
+
+  async chatGuided(message: string) {
+    const { activeSessionId, guidedSession } = get();
+    // Offensive guards: caller must not invoke without an active session
+    // or before guidedSession is loaded.  Per CLAUDE.md "proactively detect
+    // invalid states and throw meaningful exceptions" — silent ?. would
+    // mask a UI bug (ChatInput rendered with no guided session attached).
+    if (activeSessionId === null) {
+      throw new Error("chatGuided called without active session");
+    }
+    if (guidedSession === null) {
+      throw new Error("chatGuided called before guidedSession loaded");
+    }
+    // Capture session + step identity before the await (stale-fetch guard
+    // mirroring respondGuided / startGuided).  If the user switches
+    // session or the wizard advances mid-flight, the response is dropped.
+    const requestedSessionId = activeSessionId;
+    const requestedStep = guidedSession.step;
+
+    // Slice 5: chat history is server-authoritative — no optimistic local
+    // append.  The route handler appends both user + assistant turns to
+    // `guidedSession.chat_history` and returns the updated session.  Only
+    // `guidedChatPending` is local: it blocks rapid double-submits while
+    // the round-trip is in flight.  Slice 4's optimistic-append pattern
+    // produced visible drift if the server replied with a slightly
+    // different ts_iso / seq than the client guessed.
+    set({ guidedChatPending: true });
+
+    try {
+      const response = await api.chatGuided(activeSessionId, {
+        message,
+        step_index: requestedStep,
+      });
+      // Stale-fetch guard: drop the response if session changed mid-flight.
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      set({
+        guidedSession: response.guided_session,
+        guidedChatPending: false,
+      });
+    } catch {
+      // HTTP-layer failure (network, 4xx/5xx).  Distinct from the
+      // backend's synthetic-message path, which returns 200 with an
+      // unavailable assistant message AND appends both turns to
+      // chat_history — that path completes the optimistic write
+      // server-side, so even a synthetic reply round-trips through this
+      // success branch.  This catch fires only when the request itself
+      // failed (no response shape at all).
+      set({
+        error: "Failed to send chat message. Please try again.",
+        guidedChatPending: false,
+      });
     }
   },
 

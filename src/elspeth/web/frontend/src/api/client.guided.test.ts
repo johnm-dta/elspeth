@@ -30,6 +30,8 @@ function makeGetGuidedResponse(): GetGuidedResponse {
       step: "step_1_source",
       history: [],
       terminal: null,
+      chat_history: [],
+      chat_turn_seq: 0,
     },
     next_turn: null,
     terminal: null,
@@ -64,6 +66,8 @@ function makeRespondResponse(): GuidedRespondResponse {
         },
       ],
       terminal: null,
+      chat_history: [],
+      chat_turn_seq: 0,
     },
     next_turn: {
       type: "single_select",

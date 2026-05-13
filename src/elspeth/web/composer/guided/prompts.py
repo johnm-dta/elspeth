@@ -1,7 +1,23 @@
 """Guided-mode skill loading + Step 3 context-block construction.
 
-Module-cached via @lru_cache; per project memory, restart elspeth-web.service
-after editing the skill markdown for live changes to take effect.
+Skills are split per step:
+
+  skills/base.md                  Always-applies preamble + hard rules.
+  skills/step_1_source.md         Step-1 playbook.
+  skills/step_2_sink.md           Step-2 playbook.
+  skills/step_2_5_recipe_match.md Step-2.5 playbook.
+  skills/step_3_transforms.md     Step-3 playbook + sample-value eyeballing.
+
+``load_guided_skill()`` composes all five (base + every step) and is consumed
+by the chain solver, which serves Step 3 but historically receives the full
+playbook for breadth.
+
+``load_step_chat_skill(step)`` composes base + one step, scoped to the user's
+current wizard position. Consumed by the per-step chat solver.
+
+All loaders are module-cached via ``@lru_cache``; per project memory, restart
+elspeth-web.service after editing any skill markdown for live changes to take
+effect.
 """
 
 from __future__ import annotations
@@ -11,6 +27,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from elspeth.web.composer.guided.protocol import GuidedStep
+
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.recipe_match import RecipeMatch
     from elspeth.web.composer.guided.state_machine import (
@@ -18,13 +36,77 @@ if TYPE_CHECKING:
         SourceResolved,
     )
 
-_SKILL_PATH = Path(__file__).parent / "skills" / "guided_pipeline.md"
+_SKILLS_DIR = Path(__file__).parent / "skills"
+
+# CLOSED LIST — must match the GuidedStep enum members.  If a new step is
+# added to GuidedStep, add its skill file here in playbook order.
+_STEP_FILE_NAMES: dict[GuidedStep, str] = {
+    GuidedStep.STEP_1_SOURCE: "step_1_source.md",
+    GuidedStep.STEP_2_SINK: "step_2_sink.md",
+    GuidedStep.STEP_2_5_RECIPE_MATCH: "step_2_5_recipe_match.md",
+    GuidedStep.STEP_3_TRANSFORMS: "step_3_transforms.md",
+}
+
+# Playbook order — the order steps appear when composing the full skill.
+# Mirrors the natural wizard progression and is asserted at module import to
+# match the GuidedStep enum membership exactly (see assertion below).
+_STEP_PLAYBOOK_ORDER: tuple[GuidedStep, ...] = (
+    GuidedStep.STEP_1_SOURCE,
+    GuidedStep.STEP_2_SINK,
+    GuidedStep.STEP_2_5_RECIPE_MATCH,
+    GuidedStep.STEP_3_TRANSFORMS,
+)
+
+# Discoverability invariant: the per-step file map and the playbook order
+# must cover every GuidedStep member.  If GuidedStep gains a new member and
+# either map is not updated, fail loudly at import time rather than silently
+# omit the step from the composed skill.
+assert set(_STEP_FILE_NAMES.keys()) == set(GuidedStep), (
+    f"_STEP_FILE_NAMES out of sync with GuidedStep: "
+    f"missing {set(GuidedStep) - set(_STEP_FILE_NAMES)}, "
+    f"extra {set(_STEP_FILE_NAMES) - set(GuidedStep)}"
+)
+assert set(_STEP_PLAYBOOK_ORDER) == set(GuidedStep), (
+    f"_STEP_PLAYBOOK_ORDER out of sync with GuidedStep: "
+    f"missing {set(GuidedStep) - set(_STEP_PLAYBOOK_ORDER)}, "
+    f"extra {set(_STEP_PLAYBOOK_ORDER) - set(GuidedStep)}"
+)
+
+
+@lru_cache(maxsize=1)
+def _load_base() -> str:
+    """Load the always-applies preamble (intro + hard rules + per-step header)."""
+    return (_SKILLS_DIR / "base.md").read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=len(GuidedStep))
+def _load_step(step: GuidedStep) -> str:
+    """Load the per-step playbook fragment for *step*."""
+    return (_SKILLS_DIR / _STEP_FILE_NAMES[step]).read_text(encoding="utf-8")
 
 
 @lru_cache(maxsize=1)
 def load_guided_skill() -> str:
-    """Load the guided-mode skill prompt. Cached per process; restart on edit."""
-    return _SKILL_PATH.read_text(encoding="utf-8")
+    """Compose the full guided skill (base + every step in playbook order).
+
+    Used by the chain solver, which historically receives the full playbook
+    for breadth even though it only acts on Step 3.  Cached per process;
+    restart elspeth-web.service after editing any skill markdown.
+    """
+    parts = [_load_base()]
+    parts.extend(_load_step(step) for step in _STEP_PLAYBOOK_ORDER)
+    return "\n\n".join(part.rstrip() for part in parts) + "\n"
+
+
+@lru_cache(maxsize=len(GuidedStep))
+def load_step_chat_skill(step: GuidedStep) -> str:
+    """Compose base + the per-step playbook for *step* only.
+
+    Used by the per-step chat solver, which scopes the LLM's awareness to
+    just the step the user is currently on.  Cached per process; restart
+    elspeth-web.service after editing skill markdown.
+    """
+    return f"{_load_base().rstrip()}\n\n{_load_step(step).rstrip()}\n"
 
 
 def build_mode_transition_system_prompt(*, terminal_reason: str, freeform_skill: str) -> str:

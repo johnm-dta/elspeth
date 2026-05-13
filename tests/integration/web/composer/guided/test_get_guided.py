@@ -485,6 +485,8 @@ class TestGetGuidedFullStateRebuild:
             "step_2_sink_intent": None,
             "step_2_5_recipe_offer": None,
             "step_2_chosen_plugin": None,
+            "chat_history": [],
+            "chat_turn_seq": 0,
         }
         _seed_guided_session(composer_test_client, session_id, guided_dict)
 
@@ -528,6 +530,8 @@ class TestGetGuidedFullStateRebuild:
             "step_2_5_recipe_offer": None,
             # Placed in the SINGLE_SELECT→SCHEMA_FORM window.
             "step_2_chosen_plugin": "json",
+            "chat_history": [],
+            "chat_turn_seq": 0,
         }
         _seed_guided_session(composer_test_client, session_id, guided_dict)
 
@@ -566,6 +570,8 @@ class TestGetGuidedFullStateRebuild:
             },
             "step_2_5_recipe_offer": None,
             "step_2_chosen_plugin": None,
+            "chat_history": [],
+            "chat_turn_seq": 0,
         }
         _seed_guided_session(composer_test_client, session_id, guided_dict)
 
@@ -614,6 +620,8 @@ class TestGetGuidedFullStateRebuild:
             "step_2_sink_intent": None,
             "step_2_5_recipe_offer": None,
             "step_2_chosen_plugin": None,
+            "chat_history": [],
+            "chat_turn_seq": 0,
         }
         _seed_guided_session(composer_test_client, session_id, guided_dict)
 

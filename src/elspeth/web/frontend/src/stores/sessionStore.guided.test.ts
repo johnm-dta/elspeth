@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
 import { resetStore } from "@/test/store-helpers";
-import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondResponse } from "@/types/guided";
+import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondResponse, GuidedChatResponse } from "@/types/guided";
 
 // Mock the API client — store tests verify state logic, not HTTP calls.
 // Must include all exports used by sessionStore (not just guided ones).
@@ -25,6 +25,7 @@ vi.mock("@/api/client", () => ({
   archiveSession: vi.fn(),
   getGuided: vi.fn(),
   respondGuided: vi.fn(),
+  chatGuided: vi.fn(),
 }));
 
 // Mock the execution store dependency (selectSession calls clearValidation)
@@ -48,6 +49,8 @@ const sampleGuidedSession: GuidedSession = {
   step: "step_1_source",
   history: [],
   terminal: null,
+  chat_history: [],
+  chat_turn_seq: 0,
 };
 
 const sampleNextTurn: TurnPayload = {
@@ -84,6 +87,30 @@ const sampleRespondResponse: GuidedRespondResponse = {
   next_turn: { type: "single_select", step_index: 1, payload: {} },
   terminal: null,
   composition_state: { ...sampleCompositionState, version: 2 },
+};
+
+const sampleChatResponse: GuidedChatResponse = {
+  assistant_message: "Try inspecting the CSV header row.",
+  guided_session: {
+    ...sampleGuidedSession,
+    chat_history: [
+      {
+        role: "user",
+        content: "What columns are available?",
+        seq: 0,
+        step: "step_1_source",
+        ts_iso: "2026-05-13T00:00:00+00:00",
+      },
+      {
+        role: "assistant",
+        content: "Try inspecting the CSV header row.",
+        seq: 1,
+        step: "step_1_source",
+        ts_iso: "2026-05-13T00:00:00+00:00",
+      },
+    ],
+    chat_turn_seq: 2,
+  },
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -404,5 +431,96 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     const stateAfterReload = useSessionStore.getState();
     expect(stateAfterReload.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+  });
+
+  describe("chatGuided", () => {
+    it("throws when activeSessionId is null", async () => {
+      await expect(
+        useSessionStore.getState().chatGuided("What columns are available?"),
+      ).rejects.toThrow("chatGuided called without active session");
+    });
+
+    it("throws when guidedSession is null", async () => {
+      useSessionStore.setState({ activeSessionId: "sess-1" });
+
+      await expect(
+        useSessionStore.getState().chatGuided("What columns are available?"),
+      ).rejects.toThrow("chatGuided called before guidedSession loaded");
+    });
+
+    it("sets pending while in flight and clears it on success", async () => {
+      const { chatGuided } = await import("@/api/client");
+      let resolveChat!: (v: GuidedChatResponse) => void;
+      (chatGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<GuidedChatResponse>((resolve) => {
+          resolveChat = resolve;
+        }),
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const chatPromise = useSessionStore.getState().chatGuided("What columns are available?");
+
+      expect(useSessionStore.getState().guidedChatPending).toBe(true);
+      expect(chatGuided).toHaveBeenCalledWith("sess-1", {
+        message: "What columns are available?",
+        step_index: "step_1_source",
+      });
+
+      resolveChat(sampleChatResponse);
+      await chatPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.guidedChatPending).toBe(false);
+      expect(state.guidedSession).toEqual(sampleChatResponse.guided_session);
+    });
+
+    it("drops response when active session changes before resolution", async () => {
+      const { chatGuided } = await import("@/api/client");
+      let resolveChat!: (v: GuidedChatResponse) => void;
+      (chatGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        new Promise<GuidedChatResponse>((resolve) => {
+          resolveChat = resolve;
+        }),
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-A",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const chatPromise = useSessionStore.getState().chatGuided("What columns are available?");
+
+      useSessionStore.setState({
+        activeSessionId: "sess-B",
+        guidedSession: null,
+        guidedChatPending: false,
+      });
+      resolveChat(sampleChatResponse);
+      await chatPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.guidedSession).toBeNull();
+      expect(state.guidedChatPending).toBe(false);
+    });
+
+    it("sets error and clears pending on request failure", async () => {
+      const { chatGuided } = await import("@/api/client");
+      (chatGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("network failed"),
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      await useSessionStore.getState().chatGuided("What columns are available?");
+
+      const state = useSessionStore.getState();
+      expect(state.error).toBe("Failed to send chat message. Please try again.");
+      expect(state.guidedChatPending).toBe(false);
+      expect(state.guidedSession).toEqual(sampleGuidedSession);
+    });
   });
 });

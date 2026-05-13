@@ -8,7 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
@@ -68,6 +68,61 @@ class TestTurnRecord:
         )
         with pytest.raises(AttributeError):
             rec.emitter = "llm"  # type: ignore[misc]
+
+
+class TestChatTurn:
+    def test_valid_chat_turn_is_frozen_dataclass(self) -> None:
+        turn = ChatTurn(
+            role=ChatRole.USER,
+            content="What does this step need?",
+            seq=0,
+            step=GuidedStep.STEP_1_SOURCE,
+            ts_iso="2026-05-13T12:00:00+00:00",
+        )
+
+        assert turn.role is ChatRole.USER
+        with pytest.raises(AttributeError):
+            turn.content = "mutated"  # type: ignore[misc]
+
+    def test_rejects_wire_role_from_audit_initiator_namespace(self) -> None:
+        with pytest.raises(TypeError, match="role"):
+            ChatTurn(
+                role="step_entry_opener",  # type: ignore[arg-type]
+                content="What does this step need?",
+                seq=0,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+            )
+
+    def test_rejects_negative_seq(self) -> None:
+        with pytest.raises(ValueError, match="seq"):
+            ChatTurn(
+                role=ChatRole.USER,
+                content="What does this step need?",
+                seq=-1,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+            )
+
+    def test_rejects_empty_content(self) -> None:
+        with pytest.raises(ValueError, match="content"):
+            ChatTurn(
+                role=ChatRole.USER,
+                content="",
+                seq=0,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+            )
+
+    def test_rejects_wrong_step_type(self) -> None:
+        with pytest.raises(TypeError, match="step"):
+            ChatTurn(
+                role=ChatRole.USER,
+                content="What does this step need?",
+                seq=0,
+                step="step_1_source",  # type: ignore[arg-type]
+                ts_iso="2026-05-13T12:00:00+00:00",
+            )
 
 
 class TestGuidedSession:

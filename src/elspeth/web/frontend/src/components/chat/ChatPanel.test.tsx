@@ -23,8 +23,31 @@ vi.mock("./MessageBubble", () => ({
   ),
 }));
 
+// Mock surfaces both the placeholder and the onSend wiring as inspectable
+// DOM properties so per-step / per-mode tests can assert without depending
+// on the real ChatInput's textarea internals. Phase A slice 4 needs:
+//   - per-step placeholder visible (guided-active branch)
+//   - onSend callback wired so the test can simulate user submit
 vi.mock("./ChatInput", () => ({
-  ChatInput: () => <div data-testid="chat-input" />,
+  ChatInput: ({
+    placeholder,
+    onSend,
+    disabled,
+  }: {
+    placeholder?: string;
+    onSend?: (content: string) => void;
+    disabled?: boolean;
+  }) => (
+    <button
+      type="button"
+      data-testid="chat-input"
+      data-placeholder={placeholder ?? ""}
+      data-disabled={disabled ? "true" : "false"}
+      onClick={() => onSend?.("test-chat-message")}
+    >
+      {placeholder ?? ""}
+    </button>
+  ),
 }));
 
 vi.mock("./TemplateCards", () => ({
@@ -129,6 +152,8 @@ describe("ChatPanel mode discriminator", () => {
       step: "step_1_source",
       history: [],
       terminal: null,
+      chat_history: [],
+      chat_turn_seq: 0,
     };
   }
 
@@ -178,8 +203,89 @@ describe("ChatPanel mode discriminator", () => {
     expect(chatMain).not.toBeNull();
     expect(chatMain?.classList.contains("chat-panel--guided")).toBe(true);
 
-    // Freeform surface suppressed.
-    expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
+    // Phase A slice 4: ChatInput is rendered INSIDE the guided-active
+    // branch (below GuidedTurn + ExitToFreeformButton) so the user can
+    // ask scoped advisory questions of the LLM.  Previously this branch
+    // suppressed all ChatInput surfaces; the assertion is now positive.
+    // Per-step placeholder + onSend wiring are exercised in the two
+    // dedicated tests below.
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+  });
+
+  it("renders the per-step placeholder for STEP_1_SOURCE", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    // The mocked ChatInput renders `placeholder` as both its data attr
+    // and its text content.  The text must match GUIDED_CHAT_PLACEHOLDERS
+    // in ChatPanel.tsx; if a step's playbook is reworded, this expected
+    // string updates here.
+    const chatInput = screen.getByTestId("chat-input");
+    expect(chatInput.dataset.placeholder).toBe(
+      "Ask about source options, columns, or paste a sample row…",
+    );
+  });
+
+  it("renders the per-step placeholder for STEP_2_SINK", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_2_sink" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
+      "Ask about sink config, outputs, or schema mode…",
+    );
+  });
+
+  it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {
+    const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      chatGuided: chatGuidedSpy,
+    });
+
+    render(<ChatPanel />);
+
+    // The mocked ChatInput is a <button>; clicking it triggers the
+    // onSend("test-chat-message") wired in the mock factory above.
+    await act(async () => {
+      screen.getByTestId("chat-input").click();
+    });
+
+    await waitFor(() => {
+      expect(chatGuidedSpy).toHaveBeenCalledWith("test-chat-message");
+    });
+  });
+
+  it("disables the guided ChatInput while guidedChatPending=true", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
   });
 
   it("renders CompletionSummary surface when terminal.kind === 'completed'", () => {
@@ -206,6 +312,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_3_transforms",
         history: completedHistory,
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedTerminal: terminal,
     });
@@ -251,6 +359,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_3_transforms",
         history: [],
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedTerminal: terminal,
     });
@@ -299,6 +409,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_1_source",
         history: [],
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedNextTurn: null,
       guidedTerminal: terminal,
@@ -373,6 +485,8 @@ describe("ChatPanel mode discriminator", () => {
         step: "step_3_transforms",
         history: [],
         terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
       },
       guidedTerminal: terminal,
     });
@@ -436,7 +550,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
   };
 
   function activeGuidedSession(): GuidedSession {
-    return { step: "step_1_source", history: [], terminal: null };
+    return { step: "step_1_source", history: [], terminal: null, chat_history: [], chat_turn_seq: 0 };
   }
 
   // Options are intentionally distinct per step so that test 2's assertion at

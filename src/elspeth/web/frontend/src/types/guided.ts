@@ -58,13 +58,32 @@ export interface TerminalState {
 }
 
 /**
- * Wire: GuidedSessionResponse (schemas.py:231-236).
- * Exactly three wire fields — internal step results never cross the wire.
+ * Wire: ChatTurnResponse (schemas.py — Phase A slice 5).  Mirrors a single
+ * entry in GuidedSession.chat_history.  Server-emitted; all values are
+ * authoritative (Tier 1).  Ordering is driven by `seq`, not `ts_iso` —
+ * two turns produced in the same request share a wall-clock second.
+ */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
+  seq: number;
+  step: GuidedStep;
+  ts_iso: string;
+}
+
+/**
+ * Wire: GuidedSessionResponse (schemas.py:231-242 post-slice-5).
+ * `chat_history` + `chat_turn_seq` were added in Phase A slice 5 to
+ * persist per-step chat across reloads; before slice 5 the frontend
+ * carried an in-memory `guidedChatHistory` array, which is replaced
+ * verbatim by this server-authoritative field.
  */
 export interface GuidedSession {
   step: GuidedStep;
   history: TurnRecord[];
   terminal: TerminalState | null;
+  chat_history: ChatTurn[];
+  chat_turn_seq: number;
 }
 
 /** Wire: TurnPayloadResponse (schemas.py:239-252). step_index is 0-based ordinal (number). */
@@ -102,6 +121,38 @@ export interface GuidedRespondResponse {
   terminal: TerminalState | null;
   composition_state: CompositionState | null;
 }
+
+/**
+ * Request body for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatRequest).
+ *
+ * `step_index` is the wire form of the user's current step. The server
+ * validates it against the live session.step and returns 409 on mismatch
+ * (wizard advanced under the client). `message` is capped at 4096 chars
+ * server-side; the frontend lets ChatInput's native maxLength enforce the
+ * same limit before submit.
+ */
+export interface GuidedChatRequest {
+  message: string;
+  step_index: GuidedStep;
+}
+
+/**
+ * Response for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatResponse).
+ *
+ * `assistant_message` is the LLM's advisory reply, or the synthetic "I'm
+ * unavailable" message on transient LLM failure (Phase A does not yet
+ * distinguish the two on the wire; slice 5's ComposerChatTurn audit shape
+ * adds that discriminator).
+ *
+ * `guided_session` is echoed verbatim in Phase A — chat does not mutate
+ * session state. Slice 5 adds a `chat_history` field that will carry
+ * incremental turns once persistence lands.
+ */
+export interface GuidedChatResponse {
+  assistant_message: string;
+  guided_session: GuidedSession;
+}
+
 
 // ── Per-turn payload shapes ───────────────────────────────────────────────────
 // Each widget owns its payload type; add yours when you implement the widget.

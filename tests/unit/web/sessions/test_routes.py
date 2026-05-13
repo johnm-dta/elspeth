@@ -1066,6 +1066,7 @@ class TestIDORCoverageDrift:
             "fork_from_message",
             "get_guided",
             "post_guided_respond",
+            "post_guided_chat",
         }
     )
 
@@ -1221,6 +1222,7 @@ class TestIDORProtection:
     - ``POST /{session_id}/fork``            (fork_from_message)
     - ``GET  /{session_id}/guided``          (get_guided)
     - ``POST /{session_id}/guided/respond``  (post_guided_respond)
+    - ``POST /{session_id}/guided/chat``     (post_guided_chat)
 
     Counter-test: alice's own access continues to return 200 at the end,
     guarding against the regression where an over-eager 404 breaks
@@ -1369,6 +1371,19 @@ class TestIDORProtection:
         resp = bob_client.post(
             f"/api/sessions/{session_id}/guided/respond",
             json={"control_signal": "exit_to_freeform"},
+        )
+        assert resp.status_code == 404
+
+        # Bob tries to POST guided/chat — should be 404.  Phase A slice 3
+        # introduced the per-step chat endpoint; it sends user-typed text to
+        # an LLM scoped to Alice's session step, costing LLM credits and
+        # surfacing Alice's wizard step in the reply path.  Slice 5 also
+        # made it mutate chat_history on the GuidedSession (an audit-write).
+        # An ownership bypass would let bob burn LLM budget against Alice's
+        # session AND inject conversational turns into her audit trail.
+        resp = bob_client.post(
+            f"/api/sessions/{session_id}/guided/chat",
+            json={"message": "hi", "step_index": "step_1_source"},
         )
         assert resp.status_code == 404
 

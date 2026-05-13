@@ -8,7 +8,7 @@ import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
 import { SessionSidebar } from "./components/sessions/SessionSidebar";
 import { ChatPanel } from "./components/chat/ChatPanel";
-import { InspectorPanel } from "./components/inspector/InspectorPanel";
+import { InspectorPanel, OPEN_CATALOG_EVENT } from "./components/inspector/InspectorPanel";
 import { SecretsPanel } from "./components/settings/SecretsPanel";
 import { initStoreSubscriptions } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
@@ -85,6 +85,17 @@ function App() {
       if (e.key === "k" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         setShowPalette(true);
+        return;
+      }
+
+      // Ctrl+Shift+P / Cmd+Shift+P: Open plugin catalog
+      if (
+        e.key.toLowerCase() === "p" &&
+        e.shiftKey &&
+        (e.ctrlKey || e.metaKey)
+      ) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(OPEN_CATALOG_EVENT));
         return;
       }
 

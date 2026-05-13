@@ -36,6 +36,8 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "runs", label: "Runs" },
 ];
 
+export const OPEN_CATALOG_EVENT = "open-catalog";
+
 // ---------------------------------------------------------------------------
 // VersionSelector — custom dropdown with inline revert
 // ---------------------------------------------------------------------------
@@ -288,6 +290,14 @@ export function InspectorPanel() {
     return () => window.removeEventListener(SWITCH_TAB_EVENT, handleSwitchTab);
   }, []);
 
+  useEffect(() => {
+    function handleOpenCatalog() {
+      setCatalogOpen(true);
+    }
+    window.addEventListener(OPEN_CATALOG_EVENT, handleOpenCatalog);
+    return () => window.removeEventListener(OPEN_CATALOG_EVENT, handleOpenCatalog);
+  }, []);
+
   // Notify hash router when tab changes (for URL sync).
   useEffect(() => {
     window.dispatchEvent(
@@ -497,6 +507,7 @@ export function InspectorPanel() {
               onClick={() => setCatalogOpen(!catalogOpen)}
               className="btn inspector-action-btn"
             >
+              <span aria-hidden="true">▦</span>{" "}
               Catalog
             </button>
 

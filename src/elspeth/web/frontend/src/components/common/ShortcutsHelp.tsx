@@ -7,6 +7,7 @@ interface ShortcutsHelpProps {
 
 const SHORTCUTS = [
   { keys: "Ctrl+K", action: "Command palette" },
+  { keys: "Ctrl/Cmd+Shift+P", action: "Open plugin catalog" },
   { keys: "Ctrl+N", action: "New session" },
   { keys: "Ctrl+/", action: "Focus chat input" },
   { keys: "Ctrl+Shift+V", action: "Validate pipeline" },

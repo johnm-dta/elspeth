@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "./App";
 import * as api from "./api/client";
 import type { SystemStatus, UserProfile } from "./types/index";
@@ -22,6 +22,7 @@ vi.mock("./components/chat/ChatPanel", () => ({
 
 vi.mock("./components/inspector/InspectorPanel", () => ({
   InspectorPanel: () => <div data-testid="inspector-panel-stub" />,
+  OPEN_CATALOG_EVENT: "open-catalog",
 }));
 
 vi.mock("./components/settings/SecretsPanel", () => ({
@@ -132,5 +133,25 @@ describe("App banner roles", () => {
     const root = banner.closest(".alert-banner") as HTMLElement | null;
     expect(root).not.toBeNull();
     expect(root!.getAttribute("role")).toBe("status");
+  });
+
+  it("dispatches an open-catalog event on Ctrl+Shift+P", async () => {
+    const onOpenCatalog = vi.fn();
+    window.addEventListener("open-catalog", onOpenCatalog);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.keyDown(document, {
+      key: "P",
+      code: "KeyP",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+
+    expect(onOpenCatalog).toHaveBeenCalledTimes(1);
+    window.removeEventListener("open-catalog", onOpenCatalog);
   });
 });

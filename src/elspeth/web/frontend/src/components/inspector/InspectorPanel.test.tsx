@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { InspectorPanel } from "./InspectorPanel";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -292,6 +292,19 @@ describe("Version selector and catalog", () => {
     // Click again to close
     await user.click(catalogBtn);
     expect(screen.queryByText("Plugin Catalog")).not.toBeInTheDocument();
+  });
+
+  it("opens the catalog drawer when the global open-catalog event fires", () => {
+    useSessionStore.setState({
+      compositionState: makeState(),
+    });
+    render(<InspectorPanel />);
+
+    expect(screen.queryByText("Plugin Catalog")).not.toBeInTheDocument();
+
+    fireEvent(window, new CustomEvent("open-catalog"));
+
+    expect(screen.getByText("Plugin Catalog")).toBeInTheDocument();
   });
 });
 

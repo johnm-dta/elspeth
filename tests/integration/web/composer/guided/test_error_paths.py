@@ -12,7 +12,12 @@ as test_respond.py).
 Per spec §5.3, §9.4:
   - Any control_signal="exit_to_freeform" → terminal.kind="exited_to_freeform",
     terminal.reason="user_pressed_exit", next_turn=None
-  - Any respond after terminal → 409 Conflict
+  - Any NON-exit respond after terminal → 409 Conflict
+  - control_signal="exit_to_freeform" against a kind="completed" terminal →
+    200 + terminal transitions COMPLETED → EXITED_TO_FREEFORM (wizard-teardown
+    exemption -- pinned by ``TestExitFromCompletedTerminal``).  The exemption
+    is narrow: it does NOT apply to already-exited sessions and does NOT apply
+    to any non-exit payload.
 """
 
 from __future__ import annotations
@@ -182,6 +187,259 @@ class TestRespondAfterTerminal:
                 chosen=["csv"],
             )
             assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Exit-from-COMPLETED — wizard-teardown exemption from the 409 guard.
+#
+# When the wizard reaches ``terminal.kind == "completed"``, the
+# CompletionSummary surface (frontend: CompletionSummary.tsx) shows two
+# action buttons that fire ``control_signal=exit_to_freeform`` to tear the
+# wizard down and return the user to the freeform chat surface.  Without
+# the exemption added to ``post_guided_respond``, those clicks hit the
+# blanket 409 guard and the user is stuck on the summary (the ChatPanel
+# discriminator keeps the completed surface visible until
+# terminal.kind transitions to ``exited_to_freeform``).
+#
+# These tests pin the narrow exemption shape:
+#   * EXIT_TO_FREEFORM from COMPLETED -> 200 + terminal kind transitions.
+#   * Non-exit payloads from COMPLETED -> still 409.
+#   * EXIT_TO_FREEFORM from EXITED_TO_FREEFORM -> still 409 (already-exited).
+#   * No ``guided_turn_answered`` is emitted on this path (no turn was
+#     answered); ``guided_dropped_to_freeform`` IS emitted.
+# ---------------------------------------------------------------------------
+
+
+class TestExitFromCompletedTerminal:
+    """Pin the wizard-teardown exemption: exit_to_freeform from kind=COMPLETED
+    must transition to kind=EXITED_TO_FREEFORM instead of returning 409.
+    """
+
+    def _seed_completed_terminal(self, client: TestClient, session_id: str) -> None:
+        """Seed a GuidedSession with terminal.kind=COMPLETED.
+
+        Direct state injection mirrors the
+        ``test_respond.py::_seed_inspect_and_confirm_history`` pattern: we
+        bypass the full wizard drive (which would require LLM stubs and
+        recipe-accept slot wiring) and write the desired terminal state
+        straight into composer_meta.  The route under test reads
+        ``state.guided_session`` from that record and exercises the
+        exit-from-COMPLETED branch.
+        """
+        import asyncio
+        from dataclasses import replace
+        from uuid import UUID
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+        from elspeth.web.composer.guided.state_machine import (
+            GuidedSession,
+            TerminalKind,
+            TerminalState,
+            TurnRecord,
+        )
+        from elspeth.web.sessions.converters import state_from_record
+        from elspeth.web.sessions.protocol import CompositionStateData
+        from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
+
+        service = client.app.state.session_service
+        session_uuid = UUID(session_id)
+        state_record = asyncio.run(service.get_current_state(session_uuid))
+
+        if state_record is None:
+            state = _initial_composition_state_with_guided_session()
+            existing_meta: dict = {}
+        else:
+            state = state_from_record(state_record)
+            existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
+
+        # Build a GuidedSession resting at STEP_3_TRANSFORMS with COMPLETED
+        # terminal carrying a non-trivial pipeline_yaml.  The handler must
+        # NOT propagate ``pipeline_yaml`` to the new EXITED_TO_FREEFORM
+        # terminal (the TerminalState invariant restricts pipeline_yaml to
+        # kind=COMPLETED); the test asserts that elision explicitly.
+        guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
+        record = TurnRecord(
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            turn_type=TurnType.PROPOSE_CHAIN,
+            payload_hash="seed-payload-hash",
+            response_hash="seed-response-hash",
+            emitter="server",
+        )
+        completed_terminal = TerminalState(
+            kind=TerminalKind.COMPLETED,
+            reason=None,
+            pipeline_yaml="version: 1\nsource:\n  plugin: csv\n",
+        )
+        guided = replace(
+            guided,
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            history=(*guided.history, record),
+            terminal=completed_terminal,
+        )
+        state = replace(state, guided_session=guided)
+
+        new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+        state_d = state.to_dict()
+        state_data = CompositionStateData(
+            source=state_d["source"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=False,
+            validation_errors=None,
+            composer_meta=new_composer_meta,
+        )
+        asyncio.run(service.save_composition_state(session_uuid, state_data))
+
+    def test_exit_from_completed_transitions_to_exited_to_freeform(self, composer_test_client: TestClient) -> None:
+        """POST /guided/respond with control_signal=exit_to_freeform against a
+        kind=COMPLETED terminal must return 200 and transition the terminal.
+
+        Bug ref: CompletionSummary.tsx:70-75 buttons fire exit_to_freeform; the
+        prior implementation 409'd on this combination because the terminal
+        guard ran before reading control_signal, leaving the user with no chat
+        input and no way out of the summary.
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_completed_terminal(composer_test_client, session_id)
+
+        body = _respond(
+            composer_test_client,
+            session_id,
+            control_signal="exit_to_freeform",
+        )
+
+        # Top-level terminal field.
+        assert body["terminal"] is not None
+        assert body["terminal"]["kind"] == "exited_to_freeform"
+        assert body["terminal"]["reason"] == "user_pressed_exit"
+        # TerminalState invariant: pipeline_yaml is set only on kind=COMPLETED.
+        # The COMPLETED terminal had non-null yaml; the new EXITED_TO_FREEFORM
+        # terminal must drop it (yaml is recoverable from composition_state).
+        assert body["terminal"]["pipeline_yaml"] is None
+
+        # guided_session.terminal mirrors the top-level field.
+        gs = body["guided_session"]
+        assert gs["terminal"]["kind"] == "exited_to_freeform"
+        assert gs["terminal"]["reason"] == "user_pressed_exit"
+
+        # No live turn after teardown.
+        assert body["next_turn"] is None
+
+    def test_exit_from_completed_is_persisted(self, composer_test_client: TestClient) -> None:
+        """After exit-from-COMPLETED, GET /guided reflects the new terminal AND
+        the surrounding ``composition_state`` is preserved intact.
+
+        The route's persistence call is ``_replace(state, guided_session=...)``,
+        which leaves ``source``/``nodes``/``edges``/``outputs`` untouched.  The
+        production-code comment justifies dropping ``terminal.pipeline_yaml`` on
+        the grounds that the yaml is recoverable from ``composition_state``; this
+        assertion pins that claim by verifying the surrounding state survives.
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_completed_terminal(composer_test_client, session_id)
+        composition_before = _get_guided(composer_test_client, session_id)["composition_state"]
+
+        _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+
+        body = _get_guided(composer_test_client, session_id)
+        guided = body["guided_session"]
+        assert guided["terminal"] is not None
+        assert guided["terminal"]["kind"] == "exited_to_freeform"
+        assert guided["terminal"]["reason"] == "user_pressed_exit"
+        assert guided["terminal"]["pipeline_yaml"] is None
+
+        # Composition-state survives the wizard-teardown: the yaml is
+        # recoverable from these fields.
+        composition_after = body["composition_state"]
+        assert composition_after["source"] == composition_before["source"]
+        assert composition_after["nodes"] == composition_before["nodes"]
+        assert composition_after["edges"] == composition_before["edges"]
+        assert composition_after["outputs"] == composition_before["outputs"]
+
+    def test_non_exit_payload_from_completed_still_returns_409(self, composer_test_client: TestClient) -> None:
+        """Sending any non-exit payload (chosen, edited_values, ...) against a
+        kind=COMPLETED terminal must still return 409.  The exemption is
+        narrow: it ONLY applies to control_signal=exit_to_freeform.
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_completed_terminal(composer_test_client, session_id)
+
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            chosen=["csv"],
+        )
+
+        assert resp.status_code == 409
+        assert "terminal" in resp.json()["detail"].lower()
+
+    def test_exit_from_already_exited_terminal_still_returns_409(self, composer_test_client: TestClient) -> None:
+        """exit_to_freeform against a kind=EXITED_TO_FREEFORM terminal is
+        idempotently rejected with 409 -- exiting an already-exited session
+        is a no-op.  This guards against accidentally widening the exemption
+        when refactoring the terminal-rejection logic.
+        """
+        session_id = _create_session(composer_test_client)
+        # Drive the session terminal via the normal exit flow.
+        _get_guided(composer_test_client, session_id)
+        first = _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+        assert first["terminal"]["kind"] == "exited_to_freeform"
+
+        # A second exit should NOT take the exemption path -- only COMPLETED is exempt.
+        resp = _respond_raw(
+            composer_test_client,
+            session_id,
+            control_signal="exit_to_freeform",
+        )
+        assert resp.status_code == 409
+
+    def test_exit_from_completed_audit_shape(self, composer_test_client: TestClient) -> None:
+        """The exit-from-COMPLETED path emits ``guided_dropped_to_freeform``
+        and does NOT emit ``guided_turn_answered`` (no turn was being
+        answered -- the wizard had already completed).
+        """
+        import asyncio
+        import json
+        from uuid import UUID
+
+        session_id = _create_session(composer_test_client)
+        self._seed_completed_terminal(composer_test_client, session_id)
+
+        _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+
+        # Collect guided-mode tool invocations from the audit log.
+        service = composer_test_client.app.state.session_service
+        msgs = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+        tool_names: list[str] = []
+        for msg in msgs:
+            if msg.role != "tool" or not msg.tool_calls:
+                continue
+            for tc in msg.tool_calls:
+                invocation = tc.get("invocation", {})
+                name = invocation.get("tool_name")
+                if name in {
+                    "guided_turn_emitted",
+                    "guided_turn_answered",
+                    "guided_step_advanced",
+                    "guided_dropped_to_freeform",
+                }:
+                    tool_names.append(name)
+                    # For dropped_to_freeform, also assert the directive's
+                    # prev_step captures the step at which the wizard had
+                    # completed (the seeded STEP_3_TRANSFORMS) and the reason
+                    # matches USER_PRESSED_EXIT.
+                    if name == "guided_dropped_to_freeform":
+                        args = json.loads(invocation.get("arguments_canonical", "{}"))
+                        assert args["prev_step"] == "step_3_transforms"
+                        assert args["drop_reason"] == "user_pressed_exit"
+
+        assert "guided_dropped_to_freeform" in tool_names, f"expected guided_dropped_to_freeform to be emitted; got: {tool_names}"
+        assert "guided_turn_answered" not in tool_names, (
+            f"guided_turn_answered must NOT be emitted on the exit-from-COMPLETED path (no turn is being answered); got: {tool_names}"
+        )
 
 
 # ---------------------------------------------------------------------------

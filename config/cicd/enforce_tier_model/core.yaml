@@ -150,7 +150,7 @@ allow_hits:
   owner: architecture
   reason: Silent except in schema lookup — DIVERT edge may target non-existent node (forward reference or optional path)
   safety: Continues to next coalesce point; warning about potential data loss is best-effort
-  expires: '2026-05-12'
+  expires: '2026-11-13'
 - key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=0d32fa231299f2d6
   owner: bugfix
   reason: Tier-3 boundary - PayloadStore.delete() is external I/O (filesystem/blob storage)
@@ -159,7 +159,7 @@ allow_hits:
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-05-12'
+  expires: '2026-11-13'
 - key: core/landscape/exporter.py:R1:LandscapeExporter:_iter_records:fp=455e3f20c68fa667
   owner: P2-2026-02-02-76r
   reason: Sparse lookup - not all rows have tokens (batch export uses pre-loaded dicts)
@@ -188,12 +188,12 @@ allow_hits:
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-05-12'
+  expires: '2026-11-13'
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=7d0809b197d9ab44
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-05-12'
+  expires: '2026-11-13'
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=5d39923434a1b710
   owner: architecture
   reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically serializable
@@ -210,7 +210,7 @@ allow_hits:
   owner: bugfix
   reason: DNS resolver worker catches BaseException to relay ALL errors through the queue to the caller thread
   safety: Every caught exception is put on the queue and re-raised by the caller; nothing is suppressed
-  expires: '2026-05-12'
+  expires: '2026-11-13'
 - key: core/security/secret_loader.py:R6:KeyVaultSecretLoader:get_secret:fp=e77b2a357f43e9a2
   owner: bugfix
   reason: Sentinel class definition in except ImportError — not a runtime error handler

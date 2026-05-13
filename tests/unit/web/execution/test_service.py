@@ -3909,19 +3909,25 @@ class TestSanitizeErrorForClient:
         assert "API_KEY" not in result
         assert "secret" in result.lower()
 
-    def test_value_error_passes_through(self) -> None:
-        """ValueError is allowlisted — user-actionable config errors."""
+    def test_value_error_does_not_leak_validation_structure(self) -> None:
+        """ValueError can carry Pydantic/config internals and must be generic."""
         from elspeth.web.execution.service import _sanitize_error_for_client
 
-        exc = ValueError("Invalid source path: /tmp/data.csv")
-        assert _sanitize_error_for_client(exc) == "Invalid source path: /tmp/data.csv"
+        exc = ValueError("2 validation errors for PipelineSettings\nsource.options.internal_token_path\n  Field required [type=missing]")
+        result = _sanitize_error_for_client(exc)
+        assert result == "Pipeline execution failed (ValueError)"
+        assert "PipelineSettings" not in result
+        assert "internal_token_path" not in result
 
-    def test_type_error_passes_through(self) -> None:
-        """TypeError is allowlisted — type mismatches in config/YAML."""
+    def test_type_error_does_not_leak_function_signature(self) -> None:
+        """TypeError can carry function signatures and must be generic."""
         from elspeth.web.execution.service import _sanitize_error_for_client
 
-        exc = TypeError("Expected str, got int")
-        assert _sanitize_error_for_client(exc) == "Expected str, got int"
+        exc = TypeError("build_pipeline() got an unexpected keyword argument 'internal_model_state'")
+        result = _sanitize_error_for_client(exc)
+        assert result == "Pipeline execution failed (TypeError)"
+        assert "build_pipeline" not in result
+        assert "internal_model_state" not in result
 
     def test_key_error_does_not_leak_internal_names(self) -> None:
         """KeyError is NOT allowlisted — str(KeyError) leaks dict key names."""

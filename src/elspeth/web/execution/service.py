@@ -80,32 +80,19 @@ slog = structlog.get_logger()
 
 T = TypeVar("T")
 
-# Exception types whose str() is safe to expose to WebSocket clients and
-# persist in runs.error.  These produce user-actionable messages (config
-# errors, validation failures) without leaking internal paths or class
-# hierarchies.  Everything else gets a generic message — the full
-# exception is recorded in runs.error by _run_pipeline's except block.
-_CLIENT_SAFE_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    ValueError,  # config validation, illegal transitions
-    TypeError,  # type mismatches in config/YAML
-    # KeyError deliberately excluded: str(KeyError) exposes internal dict
-    # key names (e.g., '_SCOPE_TO_AUDIT_SOURCE') — the generic fallback
-    # message with the class name is safer for the client surface.
-)
-
 
 def _sanitize_error_for_client(exc: BaseException) -> str:
     """Return a client-safe error message for a pipeline failure.
 
-    Allowlists exception types that produce user-actionable messages.
-    All others are reduced to a generic message with the exception
-    class name (no internal details).  The full exception is recorded
-    in runs.error by _run_pipeline's except-BaseException block.
+    Only typed exceptions with purpose-built safe messages may expose
+    details. Broad built-ins such as ValueError, TypeError, and KeyError
+    are reduced to a generic class-name message because their str() output
+    can carry validation structure, function signatures, and internal keys.
+    The full exception is recorded in runs.error by _run_pipeline's
+    except-BaseException block.
     """
     if isinstance(exc, SecretResolutionError):
         return "One or more secret references could not be resolved. Check the Secrets panel."
-    if isinstance(exc, _CLIENT_SAFE_EXCEPTIONS):
-        return str(exc)
     return f"Pipeline execution failed ({type(exc).__name__})"
 
 

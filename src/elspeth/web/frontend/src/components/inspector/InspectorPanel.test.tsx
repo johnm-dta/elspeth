@@ -379,6 +379,15 @@ describe("InspectorPanel validation dot colour", () => {
     expect(dot.getAttribute("style")).not.toContain("var(--color-warning)");
   });
 
+  it("hides the decorative validation symbol from assistive technology", () => {
+    render(<InspectorPanel />);
+
+    const dot = screen.getByLabelText("Not validated");
+    const symbol = dot.querySelector("[aria-hidden='true']");
+
+    expect(symbol).toHaveTextContent("\u25CB");
+  });
+
   it("renders warning state in warning colour", () => {
     useExecutionStore.setState({
       validationResult: {

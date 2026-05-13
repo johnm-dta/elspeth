@@ -532,7 +532,7 @@ export function InspectorPanel() {
                   className="inspector-validation-dot"
                   style={{ color: colors[status] }}
                 >
-                  {symbols[status]}
+                  <span aria-hidden="true">{symbols[status]}</span>
                 </span>
               );
             })()}

@@ -2109,7 +2109,7 @@ Each case follows: RED test → run → GREEN. Commit per case.
 
 ### Task 12c: Property test extension + schema-level backward-direction test
 
-- [ ] **Step 1: Author the strategy contracts at `tests/property/web/composer/strategies.py`.**
+- [x] **Step 1: Author the strategy contracts at `tests/property/web/composer/strategies.py`.**
 
 Strategies per spec §8.3.1: `st_tool_call`, `st_argument_dict`, `st_redaction_policy`, `st_failure_injection_point` (with `audit_raises_OperationalError_on_commit`, `advisory_lock_unavailable`, `tool_call_cap_exceeded`, `unknown_response_key` arms), `st_cancellation_arrival_time`, `st_session_state`. Use Hypothesis `@example(...)` decorators to guarantee every cancellation/failure branch is reached (closes spec QA F-6). The strategies file's docstring contains a mapping table from §5.5 row numbers to strategy values so future drift is detectable.
 
@@ -2223,11 +2223,11 @@ def test_compose_loop_audit_machine(cancellation_arrival_time: str) -> None:
 
 If Hypothesis's `RuleBasedStateMachine.TestCase()` shape does not permit passing the forced example cleanly in the current Hypothesis version, implement a small `drive_single_example_trace(cancellation_arrival_time=...)` helper and use the same invariant helpers after the trace. The invariant helpers must be real code in the committed test file, and every cancellation enum above must be mechanically injectable.
 
-- [ ] **Step 2: Author the stateful machine at `tests/property/web/composer/test_compose_loop_invariants.py`.**
+- [x] **Step 2: Author the stateful machine at `tests/property/web/composer/test_compose_loop_invariants.py`.**
 
 Uses Hypothesis's `RuleBasedStateMachine`. After each trace, the machine asserts the §8.3.2 post-conditions: forward-direction, backward-direction (via the schema-level SQL predicate), ordering & uniqueness, redaction, cancellation-specific, audit-failure primacy, OTel counter post-conditions.
 
-- [ ] **Step 3: Author the schema-level integration test at `tests/integration/web/test_inv_audit_ahead_backward.py`.**
+- [x] **Step 3: Author the schema-level integration test at `tests/integration/web/test_inv_audit_ahead_backward.py`.**
 
 ```python
 """INV-AUDIT-AHEAD bidirectional schema-level test (spec §4.1.2 /
@@ -2253,7 +2253,7 @@ def test_no_state_row_without_tool_row(populated_audit_db):
 
 The fixture `populated_audit_db` exercises the compose loop end-to-end with mixed tool successes/failures/cancellations so the predicate has meaningful surface to evaluate.
 
-- [ ] **Step 4: Run the full property + integration surface.**
+- [x] **Step 4: Run the full property + integration surface.**
 
 ```bash
 .venv/bin/python -m pytest tests/property/web/composer/ tests/integration/web/test_inv_audit_ahead_backward.py -v

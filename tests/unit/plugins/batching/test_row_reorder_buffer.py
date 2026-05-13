@@ -16,6 +16,7 @@ from elspeth.plugins.infrastructure.batching.row_reorder_buffer import (
     RowReorderBuffer,
     RowTicket,
     ShutdownError,
+    _PendingEntry,
 )
 
 
@@ -419,6 +420,24 @@ class TestSubmitValidation:
         buffer.complete(ticket, "result")
         entry = buffer.wait_for_next_release(timeout=0.1)
         assert entry.result == "result"
+
+
+class TestPendingEntryValidation:
+    """Internal pending entries enforce the same identity invariants as tickets."""
+
+    def test_rejects_negative_sequence(self) -> None:
+        with pytest.raises(ValueError, match="sequence must be non-negative"):
+            _PendingEntry(sequence=-1, row_id="row-1", submitted_at=1.0)
+
+    def test_rejects_empty_row_id(self) -> None:
+        with pytest.raises(ValueError, match="row_id must not be empty"):
+            _PendingEntry(sequence=0, row_id="", submitted_at=1.0)
+
+    def test_accepts_valid_identity(self) -> None:
+        entry: _PendingEntry[str] = _PendingEntry(sequence=0, row_id="row-1", submitted_at=1.0)
+
+        assert entry.sequence == 0
+        assert entry.row_id == "row-1"
 
 
 class TestTicketIdentityVerification:

@@ -4,6 +4,16 @@ import { describe, expect, it } from "vitest";
 
 const appCss = readFileSync("src/App.css", "utf8");
 
+function extractForcedColorsBlock(): string {
+  const start = appCss.indexOf("@media (forced-colors: active)");
+  if (start === -1) {
+    return "";
+  }
+
+  const end = appCss.indexOf("\n}\n\n/*", start);
+  return end === -1 ? appCss.slice(start) : appCss.slice(start, end + 3);
+}
+
 function extractRootToken(tokenName: string): string {
   const blockMatch = /^:root\s*\{([\s\S]*?)\n\}/m.exec(appCss);
   if (!blockMatch) {
@@ -85,5 +95,23 @@ describe("light theme colour contrast", () => {
     expect(focusRing).not.toBe(gateBadge);
     expect(contrastRatio(focusRing, gateBadge)).toBeGreaterThanOrEqual(2);
     expect(contrastRatio(focusRing, background)).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("forced-colors accessibility fallbacks", () => {
+  it("defines system-color fallbacks for stateful high-contrast surfaces", () => {
+    const forcedColorsBlock = extractForcedColorsBlock();
+
+    expect(forcedColorsBlock).toContain("@media (forced-colors: active)");
+    expect(forcedColorsBlock).toContain(".validation-banner-fail");
+    expect(forcedColorsBlock).toContain(".alert-banner");
+    expect(forcedColorsBlock).toContain(".type-badge-source");
+    expect(forcedColorsBlock).toContain(".type-badge-transform");
+    expect(forcedColorsBlock).toContain(".type-badge-gate");
+    expect(forcedColorsBlock).toContain(".type-badge-sink");
+    expect(forcedColorsBlock).toContain(".type-badge-aggregation");
+    expect(forcedColorsBlock).toContain(".type-badge-coalesce");
+    expect(forcedColorsBlock).toContain(".react-flow__edge-path");
+    expect(forcedColorsBlock).toContain(".yaml-toolbar-btn[data-copied=\"true\"]");
   });
 });

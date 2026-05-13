@@ -1540,6 +1540,37 @@ summary:focus-visible {
   }
 }
 
+@media (forced-colors: active) {
+  .validation-banner-pass,
+  .validation-banner-fail,
+  .alert-banner {
+    border: 2px solid CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .type-badge-source,
+  .type-badge-transform,
+  .type-badge-gate,
+  .type-badge-sink,
+  .type-badge-aggregation,
+  .type-badge-coalesce {
+    border-width: 2px;
+    forced-color-adjust: none;
+  }
+
+  .react-flow__edge-path {
+    stroke: ButtonText;
+  }
+
+  :focus-visible {
+    outline: 2px solid Highlight;
+  }
+
+  .yaml-toolbar-btn[data-copied="true"] {
+    border: 2px solid Highlight;
+  }
+}
+
 /* ── Markdown rendering (A2) ─────────────────────────────────────────────── */
 
 .markdown-body {
@@ -3274,6 +3305,11 @@ summary:focus-visible {
 .yaml-toolbar-btn {
   padding: var(--space-xs) 10px;
   font-size: var(--font-size-xs);
+}
+
+.yaml-toolbar-btn[data-copied="true"] {
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
 }
 
 /* ---------------------------------------------------------------------------

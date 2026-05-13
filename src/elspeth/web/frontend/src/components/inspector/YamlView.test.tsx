@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { YamlView } from "./YamlView";
 import { useSessionStore } from "@/stores/sessionStore";
 
@@ -61,5 +62,36 @@ describe("YamlView", () => {
     expect(
       screen.queryByText("YAML will appear here once your pipeline has components."),
     ).not.toBeInTheDocument();
+  });
+
+  it("exposes copied state as a data attribute for forced-colors CSS", async () => {
+    const { fetchYaml } = await import("@/api/client");
+    vi.mocked(fetchYaml).mockResolvedValue({
+      yaml: "source:\n  plugin: text\n",
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+    });
+
+    render(<YamlView />);
+    const user = userEvent.setup();
+
+    const copyButton = await screen.findByRole("button", {
+      name: "Copy YAML to clipboard",
+    });
+    expect(copyButton).toHaveAttribute("data-copied", "false");
+
+    await user.click(copyButton);
+
+    await waitFor(() => {
+      expect(copyButton).toHaveAttribute("data-copied", "true");
+    });
   });
 });

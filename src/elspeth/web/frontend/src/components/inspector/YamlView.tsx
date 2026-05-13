@@ -171,14 +171,7 @@ export function YamlView() {
           onClick={handleCopy}
           aria-label={copied ? "Copied to clipboard" : "Copy YAML to clipboard"}
           className="btn yaml-toolbar-btn"
-          style={{
-            backgroundColor: copied
-              ? "var(--color-success-bg)"
-              : undefined,
-            color: copied
-              ? "var(--color-success)"
-              : undefined,
-          }}
+          data-copied={copied ? "true" : "false"}
         >
           {copied ? "Copied!" : "Copy"}
         </button>

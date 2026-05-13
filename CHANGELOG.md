@@ -14,11 +14,11 @@ _No unreleased changes recorded._
 
 RC-5.2 is the large Web Composer release train that folds the guided-mode
 wizard, composer progress persistence, manifest-keyed redaction, per-step chat,
-frontend recovery UX, and RC5.2 hardening back onto `main`. The branch contains
-347 commits over `main` and moves the composer from a best-effort interactive
-surface toward an audited, recoverable authoring system: model calls, tool
-dispatch, redacted tool payloads, persisted transcript rows, recovery diffs, and
-operator-visible failure causes now share one evidence story.
+frontend recovery UX, and RC5.2 hardening back onto `main`. It moves the
+composer from a best-effort interactive surface toward an audited, recoverable
+authoring system: model calls, tool dispatch, redacted tool payloads, persisted
+transcript rows, recovery diffs, and operator-visible failure causes now share
+one evidence story.
 
 ### Added
 

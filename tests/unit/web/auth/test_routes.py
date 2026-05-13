@@ -8,11 +8,16 @@ import jwt as pyjwt
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
+from sqlalchemy import select
 
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.schema import auth_events_table
+from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.routes import RegisterRequest, create_auth_router
 from elspeth.web.config import WebSettings
+from elspeth.web.middleware.request_id import RequestIdMiddleware
 
 _OIDC_FIELDS = {
     "oidc_issuer": "https://issuer.example.com",
@@ -22,11 +27,20 @@ _OIDC_FIELDS = {
 _ENTRA_FIELDS = {**_OIDC_FIELDS, "entra_tenant_id": "test-tenant-id"}
 
 
+class _NoopAuthAuditRecorder:
+    def record_login_success(self, *args, **kwargs) -> None:
+        return None
+
+    def record_login_failure(self, *args, **kwargs) -> None:
+        return None
+
+
 def _create_test_app(provider, auth_provider_type: str = "local", **settings_overrides) -> FastAPI:
     """Create a FastAPI app with auth routes for testing."""
     from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 
     app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
     app.state.auth_provider = provider
     app.state.settings = WebSettings(
         auth_provider=auth_provider_type,
@@ -37,6 +51,7 @@ def _create_test_app(provider, auth_provider_type: str = "local", **settings_ove
         **settings_overrides,
     )
     app.state.oidc_authorization_endpoint = None
+    app.state.auth_audit_recorder = _NoopAuthAuditRecorder()
     # Auth rate limiter — generous limit for tests that aren't testing rate limiting
     app.state.auth_rate_limiter = ComposerRateLimiter(limit=100)
     router = create_auth_router()
@@ -47,6 +62,15 @@ def _create_test_app(provider, auth_provider_type: str = "local", **settings_ove
 def _client_for(app: FastAPI) -> AsyncClient:
     """Create an async ASGI client without Starlette's sync TestClient portal."""
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+def _enable_auth_audit(app: FastAPI) -> None:
+    app.state.auth_audit_recorder = AuthAuditRecorder.from_settings(app.state.settings)
+
+
+def _read_auth_event_rows(audit_url: str):
+    with LandscapeDB.from_url(audit_url) as db, db.read_only_connection() as conn:
+        return conn.execute(select(auth_events_table).order_by(auth_events_table.c.occurred_at)).fetchall()
 
 
 def _assert_token_response_uncacheable(response: Response) -> None:
@@ -80,6 +104,40 @@ class TestLoginEndpoint:
         # Verify it's a valid JWT (three segments)
         assert len(body["access_token"].split(".")) == 3
 
+    async def test_login_valid_credentials_records_durable_auth_event(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        provider.create_user("alice", "password123", display_name="Alice")
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": "alice", "password": "password123"},
+                headers={"user-agent": "pytest-client", "x-request-id": "login-success-1"},
+            )
+
+        assert response.status_code == 200
+        token = response.json()["access_token"]
+        rows = _read_auth_event_rows(audit_url)
+        assert len(rows) == 1
+        event = rows[0]
+        assert event.event_type == "login"
+        assert event.outcome == "success"
+        assert event.provider == "local"
+        assert event.user_id == "alice"
+        assert event.username == "alice"
+        assert event.failure_category is None
+        assert event.request_id == "login-success-1"
+        assert event.user_agent == "pytest-client"
+        serialized = repr(dict(event._mapping))
+        assert "password123" not in serialized
+        assert token not in serialized
+
     async def test_login_invalid_credentials(self, tmp_path) -> None:
         provider = LocalAuthProvider(
             db_path=tmp_path / "auth.db",
@@ -94,6 +152,39 @@ class TestLoginEndpoint:
                 json={"username": "alice", "password": "wrong"},
             )
         assert response.status_code == 401
+
+    async def test_login_invalid_credentials_records_failure_without_secret_material(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        provider.create_user("alice", "password123", display_name="Alice")
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": "alice", "password": "wrong-password"},
+                headers={"user-agent": "pytest-client", "x-request-id": "login-failure-1"},
+            )
+
+        assert response.status_code == 401
+        rows = _read_auth_event_rows(audit_url)
+        assert len(rows) == 1
+        event = rows[0]
+        assert event.event_type == "login"
+        assert event.outcome == "failure"
+        assert event.provider == "local"
+        assert event.user_id is None
+        assert event.username == "alice"
+        assert event.failure_category == "invalid_credentials"
+        assert event.request_id == "login-failure-1"
+        serialized = repr(dict(event._mapping))
+        assert "wrong-password" not in serialized
+        assert "password123" not in serialized
+        assert "eyJ" not in serialized
 
     async def test_login_not_available_for_oidc(self, tmp_path) -> None:
         provider = AsyncMock()

@@ -24,6 +24,7 @@ from elspeth.contracts.call_data import CallPayload
 from elspeth.contracts.errors import ContractViolation, TransformErrorReason
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape._database_ops import DatabaseOps, ReadOnlyDatabaseOps
+from elspeth.core.landscape.auth_audit_repository import AuthAuditRepository
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -290,6 +291,7 @@ class RecorderFactory:
 
         # Composed repository for run lifecycle
         self._run_lifecycle = RunLifecycleRepository(db, ops, run_loader)
+        self._auth_audit = AuthAuditRepository(ops)
 
         # Composed repository for execution recording
         self._execution = ExecutionRepository(
@@ -333,6 +335,10 @@ class RecorderFactory:
     @property
     def run_lifecycle(self) -> RunLifecycleRepository:
         return self._run_lifecycle
+
+    @property
+    def auth_audit(self) -> AuthAuditRepository:
+        return self._auth_audit
 
     @property
     def execution(self) -> ExecutionRepository:

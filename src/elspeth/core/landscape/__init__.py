@@ -73,6 +73,7 @@ from elspeth.core.landscape.row_data import CallDataResult, CallDataState, RowDa
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.core.landscape.schema import (
     artifacts_table,
+    auth_events_table,
     batch_members_table,
     batch_outputs_table,
     batches_table,
@@ -133,6 +134,7 @@ __all__ = [
     "TokenParent",
     "ValidationErrorWithContract",
     "artifacts_table",
+    "auth_events_table",
     "batch_members_table",
     "batch_outputs_table",
     "batches_table",

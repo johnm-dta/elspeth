@@ -25,6 +25,7 @@ from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
+from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
@@ -370,6 +371,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             jwks_failure_retry_seconds=settings.jwks_failure_retry_seconds,
         )
     app.state.auth_provider = auth_provider
+    app.state.auth_audit_recorder = AuthAuditRecorder.from_settings(settings)
     app.state.oidc_authorization_endpoint = None  # Set by lifespan for OIDC/Entra
 
     # W16/S3: Secret key production guard -- hard crash

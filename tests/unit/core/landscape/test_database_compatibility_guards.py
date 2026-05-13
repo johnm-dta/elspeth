@@ -709,6 +709,50 @@ class TestJournalPathGuards:
         assert "ix_tokens_run_id" not in indexes
         assert epoch == ADR019_SCHEMA_EPOCH
 
+    def test_from_url_creates_missing_auth_events_table_for_existing_db(self, tmp_path: Path) -> None:
+        """The web-auth audit table is additive for existing Landscape databases."""
+        db_path = tmp_path / "missing_auth_events_table.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE auth_events")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}")
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = set(inspect(engine).get_table_names())
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "auth_events" in tables
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
+    def test_from_url_create_tables_false_allows_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
+        """Read-only opens tolerate the additive auth-events table absence."""
+        db_path = tmp_path / "readonly_missing_auth_events_table.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE auth_events")
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+        engine.dispose()
+
+        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
+        db.close()
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        tables = set(inspect(engine).get_table_names())
+        with engine.connect() as conn:
+            epoch = conn.exec_driver_sql("PRAGMA user_version").scalar_one()
+        engine.dispose()
+
+        assert "auth_events" not in tables
+        assert epoch == SQLITE_SCHEMA_EPOCH
+
     def test_from_url_stamps_schema_epoch_for_compatible_sqlite_db(self, tmp_path: Path) -> None:
         """Compatible SQLite databases should be stamped for future migrations."""
         db_path = tmp_path / "epoch_stamp.db"

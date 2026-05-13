@@ -20,6 +20,7 @@ from elspeth.web.app import (
     create_app,
     lifespan,
 )
+from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
@@ -253,6 +254,13 @@ class TestAuthWiring:
     def test_auth_provider_on_app_state(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
         assert app.state.auth_provider is not None
+
+    def test_auth_audit_recorder_on_app_state(self, tmp_path) -> None:
+        settings = _settings(tmp_path)
+        app = create_app(settings)
+
+        assert isinstance(app.state.auth_audit_recorder, AuthAuditRecorder)
+        assert app.state.auth_audit_recorder.landscape_url == settings.get_landscape_url()
 
     def test_auth_routes_registered(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))

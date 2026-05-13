@@ -9,11 +9,14 @@ GET /me returns the full UserProfile for any auth provider.
 
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.auth.audit import AuthAuditWriter
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
@@ -92,6 +95,10 @@ def _mark_token_response_uncacheable(response: Response) -> None:
     response.headers["Pragma"] = "no-cache"
 
 
+def _auth_audit_recorder(request: Request) -> AuthAuditWriter:
+    return cast(AuthAuditWriter, request.app.state.auth_audit_recorder)
+
+
 def create_auth_router() -> APIRouter:
     """Create the auth router with /api/auth prefix."""
     router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -120,8 +127,22 @@ def create_auth_router() -> APIRouter:
         try:
             token = await provider.login(body.username, body.password)
         except AuthenticationError as exc:
+            recorder = _auth_audit_recorder(request)
+            recorder.record_login_failure(
+                request,
+                provider=settings.auth_provider,
+                username=body.username,
+                failure_category="invalid_credentials",
+            )
             raise HTTPException(status_code=401, detail=exc.detail) from exc
 
+        recorder = _auth_audit_recorder(request)
+        recorder.record_login_success(
+            request,
+            provider=settings.auth_provider,
+            user_id=body.username,
+            username=body.username,
+        )
         _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 

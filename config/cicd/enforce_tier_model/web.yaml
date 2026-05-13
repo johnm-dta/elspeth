@@ -268,12 +268,12 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 isinstance check on username from external IdP JWT payload (preferred_username is Any)"
   safety: Raises AuthenticationError on non-string; validated at construction time
   expires: null
-- key: web/app.py:R5:_settings_from_env:fp=567c89dc2e6dedf1
+- key: web/app.py:R5:_settings_from_env:fp=20a77eb165dd0aac
   owner: web-app
   reason: "Tier 3 boundary \u2014 JSON-parsed env var may be a list; isinstance check classifies for tuple conversion"
   safety: isinstance used only for type dispatch; no contract masking
   expires: null
-- key: web/app.py:R6:_settings_from_env:fp=90abe5d55a74f106
+- key: web/app.py:R6:_settings_from_env:fp=d99038c753f8658c
   owner: web-app
   reason: "Tier 3 boundary \u2014 env var value that isn't valid JSON is treated as plain string (the common case)"
   safety: JSONDecodeError caught only to fall back to raw string; no silent data loss
@@ -807,7 +807,7 @@ allow_hits:
   safety: Type dispatch only selects richer error formatting; all GraphValidationError cases still append a failed validation
     check and surface to the caller.
   expires: null
-- key: web/app.py:R1:create_app:fp=20e05f13cb1612fa
+- key: web/app.py:R1:create_app:fp=2ffa69ad0c134235
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional WEB_CONCURRENCY env var"
   safety: Defaults to "1" when absent
@@ -872,7 +872,7 @@ allow_hits:
 
     correct API to use; no caller can silently misuse the primitive.'
   expires: null
-- key: web/app.py:R1:create_app:fp=f16152a33d21ed01
+- key: web/app.py:R1:create_app:fp=63835149693e791d
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional ELSPETH_ENV"
   safety: Returns None when absent; only used for test guard
@@ -959,12 +959,12 @@ allow_hits:
   safety: Closes with 1011 and exits the loop; programming and infrastructure errors outside the validation/integrity union
     still propagate to the outer handler.
   expires: null
-- key: web/app.py:R1:lifespan:fp=edb7ea3b6bff6a4d
+- key: web/app.py:R1:lifespan:fp=7c29be5bf8757ca9
   owner: web-app
   reason: "False positive \u2014 httpx.AsyncClient.get() is an HTTP GET request, not dict.get()"
   safety: HTTP errors caught by raise_for_status(); failure now raises SystemExit
   expires: null
-- key: web/app.py:R7:lifespan:fp=eb3db9ffc21e97e2
+- key: web/app.py:R7:lifespan:fp=492db855bafb0d9a
   owner: web-execution
   reason: contextlib.suppress(CancelledError) is the expected shutdown path for the periodic orphan cleanup task
   safety: Clean cancellation during app shutdown; no error suppression
@@ -1072,7 +1072,7 @@ allow_hits:
     \ the general PLUGIN_CRASH path, so the audit row still lands recording \"the dispatch produced an unrecordable result\"\
     \ \u2014 rather than the alternative of silently writing zero into the audit trail."
   expires: null
-- key: web/app.py:R6:_periodic_orphan_cleanup:fp=827ee30f79cd10bf
+- key: web/app.py:R6:_periodic_orphan_cleanup:fp=6c7eecc361a7372a
   owner: web-execution
   reason: "Audit/IO-cleanup narrow catch \u2014 except (SQLAlchemyError, OSError) absorbs recoverable failures of cancel_all_orphaned_runs\
     \ (transient DB loss, lock contention, SQLite file I/O) so the periodic loop retries on the next interval. Catch is intentionally\
@@ -1323,7 +1323,7 @@ allow_hits:
   reason: "Tier 3 \u2014 isinstance check on pipeline_yaml argument type"
   safety: Raises TypeError with diagnostic; no silent default
   expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=2f31865b19c3081d
+- key: web/app.py:R2:create_app:_request_id:fp=9550a08babb043ce
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
 

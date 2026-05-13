@@ -30,6 +30,13 @@ ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
 # Required columns that have been added since initial schema.
 # Used by _validate_schema() to detect outdated SQLite databases.
 _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
+    # Web auth audit trail - records login, token, and auth failure events.
+    ("auth_events", "event_id"),
+    ("auth_events", "occurred_at"),
+    ("auth_events", "event_type"),
+    ("auth_events", "outcome"),
+    ("auth_events", "provider"),
+    ("auth_events", "metadata_json"),
     ("tokens", "expand_group_id"),
     # Added for run ownership — prevents cross-run contamination of token-linked records
     ("tokens", "run_id"),
@@ -104,6 +111,9 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
 # Required check constraints for audit integrity.
 # Format: (table_name, constraint_name)
 _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
+    ("auth_events", "ck_auth_events_event_type"),
+    ("auth_events", "ck_auth_events_outcome"),
+    ("auth_events", "ck_auth_events_provider"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
 )
@@ -111,6 +121,9 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
 # Required indexes (including partial unique indexes) for audit integrity.
 # Format: (table_name, index_name)
 _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
+    ("auth_events", "ix_auth_events_occurred_at"),
+    ("auth_events", "ix_auth_events_type_outcome"),
+    ("auth_events", "ix_auth_events_user"),
     ("calls", "ix_calls_state_call_index_unique"),
     ("calls", "ix_calls_operation_call_index_unique"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
@@ -118,6 +131,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
 )
 
 _ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
+_ADDITIVE_TABLE_NAMES: frozenset[str] = frozenset({"auth_events"})
 
 
 def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
@@ -467,7 +481,7 @@ class LandscapeDB:
                 "Verify the database path is correct.\n\n"
                 f"Database: {self.connection_string}"
             )
-        missing_tables = sorted(expected_tables - existing_tables) if present_landscape_tables else []
+        missing_tables = sorted((expected_tables - existing_tables) - _ADDITIVE_TABLE_NAMES) if present_landscape_tables else []
 
         missing_columns = _collect_missing_required_columns(inspector)
         token_outcomes_shape_errors = _collect_token_outcomes_shape_errors(

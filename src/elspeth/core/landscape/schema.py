@@ -591,6 +591,45 @@ secret_resolutions_table = Table(
 
 Index("ix_secret_resolutions_run", secret_resolutions_table.c.run_id)
 
+
+# === Web Auth Events ===
+# Additive, non-run-scoped Landscape table for web authentication audit.
+# Records must never contain passwords, bearer tokens, raw JWTs, or unredacted
+# provider exception text.
+
+auth_events_table = Table(
+    "auth_events",
+    metadata,
+    Column("event_id", String(64), primary_key=True),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("event_type", String(32), nullable=False),
+    Column("outcome", String(16), nullable=False),
+    Column("provider", String(16), nullable=False),
+    Column("user_id", String(256)),
+    Column("username", String(256)),
+    Column("failure_category", String(64)),
+    Column("request_id", String(64)),
+    Column("client_host", String(128)),
+    Column("user_agent", Text),
+    Column("metadata_json", Text, nullable=False),
+    CheckConstraint(
+        "event_type IN ('login', 'token_issued', 'auth_failure')",
+        name="ck_auth_events_event_type",
+    ),
+    CheckConstraint(
+        "outcome IN ('success', 'failure')",
+        name="ck_auth_events_outcome",
+    ),
+    CheckConstraint(
+        "provider IN ('local', 'oidc', 'entra')",
+        name="ck_auth_events_provider",
+    ),
+)
+
+Index("ix_auth_events_occurred_at", auth_events_table.c.occurred_at)
+Index("ix_auth_events_type_outcome", auth_events_table.c.event_type, auth_events_table.c.outcome)
+Index("ix_auth_events_user", auth_events_table.c.user_id)
+
 # === Pre-flight Results (Pipeline Dependencies & Commencement Gates) ===
 
 preflight_results_table = Table(

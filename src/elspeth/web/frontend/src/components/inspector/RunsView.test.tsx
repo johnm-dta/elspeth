@@ -127,6 +127,7 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
         created_at: "2026-04-26T05:31:59.000Z",
       },
     ],
+    failure_detail: null,
     ...overrides,
   };
 }
@@ -351,6 +352,61 @@ describe("RunsView", () => {
     expect(await screen.findByText("The run has saved output")).toBeInTheDocument();
     expect(screen.getByText("Saved output is visible at /tmp/out.json.")).toBeInTheDocument();
     expect(await screen.findByText(/saved \/tmp\/out\.json/)).toBeInTheDocument();
+  });
+
+  it("renders failure_detail.error_message in the diagnostics panel when present", async () => {
+    // Regression for run 8294aab2 on 2026-05-13: the run banner showed only
+    // "Pipeline execution failed (RuntimePreflightFailedError)" — the actual
+    // cause (HTTP 400, "max_output_tokens below minimum") lived in the audit
+    // DB but was invisible in the UI. failure_detail now exposes the chain.
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    const diagnostics = makeDiagnostics({
+      run_status: "failed",
+      failure_detail: {
+        operation_id: "op-2",
+        node_id: "rate_colours",
+        operation_type: "runtime_preflight",
+        failed_at: "2026-05-13T15:03:00.866Z",
+        error_message:
+          "pre_flight_failed: llm provider openrouter failed runtime preflight: " +
+          "LLMClientError: HTTP 400 | body: " +
+          '{"error":{"message":"max_output_tokens below minimum value"}}',
+      },
+    });
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(diagnostics);
+    useExecutionStore.setState({
+      runs: [
+        makeRun({
+          status: "failed",
+          error: "Pipeline execution failed (RuntimePreflightFailedError)",
+        }),
+      ],
+      diagnosticsByRunId: { "run-1": diagnostics },
+    });
+
+    render(<RunsView />);
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
+
+    const detail = await screen.findByTestId("run-failure-detail");
+    expect(detail).toHaveTextContent("runtime_preflight failed");
+    expect(detail).toHaveTextContent("rate_colours");
+    expect(detail).toHaveTextContent("max_output_tokens below minimum value");
+    expect(detail).toHaveTextContent("HTTP 400");
+  });
+
+  it("does not render failure_detail block when none is set", async () => {
+    const { fetchRunDiagnostics } = await import("@/api/client");
+    const diagnostics = makeDiagnostics(); // failure_detail: null by default
+    (fetchRunDiagnostics as ReturnType<typeof vi.fn>).mockResolvedValue(diagnostics);
+    useExecutionStore.setState({
+      runs: [makeRun({ status: "running", error: null })],
+      diagnosticsByRunId: { "run-1": diagnostics },
+    });
+
+    render(<RunsView />);
+    await userEvent.click(screen.getByRole("button", { name: /show detail/i }));
+
+    expect(screen.queryByTestId("run-failure-detail")).toBeNull();
   });
 
   it("shows concrete run evidence while the LLM read is pending", async () => {

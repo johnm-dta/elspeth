@@ -171,6 +171,7 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
     ],
     operations: [],
     artifacts: [],
+    failure_detail: null,
     ...overrides,
   };
 }

@@ -586,6 +586,20 @@ export interface RunDiagnosticSummary {
   latest_activity_at: string | null;
 }
 
+// Focused pointer to the operation that caused a run to fail. The backend
+// surfaces the most recent failed operation here so the UI does not have to
+// scan the (paged) operations array to find the cause. ``error_message`` is
+// the full chain text from Landscape's ``operations.error_message`` — wrapper
+// error plus cause(s) plus any truncated HTTP response body captured at the
+// LLM-client wrap site.
+export interface RunDiagnosticFailureDetail {
+  operation_id: string;
+  node_id: string;
+  operation_type: string;
+  error_message: string;
+  failed_at: string;
+}
+
 export interface RunDiagnostics {
   run_id: string;
   landscape_run_id: string;
@@ -595,6 +609,7 @@ export interface RunDiagnostics {
   tokens: RunDiagnosticToken[];
   operations: RunDiagnosticOperation[];
   artifacts: RunDiagnosticArtifact[];
+  failure_detail: RunDiagnosticFailureDetail | null;
 }
 
 export interface CancelRunResponse {

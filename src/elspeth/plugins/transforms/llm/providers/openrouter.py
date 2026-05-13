@@ -58,6 +58,41 @@ OPENROUTER_BASE_URL_APPLIES_WHEN = (("base_url", OPENROUTER_BASE_URL),)
 """Value-source predicate for configs targeting the canonical OpenRouter API."""
 
 
+_HTTP_ERROR_BODY_LIMIT = 512
+"""Maximum response-body bytes appended to wrapped HTTP exception messages.
+
+Provider error responses (4xx/5xx) routinely carry the only human-readable
+description of what went wrong (e.g. Azure's "max_output_tokens below minimum
+value"). httpx's default HTTPStatusError stringifies only the status line and
+links to MDN — the body is silently dropped. The audit DB preserves the full
+payload via the call_recorder, but the *exception* the caller sees should be
+self-describing. This limit caps how much of the body we paste into the
+exception message; the full body remains in the payload store under
+calls.response_ref.
+"""
+
+
+def _summarize_http_error_body(error: httpx.HTTPStatusError) -> str:
+    """Return a ' | body: <truncated>' suffix for a wrapped HTTPStatusError, or ''.
+
+    Reads the response body (already buffered by httpx for raise_for_status to
+    have fired), strips control characters that would mangle structured logs,
+    truncates to _HTTP_ERROR_BODY_LIMIT bytes, and prefixes with a separator so
+    the exception message remains parseable. Returns '' if the body is empty or
+    unavailable (e.g. streamed response not yet read).
+    """
+    try:
+        body = error.response.text
+    except (httpx.ResponseNotRead, RuntimeError):
+        return ""
+    if not body:
+        return ""
+    cleaned = "".join(ch if ch >= " " or ch in "\n\t" else " " for ch in body)
+    if len(cleaned) > _HTTP_ERROR_BODY_LIMIT:
+        cleaned = cleaned[:_HTTP_ERROR_BODY_LIMIT] + "…"
+    return f" | body: {cleaned}"
+
+
 def normalize_openrouter_base_url(value: str) -> str:
     """Normalize base URL spellings that runtime HTTP joining treats as identical."""
     parsed = urlsplit(value)
@@ -224,10 +259,11 @@ class OpenRouterLLMProvider:
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code
+                detail = _summarize_http_error_body(e)
                 if status_code == 429:
-                    raise RateLimitError(f"Rate limited: {e}") from e
+                    raise RateLimitError(f"Rate limited: {e}{detail}") from e
                 elif status_code >= 500:
-                    raise ServerError(f"Server error ({status_code}): {e}") from e
+                    raise ServerError(f"Server error ({status_code}): {e}{detail}") from e
                 else:
                     # Check response body for context length indicators before
                     # falling through to generic LLMClientError. Matches the same
@@ -245,7 +281,7 @@ class OpenRouterLLMProvider:
                             f"Context length exceeded: {e.response.text[:200]}",
                         ) from e
                     raise LLMClientError(
-                        f"HTTP {status_code}: {e}",
+                        f"HTTP {status_code}: {e}{detail}",
                         retryable=False,
                     ) from e
             except httpx.RequestError as e:
@@ -352,7 +388,11 @@ class OpenRouterLLMProvider:
                 "model": model,
                 "messages": [{"role": "user", "content": "Respond with OK only."}],
                 "temperature": 0.0,
-                "max_tokens": 4,
+                # Underlying providers behind OpenRouter enforce different minimums
+                # on max_output_tokens. Azure-backed routes require >= 16; values
+                # below that 400 with "integer_below_min_value". 32 gives margin
+                # without materially affecting smoke-test cost.
+                "max_tokens": 32,
             }
             response = http_client.post(
                 "/chat/completions",
@@ -362,11 +402,12 @@ class OpenRouterLLMProvider:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
+            detail = _summarize_http_error_body(e)
             if status_code == 429:
-                raise RateLimitError(f"Rate limited: {e}") from e
+                raise RateLimitError(f"Rate limited: {e}{detail}") from e
             if status_code >= 500:
-                raise ServerError(f"Server error ({status_code}): {e}") from e
-            raise LLMClientError(f"HTTP {status_code}: {e}", retryable=False) from e
+                raise ServerError(f"Server error ({status_code}): {e}{detail}") from e
+            raise LLMClientError(f"HTTP {status_code}: {e}{detail}", retryable=False) from e
         except httpx.RequestError as e:
             raise NetworkError(f"Network error: {e}") from e
         finally:

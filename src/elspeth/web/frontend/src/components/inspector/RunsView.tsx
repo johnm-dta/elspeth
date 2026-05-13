@@ -550,6 +550,49 @@ function RunDiagnosticsPanel({
         </div>
       )}
 
+      {/*
+        Failure detail block. Surfaces the latest failed operation's chain text
+        (operations.error_message in Landscape) so the operator can see the
+        actual cause — provider HTTP status, response body, secret-resolution
+        failure, etc. — instead of just the sanitized class name in run.error.
+        The chain includes wrapper + cause(s) + (since 2026-05-14) truncated
+        HTTP response body captured at the LLM-client wrap site.
+      */}
+      {diagnostics?.failure_detail && (
+        <div
+          role="alert"
+          data-testid="run-failure-detail"
+          style={{
+            marginBottom: 10,
+            padding: "8px 10px",
+            border: "1px solid var(--color-error-border)",
+            borderLeft: "3px solid var(--color-error)",
+            borderRadius: "var(--radius-sm)",
+            backgroundColor: "var(--color-error-bg)",
+            color: "var(--color-error)",
+            lineHeight: 1.45,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            {diagnostics.failure_detail.operation_type} failed —{" "}
+            <span style={{ fontWeight: 400, color: "var(--color-text-muted)" }}>
+              {diagnostics.failure_detail.node_id}
+            </span>
+          </div>
+          <pre
+            style={{
+              margin: 0,
+              fontFamily: "var(--font-mono, monospace)",
+              fontSize: 11,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {diagnostics.failure_detail.error_message}
+          </pre>
+        </div>
+      )}
+
       {diagnostics && (
         <>
           {diagnostics.operations.length > 0 && (

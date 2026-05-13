@@ -448,7 +448,7 @@ class TestLLMTransformOpenRouterPipelining:
             side_effect=httpx.HTTPStatusError(
                 "Server error",
                 request=Mock(),
-                response=Mock(status_code=500),
+                response=Mock(status_code=500, text=""),
             ),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
@@ -478,7 +478,7 @@ class TestLLMTransformOpenRouterPipelining:
             side_effect=httpx.HTTPStatusError(
                 "429 Too Many Requests",
                 request=Mock(),
-                response=Mock(status_code=429),
+                response=Mock(status_code=429, text=""),
             ),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
@@ -508,7 +508,7 @@ class TestLLMTransformOpenRouterPipelining:
             side_effect=httpx.HTTPStatusError(
                 "503 Service Unavailable",
                 request=Mock(),
-                response=Mock(status_code=503),
+                response=Mock(status_code=503, text=""),
             ),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)
@@ -538,7 +538,7 @@ class TestLLMTransformOpenRouterPipelining:
             side_effect=httpx.HTTPStatusError(
                 "529 Site is overloaded",
                 request=Mock(),
-                response=Mock(status_code=529),
+                response=Mock(status_code=529, text=""),
             ),
         ):
             transform.accept(make_pipeline_row({"text": "hello"}), ctx)

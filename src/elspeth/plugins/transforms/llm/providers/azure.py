@@ -236,7 +236,12 @@ class AzureLLMProvider:
                 model=model,
                 messages=[{"role": "user", "content": "Respond with OK only."}],
                 temperature=0.0,
-                max_tokens=4,
+                # Azure OpenAI requires max_output_tokens >= 16. Values below
+                # the floor return HTTP 400 with "integer_below_min_value"
+                # before any model work, killing the entire pipeline at
+                # preflight. 32 gives margin without materially affecting
+                # smoke-test cost.
+                max_tokens=32,
             )
         finally:
             client.close()

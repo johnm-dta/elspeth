@@ -602,6 +602,27 @@ class RunDiagnosticSummary(_StrictResponse):
     latest_activity_at: datetime | None
 
 
+class RunDiagnosticFailureDetail(_StrictResponse):
+    """Focused pointer to the operation that caused a run to fail.
+
+    A run with hundreds of successful operations and one failure can hide the
+    cause in the (paged, limited) operations list. This model surfaces the
+    *latest* failed operation directly so the UI can render "what went wrong"
+    without scanning. None on the response when no failed operation exists.
+
+    ``error_message`` is the chain text persisted to ``operations.error_message``
+    in Landscape — it carries the wrapper error plus its cause(s) including any
+    truncated HTTP response body the provider returned. The full response body,
+    if relevant, lives in the audit DB under ``calls.response_ref``.
+    """
+
+    operation_id: str
+    node_id: str
+    operation_type: str
+    error_message: str = Field(min_length=1)
+    failed_at: datetime
+
+
 class RunDiagnosticsResponse(_StrictResponse):
     """REST response for run diagnostics."""
 
@@ -613,6 +634,7 @@ class RunDiagnosticsResponse(_StrictResponse):
     tokens: list[RunDiagnosticToken]
     operations: list[RunDiagnosticOperation]
     artifacts: list[RunDiagnosticArtifact]
+    failure_detail: RunDiagnosticFailureDetail | None = None
 
 
 class RunDiagnosticsWorkingView(_StrictResponse):

@@ -271,8 +271,21 @@ def _chat_rows(sessions_service: SessionServiceImpl, *, session_id: str) -> list
         return list(
             conn.execute(
                 text(
-                    "SELECT id, role, content, tool_calls, tool_call_id, parent_assistant_id "
+                    "SELECT id, role, content, tool_calls, tool_call_id, parent_assistant_id, composition_state_id "
                     "FROM chat_messages WHERE session_id = :session_id ORDER BY sequence_no"
+                ),
+                {"session_id": session_id},
+            ).fetchall()
+        )
+
+
+def _composition_state_rows(sessions_service: SessionServiceImpl, *, session_id: str) -> list[Any]:
+    with sessions_service._engine.connect() as conn:
+        return list(
+            conn.execute(
+                text(
+                    "SELECT id, version, derived_from_state_id, provenance "
+                    "FROM composition_states WHERE session_id = :session_id ORDER BY version"
                 ),
                 {"session_id": session_id},
             ).fetchall()
@@ -542,6 +555,137 @@ async def test_cl_pp_10b_commit_failure_during_plugin_crash_preserves_plugin_err
     assert observed_value(telemetry.tool_row_persist_failed_during_unwind_total) == 1
     assert any(log["event"] == "audit_insert_failed_during_tool_failure_unwind" for log in cap_logs)
     assert _chat_rows(sessions_service, session_id=session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_cl_pp_10c_cancellation_during_shielded_sync_dispatch_commits_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CL-PP-10c: caller cancellation during shielded sync dispatch does not interrupt COMMIT."""
+
+    import threading
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    session_id = "00000000-0000-4000-8000-00000000010c"
+    service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
+    telemetry = build_sessions_telemetry()
+    sessions_service._telemetry = telemetry
+    starting_integrity_violations = observed_value(telemetry.tool_row_integrity_violation_total)
+
+    real_persist = sessions_service.persist_compose_turn
+    release_worker = threading.Event()
+    worker_started = threading.Event()
+
+    def _gated_persist(*args: Any, **kwargs: Any) -> Any:
+        worker_started.set()
+        if not release_worker.wait(timeout=2.0):
+            pytest.fail("CL-PP-10c worker gate was not released within 2s")
+        return real_persist(*args, **kwargs)
+
+    sessions_service.persist_compose_turn = _gated_persist  # type: ignore[method-assign]
+    llm = _ReplayLLM(
+        (
+            _make_llm_response(
+                tool_calls=[
+                    {
+                        "id": "call_cancel_during_dispatch",
+                        "name": "set_metadata",
+                        "arguments": {"patch": {"name": "cancel during dispatch"}},
+                    }
+                ]
+            ),
+            _make_llm_response(content="Done."),
+        )
+    )
+
+    compose_task = asyncio.create_task(_run_one_turn_for_characterization(service, llm=llm, session_id=session_id))
+
+    for _ in range(200):
+        if worker_started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("CL-PP-10c worker did not enter shielded dispatch within 2s")
+
+    compose_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await compose_task
+
+    release_worker.set()
+    for _ in range(200):
+        rows = _chat_rows(sessions_service, session_id=session_id)
+        if len(rows) == 2:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("CL-PP-10c shielded worker did not commit assistant/tool rows within 2s")
+
+    rows = _chat_rows(sessions_service, session_id=session_id)
+    assert [row.role for row in rows] == ["assistant", "tool"]
+    assert rows[0].tool_calls is not None
+    assert rows[1].tool_call_id == "call_cancel_during_dispatch"
+    assert rows[1].parent_assistant_id == rows[0].id
+    assert observed_value(telemetry.tool_row_integrity_violation_total) == starting_integrity_violations
+
+
+@pytest.mark.asyncio
+async def test_cl_pp_10d_cancellation_after_commit_before_response_yield_keeps_single_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CL-PP-10d: cancellation after COMMIT preserves rows and does not duplicate tool drains."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    session_id = "00000000-0000-4000-8000-00000000010d"
+    service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
+    commit_returned = asyncio.Event()
+    release_response = asyncio.Event()
+    real_persist_async = sessions_service.persist_compose_turn_async
+
+    async def _gated_after_commit(*args: Any, **kwargs: Any) -> Any:
+        outcome = await real_persist_async(*args, **kwargs)
+        commit_returned.set()
+        await release_response.wait()
+        return outcome
+
+    sessions_service.persist_compose_turn_async = _gated_after_commit  # type: ignore[method-assign]
+    llm = _ReplayLLM(
+        (
+            _make_llm_response(
+                tool_calls=[
+                    {
+                        "id": "call_cancel_after_commit",
+                        "name": "set_metadata",
+                        "arguments": {"patch": {"name": "cancel after commit"}},
+                    }
+                ]
+            ),
+            _make_llm_response(content="Done."),
+        )
+    )
+
+    compose_task = asyncio.create_task(_run_one_turn_for_characterization(service, llm=llm, session_id=session_id))
+
+    await asyncio.wait_for(commit_returned.wait(), timeout=2.0)
+    rows_after_commit = _chat_rows(sessions_service, session_id=session_id)
+    assert [row.role for row in rows_after_commit] == ["assistant", "tool"]
+
+    compose_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await compose_task
+    release_response.set()
+
+    rows = _chat_rows(sessions_service, session_id=session_id)
+    assert [row.role for row in rows] == ["assistant", "tool"]
+    assert rows[0].tool_calls is not None
+    assert rows[1].tool_call_id == "call_cancel_after_commit"
+    assert rows[1].parent_assistant_id == rows[0].id
+    assert rows[1].composition_state_id is not None
+    state_rows = _composition_state_rows(sessions_service, session_id=session_id)
+    assert [row.provenance for row in state_rows] == ["tool_call"]
+    assert rows[1].composition_state_id == state_rows[0].id
+    assert len(rows) == 2
 
 
 @pytest.mark.asyncio

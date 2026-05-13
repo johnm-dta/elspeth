@@ -2097,9 +2097,9 @@ git commit -am "test(integration): CL-PP-{N} extends failed_turn assertions (com
 
 - [x] **CL-PP-10b: COMMIT failed (plugin crash in flight).** Same injection plus a `RuntimeError` from the second tool. Assert `AuditOutcome(assistant_id=None, unwind_audit_failed=True)`; `tool_row_persist_failed_during_unwind_total` increments; log entry emitted; caller raises the captured `ComposerPluginCrashError`.
 
-- [ ] **CL-PP-10c: `asyncio.CancelledError` during shielded sync dispatch.** Inject cancellation after `persist_compose_turn_async` has entered its shielded worker dispatch but before COMMIT returns. Assert cancellation does not interrupt the commit; assistant/tool rows are durable; after the shield completes the caller observes the cancellation according to the route contract. This closes spec §5.5 rows 5-8 at integration level.
+- [x] **CL-PP-10c: `asyncio.CancelledError` during shielded sync dispatch.** Inject cancellation after `persist_compose_turn_async` has entered its shielded worker dispatch but before COMMIT returns. Assert cancellation does not interrupt the commit; assistant/tool rows are durable; after the shield completes the caller observes the cancellation according to the route contract. This closes spec §5.5 rows 5-8 at integration level.
 
-- [ ] **CL-PP-10d: `asyncio.CancelledError` after COMMIT before response yield.** Inject cancellation after COMMIT succeeds and before the HTTP response is yielded. Assert the cancellation propagates to the client path without data loss; assistant/tool rows and composition-state rows remain queryable; no duplicate route-layer `_persist_tool_invocations` drain runs. This closes spec §5.5 rows 9-11 at integration level.
+- [x] **CL-PP-10d: `asyncio.CancelledError` after COMMIT before response yield.** Inject cancellation after COMMIT succeeds and before the HTTP response is yielded. Assert the cancellation propagates to the client path without data loss; assistant/tool rows and composition-state rows remain queryable; no duplicate route-layer `_persist_tool_invocations` drain runs. This closes spec §5.5 rows 9-11 at integration level.
 
 - [x] **CL-PP-12: Tool-call cap exceeded.** LLM emits 17 tool calls; loop raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")` BEFORE any tool execution; no DB writes; `composer.tool_call_cap_exceeded_total` increments.
 

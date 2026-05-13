@@ -396,6 +396,64 @@ def test_get_resume_point_restores_aggregation_state(
     assert "agg-node" in resume_point.aggregation_state.nodes
 
 
+def test_get_unprocessed_rows_reuses_resume_point_aggregation_state_parse(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume inspection should not parse the same aggregation checkpoint twice."""
+    import importlib
+
+    recovery_module: Any = importlib.import_module("elspeth.core.checkpoint.recovery")
+
+    run_id = "run-buffered-state-parse"
+    graph = _create_failed_run_with_checkpoint(
+        db,
+        checkpoint_manager,
+        run_id,
+        aggregation_state=AggregationCheckpointState(
+            version="4.0",
+            nodes={
+                "agg-node": AggregationNodeCheckpoint(
+                    tokens=(
+                        AggregationTokenCheckpoint(
+                            token_id="tok-buffered",
+                            row_id="row-buffered",
+                            branch_name=None,
+                            fork_group_id=None,
+                            join_group_id=None,
+                            expand_group_id=None,
+                            row_data={"id": 5},
+                            contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
+                        ),
+                    ),
+                    batch_id="batch-001",
+                    elapsed_age_seconds=0.0,
+                    count_fire_offset=None,
+                    condition_fire_offset=None,
+                ),
+            },
+        ),
+    )
+
+    original_checkpoint_loads = recovery_module.checkpoint_loads
+    parsed_payloads: list[str] = []
+
+    def counting_checkpoint_loads(payload: str) -> Any:
+        parsed_payloads.append(payload)
+        return original_checkpoint_loads(payload)
+
+    monkeypatch.setattr(recovery_module, "checkpoint_loads", counting_checkpoint_loads)
+
+    resume_point = recovery_manager.get_resume_point(run_id, graph)
+    assert resume_point is not None
+    assert resume_point.aggregation_state is not None
+    assert recovery_manager.get_unprocessed_rows(run_id) == ["row-0"]
+    assert parsed_payloads == [resume_point.checkpoint.aggregation_state_json]
+
+
 def test_get_unprocessed_rows_returns_empty_when_no_checkpoint(recovery_manager: RecoveryManager) -> None:
     assert recovery_manager.get_unprocessed_rows("missing-run") == []
 

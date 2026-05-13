@@ -219,8 +219,8 @@ allow_hits:
   owner: bugfix
   reason: Post-point-of-no-return recovery — payloads are already irreversibly deleted, so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures in PurgeResult, operator informed via CLI output
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=b640bacb8966c304
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=7a2f9a2b860707a7
   owner: core
   reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance guards against corrupted checkpoint
-  safety: Raises TypeError if not dict; no silent coercion
+  safety: Raises AuditIntegrityError if not dict; no silent coercion
   expires: null

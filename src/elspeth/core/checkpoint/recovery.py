@@ -10,6 +10,7 @@ The actual resume logic (Orchestrator.resume()) is implemented separately.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -47,14 +48,22 @@ if TYPE_CHECKING:
 # SQLite's SQLITE_MAX_VARIABLE_NUMBER defaults to 999. We chunk IN clauses
 # at 500 to leave headroom for other query parameters in the same statement.
 _METADATA_CHUNK_SIZE = 500
+_CHECKPOINT_STATE_CACHE_MAX = 16
 _DELEGATION_PATHS = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
 _RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
+_CheckpointStateCacheKey = tuple[str, str | None, str | None]
 
 __all__ = [
     "RecoveryManager",
     "ResumeCheck",  # Re-exported from contracts for convenience
     "ResumePoint",  # Re-exported from contracts for convenience
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class _RestoredCheckpointStates:
+    aggregation_state: AggregationCheckpointState | None
+    coalesce_state: CoalesceCheckpointState | None
 
 
 class RecoveryManager:
@@ -84,6 +93,7 @@ class RecoveryManager:
         """
         self._db = db
         self._checkpoint_manager = checkpoint_manager
+        self._checkpoint_state_cache: dict[_CheckpointStateCacheKey, _RestoredCheckpointStates] = {}
 
     def can_resume(self, run_id: str, graph: ExecutionGraph) -> ResumeCheck:
         """Check if a run can be resumed.
@@ -172,24 +182,15 @@ class RecoveryManager:
         if checkpoint is None:
             return None
 
-        agg_state = None
-        if checkpoint.aggregation_state_json:
-            # Use checkpoint_loads for type restoration (datetime -> datetime, not string)
-            raw = checkpoint_loads(checkpoint.aggregation_state_json)
-            agg_state = AggregationCheckpointState.from_dict(raw)
-
-        coalesce_state = None
-        if checkpoint.coalesce_state_json:
-            raw = checkpoint_loads(checkpoint.coalesce_state_json)
-            coalesce_state = CoalesceCheckpointState.from_dict(raw)
+        restored_states = self._restore_checkpoint_states(checkpoint)
 
         return ResumePoint(
             checkpoint=checkpoint,
             token_id=checkpoint.token_id,
             node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
-            aggregation_state=agg_state,
-            coalesce_state=coalesce_state,
+            aggregation_state=restored_states.aggregation_state,
+            coalesce_state=restored_states.coalesce_state,
         )
 
     def get_unprocessed_row_data(
@@ -469,21 +470,50 @@ class RecoveryManager:
         """Collect token IDs restored from checkpoint state."""
         buffered_token_ids: set[str] = set()
 
-        if checkpoint.aggregation_state_json:
-            raw = checkpoint_loads(checkpoint.aggregation_state_json)
-            agg_state = AggregationCheckpointState.from_dict(raw)
-            for node_checkpoint in agg_state.nodes.values():
+        restored_states = self._restore_checkpoint_states(checkpoint)
+        if restored_states.aggregation_state is not None:
+            for node_checkpoint in restored_states.aggregation_state.nodes.values():
                 for token in node_checkpoint.tokens:
                     buffered_token_ids.add(token.token_id)
 
-        if checkpoint.coalesce_state_json:
-            raw = checkpoint_loads(checkpoint.coalesce_state_json)
-            coalesce_state = CoalesceCheckpointState.from_dict(raw)
-            for pending in coalesce_state.pending:
+        if restored_states.coalesce_state is not None:
+            for pending in restored_states.coalesce_state.pending:
                 for coalesce_token in pending.branches.values():
                     buffered_token_ids.add(coalesce_token.token_id)
 
         return buffered_token_ids
+
+    def _restore_checkpoint_states(self, checkpoint: Checkpoint) -> _RestoredCheckpointStates:
+        """Deserialize typed checkpoint states once per observed checkpoint payload."""
+        key = (
+            checkpoint.checkpoint_id,
+            checkpoint.aggregation_state_json,
+            checkpoint.coalesce_state_json,
+        )
+        if key in self._checkpoint_state_cache:
+            cached = self._checkpoint_state_cache[key]
+            return cached
+
+        agg_state = None
+        if checkpoint.aggregation_state_json:
+            # Use checkpoint_loads for type restoration (datetime -> datetime, not string)
+            raw = checkpoint_loads(checkpoint.aggregation_state_json)
+            agg_state = AggregationCheckpointState.from_dict(raw)
+
+        coalesce_state = None
+        if checkpoint.coalesce_state_json:
+            raw = checkpoint_loads(checkpoint.coalesce_state_json)
+            coalesce_state = CoalesceCheckpointState.from_dict(raw)
+
+        restored = _RestoredCheckpointStates(
+            aggregation_state=agg_state,
+            coalesce_state=coalesce_state,
+        )
+        if len(self._checkpoint_state_cache) >= _CHECKPOINT_STATE_CACHE_MAX:
+            oldest_key = next(iter(self._checkpoint_state_cache))
+            del self._checkpoint_state_cache[oldest_key]
+        self._checkpoint_state_cache[key] = restored
+        return restored
 
     def _get_run(self, run_id: str) -> Row[Any] | None:
         """Get run metadata from the database.

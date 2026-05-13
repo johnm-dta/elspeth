@@ -38,6 +38,8 @@ from elspeth.core.landscape.schema import (
 )
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.protocol import TurnResponse, TurnType
 from elspeth.web.composer.progress import ComposerProgressEvent, ComposerProgressRegistry
 from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
@@ -63,7 +65,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateRecord,
     SessionRecord,
 )
-from elspeth.web.sessions.routes import create_session_router
+from elspeth.web.sessions.routes import _summarize_guided_response, create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -78,6 +80,20 @@ _EMPTY_STATE = CompositionState(
     metadata=PipelineMetadata(),
     version=1,
 )
+
+
+def test_summarize_guided_response_rejects_unhandled_turn_type() -> None:
+    response: TurnResponse = {
+        "chosen": None,
+        "edited_values": None,
+        "custom_inputs": None,
+        "accepted_step_index": None,
+        "edit_step_index": None,
+        "control_signal": None,
+    }
+
+    with pytest.raises(InvariantError, match="unhandled turn_type"):
+        _summarize_guided_response(cast(TurnType, object()), response)
 
 
 def _make_composer_mock(

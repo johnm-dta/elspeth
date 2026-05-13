@@ -2023,6 +2023,8 @@ def _summarize_guided_response(
             return "Accepted proposed chain"
         return None
 
+    raise InvariantError(f"_summarize_guided_response: unhandled turn_type {turn_type!r}")
+
 
 async def _dispatch_guided_respond(
     *,

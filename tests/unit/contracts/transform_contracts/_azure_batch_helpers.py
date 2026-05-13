@@ -38,14 +38,19 @@ if TYPE_CHECKING:
 _HTTPX_CLIENT_CLASS = httpx.Client
 
 
-def create_http_response(response_data: dict[str, Any], *, url: str) -> httpx.Response:
-    """Build an httpx.Response(200, json=...) bound to a POST request at ``url``.
+def create_http_response(
+    response_data: dict[str, Any],
+    *,
+    url: str,
+    status_code: int = 200,
+) -> httpx.Response:
+    """Build an httpx.Response(status, json=...) bound to a POST request at ``url``.
 
     Used by tests that need to override the per-call response on the mocked
     httpx.Client to exercise specific Azure-service response shapes.
     """
     return httpx.Response(
-        200,
+        status_code,
         json=response_data,
         request=httpx.Request("POST", url),
     )
@@ -79,6 +84,8 @@ def patch_httpx_client_with_default(
 def set_httpx_response(
     mock_client_class: MagicMock,
     response_data: dict[str, Any],
+    *,
+    status_code: int = 200,
 ) -> None:
     """Override the mocked httpx.Client to return ``response_data`` for every POST.
 
@@ -88,7 +95,7 @@ def set_httpx_response(
     mock_client_instance = mock_client_class.return_value
 
     def _mocked_post(url: str, **_: object) -> httpx.Response:
-        return create_http_response(response_data, url=url)
+        return create_http_response(response_data, url=url, status_code=status_code)
 
     mock_client_instance.post.side_effect = _mocked_post
 

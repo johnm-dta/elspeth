@@ -102,6 +102,31 @@ class TestAzureContentSafetyBatchContract(BatchTransformContractTestBase):
         assert result.row is not None
         assert result.row.to_dict() == valid_input
 
+    def test_severity_below_threshold_emits_success(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_httpx_for_batch: MagicMock,
+    ) -> None:
+        """Contract: below-threshold content passes through unchanged."""
+        set_httpx_response(
+            mock_httpx_for_batch,
+            _make_content_safety_response(hate=1, violence=1, sexual=1, self_harm=1),
+        )
+
+        result = submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row.to_dict() == valid_input
+
     def test_severity_above_threshold_emits_content_safety_error(
         self,
         started_transform: BatchTransformMixin,
@@ -132,3 +157,104 @@ class TestAzureContentSafetyBatchContract(BatchTransformContractTestBase):
         assert isinstance(categories, dict)
         assert categories["hate"] == {"severity": 3, "threshold": 2, "exceeded": True}
         assert categories["violence"] == {"severity": 1, "threshold": 2, "exceeded": False}
+
+    @pytest.mark.parametrize("status_code", [400, 500])
+    def test_http_error_emits_nonretryable_api_error(
+        self,
+        status_code: int,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_httpx_for_batch: MagicMock,
+    ) -> None:
+        """Contract: non-capacity HTTP failures route to on_error, not success."""
+        set_httpx_response(
+            mock_httpx_for_batch,
+            {"error": {"message": "azure rejected request"}},
+            status_code=status_code,
+        )
+
+        result = submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.reason["error_type"] == "http_error"
+        assert result.reason["status_code"] == status_code
+
+    def test_unknown_category_emits_closed_error(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_httpx_for_batch: MagicMock,
+    ) -> None:
+        """Contract: category taxonomy drift cannot silently pass content."""
+        set_httpx_response(
+            mock_httpx_for_batch,
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                    {"category": "SelfHarm", "severity": 0},
+                    {"category": "Harassment", "severity": 3},
+                ]
+            },
+        )
+
+        result = submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.reason is not None
+        assert result.reason["reason"] == "unknown_category"
+        assert result.reason["field"] == "content"
+        assert "Harassment" in result.reason["message"]
+
+    def test_missing_category_emits_malformed_response_error(
+        self,
+        started_transform: BatchTransformMixin,
+        valid_input: dict[str, Any],
+        mock_ctx_factory: Any,
+        output_port: CollectingOutputPort,
+        mock_httpx_for_batch: MagicMock,
+    ) -> None:
+        """Contract: absent categories fail closed instead of defaulting to safe."""
+        set_httpx_response(
+            mock_httpx_for_batch,
+            {
+                "categoriesAnalysis": [
+                    {"category": "Hate", "severity": 0},
+                    {"category": "Violence", "severity": 0},
+                    {"category": "Sexual", "severity": 0},
+                ]
+            },
+        )
+
+        result = submit_and_collect_single_result(
+            started_transform,
+            valid_input,
+            mock_ctx_factory(),
+            output_port,
+        )
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.reason is not None
+        assert result.reason["reason"] == "api_error"
+        assert result.reason["error_type"] == "malformed_response"
+        assert "missing expected categories" in result.reason["message"]

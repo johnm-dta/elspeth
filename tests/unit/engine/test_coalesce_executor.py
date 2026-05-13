@@ -2485,6 +2485,28 @@ class TestCheckpointCompletedKeys:
         assert outcome.failure_reason == "late_arrival_after_merge"
         assert outcome.outcomes_recorded is True
 
+    def test_get_checkpoint_state_does_not_serialize_for_size_check(self, monkeypatch: pytest.MonkeyPatch):
+        """Checkpoint state construction must not pre-serialize the DTO.
+
+        The CheckpointManager is the persistence boundary that serializes the
+        state.  Serializing here purely for size validation doubles checkpoint
+        cost on every interrupted coalesce run.
+        """
+        import elspeth.engine.coalesce_executor as coalesce_module
+
+        def fail_if_called(_obj: object) -> str:
+            raise AssertionError("CoalesceExecutor.get_checkpoint_state must not serialize")
+
+        monkeypatch.setattr(coalesce_module, "checkpoint_dumps", fail_if_called, raising=False)
+
+        executor, _execution, _data_flow, _, _clock = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), "node_1")
+        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
+
+        checkpoint = executor.get_checkpoint_state()
+
+        assert checkpoint.pending
+
     def test_landscape_reconstruction_restores_all_completed_keys(self):
         """Multiple completed keys restored from Landscape, not checkpoint."""
         executor, _, _, _, _clock = _make_executor()

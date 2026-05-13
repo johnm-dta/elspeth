@@ -1,6 +1,5 @@
 """AggregationExecutor - manages batch lifecycle with audit recording."""
 
-import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -36,7 +35,6 @@ from elspeth.contracts.node_state_context import AggregationFlushContext
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
-from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.config import AggregationSettings
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.engine.clock import DEFAULT_CLOCK
@@ -47,7 +45,6 @@ from elspeth.engine.triggers import TriggerEvaluator
 if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
 
-logger = logging.getLogger(__name__)
 slog = structlog.get_logger(__name__)
 
 AGGREGATION_CHECKPOINT_VERSION = "4.0"
@@ -560,13 +557,12 @@ class AggregationExecutor:
         """Return checkpoint state for persistence.
 
         Stores complete TokenInfo objects (not just IDs) to enable restoration
-        without database queries. Validates size to prevent pathological growth.
+        without database queries. Serialized size validation happens in
+        CheckpointManager, the single checkpoint persistence boundary.
 
         Returns:
             AggregationCheckpointState with all buffered aggregation data.
 
-        Raises:
-            RuntimeError: If checkpoint exceeds 10MB size limit
         """
         # Build checkpoint state from all nodes
         nodes: dict[str, AggregationNodeCheckpoint] = {}
@@ -615,24 +611,6 @@ class AggregationExecutor:
             version=AGGREGATION_CHECKPOINT_VERSION,
             nodes=nodes,
         )
-
-        # Size validation (on serialized checkpoint)
-        # Use checkpoint_dumps to handle datetime
-        serialized = checkpoint_dumps(checkpoint.to_dict())
-        size_mb = len(serialized) / 1_000_000
-        total_rows = sum(len(n.tokens) for n in self._nodes.values())
-
-        if size_mb > 1:
-            logger.warning(f"Large checkpoint: {size_mb:.1f}MB for {total_rows} buffered rows across {len(nodes)} nodes")
-
-        if size_mb > 10:
-            raise OrchestrationInvariantError(
-                f"Checkpoint size {size_mb:.1f}MB exceeds 10MB limit. "
-                f"Buffer contains {total_rows} total rows across {len(nodes)} nodes. "
-                f"Solutions: (1) Reduce aggregation count trigger to <5000 rows, "
-                f"(2) Reduce row_data payload size, or (3) Implement checkpoint retention "
-                f"policy"
-            )
 
         return checkpoint
 

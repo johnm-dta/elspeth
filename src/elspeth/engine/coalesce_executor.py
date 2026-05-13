@@ -32,7 +32,6 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
-from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
@@ -295,11 +294,6 @@ class CoalesceExecutor:
             pending=tuple(pending_entries),
             completed_keys=(),
         )
-
-        serialized = checkpoint_dumps(checkpoint.to_dict())
-        size_mb = len(serialized) / 1_000_000
-        if size_mb > 10:
-            raise RuntimeError(f"Coalesce checkpoint size {size_mb:.1f}MB exceeds 10MB limit. Pending joins: {len(pending_entries)}.")
 
         return checkpoint
 

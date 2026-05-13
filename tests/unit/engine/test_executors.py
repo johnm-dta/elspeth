@@ -2661,6 +2661,24 @@ class TestAggregationExecutor:
         assert isinstance(token_ckpt.row_data, Mapping)
         assert dict(token_ckpt.row_data) == {"value": "test"}
 
+    def test_checkpoint_state_construction_does_not_serialize_for_size_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """AggregationExecutor should build a DTO and leave serialization to CheckpointManager."""
+        import elspeth.engine.executors.aggregation as aggregation_module
+
+        def fail_if_called(_obj: object) -> str:
+            raise AssertionError("AggregationExecutor.get_checkpoint_state must not serialize")
+
+        monkeypatch.setattr(aggregation_module, "checkpoint_dumps", fail_if_called, raising=False)
+
+        executor, _, nid = self._make_agg_executor(count=10)
+        token = _make_token(data={"value": "test"}, contract=_make_contract())
+        executor.buffer_row(nid, token)
+
+        checkpoint = executor.get_checkpoint_state()
+
+        assert isinstance(checkpoint, AggregationCheckpointState)
+        assert checkpoint.nodes[str(nid)].tokens
+
     def test_checkpoint_includes_contract_for_restore(self) -> None:
         """Checkpoint should include contract info to enable PipelineRow restoration."""
         executor, _, nid = self._make_agg_executor(count=10)

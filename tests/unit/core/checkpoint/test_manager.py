@@ -13,7 +13,12 @@ from elspeth.contracts.coalesce_checkpoint import (
     CoalescePendingCheckpoint,
     CoalesceTokenCheckpoint,
 )
-from elspeth.core.checkpoint.manager import CheckpointManager, IncompatibleCheckpointError
+from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.core.checkpoint.manager import (
+    CheckpointManager,
+    IncompatibleCheckpointError,
+    _validate_checkpoint_state_json_size,
+)
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, tokens_table
 from tests.fixtures.factories import make_graph_linear
@@ -102,6 +107,27 @@ def test_create_checkpoint_rejects_missing_node_in_graph(checkpoint_manager: Che
             node_id="node-001",
             sequence_number=1,
             graph=graph,
+        )
+
+
+def test_validate_checkpoint_state_json_size_rejects_large_aggregation_state() -> None:
+    """Serialized aggregation-size guard lives at the manager boundary."""
+    with pytest.raises(OrchestrationInvariantError, match="exceeds 10MB limit"):
+        _validate_checkpoint_state_json_size(
+            state_name="aggregation",
+            serialized="x" * 10_000_001,
+            total_rows=7,
+            node_count=2,
+        )
+
+
+def test_validate_checkpoint_state_json_size_rejects_large_coalesce_state() -> None:
+    """Serialized coalesce-size guard lives at the manager boundary."""
+    with pytest.raises(RuntimeError, match=r"Coalesce checkpoint size .* exceeds 10MB limit"):
+        _validate_checkpoint_state_json_size(
+            state_name="coalesce",
+            serialized="x" * 10_000_001,
+            pending_joins=3,
         )
 
 

@@ -105,13 +105,13 @@ allow_hits:
     can enforce the schema.'
   safety: Raises ValueError with entry index and observed type on malformed input; no coercion
   expires: null
-- key: engine/coalesce_executor.py:R5:CoalesceExecutor:_execute_merge:fp=2116f4bed916112f
+- key: engine/coalesce_executor.py:R5:CoalesceExecutor:_execute_merge:fp=0f05412d6f31e065
   owner: architecture
   reason: "AuditIntegrityError check prevents writing FAILED records to a compromised database \u2014\
     \ leaving node states as pending is more honest than corrupting further"
   safety: Re-raises immediately; no writes to the untrustworthy database
   expires: null
-- key: engine/coalesce_executor.py:R4:CoalesceExecutor:_execute_merge:fp=1bfc473915d635ef
+- key: engine/coalesce_executor.py:R4:CoalesceExecutor:_execute_merge:fp=5961761ea314e7c4
   owner: architecture
   reason: "Best-effort cleanup of OPEN branch node_states after merge failure \u2014 broad catch prevents\
     \ cleanup failure from masking original merge exception"

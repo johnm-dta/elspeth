@@ -192,7 +192,14 @@ export function PluginCard({ plugin, schema, schemaError, onExpand, onRetrySchem
               </button>
             </div>
           ) : schema === null || configSchema === undefined ? (
-            <span className="plugin-card-schema-loading">Loading...</span>
+            <div
+              role="status"
+              aria-live="polite"
+              className="plugin-card-schema-loading"
+            >
+              <span className="spinner" aria-hidden="true" />
+              Loading schema...
+            </div>
           ) : isDiscriminated(configSchema) ? (
             <div className="plugin-card-variants">
               {resolveVariants(configSchema).map((variant) => (

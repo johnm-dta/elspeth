@@ -313,13 +313,17 @@ describe("PluginCard — error and loading states", () => {
     expect(onRetrySchema).toHaveBeenCalledTimes(1);
   });
 
-  it("shows Loading when schema is null and no error", async () => {
+  it("announces schema loading with a spinner when schema is null and no error", async () => {
     const user = userEvent.setup();
     render(
       <PluginCard plugin={makePlugin()} schema={null} onExpand={vi.fn()} />,
     );
     await user.click(screen.getByRole("button", { name: "example plugin details" }));
-    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    const status = screen.getByRole("status");
+
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent("Loading schema");
+    expect(status.querySelector(".spinner")).toHaveAttribute("aria-hidden", "true");
   });
 
   it("calls onExpand exactly once per expand toggle", async () => {

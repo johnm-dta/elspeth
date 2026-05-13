@@ -3239,6 +3239,9 @@ summary:focus-visible {
 }
 
 .plugin-card-schema-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
 }

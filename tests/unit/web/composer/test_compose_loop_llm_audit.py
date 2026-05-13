@@ -356,6 +356,28 @@ async def test_bad_request_records_redacted_llm_call_on_service_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unclassified_provider_exception_records_api_error_call() -> None:
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+
+    with (
+        patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=ValueError("unexpected codec failure"),
+        ),
+        pytest.raises(ValueError, match="unexpected codec failure") as exc_info,
+    ):
+        await service.compose("Hello", [], _empty_state())
+
+    llm_calls = _captured_llm_calls(exc_info.value)
+    assert len(llm_calls) == 1
+    call = llm_calls[0]
+    assert call.status is ComposerLLMCallStatus.API_ERROR
+    assert call.error_class == "ValueError"
+    assert call.error_message == "ValueError"
+
+
+@pytest.mark.asyncio
 async def test_empty_choices_records_malformed_response() -> None:
     service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
     empty_response = _FakeLLMResponse(choices=[], usage=SimpleNamespace(prompt_tokens=3, completion_tokens=None, total_tokens=3))

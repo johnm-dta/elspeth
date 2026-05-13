@@ -3389,6 +3389,12 @@ class ComposerServiceImpl:
             error_message = error_class
             _attach_llm_calls(exc, recorder)
             raise
+        except Exception as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            _attach_llm_calls(exc, recorder)
+            raise
         finally:
             if recorder is not None and status is not None:
                 recorder.record_llm_call(

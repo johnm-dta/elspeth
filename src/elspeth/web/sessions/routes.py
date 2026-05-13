@@ -1072,6 +1072,8 @@ async def _persist_chat_turns(
     session_id: UUID,
     chat_turns: tuple[ComposerChatTurn, ...],
     composition_state_id: UUID | None,
+    *,
+    request_unwinding: bool,
 ) -> None:
     """Persist per-chat-turn audit records as audit-only ``role=audit`` rows.
 
@@ -1080,12 +1082,11 @@ async def _persist_chat_turns(
     by ``json_extract(content, '$._kind')='chat_turn_audit'`` and by
     ``composition_state_id`` to scope to a particular composition snapshot.
 
-    SQLAlchemy failures are slogged (audit-system failure exemption per
-    CLAUDE.md logging primacy) but do NOT raise — a failed audit-row
-    insert must not also fail the request the audit is trying to record.
-    The pattern mirrors :func:`_persist_llm_calls` exactly; the only
-    differences are the envelope kind, the recorded summary fields, and
-    the slog event name.
+    SQLAlchemy failures propagate on the success path: otherwise the
+    guided-session ``chat_history`` state write can commit while the
+    corresponding audit-only row disappears.  During exception unwinds,
+    failures are logged instead so an audit cleanup problem does not mask
+    the primary HTTPException.
     """
     for turn in chat_turns:
         content = json.dumps(
@@ -1110,8 +1111,29 @@ async def _persist_chat_turns(
                 writer_principal="compose_loop",
             )
         except SQLAlchemyError as save_err:
+            if request_unwinding:
+                slog.error(
+                    "composer_chat_turn_persist_failed_during_unwind",
+                    session_id=str(session_id),
+                    step=turn.step,
+                    status=turn.status.value,
+                    exc_class=type(save_err).__name__,
+                )
+                continue
+            _COMPOSER_TIER1_VIOLATION_COUNTER.add(
+                1,
+                {"helper": "chat_turns"},
+            )
+            raise AuditIntegrityError(
+                f"composer_chat_turn_persist_failed: audit insert failed for "
+                f"session_id={session_id!r} on success path — Tier-1 audit "
+                f"corruption (no recovery)"
+            ) from save_err
+        except Exception as save_err:
+            if not request_unwinding:
+                raise
             slog.error(
-                "composer_chat_turn_persist_failed",
+                "composer_chat_turn_persist_failed_during_unwind",
                 session_id=str(session_id),
                 step=turn.step,
                 status=turn.status.value,
@@ -5870,32 +5892,43 @@ def create_session_router() -> APIRouter:
                 )
             finally:
                 # Drain the recorder unconditionally — same B3 pattern as
-                # post_guided_respond.  The inner try prevents an audit-
-                # persist failure from masking the in-flight HTTPException
-                # (Python's default behaviour would let a finally-block
-                # exception replace the original 400/409).  Per CLAUDE.md
-                # telemetry/logging primacy, audit-system failures during
-                # exception handling are the one exemption where slog is
-                # the correct channel.  The chat-turns buffer may be
-                # empty (rejection paths exit before record_chat_turn);
-                # _persist_chat_turns iterates an empty tuple cleanly.
-                try:
+                # post_guided_respond.  Success-path audit persist failures
+                # propagate: the state write above may already have stored
+                # chat_history/chat_turn_seq, and returning 200 without the
+                # corresponding audit-only row would create an evidence gap.
+                #
+                # During exception unwinds, audit-system failures are logged
+                # rather than masking the primary HTTPException.  This mirrors
+                # the guided/respond split and keeps logging as the channel of
+                # last resort only when no safer audit channel remains.
+                primary_exc = sys.exception()
+                if primary_exc is None:
                     await _persist_chat_turns(
                         service,
                         session_id,
                         recorder.chat_turns,
                         state_record_out.id if state_record_out is not None else None,
+                        request_unwinding=False,
                     )
-                except Exception as persist_exc:
-                    with contextlib.suppress(Exception):
-                        slog.error(
-                            "guided.chat_turn_persist_failed_during_exception_handling",
-                            session_id=str(session_id),
-                            user_id=user.user_id,
-                            site="post_guided_chat",
-                            exc_class=type(persist_exc).__name__,
-                            frames=_safe_frame_strings(persist_exc),
+                else:
+                    try:
+                        await _persist_chat_turns(
+                            service,
+                            session_id,
+                            recorder.chat_turns,
+                            state_record_out.id if state_record_out is not None else None,
+                            request_unwinding=True,
                         )
+                    except Exception as persist_exc:
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.chat_turn_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="post_guided_chat",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
 
     return router
 

@@ -24,7 +24,7 @@ from elspeth.contracts.composer_audit import (
     ComposerToolInvocation,
     ComposerToolStatus,
 )
-from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
+from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -54,6 +54,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.sessions._guided_step_chat import StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
@@ -2129,6 +2130,49 @@ class TestMessageRoutes:
             f"/api/sessions/{session_id}/guided/respond",
             json={"control_signal": "exit_to_freeform"},
         )
+
+        assert send_resp.status_code == 500
+
+    def test_guided_chat_turn_persistence_failure_raises_on_success_path(self, tmp_path) -> None:
+        """Guided chat audit rows must not disappear after chat_history is persisted."""
+        app, service = _make_app(tmp_path)
+        catalog = MagicMock()
+        catalog.list_sources.return_value = []
+        app.state.catalog_service = catalog
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Guided chat"})
+        session_id = uuid.UUID(resp.json()["id"])
+
+        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
+        assert guided_resp.status_code == 200
+
+        original_add_message = service.add_message
+
+        async def flaky_add_message(*args: Any, **kwargs: Any) -> ChatMessageRecord:
+            role = args[1]
+            tool_calls = kwargs.get("tool_calls")
+            if role == "audit" and tool_calls and tool_calls[0].get("_kind") == "chat_turn_audit":
+                raise OperationalError("INSERT INTO chat_messages", {}, Exception("db unavailable"))
+            return await original_add_message(*args, **kwargs)
+
+        service.add_message = flaky_add_message  # type: ignore[method-assign]
+
+        with patch(
+            "elspeth.web.sessions.routes.solve_step_chat_with_auto_drop",
+            new=AsyncMock(
+                return_value=StepChatResult(
+                    assistant_message="Use the source form first.",
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=7,
+                    error_class=None,
+                )
+            ),
+        ):
+            send_resp = client.post(
+                f"/api/sessions/{session_id}/guided/chat",
+                json={"message": "help me", "step_index": "step_1_source"},
+            )
 
         assert send_resp.status_code == 500
 

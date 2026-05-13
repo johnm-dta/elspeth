@@ -2274,18 +2274,6 @@ allow_hits:
     \ from result without adding a separate boolean parameter. FP rotated during RC5.2 per-step-chat merge."
   safety: Exhaustive dispatch with ValueError for invalid combinations; no silent default
   expires: null
-- key: web/sessions/routes.py:R6:_persist_chat_turns:fp=2193fa653eff050d
-  owner: composer-audit
-  reason: "Audit-system-failure exemption \u2014 per-chat-turn audit row persistence is best-effort under the audit-system-failure\
-    \ exemption (CLAUDE.md telemetry primacy). The helper iterates ComposerChatTurn records from the BufferingRecorder and\
-    \ writes them through the same session-bound chat_messages writer as the freeform composer path; a transient SQLAlchemyError\
-    \ on a single row must not raise out of finally and mask the in-flight HTTPException. FP rotated during RC5.2 per-step-chat\
-    \ merge."
-  safety: Each individual SQLAlchemyError is logged via slog.error with exc_class + frames only (B1 convention) and a channel=chat_turns
-    discriminator. The loop continues to the next record so a single bad row does not prevent persistence of healthy siblings.
-    The audit-persistence gap is observable to operators via the structured log event; the in-flight HTTPException continues
-    to propagate unchanged.
-  expires: null
 - key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=2e537f6348e82dda
   owner: web-sessions
   reason: "state.validate() may fail on structurally damaged partial-state from LLM convergence/crash \u2014 catch (ValueError,\
@@ -2575,26 +2563,26 @@ allow_hits:
   safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the original
     route exception continues to propagate and the sibling drain remains isolated.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=fffa41daff924085
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=c810b9f77504739d
   owner: composer-guided
   reason: "Phase A finally-block drain (chat_turns channel) \u2014 the broad except wraps _persist_chat_turns inside the unconditional\
-    \ finally so an audit-system failure during exception handling cannot mask the in-flight HTTPException. Mirror of the\
-    \ sibling get_guided / post_guided_respond drain pattern. The per-step chat handler emits ComposerChatTurn audit rows\
-    \ for every user/assistant turn pair; the finally-drain ensures those rows land even on rejection paths (e.g. 409 step\
-    \ mismatch, 500 InvariantError on empty LLM content) before the original HTTPException propagates. FP rotated during RC5.2\
-    \ per-step-chat merge."
+    \ finally only when the primary route body is already unwinding, so an audit-system failure during exception handling\
+    \ cannot mask the in-flight HTTPException. Success-path chat-turn audit failures raise AuditIntegrityError instead. Mirror\
+    \ of the sibling get_guided / post_guided_respond drain pattern. The per-step chat handler emits ComposerChatTurn audit\
+    \ rows for every user/assistant turn pair; the finally-drain still attempts to record rejection-path turns before the\
+    \ original HTTPException propagates. FP rotated after success-path chat-turn failures were made fatal."
   safety: "Caught exception is logged via slog.error under the audit-system-failure exemption with exc_class + frames only\
-    \ (B1 convention \u2014 never str(exc) since the exception message may carry Tier-bearing strings) and a channel=chat_turns\
-    \ discriminator so operators can distinguish which audit channel failed. The original HTTPException continues to propagate.\
-    \ No silent suppression; operators observe the audit-persist failure via the structured log event."
+    \ (B1 convention \u2014 never str(exc) since the exception message may carry Tier-bearing strings). The original HTTPException\
+    \ continues to propagate. No success-path suppression remains; tests/unit/web/sessions/test_routes.py pins that chat-turn\
+    \ audit insert failures return 500 after state persistence."
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=5453cfdf7bf92795
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=1576eb0d228dc9c2
   owner: composer-guided
   reason: Terminal logger-of-last-resort guard around slog.error in the post_guided_chat chat_turns finally-drain; if structlog
-    itself raises while reporting an audit-system failure, no safer reporting channel remains and the original route outcome
-    must be preserved. FP rotated during RC5.2 per-step-chat merge.
+    itself raises while reporting an audit-system failure during exception unwinding, no safer reporting channel remains
+    and the original route outcome must be preserved. FP rotated after success-path chat-turn failures were made fatal.
   safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the original
-    route exception continues to propagate.
+    route exception continues to propagate. Success-path drains do not enter this suppress block.
   expires: null
 per_file_rules:
 - pattern: web/composer/tools.py

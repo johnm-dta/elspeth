@@ -11,7 +11,7 @@
 //      discriminator mapping value (e.g., "provider: azure" / "openrouter").
 // ============================================================================
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, type MouseEvent } from "react";
 import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
 
 export const PREFILL_CHAT_INPUT_EVENT = "composer:prefill-chat-input";
@@ -21,6 +21,7 @@ interface PluginCardProps {
   schema: PluginSchemaInfo | null;
   schemaError?: boolean;
   onExpand: () => void;
+  onRetrySchema?: () => void;
   /** Called when the card initiates an action that should close the drawer. */
   onCloseDrawer?: () => void;
 }
@@ -108,7 +109,7 @@ function renderFields(
   ));
 }
 
-export function PluginCard({ plugin, schema, schemaError, onExpand, onCloseDrawer }: PluginCardProps) {
+export function PluginCard({ plugin, schema, schemaError, onExpand, onRetrySchema, onCloseDrawer }: PluginCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   function handleClick() {
@@ -127,6 +128,14 @@ export function PluginCard({ plugin, schema, schemaError, onExpand, onCloseDrawe
       onCloseDrawer?.();
     },
     [plugin, onCloseDrawer],
+  );
+
+  const handleRetrySchema = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      (onRetrySchema ?? onExpand)();
+    },
+    [onRetrySchema, onExpand],
   );
 
   const configSchema = schema?.json_schema as
@@ -171,9 +180,17 @@ export function PluginCard({ plugin, schema, schemaError, onExpand, onCloseDrawe
       {expanded && (
         <div className="plugin-card-expanded">
           {schemaError ? (
-            <span className="plugin-card-schema-error">
-              Failed to load schema. Collapse and expand to retry.
-            </span>
+            <div className="plugin-card-schema-error">
+              <span>Failed to load schema.</span>
+              <button
+                type="button"
+                className="btn btn-small"
+                onClick={handleRetrySchema}
+                aria-label="Retry loading schema"
+              >
+                Retry
+              </button>
+            </div>
           ) : schema === null || configSchema === undefined ? (
             <span className="plugin-card-schema-loading">Loading...</span>
           ) : isDiscriminated(configSchema) ? (

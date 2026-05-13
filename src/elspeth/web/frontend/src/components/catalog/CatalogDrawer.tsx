@@ -72,11 +72,10 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
   const drawerRef = useRef<HTMLDivElement>(null);
   useFocusTrap(drawerRef, isOpen);
 
-  // Fetch all three lists in parallel on first open.
-  // On failure: set fetchError, don't retry until drawer is closed and reopened.
-  useEffect(() => {
-    if (!isOpen || sources !== null || isFetching || fetchError) return;
+  const loadCatalog = useCallback(() => {
+    if (isFetching) return;
 
+    setFetchError(false);
     setIsFetching(true);
     Promise.all([listSources(), listTransforms(), listSinks()])
       .then(([src, xfm, snk]) => {
@@ -90,7 +89,14 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
       .finally(() => {
         setIsFetching(false);
       });
-  }, [isOpen, sources, isFetching, fetchError]);
+  }, [isFetching]);
+
+  // Fetch all three lists in parallel on first open.
+  useEffect(() => {
+    if (!isOpen || sources !== null || isFetching || fetchError) return;
+
+    loadCatalog();
+  }, [isOpen, sources, isFetching, fetchError, loadCatalog]);
 
   // Clear error on close so next open retries
   useEffect(() => {
@@ -313,7 +319,15 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
         <div className="catalog-list">
           {fetchError ? (
             <div className="catalog-status-message catalog-status-message--error">
-              Failed to load plugin catalog. Close and reopen to retry.
+              <span>Failed to load plugin catalog.</span>
+              <button
+                type="button"
+                className="btn btn-small"
+                onClick={loadCatalog}
+                aria-label="Retry loading plugin catalog"
+              >
+                Retry
+              </button>
             </div>
           ) : isLoading || isFetching ? (
             <div
@@ -341,6 +355,7 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
                   schema={schema}
                   schemaError={hasSchemaError}
                   onExpand={() => handleExpand(plugin)}
+                  onRetrySchema={() => handleExpand(plugin)}
                   onCloseDrawer={onClose}
                 />
               );

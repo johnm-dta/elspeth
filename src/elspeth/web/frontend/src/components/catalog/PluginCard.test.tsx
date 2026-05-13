@@ -294,18 +294,23 @@ describe("PluginCard — discriminated union", () => {
 describe("PluginCard — error and loading states", () => {
   it("shows schema error message and suppresses content", async () => {
     const user = userEvent.setup();
+    const onRetrySchema = vi.fn();
     render(
       <PluginCard
         plugin={makePlugin()}
         schema={null}
         schemaError
         onExpand={vi.fn()}
+        onRetrySchema={onRetrySchema}
       />,
     );
     await user.click(screen.getByRole("button", { name: "example plugin details" }));
     expect(
       screen.getByText(/Failed to load schema/),
     ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Retry loading schema" }));
+    expect(onRetrySchema).toHaveBeenCalledTimes(1);
   });
 
   it("shows Loading when schema is null and no error", async () => {

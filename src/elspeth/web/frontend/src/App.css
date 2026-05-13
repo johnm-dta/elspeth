@@ -3195,6 +3195,9 @@ summary:focus-visible {
 }
 
 .plugin-card-schema-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
   font-size: var(--font-size-xs);
   color: var(--color-error);
 }
@@ -3554,6 +3557,9 @@ summary:focus-visible {
 }
 
 .catalog-status-message--error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
   color: var(--color-error);
 }
 

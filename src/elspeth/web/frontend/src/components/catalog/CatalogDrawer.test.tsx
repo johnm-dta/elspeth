@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CatalogDrawer } from "./CatalogDrawer";
@@ -28,6 +28,10 @@ vi.mock("@/api/client", () => ({
 import { listSources, listTransforms, listSinks } from "@/api/client";
 
 describe("CatalogDrawer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("renders nothing when closed", () => {
     render(<CatalogDrawer isOpen={false} onClose={vi.fn()} />);
     expect(screen.queryByText("Plugin Catalog")).not.toBeInTheDocument();
@@ -65,6 +69,25 @@ describe("CatalogDrawer", () => {
       expect(screen.getByText("csv")).toBeInTheDocument();
       expect(screen.getByText("CSV file source")).toBeInTheDocument();
     });
+  });
+
+  it("retries catalog loading inline after an initial fetch failure", async () => {
+    vi.mocked(listSources)
+      .mockRejectedValueOnce(new Error("catalog unavailable"))
+      .mockResolvedValueOnce([
+        { name: "csv", plugin_type: "source", description: "CSV file source", config_fields: [] },
+      ]);
+    render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
+    const user = userEvent.setup();
+
+    expect(await screen.findByText("Failed to load plugin catalog.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Retry loading plugin catalog" }));
+
+    await waitFor(() => {
+      expect(listSources).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByText("CSV file source")).toBeInTheDocument();
   });
 
   it("escape key closes drawer", async () => {

@@ -84,6 +84,7 @@ class ExecutionService(Protocol):
         state_id: UUID | None = None,
         *,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
         fanout_ack_token: str | None = None,
     ) -> UUID:
         """Start a background pipeline run.
@@ -95,6 +96,7 @@ class ExecutionService(Protocol):
             session_id: Session to execute.
             state_id: Specific state to execute (latest if None).
             user_id: Authenticated user's ID for scoped secret resolution.
+            auth_provider_type: Auth provider namespace for Landscape run attribution.
             fanout_ack_token: Optional launch acknowledgement for high-fanout
                 LLM/provider-call risk.
 

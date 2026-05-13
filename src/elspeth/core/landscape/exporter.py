@@ -218,6 +218,7 @@ class LandscapeExporter:
         run = self._factory.run_lifecycle.get_run(run_id)
         if run is None:
             raise ValueError(f"Run not found: {run_id}")
+        attribution = self._factory.run_lifecycle.get_run_attribution(run_id)
 
         run_record: RunExportRecord = {
             "record_type": "run",
@@ -227,6 +228,8 @@ class LandscapeExporter:
             "completed_at": run.completed_at.isoformat() if run.completed_at else None,
             "canonical_version": run.canonical_version,
             "config_hash": run.config_hash,
+            "initiated_by_user_id": attribution[0] if attribution is not None else None,
+            "auth_provider_type": attribution[1] if attribution is not None else None,
             # Full resolved settings for audit trail portability (not just hash)
             "settings": self._parse_tier1_json(run.settings_json, "settings_json", f"run {run_id}"),
             "reproducibility_grade": run.reproducibility_grade.value if run.reproducibility_grade is not None else None,

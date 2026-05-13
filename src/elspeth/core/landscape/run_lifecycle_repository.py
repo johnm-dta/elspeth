@@ -35,6 +35,7 @@ from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.schema import (
     preflight_results_table,
+    run_attributions_table,
     runs_table,
     secret_resolutions_table,
 )
@@ -57,6 +58,17 @@ _TERMINAL_RUN_STATUSES = frozenset(
         RunStatus.INTERRUPTED,
     }
 )
+
+_AUTH_PROVIDER_TYPES = frozenset({"local", "oidc", "entra"})
+
+
+def _validate_run_attribution(*, initiated_by_user_id: str | None, auth_provider_type: str | None) -> None:
+    if initiated_by_user_id is None and auth_provider_type is None:
+        return
+    if type(initiated_by_user_id) is not str or not initiated_by_user_id.strip():
+        raise AuditIntegrityError("run attribution requires a non-blank initiated_by_user_id")
+    if auth_provider_type not in _AUTH_PROVIDER_TYPES:
+        raise AuditIntegrityError(f"run attribution requires auth_provider_type to be one of {sorted(_AUTH_PROVIDER_TYPES)!r}")
 
 
 class RunLifecycleRepository:
@@ -81,6 +93,8 @@ class RunLifecycleRepository:
         status: RunStatus = RunStatus.RUNNING,
         source_schema_json: str | None = None,
         schema_contract: SchemaContract | None = None,
+        initiated_by_user_id: str | None = None,
+        auth_provider_type: str | None = None,
     ) -> Run:
         """Begin a new pipeline run.
 
@@ -95,6 +109,8 @@ class RunLifecycleRepository:
                 type fidelity (datetime/Decimal restoration from payload JSON strings).
             schema_contract: Optional schema contract for audit trail field resolution.
                 Stored via ContractAuditRecord for complete field mapping traceability.
+            initiated_by_user_id: Optional authenticated user ID that initiated the run.
+            auth_provider_type: Optional auth provider namespace for the initiating user.
 
         Returns:
             Run model with generated run_id
@@ -103,6 +119,7 @@ class RunLifecycleRepository:
             raise AuditIntegrityError(
                 "begin_run() cannot create a COMPLETED run. Use complete_run() so completed_at is recorded in the audit trail."
             )
+        _validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
 
         run_id = run_id or generate_id()
         settings_json = canonical_json(config)
@@ -151,6 +168,16 @@ class RunLifecycleRepository:
                 runtime_val_manifest_json=runtime_val_manifest_json,
             )
         )
+        if initiated_by_user_id is not None and auth_provider_type is not None:
+            self._ops.execute_insert(
+                run_attributions_table.insert().values(
+                    run_id=run.run_id,
+                    recorded_at=timestamp,
+                    initiated_by_user_id=initiated_by_user_id,
+                    auth_provider_type=auth_provider_type,
+                ),
+                context="run_attributions",
+            )
 
         return run
 
@@ -238,6 +265,20 @@ class RunLifecycleRepository:
         if row is None:
             return None
         return self._run_loader.load(row)
+
+    def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
+        """Return ``(initiated_by_user_id, auth_provider_type)`` for a run if present."""
+        query = select(
+            run_attributions_table.c.initiated_by_user_id,
+            run_attributions_table.c.auth_provider_type,
+        ).where(run_attributions_table.c.run_id == run_id)
+        row = self._ops.execute_fetchone(query)
+        if row is None:
+            return None
+        initiated_by_user_id = row.initiated_by_user_id
+        auth_provider_type = row.auth_provider_type
+        _validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
+        return initiated_by_user_id, auth_provider_type
 
     def get_source_schema(self, run_id: str) -> str:
         """Get source schema JSON for a run (for resume/type restoration).

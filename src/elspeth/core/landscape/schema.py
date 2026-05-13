@@ -94,6 +94,17 @@ runs_table = Table(
     Column("runtime_val_manifest_json", Text),
 )
 
+run_attributions_table = Table(
+    "run_attributions",
+    metadata,
+    Column("run_id", String(64), ForeignKey("runs.run_id"), primary_key=True),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("initiated_by_user_id", String(255), nullable=False),
+    Column("auth_provider_type", String(32), nullable=False),
+    CheckConstraint("auth_provider_type IN ('local', 'oidc', 'entra')", name="ck_run_attributions_auth_provider_type"),
+)
+Index("ix_run_attributions_user", run_attributions_table.c.initiated_by_user_id, run_attributions_table.c.auth_provider_type)
+
 # === Nodes (Plugin Instances) ===
 
 nodes_table = Table(

@@ -327,6 +327,7 @@ class ExecutionServiceImpl:
         state_id: UUID | None = None,
         *,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
         fanout_ack_token: str | None = None,
     ) -> UUID:
         """Start a background pipeline run.
@@ -340,6 +341,7 @@ class ExecutionServiceImpl:
             session_id: Session to execute.
             state_id: Specific state to execute (latest if None).
             user_id: Authenticated user's ID for scoped secret resolution.
+            auth_provider_type: Auth provider namespace for Landscape run attribution.
             fanout_ack_token: Optional launch acknowledgement for high-fanout
                 LLM/provider-call risk.
 
@@ -352,7 +354,13 @@ class ExecutionServiceImpl:
         session_key = str(session_id)
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
-            return await self._execute_locked(session_id, state_id, user_id=user_id, fanout_ack_token=fanout_ack_token)
+            return await self._execute_locked(
+                session_id,
+                state_id,
+                user_id=user_id,
+                auth_provider_type=auth_provider_type,
+                fanout_ack_token=fanout_ack_token,
+            )
 
     async def _execute_locked(
         self,
@@ -360,6 +368,7 @@ class ExecutionServiceImpl:
         state_id: UUID | None = None,
         *,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
         fanout_ack_token: str | None = None,
     ) -> UUID:
         """Inner execute — runs under the per-session asyncio.Lock."""
@@ -536,7 +545,14 @@ class ExecutionServiceImpl:
                 )
 
             # Submit to thread pool
-            future = self._executor.submit(self._run_pipeline, str(run_id), pipeline_yaml, shutdown_event, user_id)
+            future = self._executor.submit(
+                self._run_pipeline,
+                str(run_id),
+                pipeline_yaml,
+                shutdown_event,
+                user_id,
+                auth_provider_type,
+            )
         except BaseException as exc:
             with self._shutdown_events_lock:
                 self._shutdown_events.pop(str(run_id), None)
@@ -700,6 +716,7 @@ class ExecutionServiceImpl:
         pipeline_yaml: str,
         shutdown_event: threading.Event,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
     ) -> None:
         """Execute a pipeline in the background thread.
 
@@ -930,6 +947,8 @@ class ExecutionServiceImpl:
                 shutdown_event=shutdown_event,  # B2: NEVER omit this
                 sink_factory=_make_sink_factory(settings),
                 run_id=run_id,
+                initiated_by_user_id=user_id,
+                auth_provider_type=auth_provider_type,
             )
 
             # Orchestrator.run() returns normally ONLY on completion.

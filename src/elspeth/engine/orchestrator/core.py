@@ -1338,6 +1338,8 @@ class Orchestrator:
         secret_resolutions: list[SecretResolutionInput] | None,
         *,
         run_id: str | None = None,
+        initiated_by_user_id: str | None = None,
+        auth_provider_type: str | None = None,
     ) -> tuple[RecorderFactory, Any]:
         """Execute the DATABASE phase: create factory, begin run, record secrets.
 
@@ -1346,6 +1348,8 @@ class Orchestrator:
             payload_store: PayloadStore for audit compliance.
             secret_resolutions: Optional secret resolution records.
             run_id: Optional caller-supplied run ID for audit correlation.
+            initiated_by_user_id: Optional authenticated web user that initiated the run.
+            auth_provider_type: Optional auth provider namespace for the initiating user.
 
         Returns:
             Tuple of (factory, run) where run has run_id and config_hash attributes.
@@ -1374,6 +1378,8 @@ class Orchestrator:
                 source_schema_json=source_schema_json,
                 schema_contract=source_contract,
                 run_id=run_id,
+                initiated_by_user_id=initiated_by_user_id,
+                auth_provider_type=auth_provider_type,
             )
 
             # Record secret resolutions in audit trail (deferred from pre-run loading)
@@ -1474,6 +1480,8 @@ class Orchestrator:
         shutdown_event: threading.Event | None = None,
         sink_factory: Callable[[str], SinkProtocol] | None = None,
         run_id: str | None = None,
+        initiated_by_user_id: str | None = None,
+        auth_provider_type: str | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -1494,6 +1502,8 @@ class Orchestrator:
                 closed by the time export runs).
             run_id: Optional caller-supplied Landscape run ID. When omitted,
                 Landscape generates a run ID.
+            initiated_by_user_id: Optional authenticated web user that initiated the run.
+            auth_provider_type: Optional auth provider namespace for the initiating user.
 
         Raises:
             OrchestrationInvariantError: If graph or payload_store is not provided
@@ -1520,6 +1530,8 @@ class Orchestrator:
             payload_store,
             secret_resolutions,
             run_id=run_id,
+            initiated_by_user_id=initiated_by_user_id,
+            auth_provider_type=auth_provider_type,
         )
 
         # Record pre-flight results (deferred from bootstrap_and_run)

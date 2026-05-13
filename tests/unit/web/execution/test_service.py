@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.enums import RunStatus
@@ -34,6 +35,8 @@ from elspeth.core.config import (
     RateLimitSettings,
     TelemetrySettings,
 )
+from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.schema import run_attributions_table
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import (
     RunAccounting,
@@ -488,6 +491,64 @@ class TestExecutionFanoutGuard:
 
 class TestWebRuntimeInfrastructure:
     """Regression coverage for web execution's orchestrator runtime wiring."""
+
+    def test_run_pipeline_records_web_user_attribution_in_landscape(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Web execution must persist who initiated the Landscape run."""
+        source_path = tmp_path / "input.txt"
+        source_path.write_text("alpha\n", encoding="utf-8")
+        output_path = tmp_path / "out.jsonl"
+        run_id = str(uuid4())
+        mock_settings.get_landscape_url.return_value = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_settings.get_payload_store_path.return_value = tmp_path / "payloads"
+
+        pipeline_yaml = f"""
+source:
+  plugin: text
+  on_success: output
+  options:
+    path: {source_path}
+    column: value
+    on_validation_failure: discard
+    schema:
+      mode: fixed
+      fields:
+      - "value: str"
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: {output_path}
+      format: jsonl
+      mode: write
+      schema:
+        mode: observed
+"""
+
+        service._run_pipeline(
+            run_id,
+            pipeline_yaml,
+            threading.Event(),
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        db = LandscapeDB.from_url(mock_settings.get_landscape_url.return_value, create_tables=False)
+        try:
+            with db.read_only_connection() as conn:
+                row = conn.execute(select(run_attributions_table).where(run_attributions_table.c.run_id == run_id)).one()
+        finally:
+            db.close()
+
+        assert row.initiated_by_user_id == "alice"
+        assert row.auth_provider_type == "local"
+        assert output_path.exists()
 
     def test_web_scrape_pipeline_receives_rate_limit_registry(
         self,

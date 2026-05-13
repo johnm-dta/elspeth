@@ -224,6 +224,8 @@ class TestExecuteEndpoint:
             assert resp.status_code == 202
             body = resp.json()
             assert body["run_id"] == str(expected_run_id)
+        assert svc.execute.await_args.kwargs["user_id"] == _TEST_USER_ID
+        assert svc.execute.await_args.kwargs["auth_provider_type"] == "local"
 
     @pytest.mark.asyncio
     async def test_execute_with_active_run_returns_409(self) -> None:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from elspeth.contracts import ExportStatus, FieldContract, ReproducibilityGrade, RunStatus, SchemaContract, SecretResolutionInput
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
@@ -26,7 +26,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
-from elspeth.core.landscape.schema import runs_table
+from elspeth.core.landscape.schema import run_attributions_table, runs_table
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
@@ -100,6 +100,42 @@ class TestBeginRunDirect:
                 canonical_version="v1",
                 run_id="completed-at-begin",
                 status=RunStatus.COMPLETED,
+            )
+
+    def test_begin_run_records_web_attribution_without_changing_config_hash(self) -> None:
+        """User attribution is audit metadata, not part of the pipeline config hash."""
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        config = {"pipeline": "test"}
+
+        attributed = repo.begin_run(
+            config=config,
+            canonical_version="v1",
+            run_id="attributed-run",
+            initiated_by_user_id="alice",
+            auth_provider_type="local",
+        )
+        unattributed = repo.begin_run(config=config, canonical_version="v1", run_id="unattributed-run")
+
+        with db.read_only_connection() as conn:
+            row = conn.execute(select(run_attributions_table).where(run_attributions_table.c.run_id == "attributed-run")).one()
+
+        assert attributed.config_hash == unattributed.config_hash
+        assert row.initiated_by_user_id == "alice"
+        assert row.auth_provider_type == "local"
+
+    def test_begin_run_rejects_partial_web_attribution(self) -> None:
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+
+        with pytest.raises(AuditIntegrityError, match="initiated_by_user_id"):
+            repo.begin_run(
+                config={"pipeline": "test"},
+                canonical_version="v1",
+                run_id="partial-attribution",
+                auth_provider_type="local",
             )
 
 

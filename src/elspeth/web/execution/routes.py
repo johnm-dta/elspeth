@@ -442,12 +442,14 @@ def create_execution_router() -> APIRouter:
         {"detail": str(exc), "error_type": "run_already_active"}.
         """
         await _verify_session_ownership(session_id, user, request)
+        settings: WebSettings = request.app.state.settings
         fanout_ack_token = execute_request.fanout_ack_token if execute_request is not None else None
         try:
             run_id = await service.execute(
                 session_id,
                 state_id,
                 user_id=user.user_id,
+                auth_provider_type=settings.auth_provider,
                 fanout_ack_token=fanout_ack_token,
             )
         except StateAccessError:

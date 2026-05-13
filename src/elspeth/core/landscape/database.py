@@ -37,6 +37,11 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("auth_events", "outcome"),
     ("auth_events", "provider"),
     ("auth_events", "metadata_json"),
+    # Web run attribution - records the authenticated user that initiated a run.
+    ("run_attributions", "run_id"),
+    ("run_attributions", "recorded_at"),
+    ("run_attributions", "initiated_by_user_id"),
+    ("run_attributions", "auth_provider_type"),
     ("tokens", "expand_group_id"),
     # Added for run ownership — prevents cross-run contamination of token-linked records
     ("tokens", "run_id"),
@@ -114,6 +119,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("auth_events", "ck_auth_events_event_type"),
     ("auth_events", "ck_auth_events_outcome"),
     ("auth_events", "ck_auth_events_provider"),
+    ("run_attributions", "ck_run_attributions_auth_provider_type"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
 )
@@ -124,6 +130,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("auth_events", "ix_auth_events_occurred_at"),
     ("auth_events", "ix_auth_events_type_outcome"),
     ("auth_events", "ix_auth_events_user"),
+    ("run_attributions", "ix_run_attributions_user"),
     ("calls", "ix_calls_state_call_index_unique"),
     ("calls", "ix_calls_operation_call_index_unique"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
@@ -131,7 +138,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
 )
 
 _ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
-_ADDITIVE_TABLE_NAMES: frozenset[str] = frozenset({"auth_events"})
+_ADDITIVE_TABLE_NAMES: frozenset[str] = frozenset({"auth_events", "run_attributions"})
 
 
 def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:

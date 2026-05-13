@@ -45,7 +45,12 @@ from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
-from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.errors import (
+    BlobSourcePathMismatchError,
+    MalformedBlobRefError,
+    PathAllowlistViolationError,
+    SemanticContractViolationError,
+)
 from elspeth.web.execution.failure_samples import format_failure_samples, load_top_failure_samples
 from elspeth.web.execution.fanout_guard import (
     ExecutionFanoutGuardRequired,
@@ -431,7 +436,7 @@ class ExecutionServiceImpl:
                 if value is not None:
                     resolved = resolve_data_path(value, str(self._settings.data_dir))
                     if not any(resolved.is_relative_to(d) for d in allowed_dirs):
-                        raise ValueError(f"Source {key}='{value}' resolves outside allowed directories")
+                        raise PathAllowlistViolationError(f"Source {key}='{value}' resolves outside allowed directories")
 
         # Sink path allowlist — prevents arbitrary file writes via sink options.
         # Without this, a client can set sink options.path to any absolute or
@@ -446,7 +451,9 @@ class ExecutionServiceImpl:
                     if value is not None:
                         resolved = resolve_data_path(value, str(self._settings.data_dir))
                         if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
-                            raise ValueError(f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories")
+                            raise PathAllowlistViolationError(
+                                f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories"
+                            )
 
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
 
@@ -469,7 +476,10 @@ class ExecutionServiceImpl:
         if composition_state.source is not None and self._blob_service is not None:
             blob_ref = composition_state.source.options.get("blob_ref")
             if blob_ref is not None:
-                parsed_blob_id = UUID(blob_ref)
+                try:
+                    parsed_blob_id = UUID(blob_ref)
+                except ValueError as exc:
+                    raise MalformedBlobRefError("blob_ref must be a UUID") from exc
                 # IDOR contract (mirrors the state_id branch above): the
                 # nonexistent-blob and cross-session-blob cases MUST be
                 # indistinguishable from the client's perspective.  Both

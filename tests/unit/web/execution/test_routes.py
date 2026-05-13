@@ -787,26 +787,47 @@ class TestExecuteIDORAndPathTraversal:
         assert resp_a.json() == {"detail": "Blob not found"}
 
     @pytest.mark.asyncio
-    async def test_execute_source_path_traversal_returns_404(self) -> None:
+    async def test_execute_source_path_traversal_returns_400(self) -> None:
         """Source path escaping allowed directories is rejected."""
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
         svc = MagicMock()
-        svc.execute = AsyncMock(side_effect=ValueError("Source path='../../etc/passwd' resolves outside allowed directories"))
+        svc.execute = AsyncMock(
+            side_effect=PathAllowlistViolationError("Source path='../../etc/passwd' resolves outside allowed directories")
+        )
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(f"/api/sessions/{uuid4()}/execute")
-            assert resp.status_code == 404
+            assert resp.status_code == 400
             assert "resolves outside" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_execute_sink_path_traversal_returns_404(self) -> None:
+    async def test_execute_sink_path_traversal_returns_400(self) -> None:
         """Sink path escaping allowed output directories is rejected."""
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
         svc = MagicMock()
-        svc.execute = AsyncMock(side_effect=ValueError("Sink 'out' path='../../../tmp/evil' resolves outside allowed output directories"))
+        svc.execute = AsyncMock(
+            side_effect=PathAllowlistViolationError("Sink 'out' path='../../../tmp/evil' resolves outside allowed output directories")
+        )
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(f"/api/sessions/{uuid4()}/execute")
-            assert resp.status_code == 404
+            assert resp.status_code == 400
             assert "resolves outside" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_execute_malformed_blob_ref_returns_400(self) -> None:
+        """Malformed caller-supplied blob_ref is validation, not not-found."""
+        from elspeth.web.execution.errors import MalformedBlobRefError
+
+        svc = MagicMock()
+        svc.execute = AsyncMock(side_effect=MalformedBlobRefError("blob_ref must be a UUID"))
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/sessions/{uuid4()}/execute")
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "blob_ref must be a UUID"
 
 
 class TestWebSocketReconnectTier1Guards:

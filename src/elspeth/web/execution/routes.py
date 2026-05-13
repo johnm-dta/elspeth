@@ -34,7 +34,7 @@ from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
-from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.errors import BlobSourcePathMismatchError, ExecuteRequestValidationError, SemanticContractViolationError
 from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
@@ -560,13 +560,14 @@ def create_execution_router() -> APIRouter:
                     ],
                 },
             ) from exc
+        except ExecuteRequestValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         except ValueError as exc:
             # Remaining ValueError sources are non-IDOR: the user's
             # OWN session having no composition state (when state_id
-            # is None), source/sink path-allowlist rejections that
-            # echo the caller's own input, and UUID parse errors on
-            # malformed blob_ref strings.  These are not cross-user
-            # oracles, so the diagnostic body is kept.
+            # is None). Caller-authored request validation failures
+            # (path allowlist, malformed blob_ref) raise
+            # ExecuteRequestValidationError above and return 400.
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {"run_id": str(run_id)}
 

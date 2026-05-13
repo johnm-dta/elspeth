@@ -2564,8 +2564,10 @@ class TestBlobRefPreValidation:
         service: ExecutionServiceImpl,
         mock_session_service: MagicMock,
     ) -> None:
-        """A non-UUID blob_ref raises ValueError before create_run()
+        """A non-UUID blob_ref raises typed validation before create_run()
         is called, so no pending run is orphaned."""
+        from elspeth.web.execution.errors import MalformedBlobRefError
+
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
@@ -2577,7 +2579,7 @@ class TestBlobRefPreValidation:
         blob_service = MagicMock()
         cast(Any, service)._blob_service = blob_service
 
-        with pytest.raises(ValueError):
+        with pytest.raises(MalformedBlobRefError):
             await service.execute(session_id=uuid4())
 
         # The critical invariant: create_run() was never called,
@@ -3228,7 +3230,9 @@ class TestSinkPathRestriction:
         state.nodes = None
         state.edges = None
 
-        with pytest.raises(ValueError, match="resolves outside allowed output directories"):
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
             await service.execute(session_id=uuid4())
 
     @pytest.mark.asyncio
@@ -3253,7 +3257,9 @@ class TestSinkPathRestriction:
         state.nodes = None
         state.edges = None
 
-        with pytest.raises(ValueError, match="resolves outside allowed output directories"):
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
             await service.execute(session_id=uuid4())
 
     @pytest.mark.asyncio
@@ -3543,7 +3549,9 @@ class TestRelativePathResolution:
         state.nodes = None
         state.edges = None
 
-        with pytest.raises(ValueError, match="resolves outside allowed directories"):
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed directories"):
             await service.execute(session_id=uuid4())
 
 

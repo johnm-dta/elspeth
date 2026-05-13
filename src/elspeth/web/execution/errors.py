@@ -36,6 +36,24 @@ class SemanticContractViolationError(ValueError):
         super().__init__(message)
 
 
+class ExecuteRequestValidationError(ValueError):
+    """Caller-authored /execute request data failed validation.
+
+    Subclasses ValueError for compatibility with older service-level tests
+    and callers, but route handlers should catch this specific base class
+    and return HTTP 400 rather than conflating malformed input with 404
+    not-found/IDOR responses.
+    """
+
+
+class PathAllowlistViolationError(ExecuteRequestValidationError):
+    """Raised when a source or sink path escapes the configured allowlist."""
+
+
+class MalformedBlobRefError(ExecuteRequestValidationError):
+    """Raised when caller-supplied blob_ref is not a UUID."""
+
+
 class BlobSourcePathMismatchError(Exception):
     """Tier 1 audit-integrity violation — composer-stored blob source path
     diverges from the referenced blob's canonical ``storage_path``.

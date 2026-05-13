@@ -26,10 +26,10 @@ composer-progress surface, but metric naming does not justify an
 import from ``web/sessions/service.py`` up into ``web/composer``.
 Composer code may import the sessions-owned container or receive it
 from app wiring; sessions code must not import composer-owned modules.
-Phase 2 (redaction counters) and Phase 3 (compose-loop and
-audit-grade counters) may extend this container only if ownership
-still belongs to the sessions persistence surface; otherwise those
-phases add composer-owned telemetry separately.
+Phase 2 (redaction counters) and Phase 3 (compose-loop counters) may
+extend this container only if ownership still belongs to the sessions
+persistence surface; otherwise those phases add composer-owned
+telemetry separately.
 """
 
 from __future__ import annotations
@@ -123,17 +123,13 @@ class _SessionsTelemetry:
     wiring the real OTel SDK; production wiring replaces them at startup.
     """
 
-    # Phase 1 audit-primacy counters only. Phase 2 (redaction) adds
-    # ``summarizer_errors_total`` and ``unknown_response_key_total``;
-    # Phase 3 (compose loop + audit-grade view) adds
-    # ``tool_call_cap_exceeded_total`` and ``audit_grade_view_total``.
-    # Each phase extends this dataclass when its emitter ships,
-    # which keeps "registered" and "exercised" in lock-step
-    # operationally.
     tool_row_tier1_violation_total: _Counter
     state_rolled_back_during_persist_total: _Counter
     tool_row_persist_failed_during_unwind_total: _Counter
     tool_row_integrity_violation_total: _Counter
+    tool_call_cap_exceeded_total: _Counter
+    audit_grade_view_total: _Counter
+    audit_access_log_write_failed_total: _Counter
 
 
 def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemetry:
@@ -152,6 +148,9 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             state_rolled_back_during_persist_total=_FakeCounter(),
             tool_row_persist_failed_during_unwind_total=_FakeCounter(),
             tool_row_integrity_violation_total=_FakeCounter(),
+            tool_call_cap_exceeded_total=_FakeCounter(),
+            audit_grade_view_total=_FakeCounter(),
+            audit_access_log_write_failed_total=_FakeCounter(),
         )
 
     # Production wiring against the real OTel meter. The ``_Meter``
@@ -163,4 +162,7 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         state_rolled_back_during_persist_total=meter.create_counter("composer.audit.state_rolled_back_during_persist_total"),
         tool_row_persist_failed_during_unwind_total=meter.create_counter("composer.audit.tool_row_persist_failed_during_unwind_total"),
         tool_row_integrity_violation_total=meter.create_counter("composer.audit.tool_row_integrity_violation_total"),
+        tool_call_cap_exceeded_total=meter.create_counter("composer.tool_call_cap_exceeded_total"),
+        audit_grade_view_total=meter.create_counter("composer.audit.audit_grade_view_total"),
+        audit_access_log_write_failed_total=meter.create_counter("composer.audit.audit_access_log_write_failed_total"),
     )

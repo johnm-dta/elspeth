@@ -30,7 +30,7 @@ from elspeth.contracts.composer_llm_audit import (
     ComposerChatTurnStatus,
     ComposerLLMCall,
 )
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.core.canonical import stable_hash
@@ -112,6 +112,7 @@ from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.protocol import (
+    AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
     ChatMessageRole,
@@ -268,6 +269,9 @@ def _message_response(msg: ChatMessageRecord, *, include_raw_content: bool = Fal
         tool_calls=deep_thaw(msg.tool_calls) if msg.tool_calls is not None else None,
         created_at=msg.created_at,
         composition_state_id=str(msg.composition_state_id) if msg.composition_state_id else None,
+        tool_call_id=msg.tool_call_id,
+        parent_assistant_id=str(msg.parent_assistant_id) if msg.parent_assistant_id else None,
+        sequence_no=msg.sequence_no,
     )
 
 
@@ -789,6 +793,22 @@ def _composer_conversation_or_llm_audit_messages(messages: Sequence[ChatMessageR
     return [message for message in messages if not _is_composer_audit_tool_message(message) or _is_composer_llm_audit_tool_message(message)]
 
 
+def _composer_conversation_or_tool_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
+    """Return user-visible conversation plus real assistant-linked tool rows."""
+
+    return [message for message in messages if message.role == "tool" or not _is_composer_audit_tool_message(message)]
+
+
+def _composer_conversation_tool_or_llm_audit_messages(messages: Sequence[ChatMessageRecord]) -> list[ChatMessageRecord]:
+    """Return conversation, tool rows, and safe per-LLM-call audit sidecars."""
+
+    return [
+        message
+        for message in messages
+        if message.role == "tool" or not _is_composer_audit_tool_message(message) or _is_composer_llm_audit_tool_message(message)
+    ]
+
+
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
     """Convert persisted session messages to LLM chat history.
 
@@ -1257,6 +1277,27 @@ async def _verify_session_ownership(
     return session
 
 
+async def _failed_turn_response_body(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    failed_turn: FailedTurnMetadata,
+) -> dict[str, object]:
+    """Return the stable response fragment for a persisted failed compose turn."""
+
+    tool_responses_persisted = failed_turn.tool_responses_persisted
+    if tool_responses_persisted is None:
+        tool_responses_persisted = await service.count_tool_responses_for_assistant_async(
+            session_id=str(session_id),
+            assistant_message_id=failed_turn.assistant_message_id,
+        )
+    return {
+        "assistant_message_id": failed_turn.assistant_message_id,
+        "tool_calls_attempted": failed_turn.tool_calls_attempted,
+        "tool_responses_persisted": tool_responses_persisted,
+        "transcript_url": None,
+    }
+
+
 async def _handle_convergence_error(
     exc: ComposerConvergenceError,
     service: SessionServiceProtocol,
@@ -1322,6 +1363,8 @@ async def _handle_convergence_error(
         # names the next practical action for each class" criterion.
         "recovery_text": progress.likely_next,
     }
+    if exc.failed_turn is not None:
+        response_body["failed_turn"] = await _failed_turn_response_body(service, session_id, exc.failed_turn)
     persisted_state_id: UUID | None = None
     if exc.partial_state is not None:
         # Persistence guard: DB write failure should not upgrade the
@@ -1382,7 +1425,9 @@ async def _handle_convergence_error(
     # convergence happened before any state mutation (e.g. budget hit on
     # discovery-only turns), so failed runs without state changes still
     # leave a record of what the LLM tried.
-    if exc.tool_invocations:
+    # Compose-loop carriers with failed_turn were already committed by
+    # persist_compose_turn_async; only pre-cutover/non-loop carriers drain here.
+    if exc.tool_invocations and exc.failed_turn is None:
         await _persist_tool_invocations(
             service,
             session_id,
@@ -1460,6 +1505,8 @@ async def _handle_plugin_crash(
             "log event for triage. This is not a user-retryable error."
         ),
     }
+    if exc.failed_turn is not None:
+        response_body["failed_turn"] = await _failed_turn_response_body(service, session_id, exc.failed_turn)
 
     persisted_state_id_pc: UUID | None = None
     if exc.partial_state is not None:
@@ -1532,7 +1579,9 @@ async def _handle_plugin_crash(
     # is the LAST entry in tool_invocations with status=PLUGIN_CRASH;
     # earlier entries are the calls that successfully ran before the
     # plugin bug fired.
-    if exc.tool_invocations:
+    # Compose-loop plugin-crash rows commit before the carrier is raised.
+    # Retain this drain only for older/non-loop carriers with no failed_turn.
+    if exc.tool_invocations and exc.failed_turn is None:
         await _persist_tool_invocations(
             service,
             session_id,
@@ -1689,6 +1738,8 @@ async def _handle_runtime_preflight_failure(
             "This is not a user-retryable error."
         ),
     }
+    if exc.failed_turn is not None:
+        response_body["failed_turn"] = await _failed_turn_response_body(service, session_id, exc.failed_turn)
 
     persisted_state_id_rpf: UUID | None = None
     if exc.partial_state is not None:
@@ -1755,7 +1806,9 @@ async def _handle_runtime_preflight_failure(
     # before raising; other runtime-preflight failures may still carry an
     # empty tuple. The unconditional call handles both via the empty-tuple
     # early-return inside _persist_tool_invocations.
-    if exc.tool_invocations:
+    # Runtime-preflight carriers from the compose loop use the committed
+    # failed_turn row; post-compose/non-loop carriers still drain here.
+    if exc.tool_invocations and exc.failed_turn is None:
         await _persist_tool_invocations(
             service,
             session_id,
@@ -3462,7 +3515,7 @@ def create_session_router() -> APIRouter:
                 # lands as one role=tool chat message linked to the post-compose
                 # state id (when version advanced) so the audit trail records
                 # which tool calls produced this state.
-                if result.tool_invocations:
+                if result.tool_invocations and not result.persisted_tool_call_turn:
                     await _persist_tool_invocations(
                         service,
                         session.id,
@@ -4004,7 +4057,7 @@ def create_session_router() -> APIRouter:
                     writer_principal="compose_loop",
                 )
                 # Per-tool-call audit trail (recompose path; symmetric with send_message).
-                if result.tool_invocations:
+                if result.tool_invocations and not result.persisted_tool_call_turn:
                     await _persist_tool_invocations(
                         service,
                         session.id,
@@ -4104,6 +4157,7 @@ def create_session_router() -> APIRouter:
         offset: int = Query(0, ge=0),
         include_llm_audit: bool = Query(False),
         include_raw_content: bool = Query(False),
+        include_tool_rows: bool = Query(False),
     ) -> list[ChatMessageResponse]:
         """Get conversation history for a session.
 
@@ -4116,15 +4170,29 @@ def create_session_router() -> APIRouter:
         """
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
+        if include_tool_rows:
+            audit_query_args = {key: value for key, value in request.query_params.items() if key in AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST}
+            await service.record_audit_grade_view_async(
+                session_id=str(session.id),
+                requesting_principal=user.user_id,
+                request_path=request.url.path,
+                query_args=audit_query_args,
+                ip_address=request.client.host if request.client else None,
+            )
         # Fetch before slicing so hidden audit rows cannot skew normal-chat
         # pagination. The service remains the durable audit store; this route
         # is the user-facing conversation channel. The eval harness can opt in
         # to LLM-call sidecars, which contain model/usage/cost metadata but not
         # raw prompts, tool arguments, or tool results.
         messages = await service.get_messages(session.id, limit=None)
-        conversation_messages = (
-            _composer_conversation_or_llm_audit_messages(messages) if include_llm_audit else _composer_conversation_messages(messages)
-        )
+        if include_tool_rows and include_llm_audit:
+            conversation_messages = _composer_conversation_tool_or_llm_audit_messages(messages)
+        elif include_tool_rows:
+            conversation_messages = _composer_conversation_or_tool_messages(messages)
+        elif include_llm_audit:
+            conversation_messages = _composer_conversation_or_llm_audit_messages(messages)
+        else:
+            conversation_messages = _composer_conversation_messages(messages)
         paged_messages = conversation_messages[offset : offset + limit]
         return [_message_response(m, include_raw_content=include_raw_content) for m in paged_messages]
 
@@ -4518,6 +4586,7 @@ def create_session_router() -> APIRouter:
                         raw_content=user_msg.raw_content,
                         tool_calls=user_msg.tool_calls,
                         created_at=user_msg.created_at,
+                        sequence_no=user_msg.sequence_no,
                         composition_state_id=copied_state.id,
                         writer_principal=user_msg.writer_principal,
                         tool_call_id=user_msg.tool_call_id,

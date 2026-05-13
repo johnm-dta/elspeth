@@ -117,6 +117,9 @@ class ChatMessageResponse(_StrictResponse):
     tool_calls: ToolCallList | None = None
     created_at: datetime
     composition_state_id: str | None = None
+    tool_call_id: str | None = None
+    parent_assistant_id: str | None = None
+    sequence_no: int | None = None
 
 
 class MessageWithStateResponse(_StrictResponse):

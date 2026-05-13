@@ -55,6 +55,74 @@ SELECT cs.id
 """
 
 
+@pytest.fixture
+def populated_audit_db(service):
+    """Initialized audit DB with successful and rolled-back compose-turn writes."""
+
+    from sqlalchemy.exc import IntegrityError
+
+    with service._engine.begin() as conn:
+        _make_session(conn, session_id="populated_audit")
+    service.persist_compose_turn(
+        session_id="populated_audit",
+        assistant_content="ok",
+        redacted_assistant_tool_calls=({"id": "tc_populated_a", "function": {"name": "f"}},),
+        redacted_tool_rows=(
+            RedactedToolRow(
+                "tc_populated_a",
+                '{"r": 1}',
+                StatePayload(
+                    data=CompositionStateData(),
+                    derived_from_state_id=None,
+                ),
+            ),
+        ),
+        parent_composition_state_id=None,
+        expected_current_state_id=None,
+        writer_principal="compose_loop",
+        plugin_crash_pending=False,
+    )
+    with service._engine.begin() as conn:
+        first_state_id = conn.execute(
+            text("SELECT id FROM composition_states WHERE session_id='populated_audit' ORDER BY version DESC LIMIT 1")
+        ).scalar_one()
+    with pytest.raises(
+        IntegrityError,
+        match=(
+            r"(UNIQUE.*chat_messages.*session_id.*tool_call_id"
+            r"|uq_chat_messages_tool_call_id)"
+        ),
+    ):
+        service.persist_compose_turn(
+            session_id="populated_audit",
+            assistant_content="duplicate",
+            redacted_assistant_tool_calls=({"id": "tc_populated_a", "function": {"name": "f"}},),
+            redacted_tool_rows=(
+                RedactedToolRow(
+                    "tc_populated_a",
+                    "{}",
+                    StatePayload(
+                        data=CompositionStateData(),
+                        derived_from_state_id=None,
+                    ),
+                ),
+            ),
+            parent_composition_state_id=None,
+            expected_current_state_id=first_state_id,
+            writer_principal="compose_loop",
+            plugin_crash_pending=False,
+        )
+    return service._engine
+
+
+def test_no_state_row_without_tool_row(populated_audit_db):
+    """The INV-AUDIT-AHEAD backward-direction post-condition is a SQL predicate."""
+
+    with populated_audit_db.connect() as conn:
+        orphans = conn.execute(text(_BACKWARD_PREDICATE)).fetchall()
+    assert orphans == []
+
+
 def test_backward_direction_holds_after_successful_persist(service):
     with service._engine.begin() as conn:
         _make_session(conn, session_id="b1")

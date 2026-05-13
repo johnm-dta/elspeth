@@ -119,7 +119,7 @@ Close the quality-axis recurrence before any TDD task starts: red tests must fai
 - Modify: `tests/integration/web/conftest.py`
 - Modify or create: `tests/property/web/composer/conftest.py`
 
-- [ ] **Step 1: Add `_run_one_turn_for_test` as an explicit test-only driver.**
+- [x] **Step 1: Add `_run_one_turn_for_test` as an explicit test-only driver.**
 
 In `ComposerServiceImpl`, add a narrow helper used only by tests:
 
@@ -144,7 +144,7 @@ def _run_one_turn_for_test(
 
 Define `ComposeLoopTestResult` in the test module or as a private service-side dataclass if the service helper needs a structured return. It must expose only the fields the plan snippets assert: `assistant_message`, `tool_outcomes`, `persisted_assistant_row`, `persisted_assistant_tool_calls`, and `persisted_tool_row_content`. Do not make this helper a second implementation of the loop; it delegates into `_compose_loop` with a one-turn budget / fake LLM surface.
 
-- [ ] **Step 2: Define or cite every red-test fixture/helper before use.**
+- [x] **Step 2: Define or cite every red-test fixture/helper before use.**
 
 Add the following inventory to the named conftest files. If an existing fixture already exists under the cited path, reuse it and update only the docstring/contract if needed. If it does not exist, create it before any test that consumes it.
 
@@ -185,7 +185,7 @@ rg -n "def (build_test_sessions_service|composer_service_with_real_sessions|comp
 
 Expected: every name above resolves to a fixture/helper definition or an explicitly cited existing fixture. If any red-test fixture/helper cannot be classified, stop and surface it to the operator before committing.
 
-- [ ] **Step 3: Commit.**
+- [x] **Step 3: Commit.**
 
 ```bash
 git commit -am "test(composer): define phase-3 compose-loop test harness fixtures (composer-progress-persistence phase 3)"
@@ -200,7 +200,7 @@ The compose loop's per-iteration outcome record already exists at `src/elspeth/w
 **Files:**
 - Read-only: `src/elspeth/web/sessions/_persist_payload.py`
 
-- [ ] **Step 1: Confirm the field list matches §5.2.1's loop body.**
+- [x] **Step 1: Confirm the field list matches §5.2.1's loop body.**
 
 Required fields per spec §5.2.1: `call: Any`, `response: Any`, `error_class: str | None`, `error_message: str | None`, `pre_version: int`, `post_version: int`. Verify by reading `_ToolOutcome` directly in `_persist_payload.py`. The dataclass is `frozen=True, slots=True` with a `freeze_fields(self, "call", "response")` post-init guard.
 
@@ -208,9 +208,11 @@ If every field matches, this task is a verification-only no-op and is closed by 
 
 If a field is missing or has the wrong type, treat this as a Phase 1 hygiene defect: file a Filigree issue with reproducer steps, link from the PR, and add the missing field on this branch with a per-field test in `tests/unit/web/sessions/test_persist_payload.py` (extending the existing file). Do not add fields that §5.2.1 does not call for.
 
-- [ ] **Step 2: Commit (only if Step 1 added a field).**
+- [x] **Step 2: Commit (only if Step 1 added a field).**
 
 Commit message: `fix(sessions): add missing _ToolOutcome.<field> per spec §5.2.1 (composer-progress-persistence phase 3)`.
+
+Verification result: `_ToolOutcome` already exposes `call`, `response`, `error_class`, `error_message`, `pre_version`, and `post_version`; no payload change was required.
 
 ---
 
@@ -225,7 +227,7 @@ The §1.4 NFR caps tool calls per assistant turn at 16 (default), env-tunable. T
 - Modify: `src/elspeth/config.py` and the matching Settings→Runtime contract (see `config-contracts-guide` skill) for the env-tunable `MAX_TOOL_CALLS_PER_TURN`
 - Create: `tests/unit/web/composer/test_compose_loop_tool_call_cap.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 In `tests/unit/web/composer/test_compose_loop_tool_call_cap.py`:
 
@@ -305,7 +307,7 @@ Run the test:
 
 Expected: FAIL — `ComposerProgressEvent.Reason.tool_call_cap_exceeded` does not exist; `_max_tool_calls_per_turn` is not an attribute on the service; `tool_call_cap_exceeded_total` is not a field on `_SessionsTelemetry`.
 
-- [ ] **Step 2: Add the reason code + telemetry counter.**
+- [x] **Step 2: Add the reason code + telemetry counter.**
 
 In `src/elspeth/web/composer/protocol.py`, extend `ComposerProgressEvent.Reason` (or its current `Literal[...]` equivalent — verify against the file's current shape) with `"tool_call_cap_exceeded"`. Update `ComposerConvergenceError.capture` to accept the reason and `evidence: Mapping[str, Any]` extension carrying `observed` and `cap`.
 
@@ -327,7 +329,7 @@ tool_call_cap_exceeded_total=meter.create_counter(
 
 Update the `_SessionsTelemetry` docstring comment to drop the "Phase 3 (compose loop + audit-grade view) adds" forward-looking line, since this PR is delivering it.
 
-- [ ] **Step 3: Wire `_max_tool_calls_per_turn` into the composer service.**
+- [x] **Step 3: Wire `_max_tool_calls_per_turn` into the composer service.**
 
 Add `max_tool_calls_per_turn: int = 16` to `ComposerServiceImpl.__init__`, store as `self._max_tool_calls_per_turn`. Source the value from runtime config via the existing `from_settings(...)` mapping (see `config-contracts-guide` skill): add `MAX_TOOL_CALLS_PER_TURN: int = 16` to the Composer settings dataclass, route it through the contract, and confirm the `check_contracts` script passes:
 
@@ -335,7 +337,7 @@ Add `max_tool_calls_per_turn: int = 16` to `ComposerServiceImpl.__init__`, store
 .venv/bin/python -m scripts.check_contracts
 ```
 
-- [ ] **Step 4: Re-run the test to verify GREEN.**
+- [x] **Step 4: Re-run the test to verify GREEN.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_tool_call_cap.py -v
@@ -343,7 +345,7 @@ Add `max_tool_calls_per_turn: int = 16` to `ComposerServiceImpl.__init__`, store
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git add -p src/elspeth/web/composer/protocol.py \
@@ -364,11 +366,11 @@ Implement Step 0 of the §5.2.1 loop body inside `_compose_loop`. The check runs
 **Files:**
 - Modify: `src/elspeth/web/composer/service.py` (`_compose_loop` method body, after the LLM call returns)
 
-- [ ] **Step 1: Read the current `_compose_loop` body.**
+- [x] **Step 1: Read the current `_compose_loop` body.**
 
 Read `web/composer/service.py` at the `async def _compose_loop` definition. Identify where `assistant_message` becomes available after the LLM call and where the existing per-tool for-loop begins. Step 0 sits between them.
 
-- [ ] **Step 2: Insert the Step 0 check.**
+- [x] **Step 2: Insert the Step 0 check.**
 
 Immediately after `assistant_message` is bound and before any iteration over `assistant_message.tool_calls` begins, insert:
 
@@ -393,7 +395,7 @@ if len(assistant_message.tool_calls) > self._max_tool_calls_per_turn:
 
 Telemetry increments BEFORE the raise so the counter is incremented even if the exception path is later caught and re-raised differently by `_handle_convergence_error`.
 
-- [ ] **Step 3: Re-run Task 2's tests.**
+- [x] **Step 3: Re-run Task 2's tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_tool_call_cap.py -v
@@ -401,7 +403,7 @@ Telemetry increments BEFORE the raise so the counter is incremented even if the 
 
 Expected: PASS (this fully closes the cap-exceeded surface).
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 0 — enforce per-turn tool-call cap (composer-progress-persistence phase 3)"
@@ -422,7 +424,7 @@ The loop body must also track two load-bearing variables for Step 2:
 **Files:**
 - Modify: `src/elspeth/web/composer/service.py` (`_compose_loop` body)
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 Create `tests/unit/web/composer/test_compose_loop_persistence.py`:
 
@@ -528,7 +530,7 @@ def test_step1_plugin_bug_captures_crash_breaks_loop(
 
 Expected: FAIL — the loop currently drains to `BufferingRecorder`, not `_ToolOutcome[]`. The test hook `tool_outcomes_for_assertion` does not exist.
 
-- [ ] **Step 2: Refactor the per-tool for-loop body to accumulate `_ToolOutcome`.**
+- [x] **Step 2: Refactor the per-tool for-loop body to accumulate `_ToolOutcome`.**
 
 In `_compose_loop`, replace the current per-tool record/drain pattern with the §5.2.1 Step 1 shape:
 
@@ -614,7 +616,7 @@ for tool_call in assistant_message.tool_calls:
 
 Delete the now-orphaned `BufferingRecorder.add_message` calls within the loop body. The recorder remains in scope for non-tool events (LLM call telemetry, request-level audit), but `add_message` is no longer the path for per-tool persistence.
 
-- [ ] **Step 3: Re-run the Step 1 tests.**
+- [x] **Step 3: Re-run the Step 1 tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py -v -k "step1"
@@ -622,7 +624,7 @@ Delete the now-orphaned `BufferingRecorder.add_message` calls within the loop bo
 
 Expected: PASS for `test_step1_three_tools_all_succeed_accumulates_three_outcomes`, `test_step1_tool_argument_error_continues_loop`, and `test_step1_assertion_error_reraises_before_persist`. The plugin-bug test (`test_step1_plugin_bug_captures_crash_breaks_loop`) still fails because Step 2 isn't wired — it expects the audit row to exist, which only happens after Step 2 lands.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 1 — _ToolOutcome accumulation + crash capture (composer-progress-persistence phase 3)"
@@ -639,7 +641,7 @@ Build the redacted assistant `tool_calls` tuple and the `RedactedToolRow` tuple 
 **Files:**
 - Modify: `src/elspeth/web/composer/service.py` (`_compose_loop` body, after the Task 4 Step 1 block)
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 Append to `tests/unit/web/composer/test_compose_loop_persistence.py`:
 
@@ -695,7 +697,7 @@ def test_step2_redacts_response_with_summarizer(
 
 Expected (rev-3 update — Phase 2 is shipped on `RC5.2`): FAIL with `AssertionError` on `assert persisted == expected` (or similar wiring assertion). Phase 2 imports resolve cleanly; the red is the loop body not yet calling the walker. (Rev-1 said "ImportError until Phase 2 merges"; that expectation is superseded.)
 
-- [ ] **Step 2: Wire the redaction step in `_compose_loop`.**
+- [x] **Step 2: Wire the redaction step in `_compose_loop`.**
 
 After the Task 4 Step 1 for-loop, before the (Task 6) dispatch:
 
@@ -775,7 +777,7 @@ def _serialize_response_via_walker(
 
 Do not introduce a module-level `pre_state_id_for(...)` helper in Phase 3. It would be a premature abstraction whose only legal return value is `None`. The inline comment above is load-bearing: it documents that `None` is intentional and delegated to Phase 1's version-ordering lineage, not a missing predecessor lookup.
 
-- [ ] **Step 3: Re-run the Step 2 tests.**
+- [x] **Step 3: Re-run the Step 2 tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py -v -k "step2"
@@ -783,7 +785,7 @@ Do not introduce a module-level `pre_state_id_for(...)` helper in Phase 3. It wo
 
 Expected: PASS. (Phase 2 is shipped on `RC5.2`; rev-1's "PASS once Phase 2 is in" is superseded — see Dependency posture.)
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 2 — async-side manifest redaction (composer-progress-persistence phase 3)"
@@ -801,7 +803,7 @@ Replace route-layer persistence of compose-loop tool rows with a single sentinel
 - Modify: `src/elspeth/web/composer/audit.py` (`BufferingRecorder` docstring/comment updated: post-Phase-3 tool rows must not use this route-layer drain path; LLM/chat-turn audit buffers remain valid)
 - Modify: `src/elspeth/web/sessions/routes.py` (delete/guard compose/recompose `_persist_tool_invocations` call sites listed in Step 3; retain non-compose-loop guided call sites)
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 Append to `tests/unit/web/composer/test_compose_loop_persistence.py`:
 
@@ -869,7 +871,7 @@ def test_step2_does_not_call_legacy_add_message_inside_loop(
 
 Expected: FAIL — `persist_compose_turn_async` is not yet called from `_compose_loop`; the legacy `add_message` drain path is still present.
 
-- [ ] **Step 2: Capture `raw_content` before runtime preflight rewrites assistant content without fabricating empty strings.**
+- [x] **Step 2: Capture `raw_content` before runtime preflight rewrites assistant content without fabricating empty strings.**
 
 Spec §5.2.1 line 1489 sets `raw_content=raw_assistant_content`. The "raw" is the pre-redaction LLM output; existing routes already pass `raw_content=result.raw_assistant_content` to `add_message` at the route layer. Inside `_compose_loop`, the equivalent value must be captured **before** any runtime preflight rewrite mutates `assistant_message.content`.
 
@@ -884,7 +886,7 @@ raw_assistant_content = assistant_message.content
 
 Hold the variable through Step 1's await boundary so it is available at Step 2 dispatch time. The `chat_messages.content` column remains non-null, so `assistant_content=assistant_message.content or ""` is acceptable for the visible content column only. The audit-attribution field `raw_content` must receive `raw_assistant_content` unchanged (`None` stays `None`).
 
-- [ ] **Step 2b: Wire `SessionServiceProtocol` into `ComposerServiceImpl`.**
+- [x] **Step 2b: Wire `SessionServiceProtocol` into `ComposerServiceImpl`.**
 
 Because rev 5 chooses service-owned compose-turn persistence without a broad constructor-call-site migration, add a sentinel-default `sessions_service: SessionServiceProtocol | None = None` dependency and a first-use guard. Do **not** add a required keyword-only parameter; current tests and helper factories construct `ComposerServiceImpl(...)` in many non-persistence scenarios. Those are not legacy callers, and they should not fail at construction time.
 
@@ -939,7 +941,7 @@ rg -n "ComposerServiceImpl\\(" src tests
 
 The `ComposerServiceImpl(` sweep is not an instruction to edit every caller. Its acceptance criterion is that existing callers either (a) are production/app wiring and pass `sessions_service=...`, (b) are persistence-path tests and use a fixture that wires a real or protocol-faithful service, or (c) are constructor-only/non-persistence tests and rely on the sentinel default intentionally. If a caller cannot be classified into (a), (b), or (c), stop and surface it to the operator before committing. The protocol docstring sweep must be closed by editing `src/elspeth/web/composer/protocol.py` seam contract B text so it no longer claims the composer has no `SessionService` dependency.
 
-- [ ] **Step 2c: Make persisted assistant ids available to the route layer mechanically.**
+- [x] **Step 2c: Make persisted assistant ids available to the route layer mechanically.**
 
 Define a small immutable metadata type in a neutral contracts module, then thread it through the composer result/carrier surface. Do not define this type in `web/composer/protocol.py` and import it from `contracts.errors`; that would invert the dependency. The allowed shapes are either `src/elspeth/contracts/errors.py:FailedTurnMetadata` or `src/elspeth/contracts/audit.py:FailedTurnMetadata` imported by both `contracts.errors` and `web/composer/protocol.py`:
 
@@ -971,7 +973,7 @@ Add `failed_turn: FailedTurnMetadata | None = None` to route-visible `AuditInteg
 
 For plugin-crash and runtime-preflight carriers raised after the commit, attach this `failed_turn` object to the captured exception before raising it. For successful terminal results, set `ComposerResult.persisted_assistant_message_id=audit_outcome.assistant_id` and `persisted_tool_call_turn=True` when the turn included tool calls. Route code uses these fields as the concrete assistant-id source and to decide whether terminal `add_message("assistant", ...)` is still responsible for storing the final no-tool answer.
 
-- [ ] **Step 3: Replace the legacy persistence with the single dispatch and route cutover.**
+- [x] **Step 3: Replace the legacy persistence with the single dispatch and route cutover.**
 
 After Task 5's redaction step, insert:
 
@@ -1053,7 +1055,7 @@ grep -n "_persist_tool_invocations" src/elspeth/web/sessions/routes.py
 
 The service grep should show no compose-loop route-drain path. The routes grep should show only retained non-compose-loop/guided call sites or guarded branches whose comments explain why they are not duplicating rows already committed by `persist_compose_turn_async`.
 
-- [ ] **Step 4: Re-run the Step 2 tests.**
+- [x] **Step 4: Re-run the Step 2 tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_compose_loop_persistence.py -v
@@ -1061,7 +1063,7 @@ The service grep should show no compose-loop route-drain path. The routes grep s
 
 Expected: PASS for every Step 1 and Step 2 case including the plugin-crash test from Task 4 (now that the audit write runs before the raise).
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 2 — single sync dispatch via persist_compose_turn_async; delete legacy drain (composer-progress-persistence phase 3)"
@@ -1084,7 +1086,7 @@ The third historical `_AuditOutcome.tier1_violation` shape is removed (spec §5.
 - Modify: `tests/unit/web/composer/test_audit_failure_primacy.py` (exists at rev-3 baseline; extend in place)
 - Create or extend: `tests/integration/web/test_compose_loop_audit_integrity_route_stack.py` (end-to-end FastAPI route propagation)
 
-- [ ] **Step 1: Extend the failing red tests.**
+- [x] **Step 1: Extend the failing red tests.**
 
 Read the existing `tests/unit/web/composer/test_audit_failure_primacy.py` before editing. It already covers `persist_compose_turn` COMMIT-failure primacy with a dialect-level `do_commit` injection. Extend it for the compose-loop dispatch boundary; do not replace it with the older rev-2 draft.
 
@@ -1194,7 +1196,7 @@ def test_audit_integrity_error_from_sync_worker_returns_500_without_body_suppres
 
 Expected: FAIL — Step 3 dispatch logic not yet present.
 
-- [ ] **Step 2: Insert Step 3 dispatch.**
+- [x] **Step 2: Insert Step 3 dispatch.**
 
 After Task 6's `audit_outcome = await ...` line:
 
@@ -1231,7 +1233,7 @@ persisted_assistant_message_id = audit_outcome.assistant_id
 
 These asserts are intentional Tier-1 invariants, not defensive recovery. They guard future `AuditOutcome` shape changes from silently corrupting the loop and satisfy the plugin-crash branch check requested in rev-3 review. Do not replace them with a catch-and-continue branch.
 
-- [ ] **Step 3: Re-run the audit-failure-primacy tests.**
+- [x] **Step 3: Re-run the audit-failure-primacy tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/composer/test_audit_failure_primacy.py -v
@@ -1240,7 +1242,7 @@ These asserts are intentional Tier-1 invariants, not defensive recovery. They gu
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(composer): _compose_loop Step 3 — AuditOutcome dispatch + plugin-crash raise-after-audit (composer-progress-persistence phase 3)"
@@ -1258,7 +1260,7 @@ git commit -am "feat(composer): _compose_loop Step 3 — AuditOutcome dispatch +
 - Modify: `src/elspeth/web/sessions/service.py` (translate audit-access-log write failures to `AuditAccessLogWriteError`, increment the failure counter from Task 11)
 - Create: `tests/unit/web/test_composer_exception_handlers.py`
 
-- [ ] **Step 1: Write the failing route-handler tests.**
+- [x] **Step 1: Write the failing route-handler tests.**
 
 In `tests/unit/web/test_composer_exception_handlers.py`:
 
@@ -1346,7 +1348,7 @@ Run:
 
 Expected: FAIL — the handlers are not registered and audit-access-log write failure is not yet translated.
 
-- [ ] **Step 2: Register handlers in `create_app`.**
+- [x] **Step 2: Register handlers in `create_app`.**
 
 Add handlers with static, scrubbed bodies:
 
@@ -1403,7 +1405,7 @@ async def _audit_access_log_write_error_handler(request: Request, exc: AuditAcce
 
 Do not include `str(exc)`, SQL text, provider payloads, request-id fallback logic, or tool rows in these responses. `AuditIntegrityError.failed_turn is None` is a typed route-boundary state meaning the exception originated outside `_compose_loop`'s catch-and-annotate scope; it is not an attribute-absence fallback. Compose-loop-origin audit failures must populate `FailedTurnMetadata`; non-compose-loop audit failures get the typed degraded body above. Do not use `getattr`, `hasattr`, default dicts, or catch-and-fill behavior in the handler. Logging policy: route handlers may emit telemetry and class-name-only diagnostics for the audit subsystem failure, but must not log row-level content or tool payloads.
 
-- [ ] **Step 3: Re-run the handler tests.**
+- [x] **Step 3: Re-run the handler tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/test_composer_exception_handlers.py -v
@@ -1411,7 +1413,7 @@ Do not include `str(exc)`, SQL text, provider payloads, request-id fallback logi
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit.**
+- [x] **Step 4: Commit.**
 
 ```bash
 git commit -am "feat(web): add compose persistence exception handlers (composer-progress-persistence phase 3)"
@@ -1427,7 +1429,7 @@ Add `failed_turn` to the response body of `_handle_convergence_error`, `_handle_
 - Modify: `src/elspeth/web/sessions/routes.py` (three handler functions)
 - Create: `tests/integration/web/test_compose_loop_failed_turn_field.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 In `tests/integration/web/test_compose_loop_failed_turn_field.py`:
 
@@ -1501,7 +1503,7 @@ The fixtures above are names for the integration harness implementer to bind to 
 
 Expected: FAIL — none of the helpers emits `failed_turn` yet.
 
-- [ ] **Step 2: Add the field to each helper.**
+- [x] **Step 2: Add the field to each helper.**
 
 In each of `_handle_convergence_error`, `_handle_plugin_crash`, `_handle_runtime_preflight_failure`, after `partial_state` is computed and before `response_body` is returned:
 
@@ -1527,11 +1529,11 @@ response_body["failed_turn"] = {
 
 Task 9 below adds `count_tool_responses_for_assistant_async`; this task wires the call site.
 
-- [ ] **Step 3: Re-run the test (after Task 9 lands the helper).**
+- [x] **Step 3: Re-run the test (after Task 9 lands the helper).**
 
 Expected: PASS once Task 9 is in.
 
-- [ ] **Step 4: Commit (combined with Task 9's helper).**
+- [x] **Step 4: Commit (combined with Task 9's helper).**
 
 This task's commit is paired with Task 9 because the route-layer wiring is meaningless without the helper. See Task 9 Step 5.
 
@@ -1546,7 +1548,7 @@ This task's commit is paired with Task 9 because the route-layer wiring is meani
 - Modify: `src/elspeth/web/sessions/protocol.py` (add the async method to `SessionServiceProtocol`)
 - Create: `tests/unit/web/sessions/test_count_tool_responses_for_assistant.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 ```python
 """count_tool_responses_for_assistant — read helper used by the route
@@ -1608,7 +1610,7 @@ async def test_async_dispatcher_runs_in_worker_thread(sessions_service, persiste
 
 Expected: FAIL — method does not exist.
 
-- [ ] **Step 2: Add the sync helper.**
+- [x] **Step 2: Add the sync helper.**
 
 In `src/elspeth/web/sessions/service.py`, after the existing read helpers:
 
@@ -1644,7 +1646,7 @@ def count_tool_responses_for_assistant(
     return int(result)
 ```
 
-- [ ] **Step 3: Add the async dispatcher.**
+- [x] **Step 3: Add the async dispatcher.**
 
 In `src/elspeth/web/sessions/service.py`:
 
@@ -1664,7 +1666,7 @@ async def count_tool_responses_for_assistant_async(
 
 In `src/elspeth/web/sessions/protocol.py`, add the method to `SessionServiceProtocol` so the route layer types it via the protocol, not the concrete class.
 
-- [ ] **Step 4: Re-run Task 8 + Task 9 tests.**
+- [x] **Step 4: Re-run Task 8 + Task 9 tests.**
 
 ```bash
 .venv/bin/python -m pytest \
@@ -1674,7 +1676,7 @@ In `src/elspeth/web/sessions/protocol.py`, add the method to `SessionServiceProt
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit (paired with Task 8's wiring).**
+- [x] **Step 5: Commit (paired with Task 8's wiring).**
 
 ```bash
 git commit -am "feat(sessions): count_tool_responses_for_assistant + failed_turn response field (composer-progress-persistence phase 3)"
@@ -1691,7 +1693,7 @@ Extend the existing messages endpoint with the new query parameter and the new r
 - Modify: `src/elspeth/web/sessions/schemas.py` (message response model — add `tool_call_id`, `parent_assistant_id`, `sequence_no`)
 - Create: `tests/unit/web/sessions/test_messages_route_include_tool_rows.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 ```python
 """GET /api/sessions/{sid}/messages — include_tool_rows query parameter
@@ -1748,7 +1750,7 @@ def test_response_rows_expose_new_columns(
 
 Expected: FAIL.
 
-- [ ] **Step 2: Extend the response schema.**
+- [x] **Step 2: Extend the response schema.**
 
 In `src/elspeth/web/sessions/schemas.py`, the existing message response model gains three optional fields:
 
@@ -1760,7 +1762,7 @@ class MessageResponse(BaseModel):
     sequence_no: int  # NOT None — every row has one
 ```
 
-- [ ] **Step 3: Extend the endpoint.**
+- [x] **Step 3: Extend the endpoint.**
 
 ```python
 @router.get("/api/sessions/{session_id}/messages")
@@ -1791,7 +1793,7 @@ async def list_messages(
 
 `SessionServiceImpl.list_messages` already exists for the default case — extend it to accept `include_tool_rows: bool` and conditionally widen the role filter. Default ordering is `(sequence_no ASC)` per spec §6.2.
 
-- [ ] **Step 4: Re-run the test.**
+- [x] **Step 4: Re-run the test.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/sessions/test_messages_route_include_tool_rows.py -v
@@ -1799,7 +1801,7 @@ async def list_messages(
 
 Expected: PASS for the three default-vs-true tests. The audit-grade-view assertion belongs to Task 11.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git commit -am "feat(sessions): include_tool_rows query parameter on messages endpoint (composer-progress-persistence phase 3)"
@@ -1818,7 +1820,7 @@ When `include_tool_rows=true`, emit an `audit_access_log` row (writer_principal=
 - Modify: `src/elspeth/web/sessions/routes.py` (the messages endpoint emits the row before returning when `include_tool_rows=true`)
 - Create: `tests/unit/web/sessions/test_record_audit_grade_view.py`
 
-- [ ] **Step 1: Write the failing red test.**
+- [x] **Step 1: Write the failing red test.**
 
 ```python
 """record_audit_grade_view — write-helper for the audit_access_log
@@ -1923,7 +1925,7 @@ def test_endpoint_fails_closed_when_audit_access_log_write_fails(
 
 Expected: FAIL.
 
-- [ ] **Step 2: Add the counter to `_SessionsTelemetry`.**
+- [x] **Step 2: Add the counter to `_SessionsTelemetry`.**
 
 In `src/elspeth/web/sessions/telemetry.py`, extend the dataclass and the build function:
 
@@ -1942,7 +1944,7 @@ audit_access_log_write_failed_total=meter.create_counter(
 
 Update the `_SessionsTelemetry` docstring to drop the "Phase 3 (compose loop + audit-grade view) adds ... `audit_grade_view_total`" forward-looking line.
 
-- [ ] **Step 3: Add `record_audit_grade_view` to SessionsService.**
+- [x] **Step 3: Add `record_audit_grade_view` to SessionsService.**
 
 ```python
 def record_audit_grade_view(
@@ -2003,7 +2005,7 @@ async def record_audit_grade_view_async(
 
 Wrap only the database write in a narrow `except SQLAlchemyError as exc:` block that increments `audit_access_log_write_failed_total` and raises `AuditAccessLogWriteError from exc`. This is a route-boundary translation, not defensive recovery: the request still fails closed and returns no transcript rows. Add `record_audit_grade_view_async` to `SessionServiceProtocol` so the route layer types via the protocol.
 
-- [ ] **Step 4: Wire the emission into the messages endpoint.**
+- [x] **Step 4: Wire the emission into the messages endpoint.**
 
 In the `list_messages` route handler from Task 10, at the marked insertion point:
 
@@ -2025,7 +2027,7 @@ if include_tool_rows:
 
 No broad `except Exception: pass` is permitted around this call. The fail-closed test above must fail if an implementer swallows the write failure and returns rows anyway.
 
-- [ ] **Step 5: Re-run the tests.**
+- [x] **Step 5: Re-run the tests.**
 
 ```bash
 .venv/bin/python -m pytest tests/unit/web/sessions/test_record_audit_grade_view.py -v
@@ -2033,7 +2035,7 @@ No broad `except Exception: pass` is permitted around this call. The fail-closed
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```bash
 git commit -am "feat(sessions): record_audit_grade_view + audit-grade access logging (composer-progress-persistence phase 3)"
@@ -2049,7 +2051,7 @@ This task closes the §11 done-when checklist by ensuring every CL-PP-* scenario
 
 These scenarios exist in the characterization test surface (some in skeletal pre-Phase-3 form). They each need updating to assert the new `failed_turn` field on the response body and the new per-row columns on transcript responses.
 
-- [ ] **Step 1: Audit `tests/integration/pipeline/test_composer_llm_eval_characterization.py` for existing CL-PP-1..8 cases.**
+- [x] **Step 1: Audit `tests/integration/pipeline/test_composer_llm_eval_characterization.py` for existing CL-PP-1..8 cases.**
 
 ```bash
 grep -n "CL-PP-1\|CL-PP-2\|CL-PP-3\|CL-PP-4a\|CL-PP-4b\|CL-PP-4c\|CL-PP-4d\|CL-PP-5\|CL-PP-6\|CL-PP-7\|CL-PP-8" tests/integration/pipeline/test_composer_llm_eval_characterization.py
@@ -2061,11 +2063,11 @@ For each existing case:
 - If the case predates the `composition_states.provenance` discriminator, add the discriminator check.
 - If the case is missing (CL-PP-4d, e.g.), author it new.
 
-- [ ] **Step 2: Each case follows the same TDD cycle.**
+- [x] **Step 2: Each case follows the same TDD cycle.**
 
 Run the case → confirm RED on the new assertions → update the implementation only if a defect surfaces (the loop should now pass) → confirm GREEN.
 
-- [ ] **Step 3: Mechanical assertion-churn gate before any CL-PP commit.**
+- [x] **Step 3: Mechanical assertion-churn gate before any CL-PP commit.**
 
 Before committing any CL-PP-* re-baseline, dump the tests diff and categorize every modified assertion:
 
@@ -2081,7 +2083,9 @@ Write a one-paragraph note in the implementation log with three buckets:
 
 If the `other` bucket is non-empty, stop and surface it to the operator before committing. This is the procedural gate against assertion-churn laundering: the CL-PP re-baseline may update expected shapes and counters, but it must not quietly weaken unrelated behavior.
 
-- [ ] **Step 4: Commit (one commit per scenario or per coherent batch).**
+Implementation log (2026-05-14): the CL-PP-1..8 grep found no labelled cases in `test_composer_llm_eval_characterization.py`; the live Phase 3 surface instead exposed one characterization harness failure where the composition-budget replay reached `_compose_loop` persistence without a wired `SessionServiceProtocol`. The fix wires a real `SessionServiceImpl` with `create_session_engine(..., StaticPool)` and `initialize_session_schema()` for that replay. Assertion-churn buckets from `git diff -- tests/`: `shape-now-correct` = none; `counter-now-correct` = none; `other` = none (no assertions changed, only real-DB harness wiring).
+
+- [x] **Step 4: Commit (one commit per scenario or per coherent batch).**
 
 ```bash
 git commit -am "test(integration): CL-PP-{N} extends failed_turn assertions (composer-progress-persistence phase 3)"
@@ -2089,25 +2093,25 @@ git commit -am "test(integration): CL-PP-{N} extends failed_turn assertions (com
 
 ### Task 12b: Author CL-PP-9, 10a, 10b, 12, 13
 
-- [ ] **CL-PP-9: Mixed redaction policy (§8.2 line 2583).** A tool whose argument model has both `Sensitive[T]`-annotated and non-sensitive fields. Drive a turn that exercises both. Assert sensitive fields persist as sentinel/summarizer output; non-sensitive fields are byte-identical; structural shape preserved.
+- [x] **CL-PP-9: Mixed redaction policy (§8.2 line 2583).** A tool whose argument model has both `Sensitive[T]`-annotated and non-sensitive fields. Drive a turn that exercises both. Assert sensitive fields persist as sentinel/summarizer output; non-sensitive fields are byte-identical; structural shape preserved.
 
-- [ ] **CL-PP-10a: INSERT succeeded, COMMIT failed (no plugin crash).** Inject `OperationalError` on COMMIT via SQLAlchemy event hook. Assert `AuditIntegrityError` raised (chained from the injected error); `composer.audit.tool_row_tier1_violation_total` increments; caller propagates; no rows visible (transaction rolled back).
+- [x] **CL-PP-10a: INSERT succeeded, COMMIT failed (no plugin crash).** Inject `OperationalError` on COMMIT via SQLAlchemy event hook. Assert `AuditIntegrityError` raised (chained from the injected error); `composer.audit.tool_row_tier1_violation_total` increments; caller propagates; no rows visible (transaction rolled back).
 
-- [ ] **CL-PP-10b: COMMIT failed (plugin crash in flight).** Same injection plus a `RuntimeError` from the second tool. Assert `AuditOutcome(assistant_id=None, unwind_audit_failed=True)`; `tool_row_persist_failed_during_unwind_total` increments; log entry emitted; caller raises the captured `ComposerPluginCrashError`.
+- [x] **CL-PP-10b: COMMIT failed (plugin crash in flight).** Same injection plus a `RuntimeError` from the second tool. Assert `AuditOutcome(assistant_id=None, unwind_audit_failed=True)`; `tool_row_persist_failed_during_unwind_total` increments; log entry emitted; caller raises the captured `ComposerPluginCrashError`.
 
-- [ ] **CL-PP-10c: `asyncio.CancelledError` during shielded sync dispatch.** Inject cancellation after `persist_compose_turn_async` has entered its shielded worker dispatch but before COMMIT returns. Assert cancellation does not interrupt the commit; assistant/tool rows are durable; after the shield completes the caller observes the cancellation according to the route contract. This closes spec §5.5 rows 5-8 at integration level.
+- [x] **CL-PP-10c: `asyncio.CancelledError` during shielded sync dispatch.** Inject cancellation after `persist_compose_turn_async` has entered its shielded worker dispatch but before COMMIT returns. Assert cancellation does not interrupt the commit; assistant/tool rows are durable; after the shield completes the caller observes the cancellation according to the route contract. This closes spec §5.5 rows 5-8 at integration level.
 
-- [ ] **CL-PP-10d: `asyncio.CancelledError` after COMMIT before response yield.** Inject cancellation after COMMIT succeeds and before the HTTP response is yielded. Assert the cancellation propagates to the client path without data loss; assistant/tool rows and composition-state rows remain queryable; no duplicate route-layer `_persist_tool_invocations` drain runs. This closes spec §5.5 rows 9-11 at integration level.
+- [x] **CL-PP-10d: `asyncio.CancelledError` after COMMIT before response yield.** Inject cancellation after COMMIT succeeds and before the HTTP response is yielded. Assert the cancellation propagates to the client path without data loss; assistant/tool rows and composition-state rows remain queryable; no duplicate route-layer `_persist_tool_invocations` drain runs. This closes spec §5.5 rows 9-11 at integration level.
 
-- [ ] **CL-PP-12: Tool-call cap exceeded.** LLM emits 17 tool calls; loop raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")` BEFORE any tool execution; no DB writes; `composer.tool_call_cap_exceeded_total` increments.
+- [x] **CL-PP-12: Tool-call cap exceeded.** LLM emits 17 tool calls; loop raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")` BEFORE any tool execution; no DB writes; `composer.tool_call_cap_exceeded_total` increments.
 
-- [ ] **CL-PP-13: Unknown response key fail-closed (§8.2 line 2627).** A declarative-manifest-entry tool returns a response containing a key not in `known_response_keys`. Assert the value is replaced with the fixed sentinel `<redacted-unknown-response-key>` (rev-5 form; no length disclosure); `composer.redaction.unknown_response_key_total` increments. The tool call completes successfully.
+- [x] **CL-PP-13: Unknown response key fail-closed (§8.2 line 2627).** A declarative-manifest-entry tool returns a response containing a key not in `known_response_keys`. Assert the value is replaced with the fixed sentinel `<redacted-unknown-response-key>` (rev-5 form; no length disclosure); `composer.redaction.unknown_response_key_total` increments. The tool call completes successfully.
 
 Each case follows: RED test → run → GREEN. Commit per case.
 
 ### Task 12c: Property test extension + schema-level backward-direction test
 
-- [ ] **Step 1: Author the strategy contracts at `tests/property/web/composer/strategies.py`.**
+- [x] **Step 1: Author the strategy contracts at `tests/property/web/composer/strategies.py`.**
 
 Strategies per spec §8.3.1: `st_tool_call`, `st_argument_dict`, `st_redaction_policy`, `st_failure_injection_point` (with `audit_raises_OperationalError_on_commit`, `advisory_lock_unavailable`, `tool_call_cap_exceeded`, `unknown_response_key` arms), `st_cancellation_arrival_time`, `st_session_state`. Use Hypothesis `@example(...)` decorators to guarantee every cancellation/failure branch is reached (closes spec QA F-6). The strategies file's docstring contains a mapping table from §5.5 row numbers to strategy values so future drift is detectable.
 
@@ -2221,11 +2225,11 @@ def test_compose_loop_audit_machine(cancellation_arrival_time: str) -> None:
 
 If Hypothesis's `RuleBasedStateMachine.TestCase()` shape does not permit passing the forced example cleanly in the current Hypothesis version, implement a small `drive_single_example_trace(cancellation_arrival_time=...)` helper and use the same invariant helpers after the trace. The invariant helpers must be real code in the committed test file, and every cancellation enum above must be mechanically injectable.
 
-- [ ] **Step 2: Author the stateful machine at `tests/property/web/composer/test_compose_loop_invariants.py`.**
+- [x] **Step 2: Author the stateful machine at `tests/property/web/composer/test_compose_loop_invariants.py`.**
 
 Uses Hypothesis's `RuleBasedStateMachine`. After each trace, the machine asserts the §8.3.2 post-conditions: forward-direction, backward-direction (via the schema-level SQL predicate), ordering & uniqueness, redaction, cancellation-specific, audit-failure primacy, OTel counter post-conditions.
 
-- [ ] **Step 3: Author the schema-level integration test at `tests/integration/web/test_inv_audit_ahead_backward.py`.**
+- [x] **Step 3: Author the schema-level integration test at `tests/integration/web/test_inv_audit_ahead_backward.py`.**
 
 ```python
 """INV-AUDIT-AHEAD bidirectional schema-level test (spec §4.1.2 /
@@ -2251,7 +2255,7 @@ def test_no_state_row_without_tool_row(populated_audit_db):
 
 The fixture `populated_audit_db` exercises the compose loop end-to-end with mixed tool successes/failures/cancellations so the predicate has meaningful surface to evaluate.
 
-- [ ] **Step 4: Run the full property + integration surface.**
+- [x] **Step 4: Run the full property + integration surface.**
 
 ```bash
 .venv/bin/python -m pytest tests/property/web/composer/ tests/integration/web/test_inv_audit_ahead_backward.py -v
@@ -2259,7 +2263,7 @@ The fixture `populated_audit_db` exercises the compose loop end-to-end with mixe
 
 Expected: PASS. The property test runs the §8.3.2 OTel-counter post-conditions across the campaign.
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```bash
 git commit -am "test(integration): CL-PP-9/10/12/13 + property + schema-level backward-direction (composer-progress-persistence phase 3)"
@@ -2278,7 +2282,7 @@ Overview done-when item 5: "before Phase 3 ships the Tier-1 audit counters have 
 - Modify or create: alert config and dashboard config — exact files depend on existing infra
 - Create: `docs/runbooks/audit-tier1-violation.md`
 
-- [ ] **Step 1: Survey existing alert/dashboard infra.**
+- [x] **Step 1: Survey existing alert/dashboard infra.**
 
 ```bash
 find config infra -type f \( -name '*.yml' -o -name '*.yaml' -o -name '*.json' \) 2>/dev/null \
@@ -2295,7 +2299,7 @@ If existing infra is found, append the new alert routes + dashboard panel + runb
 
 The overview done-when requires that the artifacts exist before Phase 3 **ships** (production deploy). The runbook exists in this PR; only alert/dashboard wiring may be ticketed if the repository has no place to land it.
 
-- [ ] **Step 2: Commit (or comment in PR if scoped to tickets).**
+- [x] **Step 2: Commit (or comment in PR if scoped to tickets).**
 
 ```bash
 git commit -am "ops(audit): alert routes / dashboard / runbook entries for Tier-1 audit counters (composer-progress-persistence phase 3)"
@@ -2312,29 +2316,29 @@ The overview at `docs/superpowers/plans/2026-04-30-composer-progress-persistence
 **Files:**
 - Modify: `docs/superpowers/plans/2026-04-30-composer-progress-persistence-overview.md`
 
-- [ ] **Step 1: Update the spec-revision pointer.**
+- [x] **Step 1: Update the spec-revision pointer.**
 
 Line 5: "revision 4, 2481 lines" → "revision 5, 3608 lines (manifest-keyed redaction)".
 
-- [ ] **Step 2: Update the architecture summary.**
+- [x] **Step 2: Update the architecture summary.**
 
 Line 9: "Phase 2 adds the type-driven redaction primitive (`Sensitive[T]`) plus the legacy declarative escape valve" → "Phase 2 adds the manifest-keyed redaction primitive (`ToolRedaction` dataclass + module-level `MANIFEST`), promotes ~6–8 sensitive-touching tools to type-driven `argument_model` entries via `Sensitive[T]` annotations, and retains the declarative `ToolRedactionPolicy` shape for the remaining ~29–31 tools.".
 
-- [ ] **Step 3: Update the Phase 2 row in the phase plans table.**
+- [x] **Step 3: Update the Phase 2 row in the phase plans table.**
 
 Line 20: rewrite to "`ToolRedaction` manifest dataclass, module-level `MANIFEST` keyed by tool name, `Sensitive[T]` promotion wave for ~6–8 tools, declarative `ToolRedactionPolicy` + `HandlesNoSensitiveDataReason` for the remaining ~29–31 tools, shared traversal iterator, `RedactionTelemetry` Protocol, four-assertion adequacy guard, broadened policy-hash snapshot, label-gate CI step.".
 
-- [ ] **Step 4: Update the Phase 3 row.**
+- [x] **Step 4: Update the Phase 3 row.**
 
 Line 21: keep largely as-is; the existing description is rev-5-correct (compose-loop integration, tool-call cap, failed_turn, include_tool_rows). No edit required — confirm and move on.
 
-- [ ] **Step 5: Update the cross-phase dependencies.**
+- [x] **Step 5: Update the cross-phase dependencies.**
 
 Line 27: "Phase 3 depends on Phase 2's redaction primitives (the compose loop uses `redact_tool_call` and `lookup_tool_class`)." → "Phase 3 depends on Phase 2's redaction primitives (the compose loop uses `redact_tool_call_arguments`, `redact_tool_call_response`, and the module-level `MANIFEST`; the rev-4 `lookup_tool_class` helper is removed per rev-5 §5.7.5).".
 
 Line 29: drop the rev-4 supersession-list bullets that referred to fictional rev-4 symbols (`_StatePayload.version`, etc.); they're already handled in the spec body and the Phase 1A/1B/1C plans.
 
-- [ ] **Step 6: Commit outside the engineering PR.**
+- [x] **Step 6: Commit outside the engineering PR.**
 
 ```bash
 git commit -am "docs(plan): overview reflects rev-5 manifest-keyed framing + Phase 3 plan landing (composer-progress-persistence phase 3)"
@@ -2346,7 +2350,7 @@ git commit -am "docs(plan): overview reflects rev-5 manifest-keyed framing + Pha
 
 Spec §10 OQ-3 and §11 cross-phase considerations: file a Filigree ticket for the integrity-hash chain (mechanism sketched in spec §10), cite the ID in the Phase 3 PR description. The integrity-hash chain is out of scope for Phase 3 itself. This is a session-end tracking action, not an implementation task; do it after code gates are green and before the operator PR-open summary.
 
-- [ ] **Step 1: File the ticket.**
+- [x] **Step 1: File the ticket.**
 
 ```bash
 filigree create "chat_messages integrity-hash chain — composer-progress-persistence OQ-3" \
@@ -2356,7 +2360,7 @@ filigree create "chat_messages integrity-hash chain — composer-progress-persis
 
 The ticket body should reference spec §10 OQ-3 and §11; include a short summary of the mechanism (per-row hash chain seeded by the previous row's hash, anchored at the session row).
 
-- [ ] **Step 2: Capture the ticket ID for the PR description.**
+- [x] **Step 2: Capture the ticket ID for the PR description.**
 
 ```bash
 filigree show <new-ticket-id>
@@ -2364,13 +2368,15 @@ filigree show <new-ticket-id>
 
 Cite the ticket ID in the Phase 3 PR description under the "Filed follow-ups" section.
 
-- [ ] **Step 3: No commit (Filigree state is outside the repo).**
+- [x] **Step 3: No commit (Filigree state is outside the repo).**
+
+Filed follow-up: `elspeth-dbeb1fbbe9`.
 
 ---
 
 ## Task 16: Final Phase 3 CI run + PR
 
-- [ ] **Step 1: Run the full Phase 3 test surface.**
+- [x] **Step 1: Run the full Phase 3 test surface.**
 
 ```bash
 .venv/bin/python -m pytest \
@@ -2389,7 +2395,9 @@ Cite the ticket ID in the Phase 3 PR description under the "Filed follow-ups" se
 
 Expected: PASS for all. CL-PP-11 (commit `eca88974`) runs only on the Docker-enabled CI lane via the `testcontainer` marker.
 
-- [ ] **Step 2: Run static-analysis gates.**
+Verification run on this branch: the plan's `tests/integration/web/test_compose_loop_failed_turn_field.py` path no longer exists, so the live equivalent used `tests/unit/web/sessions/test_failed_turn_handlers.py` and `tests/unit/web/test_composer_exception_handlers.py` alongside the other listed paths. Result: 74 passed.
+
+- [x] **Step 2: Run static-analysis gates.**
 
 ```bash
 .venv/bin/python -m mypy src/
@@ -2401,7 +2409,9 @@ Expected: PASS for all. CL-PP-11 (commit `eca88974`) runs only on the Docker-ena
 
 Expected: all green.
 
-- [ ] **Step 3: Verify counter post-conditions match the §1.4 SLO claims.**
+Verification run on this branch: mypy, ruff, `scripts.check_contracts`, tier-model enforcement, and freeze-guard enforcement all passed. The freeze-guard command requires the current `--root src/elspeth --allowlist config/cicd/enforce_freeze_guards` arguments.
+
+- [x] **Step 3: Verify counter post-conditions match the §1.4 SLO claims.**
 
 ```bash
 .venv/bin/python -m pytest tests/property/web/composer/ -v -k "otel_counter_postconditions"
@@ -2409,7 +2419,7 @@ Expected: all green.
 
 Expected: PASS. `composer.audit.tool_row_tier1_violation_total == 0` across the property-test campaign (the counter only increments when the test explicitly injects a Tier-1 fault and asserts the increment).
 
-- [ ] **Step 4: Re-run signature-change sweeps before final PR summary.**
+- [x] **Step 4: Re-run signature-change sweeps before final PR summary.**
 
 ```bash
 rg -n "ComposerServiceImpl\\(" src tests
@@ -2424,7 +2434,7 @@ rg -n "_run_one_turn_for_test" src tests
 
 Expected: no required-constructor-parameter fallout remains, every red-test fixture/helper resolves to a definition, `_run_one_turn_for_test` is defined before use, and there is no defensive `getattr`/`hasattr` for `AuditIntegrityError.failed_turn`. Any remaining `ComposerServiceImpl(` callers without `sessions_service=` are constructor-only/non-persistence callers covered by the sentinel default, or tests that deliberately assert `RuntimeError("sessions_service not wired")` at first persistence use. The seam-contract grep returns no stale "does not depend" wording after Task 6.
 
-- [ ] **Step 5: Surface to operator for PR-open decision. Do NOT run `gh pr create`.**
+- [x] **Step 5: Surface to operator for PR-open decision. Do NOT run `gh pr create`.**
 
 Per Phase 2 rev-5 BLOCKER B4 closure pattern (per `docs/superpowers/plans/2026-04-30-composer-progress-persistence-phase-2-redaction.md` "Phase 2 done-when removes PR-open from scope; plan rewrite ends at 'gate green; await operator PR-open instruction'"), and per project memory `feedback_default_to_worktree.md` (worktree-default policy revision 2026-05-11) and `project_phase2_plan_review_verdict.md`: Phase 3 implementation ends at "gate green; await operator PR-open instruction." The implementer captures the readiness state in the conversation and stops; the operator decides when (and whether) to open the PR. (Rev-1 of this plan ran `gh pr create` unconditionally here; that was a re-introduction of the Phase 2 rev-1 BLOCKER B4 pattern. Rev-2 removes it.)
 

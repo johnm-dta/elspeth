@@ -81,6 +81,17 @@ CompositionStateProvenance = Literal[
     "session_fork",
 ]
 
+AUDIT_GRADE_VIEW_WRITER_PRINCIPAL = "audit_grade_view"
+AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "include_tool_rows",
+        "include_llm_audit",
+        "include_raw_content",
+        "limit",
+        "offset",
+    }
+)
+
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
 CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES: frozenset[str] = frozenset(get_args(ChatMessageWriterPrincipal))
 COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(CompositionStateProvenance))
@@ -190,6 +201,7 @@ class ChatMessageRecord:
     content: str
     created_at: datetime
     writer_principal: ChatMessageWriterPrincipal
+    sequence_no: int | None = None
     raw_content: str | None = None
     tool_calls: Sequence[Mapping[str, Any]] | None = None
     composition_state_id: UUID | None = None
@@ -299,6 +311,28 @@ class CompositionStateRecord:
             non_none.append("composer_meta")
         if non_none:
             freeze_fields(self, *non_none)
+
+
+@dataclass(frozen=True, slots=True)
+class AuditAccessLogRecord:
+    """Represents a row from the audit_access_log table.
+
+    ``query_args`` is a privacy-gated, closed allowlist mapping captured
+    at the audit-grade messages route boundary. It may contain mutable
+    JSON structures after SQLAlchemy deserialisation, so freeze it.
+    """
+
+    id: str
+    timestamp: datetime
+    session_id: str
+    requesting_principal: str
+    request_path: str
+    query_args: Mapping[str, str]
+    ip_address: str | None
+    writer_principal: str
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "query_args")
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +468,15 @@ class StaleComposeStateError(RuntimeError):
     """
 
 
+class AuditAccessLogWriteError(RuntimeError):
+    """Audit-grade transcript access could not be recorded.
+
+    ``include_tool_rows=true`` exposes audit-grade transcript rows. If
+    that access cannot be written to ``audit_access_log`` first, callers
+    must fail closed and return no transcript rows.
+    """
+
+
 class ToolCallIDMismatchError(RuntimeError):
     """Assistant ``tool_calls`` and persisted tool rows disagreed on
     the set of tool-call IDs for one compose turn.
@@ -518,6 +561,27 @@ class SessionServiceProtocol(Protocol):
         limit: int | None = 100,
         offset: int = 0,
     ) -> list[ChatMessageRecord]: ...
+
+    async def count_tool_responses_for_assistant_async(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str | None,
+    ) -> int:
+        """Count persisted tool rows linked to an assistant message."""
+        ...
+
+    async def record_audit_grade_view_async(
+        self,
+        *,
+        session_id: str,
+        requesting_principal: str,
+        request_path: str,
+        query_args: Mapping[str, str],
+        ip_address: str | None,
+    ) -> None:
+        """Append one audit_access_log row before exposing tool rows."""
+        ...
 
     async def save_composition_state(
         self,

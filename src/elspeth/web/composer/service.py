@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
 
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
+    from elspeth.web.sessions.protocol import SessionServiceProtocol
 
 import structlog
 from opentelemetry import metrics
@@ -41,7 +42,7 @@ from elspeth.contracts.composer_llm_audit import (
     ComposerLLMCallStatus,
     ComposerLLMProviderCostSource,
 )
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.core.canonical import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
@@ -1129,11 +1130,14 @@ class ComposerServiceImpl:
         self,
         catalog: CatalogService,
         settings: ComposerSettings,
+        *,
+        sessions_service: SessionServiceProtocol | None = None,
         session_engine: Engine | None = None,
         secret_service: Any | None = None,
         runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
     ) -> None:
         self._catalog = catalog
+        self._sessions_service = sessions_service
         self._model = settings.composer_model
         self._max_composition_turns = settings.composer_max_composition_turns
         self._max_discovery_turns = settings.composer_max_discovery_turns
@@ -1145,6 +1149,13 @@ class ComposerServiceImpl:
         self._runtime_preflight_timeout_seconds = settings.composer_runtime_preflight_timeout_seconds
         self._runtime_preflight_coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
         self._availability = self._compute_availability()
+
+    def _require_sessions_service(self) -> SessionServiceProtocol:
+        """Return the wired sessions service or fail at the persistence boundary."""
+
+        if self._sessions_service is None:
+            raise RuntimeError("sessions_service not wired")
+        return self._sessions_service
 
     def get_availability(self) -> ComposerAvailability:
         """Return the boot-time composer availability snapshot."""
@@ -1829,8 +1840,15 @@ class ComposerServiceImpl:
         # additional iterations. NEVER catches plugin exceptions — only
         # configuration diagnostics.
         repair_turns_used = 0
+        persisted_assistant_message_id: str | None = None
+        persisted_tool_call_turn = False
+        failed_turn: FailedTurnMetadata | None = None
 
         while True:
+            # Phase 3 Step 1 captures the state id observed before the
+            # provider call. Step 2 passes this exact value to
+            # persist_compose_turn_async as expected_current_state_id.
+            current_state_id: str | None = None
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
                 llm_messages,
@@ -1841,6 +1859,25 @@ class ComposerServiceImpl:
                 recorder=recorder,
             )
             assistant_message = response.choices[0].message
+            raw_assistant_content = assistant_message.content
+            assistant_tool_calls = assistant_message.tool_calls or ()
+            if len(assistant_tool_calls) > self._max_tool_calls_per_turn:  # type: ignore[attr-defined]
+                telemetry = self._telemetry  # type: ignore[attr-defined]
+                if telemetry is not None:
+                    telemetry.tool_call_cap_exceeded_total.add(1)
+                raise ComposerConvergenceError.capture(
+                    max_turns=composition_turns_used + discovery_turns_used,
+                    budget_exhausted="composition",
+                    state=state,
+                    initial_version=initial_version,
+                    tool_invocations=recorder.invocations,
+                    llm_calls=recorder.llm_calls,
+                    reason="tool_call_cap_exceeded",
+                    evidence={
+                        "observed": len(assistant_tool_calls),
+                        "cap": self._max_tool_calls_per_turn,  # type: ignore[attr-defined]
+                    },
+                )
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
@@ -1900,7 +1937,12 @@ class ComposerServiceImpl:
                 # response can surface ``composer_meta.repair_turns_used``)
                 # — see web/sessions/routes.py::_state_data_from_composer_state
                 # call sites in the compose / recompose paths.
-                return replace(result, repair_turns_used=repair_turns_used)
+                return replace(
+                    result,
+                    repair_turns_used=repair_turns_used,
+                    persisted_assistant_message_id=persisted_assistant_message_id,
+                    persisted_tool_call_turn=persisted_tool_call_turn,
+                )
 
             await _emit_progress(
                 progress,
@@ -1935,9 +1977,44 @@ class ComposerServiceImpl:
             turn_has_mutation = False
             turn_has_discovery = False
             all_cache_hits = True
+            # Step 1 — execute tool calls in async land while accumulating
+            # immutable _ToolOutcome records. Step 2 performs audit writes
+            # from this list; cancellation before Step 2 leaves the DB
+            # unchanged for the current assistant response.
+            from elspeth.web.sessions._persist_payload import _ToolOutcome
+
+            tool_outcomes: list[_ToolOutcome] = []
+            plugin_crash: ComposerPluginCrashError | None = None
+            plugin_crash_cause: Exception | None = None
+            pre_state_id = current_state_id
+            self._phase3_last_expected_current_state_id = pre_state_id
+            decoded_args_by_call_id: dict[str, dict[str, Any]] = {}
 
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
+                pre_version = state.version
+
+                def _append_tool_outcome(
+                    *,
+                    response: Any,
+                    error_class: str | None,
+                    error_message: str | None,
+                    post_version: int,
+                    _tool_outcomes: list[_ToolOutcome] = tool_outcomes,
+                    _tool_call: Any = tool_call,
+                    _pre_version: int = pre_version,
+                ) -> None:
+                    _tool_outcomes.append(
+                        _ToolOutcome(
+                            call=_tool_call,
+                            response=response,
+                            error_class=error_class,
+                            error_message=error_message,
+                            pre_version=_pre_version,
+                            post_version=post_version,
+                        )
+                    )
+
                 try:
                     decoded_arguments = json.loads(tool_call.function.arguments)
                 except (json.JSONDecodeError, TypeError) as exc:
@@ -1967,6 +2044,12 @@ class ComposerServiceImpl:
                             error_message=type(exc).__name__,
                             error_payload=error_payload,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=type(exc).__name__,
+                        error_message=type(exc).__name__,
+                        post_version=state.version,
                     )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
@@ -2013,6 +2096,12 @@ class ComposerServiceImpl:
                             error_payload=error_payload,
                         )
                     )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=error_class,
+                        error_message=error_message,
+                        post_version=state.version,
+                    )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
@@ -2025,6 +2114,7 @@ class ComposerServiceImpl:
                     continue
 
                 arguments = cast(dict[str, Any], decoded_arguments)
+                decoded_args_by_call_id[tool_call.id] = arguments
 
                 # Open the audit envelope ONCE per dispatch — the cache,
                 # required-paths, ToolArgumentError, plugin-crash, and
@@ -2053,6 +2143,12 @@ class ComposerServiceImpl:
                             error_message=type(canonicalization_failed).__name__,
                             error_payload=error_payload,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=type(canonicalization_failed).__name__,
+                        error_message=type(canonicalization_failed).__name__,
+                        post_version=state.version,
                     )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
@@ -2099,6 +2195,12 @@ class ComposerServiceImpl:
                                 cache_hit=True,
                             )
                         )
+                        _append_tool_outcome(
+                            response=cached_result,
+                            error_class=None,
+                            error_message=None,
+                            post_version=state.version,
+                        )
                         # Cache hits are exclusively for discovery tools
                         # (`is_cacheable_discovery_tool` gates above). A
                         # discovery success is an *observation* — the model
@@ -2144,6 +2246,12 @@ class ComposerServiceImpl:
                             error_message=f"missing: {', '.join(missing)}",
                             error_payload=error_payload,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class="MissingRequiredPaths",
+                        error_message=f"missing: {', '.join(missing)}",
+                        post_version=state.version,
                     )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
@@ -2617,6 +2725,12 @@ class ComposerServiceImpl:
                         ),
                     )
                     arg_error_payload = _arg_error_payload(exc, tool_name)
+                    _append_tool_outcome(
+                        response=None,
+                        error_class="ToolArgumentError",
+                        error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
+                        post_version=state.version,
+                    )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
@@ -2669,6 +2783,10 @@ class ComposerServiceImpl:
                     # ``type(exc).__name__`` — no poisoned memory work.
                     # Closes blocker B2 from the panel review (2026-05-04).
                     raise
+                except AuditIntegrityError:
+                    # Tier-1 audit invariant. Do not let the plugin-bug
+                    # catch-all below launder it into ComposerPluginCrashError.
+                    raise
                 except Exception as tool_exc:
                     # Plugin-bug path: any exception class OTHER than
                     # ToolArgumentError escaping execute_tool() is a plugin
@@ -2708,13 +2826,21 @@ class ComposerServiceImpl:
                     # takes the recorder buffer (including the helper's
                     # final crash record) so the route handler's
                     # ``_handle_plugin_crash`` gets the complete sequence.
-                    raise ComposerPluginCrashError.capture(
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=type(tool_exc).__name__,
+                        error_message=str(tool_exc),
+                        post_version=state.version,
+                    )
+                    plugin_crash = ComposerPluginCrashError.capture(
                         tool_exc,
                         state=state,
                         initial_version=initial_version,
                         tool_invocations=recorder.invocations,
                         llm_calls=recorder.llm_calls,
-                    ) from tool_exc
+                    )
+                    plugin_crash_cause = tool_exc
+                    break
 
                 # SUCCESS path — the helper already recorded
                 # ComposerToolStatus.SUCCESS via finish_success (with the
@@ -2755,6 +2881,12 @@ class ComposerServiceImpl:
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                 result_json = _serialize_tool_result(result)
                 await _emit_progress(progress, _tool_completed_progress_event(tool_name, result.success))
+                _append_tool_outcome(
+                    response=result,
+                    error_class=None,
+                    error_message=None,
+                    post_version=state.version,
+                )
 
                 # Cache cacheable discovery results
                 if is_cacheable_discovery_tool(tool_name):
@@ -2773,6 +2905,114 @@ class ComposerServiceImpl:
                     turn_has_mutation = True
                 else:
                     turn_has_discovery = True
+
+            self._phase3_last_tool_outcomes = tuple(tool_outcomes)
+            # Step 2a — redact in async land. The walkers are pure and
+            # non-blocking; building this payload before the sync persistence
+            # dispatch keeps the eventual worker transaction narrow.
+            from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
+            from elspeth.web.sessions._persist_payload import RedactedToolRow
+
+            phase3_self = cast(Any, self)
+            redaction_telemetry = phase3_self._redaction_telemetry
+            redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...] = ()
+            for tool_outcome in tool_outcomes:
+                tc = tool_outcome.call
+                if tc.id in decoded_args_by_call_id:
+                    decoded_args = decoded_args_by_call_id[tc.id]
+                else:
+                    decoded_args = {"_raw_arguments": tc.function.arguments}
+                if tc.function.name in MANIFEST:
+                    persisted_arguments = redact_tool_call_arguments(
+                        tc.function.name,
+                        decoded_args,
+                        telemetry=redaction_telemetry,
+                    )
+                else:
+                    # Unknown tool names are Tier-3 LLM hallucinations handled
+                    # by execute_tool as a semantic failure ToolResult. The
+                    # manifest is intentionally closed, so do not call the
+                    # walker for names it cannot know about.
+                    persisted_arguments = decoded_args
+                redacted_assistant_tool_calls = (
+                    *redacted_assistant_tool_calls,
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": json.dumps(persisted_arguments),
+                        },
+                    },
+                )
+            redacted_tool_rows = tuple(
+                RedactedToolRow(
+                    tool_call_id=tool_outcome.call.id,
+                    content=phase3_self._serialize_response_via_walker(tool_outcome, telemetry=redaction_telemetry),
+                    composition_state_payload=(
+                        phase3_self._state_payload_for_compose_turn_for_test(tool_outcome.response)
+                        if tool_outcome.post_version > tool_outcome.pre_version
+                        else None
+                    ),
+                )
+                for tool_outcome in tool_outcomes
+            )
+            self._phase3_last_redacted_assistant_tool_calls = redacted_assistant_tool_calls
+            self._phase3_last_redacted_tool_rows = redacted_tool_rows
+            if session_id is not None:
+                sessions_service = self._require_sessions_service()
+                try:
+                    audit_outcome = await sessions_service.persist_compose_turn_async(
+                        session_id=session_id,
+                        assistant_content=assistant_message.content or "",
+                        raw_content=raw_assistant_content,
+                        redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+                        redacted_tool_rows=redacted_tool_rows,
+                        parent_composition_state_id=current_state_id,
+                        expected_current_state_id=current_state_id,
+                        writer_principal="compose_loop",
+                        plugin_crash_pending=plugin_crash is not None,
+                    )
+                except AuditIntegrityError as exc:
+                    exc.failed_turn = FailedTurnMetadata(
+                        assistant_message_id=None,
+                        tool_calls_attempted=len(assistant_tool_calls),
+                        tool_responses_persisted=0,
+                    )
+                    raise
+                self._phase3_last_audit_outcome = audit_outcome
+                failed_turn = FailedTurnMetadata(
+                    assistant_message_id=audit_outcome.assistant_id,
+                    tool_calls_attempted=len(assistant_tool_calls),
+                )
+                if audit_outcome.assistant_id is None and plugin_crash is None:
+                    raise AuditIntegrityError(
+                        "persist_compose_turn_async returned unwind_audit_failed without an in-flight plugin crash",
+                        failed_turn=failed_turn,
+                    )
+                if audit_outcome.assistant_id is None and not audit_outcome.unwind_audit_failed:
+                    raise AuditIntegrityError(
+                        "persist_compose_turn_async returned no assistant id without the unwind-audit-failed disposition",
+                        failed_turn=failed_turn,
+                    )
+                persisted_assistant_message_id = audit_outcome.assistant_id
+                persisted_tool_call_turn = True
+            if plugin_crash is not None:
+                if persisted_tool_call_turn:
+                    persisted_plugin_crash = ComposerPluginCrashError.capture(
+                        plugin_crash.original_exc,
+                        state=state,
+                        initial_version=initial_version,
+                        tool_invocations=(),
+                        llm_calls=recorder.llm_calls,
+                        failed_turn=failed_turn,
+                    )
+                    if plugin_crash_cause is None:
+                        raise persisted_plugin_crash
+                    raise persisted_plugin_crash from plugin_crash_cause
+                if plugin_crash_cause is None:
+                    raise plugin_crash
+                raise plugin_crash from plugin_crash_cause
 
             # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
             # same (tool_name, arguments_hash), the model has stopped reading
@@ -2837,7 +3077,7 @@ class ComposerServiceImpl:
                                 reason="composer_complete",
                             ),
                         )
-                        return await self._finalize_no_tool_response(
+                        result = await self._finalize_no_tool_response(
                             content=assistant_message.content or "",
                             state=state,
                             initial_version=initial_version,
@@ -2850,13 +3090,19 @@ class ComposerServiceImpl:
                             tool_invocations=recorder.invocations,
                             llm_calls=recorder.llm_calls,
                         )
+                        return replace(
+                            result,
+                            persisted_assistant_message_id=persisted_assistant_message_id,
+                            persisted_tool_call_turn=persisted_tool_call_turn,
+                        )
                     raise ComposerConvergenceError.capture(
                         max_turns=composition_turns_used + discovery_turns_used,
                         budget_exhausted="composition",
                         state=state,
                         initial_version=initial_version,
-                        tool_invocations=recorder.invocations,
+                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
                         llm_calls=recorder.llm_calls,
+                        failed_turn=failed_turn,
                     )
             elif turn_has_discovery:
                 discovery_turns_used += 1
@@ -2866,8 +3112,9 @@ class ComposerServiceImpl:
                         budget_exhausted="discovery",
                         state=state,
                         initial_version=initial_version,
-                        tool_invocations=recorder.invocations,
+                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
                         llm_calls=recorder.llm_calls,
+                        failed_turn=failed_turn,
                     )
             else:
                 # The only non-cache tool currently handled outside the
@@ -3820,3 +4067,181 @@ def _arg_error_payload(exc: ToolArgumentError, tool_name: str) -> Mapping[str, A
     if validation_errors is not None:
         payload["validation_errors"] = validation_errors
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 test-only compose-loop driver.
+#
+# Appended at end-of-file for the same reason as ``_arg_error_payload``:
+# inserting helper code above the existing composer implementation rotates
+# tier-model allowlist fingerprints for unrelated trust-boundary code.
+# Task 6 moves the sessions-service dependency into the constructor when the
+# production persistence path is wired; Task 0 only needs the explicit test
+# harness and first-use guard.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ComposeLoopTestResult:
+    """Structured result returned by the Phase 3 one-turn test driver."""
+
+    assistant_message: str
+    tool_outcomes: tuple[Any, ...] = ()
+    persisted_assistant_row: Any | None = None
+    persisted_assistant_tool_calls: tuple[Any, ...] = ()
+    persisted_tool_row_content: tuple[Any, ...] = ()
+
+    @property
+    def tool_outcomes_for_assertion(self) -> tuple[Any, ...]:
+        """Backward-compatible assertion surface named by the Phase 3 plan."""
+
+        return self.tool_outcomes
+
+
+async def _phase3_run_one_turn_for_test(
+    self: ComposerServiceImpl,
+    *,
+    llm: Any | None = None,
+    session_id: str | None = None,
+    initial_state: CompositionState | None = None,
+    user_message_id: str | None = None,
+) -> ComposeLoopTestResult:
+    """Drive exactly one compose-loop turn for Phase 3 tests.
+
+    Test-only helper: it bypasses HTTP route setup but exercises the
+    same ``_compose_loop`` body, including ``_require_sessions_service()``.
+    Missing ``sessions_service`` must therefore fail with
+    ``RuntimeError("sessions_service not wired")``, not ``AttributeError``
+    or a constructor ``TypeError``.
+    """
+
+    from elspeth.web.composer.state import PipelineMetadata
+
+    del user_message_id
+    self._require_sessions_service()
+    state = initial_state or CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    resolved_session_id = session_id or "00000000-0000-0000-0000-000000000000"
+    original_call_llm = self._call_llm
+
+    async def _call_fake_llm(messages: Any, tools: Any) -> Any:
+        if llm is None:
+            return await original_call_llm(messages, tools)
+        return await llm(messages, tools)
+
+    self._call_llm = _call_fake_llm  # type: ignore[method-assign]
+    try:
+        result = await self._compose_loop(
+            "Phase 3 one-turn test driver",
+            [],
+            state,
+            session_id=resolved_session_id,
+            deadline=asyncio.get_event_loop().time() + self._timeout_seconds,
+        )
+    finally:
+        self._call_llm = original_call_llm  # type: ignore[method-assign]
+
+    return ComposeLoopTestResult(
+        assistant_message=result.message,
+        tool_outcomes=tuple(self._phase3_last_tool_outcomes),
+        persisted_assistant_tool_calls=tuple(self._phase3_last_redacted_assistant_tool_calls),
+        persisted_tool_row_content=tuple(row.content for row in self._phase3_last_redacted_tool_rows),
+    )
+
+
+ComposerServiceImpl._run_one_turn_for_test = _phase3_run_one_turn_for_test  # type: ignore[attr-defined]
+
+
+def _phase3_serialize_response_via_walker(
+    self: ComposerServiceImpl,
+    outcome: Any,
+    *,
+    telemetry: Any,
+) -> str:
+    """Serialize one Step 1 outcome through the Phase 2 response walker."""
+
+    from elspeth.core.canonical import canonical_json
+    from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_response
+
+    if outcome.error_class is None:
+        result = cast(ToolResult, outcome.response)
+        if outcome.call.function.name not in MANIFEST:
+            return canonical_json(result.to_dict())
+        redacted = redact_tool_call_response(
+            tool_name=outcome.call.function.name,
+            response=result.to_dict(),
+            telemetry=telemetry,
+        )
+        return canonical_json(redacted)
+    return canonical_json(
+        {
+            "error_class": outcome.error_class,
+            "error_message": outcome.error_message,
+        }
+    )
+
+
+def _phase3_state_payload_for_compose_turn_for_test(
+    self: ComposerServiceImpl,
+    response: Any,
+) -> Any:
+    """Build a StatePayload for the current interim Step 2 redacted row."""
+
+    del self
+    from elspeth.web.sessions._persist_payload import StatePayload
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    result = cast(ToolResult, response)
+    state_d = result.updated_state.to_dict()
+    return StatePayload(
+        data=CompositionStateData(
+            source=state_d["source"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=result.validation.is_valid,
+            validation_errors=tuple(error.message for error in result.validation.errors),
+            composer_meta=None,
+        ),
+        # Phase 1 inserts composition state rows inside
+        # persist_compose_turn under the session write lock and re-derives
+        # lineage from per-session version ordering when this is None
+        # (spec §5.7.1). The async loop deliberately does not fabricate a
+        # predecessor id for a row that has not been allocated yet.
+        derived_from_state_id=None,
+    )
+
+
+ComposerServiceImpl._serialize_response_via_walker = _phase3_serialize_response_via_walker  # type: ignore[attr-defined]
+ComposerServiceImpl._state_payload_for_compose_turn_for_test = _phase3_state_payload_for_compose_turn_for_test  # type: ignore[attr-defined]
+
+_PHASE3_ORIGINAL_COMPOSER_INIT = ComposerServiceImpl.__init__
+
+
+def _phase3_composer_init(self: ComposerServiceImpl, *args: Any, **kwargs: Any) -> None:
+    """Store the Phase 3 per-turn tool-call cap without moving class code."""
+
+    _PHASE3_ORIGINAL_COMPOSER_INIT(self, *args, **kwargs)
+    from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
+
+    try:
+        self._max_tool_calls_per_turn = self._settings.composer_max_tool_calls_per_turn  # type: ignore[attr-defined]
+    except AttributeError:
+        self._max_tool_calls_per_turn = 16  # type: ignore[attr-defined]
+    self._telemetry = None  # type: ignore[attr-defined]
+    self._redaction_telemetry = OtelRedactionTelemetry()  # type: ignore[attr-defined]
+    self._phase3_last_tool_outcomes = ()
+    self._phase3_last_expected_current_state_id = None
+    self._phase3_last_redacted_assistant_tool_calls = ()
+    self._phase3_last_redacted_tool_rows = ()
+    self._phase3_last_audit_outcome = None  # type: ignore[assignment]
+
+
+ComposerServiceImpl.__init__ = _phase3_composer_init  # type: ignore[method-assign]

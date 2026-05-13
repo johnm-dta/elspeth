@@ -28,15 +28,20 @@ from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
+    audit_access_log_table,
     chat_messages_table,
     composition_states_table,
     runs_table,
     sessions_table,
 )
 from elspeth.web.sessions.protocol import (
+    AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
+    AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
     LEGAL_RUN_TRANSITIONS,
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
+    AuditAccessLogRecord,
+    AuditAccessLogWriteError,
     ChatMessageRecord,
     ChatMessageRole,
     ChatMessageWriterPrincipal,
@@ -1239,6 +1244,7 @@ class SessionServiceImpl:
         csid = str(composition_state_id) if composition_state_id else None
         pid = str(parent_assistant_id) if parent_assistant_id else None
         msg_id_holder: dict[str, str] = {}
+        sequence_holder: dict[str, int] = {}
 
         def _sync() -> None:
             with self._engine.begin() as conn:
@@ -1251,6 +1257,7 @@ class SessionServiceImpl:
                     )
                 with self._session_write_lock(conn, sid):
                     seq = self._reserve_sequence_range(conn, sid, count=1)
+                    sequence_holder["sequence_no"] = seq
                     msg_id_holder["id"] = self._insert_chat_message(
                         conn,
                         session_id=sid,
@@ -1283,6 +1290,7 @@ class SessionServiceImpl:
             raw_content=raw_content,
             tool_calls=tool_calls,
             created_at=now,
+            sequence_no=sequence_holder["sequence_no"],
             composition_state_id=composition_state_id,
             writer_principal=writer_principal,
             tool_call_id=tool_call_id,
@@ -1327,10 +1335,139 @@ class SessionServiceImpl:
                 raw_content=row.raw_content,
                 tool_calls=row.tool_calls,
                 created_at=self._ensure_utc(row.created_at),
+                sequence_no=row.sequence_no,
                 composition_state_id=UUID(row.composition_state_id) if row.composition_state_id else None,
                 writer_principal=row.writer_principal,
                 tool_call_id=row.tool_call_id,
                 parent_assistant_id=UUID(row.parent_assistant_id) if row.parent_assistant_id else None,
+            )
+            for row in rows
+        ]
+
+    def count_tool_responses_for_assistant(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str | None,
+    ) -> int:
+        """Count role='tool' rows linked to the given assistant message."""
+
+        if assistant_message_id is None:
+            return 0
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                select(func.count())
+                .select_from(chat_messages_table)
+                .where(chat_messages_table.c.session_id == session_id)
+                .where(chat_messages_table.c.parent_assistant_id == assistant_message_id)
+                .where(chat_messages_table.c.role == "tool")
+            ).scalar_one()
+        return int(result)
+
+    async def count_tool_responses_for_assistant_async(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str | None,
+    ) -> int:
+        """Async dispatcher for :meth:`count_tool_responses_for_assistant`."""
+
+        return cast(
+            int,
+            await self._run_sync(
+                self.count_tool_responses_for_assistant,
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+            ),
+        )
+
+    @staticmethod
+    def _validate_audit_grade_query_args(query_args: Mapping[str, str]) -> dict[str, str]:
+        """Return an owned dict after enforcing the privacy allowlist."""
+
+        unexpected = frozenset(query_args) - AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST
+        if unexpected:
+            raise ValueError(f"unallowlisted audit-grade query args: {sorted(unexpected)}")
+        return dict(query_args)
+
+    def record_audit_grade_view(
+        self,
+        *,
+        session_id: str,
+        requesting_principal: str,
+        request_path: str,
+        query_args: Mapping[str, str],
+        ip_address: str | None,
+    ) -> None:
+        """Append one row to ``audit_access_log`` before returning tool rows.
+
+        The writer principal is pinned to ``audit_grade_view``; admin-tool
+        writes use a separate path. The privacy posture is mechanical:
+        ``query_args`` must already be reduced to the closed allowlist in
+        ``AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST``, and ``ip_address`` is
+        either stored literally or omitted as ``None``.
+        """
+
+        allowed_query_args = self._validate_audit_grade_query_args(query_args)
+        now = self._now()
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    audit_access_log_table.insert().values(
+                        id=str(uuid.uuid4()),
+                        timestamp=now,
+                        session_id=session_id,
+                        requesting_principal=requesting_principal,
+                        request_path=request_path,
+                        query_args=allowed_query_args,
+                        ip_address=ip_address,
+                        writer_principal=AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
+                    )
+                )
+        except SQLAlchemyError as exc:
+            self._telemetry.audit_access_log_write_failed_total.add(1)
+            raise AuditAccessLogWriteError("audit_access_log write failed for audit-grade messages view") from exc
+        self._telemetry.audit_grade_view_total.add(1)
+
+    async def record_audit_grade_view_async(
+        self,
+        *,
+        session_id: str,
+        requesting_principal: str,
+        request_path: str,
+        query_args: Mapping[str, str],
+        ip_address: str | None,
+    ) -> None:
+        """Async dispatcher for :meth:`record_audit_grade_view`."""
+
+        await self._run_sync(
+            self.record_audit_grade_view,
+            session_id=session_id,
+            requesting_principal=requesting_principal,
+            request_path=request_path,
+            query_args=query_args,
+            ip_address=ip_address,
+        )
+
+    def list_audit_access_log(self, *, session_id: str) -> list[AuditAccessLogRecord]:
+        """Return audit-access log rows for tests and operator diagnostics."""
+
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(audit_access_log_table)
+                .where(audit_access_log_table.c.session_id == session_id)
+                .order_by(audit_access_log_table.c.timestamp)
+            ).fetchall()
+        return [
+            AuditAccessLogRecord(
+                id=row.id,
+                timestamp=self._ensure_utc(row.timestamp),
+                session_id=row.session_id,
+                requesting_principal=row.requesting_principal,
+                request_path=row.request_path,
+                query_args=row.query_args,
+                ip_address=row.ip_address,
+                writer_principal=row.writer_principal,
             )
             for row in rows
         ]
@@ -2305,6 +2442,7 @@ class SessionServiceImpl:
                 raw_content=d["raw_content"],
                 tool_calls=d["tool_calls"],
                 created_at=d["created_at"],
+                sequence_no=d["sequence_no"],
                 composition_state_id=UUID(d["composition_state_id"]) if d["composition_state_id"] else None,
                 writer_principal=d["writer_principal"],
                 tool_call_id=d["tool_call_id"],

@@ -63,6 +63,7 @@ type ComposerProgressReason = Literal[
     "convergence_composition_budget",
     "convergence_discovery_budget",
     "convergence_wall_clock_timeout",
+    "tool_call_cap_exceeded",
     # Provider-side failures — LiteLLM exception families.
     "provider_auth_failed",
     "provider_unavailable",

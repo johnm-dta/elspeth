@@ -21,7 +21,7 @@ import structlog
 
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.audit import emit_dropped_to_freeform
-from elspeth.web.composer.guided.chain_solver import solve_chain
+from elspeth.web.composer.guided.chain_solver import ChainSolverResponseShapeError, solve_chain
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -100,6 +100,12 @@ async def solve_chain_with_auto_drop(
     ``AttributeError``, and ``json.JSONDecodeError`` cover malformed-response
     shape from ``chain_solver._extract_tool_call`` (empty ``choices``,
     missing ``message``, invalid tool-call JSON).
+    ``ChainSolverResponseShapeError`` covers shape failures one layer deeper:
+    wrong tool name, wrong ``turn_type``, missing or malformed
+    ``payload.steps`` / ``payload.why``.  All such failures are
+    external-system (LLM) shape misbehaviour, not server bugs -- routing
+    them through the auto-drop path matches what the codebase already does
+    for sibling shape failures at the LiteLLM-response level.
 
     ``asyncio.CancelledError`` is deliberately NOT in the set — client
     disconnects must propagate, not be silently absorbed as a "drop".
@@ -111,6 +117,16 @@ async def solve_chain_with_auto_drop(
     diagnostic frames go to slog (which is operator-scoped, not
     Landscape-archived).
 
+    The ``recorder`` is forwarded into ``solve_chain`` so each LLM invocation
+    records exactly one :class:`ComposerLLMCall` row regardless of outcome
+    (success, transient failure absorbed by this wrapper, or escaping
+    exception). The wrapper's own audit emission (``guided_dropped_to_freeform``
+    on the transient-failure branch) lives on the :class:`ComposerToolInvocation`
+    channel — a separate audit primitive from the LLM-call row. Both channels
+    must drain into persistence at the route handler exit; that drain currently
+    fires ``_persist_tool_invocations`` AND ``_persist_llm_calls`` in the
+    guided dispatch ``finally`` blocks.
+
     Args:
         site: Stable identifier for the call site, used in the slog event
             (e.g. ``"step_2_sink_initial_solve"``). Required for triage so
@@ -118,6 +134,10 @@ async def solve_chain_with_auto_drop(
         composition_version: ``state.version`` at the dispatch site; passed
             verbatim into ``emit_dropped_to_freeform`` so the audit row
             stamps the version the operator was working against.
+        recorder: Receives both the :class:`ComposerLLMCall` from
+            ``solve_chain`` (one per invocation) and the
+            ``guided_dropped_to_freeform`` :class:`ComposerToolInvocation` on
+            the transient-failure branch (one per drop).
     """
     from litellm.exceptions import APIError as LiteLLMAPIError
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
@@ -130,6 +150,7 @@ async def solve_chain_with_auto_drop(
             sink=sink,
             recipe_match=recipe_match,
             repair_context=repair_context,
+            recorder=recorder,
         )
         return proposal, session
     except (
@@ -140,6 +161,7 @@ async def solve_chain_with_auto_drop(
         IndexError,
         AttributeError,
         json.JSONDecodeError,
+        ChainSolverResponseShapeError,
     ) as exc:
         slog.error(
             "guided.chain_solver_transient_failure",

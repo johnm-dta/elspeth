@@ -59,7 +59,9 @@ from elspeth.web.composer.guided.state_machine import (
     GuidedSession,
     SinkIntent,
     SourceResolved,
+    TerminalKind,
     TerminalReason,
+    TerminalState,
     TurnRecord,
     mark_solver_exhausted,
     step_advance,
@@ -1829,7 +1831,11 @@ async def _dispatch_guided_respond(
     The dispatcher is called only when ``guided.terminal is None``.  The
     caller checks terminality before and after; the dispatcher never
     terminates a session (that is ``step_advance``'s responsibility for
-    exit_to_freeform and the step-2.5 recipe-accept path).
+    exit_to_freeform and the step-2.5 recipe-accept path).  The caller
+    also bypasses the dispatcher entirely on the exit-from-COMPLETED path
+    (see ``post_guided_respond``): that path transitions terminal kind
+    COMPLETED -> EXITED_TO_FREEFORM directly, without running any
+    step-handler dispatch logic.
 
     Decision table:
 
@@ -4843,6 +4849,14 @@ def create_session_router() -> APIRouter:
                 # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
                 # ``exc_info`` (frames are bounded and value-free; the
                 # exception message can carry Tier-bearing strings).
+                #
+                # The two recorder channels (tool invocations and LLM calls)
+                # drain through TWO separate try blocks so that a failure
+                # persisting one does not skip the other.  ``_persist_llm_calls``
+                # covers the :class:`ComposerLLMCall` rows that ``solve_chain``
+                # buffers during guided Step 3 (chain solver) invocations.
+                # Without the second drain the LLM-call audit would be
+                # garbage-collected with the recorder at function exit.
                 try:
                     await _persist_tool_invocations(
                         service,
@@ -4861,6 +4875,25 @@ def create_session_router() -> APIRouter:
                         session_id=str(session_id),
                         user_id=user.user_id,
                         site="get_guided",
+                        channel="tool_invocations",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
+                try:
+                    await _persist_llm_calls(
+                        service,
+                        session_id,
+                        recorder.llm_calls,
+                        state_record_out.id if state_record_out is not None else None,
+                        plugin_crash_pending=False,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="get_guided",
+                        channel="llm_calls",
                         exc_class=type(persist_exc).__name__,
                         frames=_safe_frame_strings(persist_exc),
                     )
@@ -4884,7 +4917,13 @@ def create_session_router() -> APIRouter:
         ``terminal`` payload (or ``None`` while still active).
 
         Raises 400 if the session has no ``guided_session`` attached.
-        Raises 409 if the guided session is already in a terminal state.
+        Raises 409 if the guided session is already in a terminal state,
+            EXCEPT for the wizard-teardown signal
+            ``control_signal=exit_to_freeform`` against a ``kind=completed``
+            terminal -- that path transitions the terminal to
+            ``exited_to_freeform`` so the chat surface can return.  Already-
+            exited sessions and non-exit payloads against terminal sessions
+            still 409.
         Raises 404 if the session does not exist or belong to the requesting user.
         """
         await _verify_session_ownership(session_id, user, request)
@@ -4923,7 +4962,140 @@ def create_session_router() -> APIRouter:
 
                 guided = state.guided_session
 
-                # Reject if session already terminal.
+                # Parse control_signal (Tier-3 -> Tier-2 coercion) BEFORE the
+                # terminal-rejection guard so we can recognise the
+                # exit-from-COMPLETED meta-control signal. Other call sites
+                # below reuse this parsed value rather than re-parsing.
+                control_signal = _validate_control_signal(body.control_signal)
+
+                # Exit-from-COMPLETED is a wizard-teardown signal, NOT a turn
+                # response.  When the user clicks "Save and exit" or "Drop to
+                # freeform to keep editing" on the CompletionSummary surface
+                # (frontend: CompletionSummary.tsx), the buttons fire
+                # control_signal=exit_to_freeform.  Without this branch, those
+                # requests hit the generic 409 below and the user is locked
+                # into the summary -- the ChatPanel discriminator
+                # (ChatPanel.tsx:182) keeps the completed surface visible (and
+                # the chat input hidden) until terminal.kind transitions to
+                # exited_to_freeform.  This branch performs that transition.
+                #
+                # Scope of the exemption (intentionally narrow):
+                #   * Only kind=COMPLETED is exempt.  Already-exited sessions
+                #     (kind=EXITED_TO_FREEFORM) still 409 -- exiting an
+                #     already-exited session is a no-op.
+                #   * Only control_signal=EXIT_TO_FREEFORM is exempt.  Any
+                #     other payload (chosen=..., edited_values=..., etc.) sent
+                #     to a terminal session still 409s -- no turn is live to
+                #     answer.
+                #
+                # Audit shape:
+                #   * The turn-answering scaffolding (_validate_step_indices,
+                #     existing_record lookup, response_hash computation,
+                #     emit_turn_answered) is bypassed -- no turn is being
+                #     answered.  The wizard had no live turn from a terminal
+                #     state, so claiming one was answered would be a fabricated
+                #     audit record.
+                #   * The wizard-teardown directive
+                #     ``guided_dropped_to_freeform`` is emitted directly, with
+                #     prev_step capturing the step at which the wizard had
+                #     completed.  This is the same directive shape the state
+                #     machine emits for mid-wizard exit -- ``prev_step`` lets
+                #     downstream consumers reconstruct the trajectory.
+                #
+                # Terminal shape:
+                #   * The new terminal has ``pipeline_yaml=None`` because
+                #     TerminalState (state_machine.py:53-54) restricts that
+                #     field to kind=COMPLETED.  No information is lost: the
+                #     yaml is recoverable from composition_state at any time,
+                #     and the COMPLETED transition that produced the yaml was
+                #     already audit-recorded by the preceding
+                #     handle_step_*_accept call.
+                #   * reason=USER_PRESSED_EXIT matches the
+                #     state-machine-driven mid-wizard exit (state_machine.py:549).
+                if (
+                    guided.terminal is not None
+                    and guided.terminal.kind is TerminalKind.COMPLETED
+                    and control_signal is ControlSignal.EXIT_TO_FREEFORM
+                ):
+                    from dataclasses import replace as _replace
+
+                    new_terminal = TerminalState(
+                        kind=TerminalKind.EXITED_TO_FREEFORM,
+                        reason=TerminalReason.USER_PRESSED_EXIT,
+                        pipeline_yaml=None,
+                    )
+                    new_guided = _replace(guided, terminal=new_terminal)
+
+                    emit_dropped_to_freeform(
+                        recorder,
+                        prev=new_guided.step,
+                        drop_reason=TerminalReason.USER_PRESSED_EXIT,
+                        validation_result=None,
+                        composition_version=state.version,
+                        actor=user.user_id,
+                    )
+
+                    new_state = _replace(state, guided_session=new_guided)
+                    # ``existing_meta_exit`` distinguishes this scope from the
+                    # later sibling block (~line 5031) that uses ``existing_meta``
+                    # for the normal-turn persistence path; mypy treats same-name
+                    # locals in the same function as redefinitions even when
+                    # control flow makes them disjoint.
+                    existing_meta_exit: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        existing_meta_exit = dict(deep_thaw(state_record.composer_meta))
+                    new_composer_meta = {**existing_meta_exit, "guided_session": new_guided.to_dict()}
+
+                    state_d = new_state.to_dict()
+                    state_data = CompositionStateData(
+                        source=state_d["source"],
+                        nodes=state_d["nodes"],
+                        edges=state_d["edges"],
+                        outputs=state_d["outputs"],
+                        metadata_=state_d["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=new_composer_meta,
+                    )
+                    state_record_out = await service.save_composition_state(
+                        session_id,
+                        state_data,
+                        # Exit-from-COMPLETED handler: user transitions a completed
+                        # guided session to ``kind=exited_to_freeform`` via the
+                        # control_signal=exit_to_freeform path. Same disposition as
+                        # other guided convergence writes — the user-supplied
+                        # exit signal converged on a new terminal state and the
+                        # resulting state is being persisted.
+                        provenance="convergence_persist",
+                    )
+
+                    new_terminal_response = TerminalStateResponse(
+                        kind=new_terminal.kind.value,
+                        reason=new_terminal.reason.value if new_terminal.reason is not None else None,
+                        pipeline_yaml=new_terminal.pipeline_yaml,
+                    )
+                    return GuidedRespondResponse(
+                        guided_session=GuidedSessionResponse(
+                            step=new_guided.step.value,
+                            history=[
+                                TurnRecordResponse(
+                                    step=r.step.value,
+                                    turn_type=r.turn_type.value,
+                                    payload_hash=r.payload_hash,
+                                    response_hash=r.response_hash,
+                                    emitter=r.emitter,
+                                )
+                                for r in new_guided.history
+                            ],
+                            terminal=new_terminal_response,
+                        ),
+                        next_turn=None,
+                        terminal=new_terminal_response,
+                        composition_state=_state_response(state_record_out),
+                    )
+
+                # Reject if session already terminal (any case not handled by
+                # the exit-from-COMPLETED branch above).
                 if guided.terminal is not None:
                     raise HTTPException(
                         status_code=409,
@@ -4947,14 +5119,12 @@ def create_session_router() -> APIRouter:
                 current_turn_type = existing_record.turn_type
 
                 # --- Wire-boundary validation (Codex #7, #12) -------------------
-                # Both guards run before the TurnResponse dict is assembled so that
-                # invalid requests are rejected before response_hash is computed or
-                # guided_turn_answered is emitted.
-
-                # Codex #12: validate control_signal against the ControlSignal enum.
-                # This is the Tier-3 -> Tier-2 coercion: the parsed enum (or
-                # None) flows into the typed ``TurnResponse`` below.
-                control_signal = _validate_control_signal(body.control_signal)
+                # ``control_signal`` was parsed earlier (above the
+                # exit-from-COMPLETED branch and the generic 409 guard) so
+                # that the meta-control signal could be recognised before the
+                # terminal-rejection short-circuit fires.  The parsed
+                # ``ControlSignal | None`` flows into the typed ``TurnResponse``
+                # below.
 
                 # Codex #7: validate step-index fields against the current proposal.
                 _validate_step_indices(
@@ -5219,6 +5389,14 @@ def create_session_router() -> APIRouter:
                 # ``exc_class`` + ``frames`` only, never ``str(exc)`` or
                 # ``exc_info`` (frames are bounded and value-free; the
                 # exception message can carry Tier-bearing strings).
+                #
+                # The two recorder channels (tool invocations and LLM calls)
+                # drain through TWO separate try blocks so that a failure
+                # persisting one does not skip the other.  ``_persist_llm_calls``
+                # covers the :class:`ComposerLLMCall` rows that ``solve_chain``
+                # buffers during guided Step 3 (chain solver) invocations.
+                # Without the second drain the LLM-call audit would be
+                # garbage-collected with the recorder at function exit.
                 try:
                     await _persist_tool_invocations(
                         service,
@@ -5237,6 +5415,25 @@ def create_session_router() -> APIRouter:
                         session_id=str(session_id),
                         user_id=user.user_id,
                         site="post_guided_respond",
+                        channel="tool_invocations",
+                        exc_class=type(persist_exc).__name__,
+                        frames=_safe_frame_strings(persist_exc),
+                    )
+                try:
+                    await _persist_llm_calls(
+                        service,
+                        session_id,
+                        recorder.llm_calls,
+                        state_record_out.id if state_record_out is not None else None,
+                        plugin_crash_pending=False,
+                    )
+                except Exception as persist_exc:
+                    slog.error(
+                        "guided.audit_persist_failed_during_exception_handling",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        site="post_guided_respond",
+                        channel="llm_calls",
                         exc_class=type(persist_exc).__name__,
                         frames=_safe_frame_strings(persist_exc),
                     )

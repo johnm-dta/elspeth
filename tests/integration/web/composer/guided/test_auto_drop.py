@@ -421,17 +421,38 @@ def _post_step_2_sink_intent(client: TestClient, session_id: str) -> object:
 
 
 class TestI2ChainSolverTransientFailure:
-    """Pin: transient LLM failure at each solve_chain site auto-drops cleanly.
+    """Pin: external-LLM failures at each solve_chain site auto-drop cleanly.
+
+    "Transient" in the class name is historical — the class now covers two
+    overlapping categories that both route through SOLVER_EXHAUSTED auto-drop:
+
+      * **Transient** — LiteLLM provider/network errors, timeouts, malformed
+        response shape at the LiteLLM-response level (``IndexError`` from
+        empty ``choices``, ``AttributeError`` from missing ``message``,
+        ``json.JSONDecodeError`` from invalid tool-call arguments).  These
+        are retry-class failures in principle, but the wrapper single-shots
+        the drop.
+
+      * **LLM-shape violations** — the LLM responded but produced an
+        ``emit_turn`` shape that violated the chain-solver contract (wrong
+        tool name, wrong ``turn_type``, missing/malformed ``payload``).
+        Routed via :class:`ChainSolverResponseShapeError`, sibling-bucketed
+        with the LiteLLM-level shape failures because both are "external
+        system produced unexpected response."
+
+    The category distinction matters for the spec §5.4 retry-then-
+    PROTOCOL_VIOLATION flow (filed as observation
+    ``elspeth-obs-8e5b614ca3``) but does not change current behaviour.
 
     Patches ``chain_solver._litellm_acompletion`` (the seam the existing
-    auto-drop tests use) to raise transient exception classes from the
-    project canonical set. Asserts:
+    auto-drop tests use) to provoke each failure mode. Asserts:
       - HTTP 200 (not 500) with terminal=exited_to_freeform / solver_exhausted.
       - ``guided_dropped_to_freeform`` audit emitted exactly once with the
         ``validation_result`` payload mandated by spec §9.1.
       - No exception ``str(exc)`` leaks into the response body.
-      - ``InvariantError`` from chain_solver (e.g. emit-shape contract
-        violations) still propagates as 500 — real bugs must crash.
+      - ``InvariantError`` from inside ``solve_chain``'s callee chain (a
+        genuine server-side invariant violation, NOT an LLM shape failure)
+        still propagates as 500 — real server bugs must crash.
     """
 
     def test_step_2_sink_initial_solve_api_error_auto_drops(self, composer_test_client: TestClient) -> None:
@@ -606,20 +627,27 @@ class TestI2ChainSolverTransientFailure:
         errors = drop_invocations[0]["validation_result"]["errors"]
         assert errors[0]["message"] == "Chain solver failed: IndexError", errors
 
-    def test_chain_solver_invariant_error_still_propagates_to_500(self, composer_test_client: TestClient) -> None:
-        """Class B: InvariantError from chain_solver must propagate as 500.
+    def test_chain_solver_wrong_tool_name_auto_drops(self, composer_test_client: TestClient) -> None:
+        """LLM-shape failure: a tool_call name other than ``emit_turn`` is an
+        external-system (LLM) shape violation, not a server-side programming
+        bug.  ``solve_chain`` raises :class:`ChainSolverResponseShapeError`
+        and the wrapper routes the request through the SOLVER_EXHAUSTED
+        auto-drop path -- HTTP 200 with terminal kind=exited_to_freeform,
+        reason=solver_exhausted, and a ``guided_dropped_to_freeform`` event.
 
-        ``chain_solver.py`` raises ``InvariantError`` at lines 97 / 99 / 116
-        when the LLM returns a tool name / turn_type / tool_calls shape that
-        violates the solver's emit contract. Per the I2 design, these are
-        Class B (programming bug → 500) — the wrapper must NOT absorb them.
+        Prior to the schema-tightening fix, this case raised
+        :class:`InvariantError` from inside ``solve_chain``, which escaped
+        the wrapper's caught set and surfaced as HTTP 500.  The sibling
+        test ``test_invariant_error_from_solve_chain_propagates_to_500``
+        below pins the wrapper's not-absorb-InvariantError contract using a
+        direct ``solve_chain`` stub (decoupled from chain_solver internals).
         """
         session_id = _create_session(composer_test_client)
         _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
 
         # Construct a LiteLLM response with a tool_call name OTHER than
-        # ``emit_turn`` — this triggers ``raise InvariantError`` at
-        # chain_solver.py:97 from inside ``solve_chain``.
+        # ``emit_turn`` — this triggers ``raise ChainSolverResponseShapeError``
+        # in ``solve_chain``, which the wrapper now catches.
         wrong_name_response = SimpleNamespace(
             choices=[
                 SimpleNamespace(
@@ -643,12 +671,282 @@ class TestI2ChainSolverTransientFailure:
         ):
             resp = _post_step_2_sink_intent(composer_test_client, session_id)
 
-        # Must NOT be absorbed into the auto-drop path. The outer
-        # ``except InvariantError`` handler returns 500 with the B1-sanitized
-        # static detail (no exc str).
+        assert resp.status_code == 200, resp.json()
+        terminal = resp.json()["terminal"]
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+        # The drop event must carry the exc_class in validation_result.errors
+        # (per the wrapper contract) — no exc str leakage.
+        drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert len(drop_invocations) == 1, drop_invocations
+        errors = drop_invocations[0]["validation_result"]["errors"]
+        assert errors[0]["message"] == "Chain solver failed: ChainSolverResponseShapeError", errors
+
+    def test_chain_solver_wrong_turn_type_auto_drops(self, composer_test_client: TestClient) -> None:
+        """LLM-shape failure: a turn_type other than ``propose_chain`` is an
+        external-system shape violation routed through auto-drop.
+
+        Before the fix, the schema permitted six turn types and the consumer
+        raised :class:`InvariantError` for any non-``propose_chain`` value
+        (escaping as HTTP 500).  The schema-tightening reduces the allowed
+        set to ``["propose_chain"]``, and the backstop routes any survivor
+        through auto-drop.
+        """
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        wrong_turn_type_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="emit_turn",
+                                    arguments=json.dumps({"turn_type": "single_select", "payload": {"options": []}}),
+                                )
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=wrong_turn_type_response,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        assert resp.status_code == 200, resp.json()
+        terminal = resp.json()["terminal"]
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+    def test_chain_solver_missing_payload_steps_auto_drops(self, composer_test_client: TestClient) -> None:
+        """LLM-shape failure: ``propose_chain`` payload missing ``steps`` key.
+
+        Prior to the fix, ``payload["steps"]`` raised :class:`KeyError`,
+        which escaped the wrapper's caught set as an unhandled exception
+        and surfaced as HTTP 500.  The backstop now converts shape failures
+        into :class:`ChainSolverResponseShapeError` and routes them through
+        auto-drop.
+        """
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        missing_steps_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="emit_turn",
+                                    arguments=json.dumps({"turn_type": "propose_chain", "payload": {"why": "no steps"}}),
+                                )
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=missing_steps_response,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        assert resp.status_code == 200, resp.json()
+        terminal = resp.json()["terminal"]
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+    def test_chain_solver_malformed_steps_element_auto_drops(self, composer_test_client: TestClient) -> None:
+        """LLM-shape failure: ``payload.steps`` element is not dict-coercible
+        (e.g., a bare integer).  The ``tuple(dict(s) for s in steps_raw)``
+        coercion raises ``TypeError``, which the backstop converts to
+        :class:`ChainSolverResponseShapeError`.
+        """
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        malformed_step_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="emit_turn",
+                                    arguments=json.dumps(
+                                        {
+                                            "turn_type": "propose_chain",
+                                            "payload": {"steps": [42], "why": "garbage step"},
+                                        }
+                                    ),
+                                )
+                            )
+                        ],
+                    )
+                )
+            ]
+        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=malformed_step_response,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        assert resp.status_code == 200, resp.json()
+        terminal = resp.json()["terminal"]
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+    def test_invariant_error_from_solve_chain_propagates_to_500(self, composer_test_client: TestClient) -> None:
+        """The wrapper's not-absorb-:class:`InvariantError` contract is preserved.
+
+        Stubs :func:`solve_chain` directly (not ``_litellm_acompletion``) to
+        raise :class:`InvariantError` -- representing a *genuine* server-side
+        invariant violation as opposed to an LLM shape failure (which now
+        raises :class:`ChainSolverResponseShapeError`).  The wrapper must
+        NOT absorb this class; the request surfaces as HTTP 500 with the
+        B1-sanitised static detail.
+        """
+        from elspeth.web.composer.guided.errors import InvariantError
+
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        async def _raise_invariant(**_kwargs):
+            raise InvariantError("genuine server-side invariant violation")
+
+        with patch(
+            "elspeth.web.sessions._guided_solve_chain.solve_chain",
+            new=_raise_invariant,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
         assert resp.status_code == 500, resp.json()
         detail = resp.json().get("detail", "")
         assert "invariant" in detail.lower(), detail
-        # No drop event must have been emitted.
+        # No drop event must have been emitted -- the wrapper short-circuits
+        # before reaching mark_solver_exhausted.
         drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
         assert drop_invocations == [], f"InvariantError must not trigger guided_dropped_to_freeform; got {drop_invocations}"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end LLM-call audit persistence
+#
+# These tests prove the drain wiring: a solve_chain invocation records a
+# ComposerLLMCall into the recorder, the route handler's ``finally`` block
+# fires ``_persist_llm_calls(recorder.llm_calls)``, and the audit row lands
+# in the session message table with ``_kind=llm_call_audit``.
+#
+# Mock-based unit tests cover the recorder side of that boundary
+# (test_chain_solver.py:TestSolveChainLLMCallAudit).  These tests cover the
+# persist side end-to-end against the route handler + session-service stack.
+# ---------------------------------------------------------------------------
+
+
+def _extract_llm_call_audits(client: TestClient, session_id: str) -> list[dict]:
+    """Return all ``_kind=llm_call_audit`` content payloads for this session.
+
+    Mirrors :func:`_extract_guided_drop_invocations` but filters on the
+    LLM-call audit channel (persisted by ``_persist_llm_calls``) rather
+    than the tool-invocation channel (persisted by
+    ``_persist_tool_invocations``).
+    """
+    tool_messages = _get_tool_messages(client, session_id)
+    rows: list[dict] = []
+    for msg in tool_messages:
+        # _persist_llm_calls writes the compact summary into ``content`` and
+        # the full envelope into ``tool_calls[0]``.  Parse content and filter
+        # by ``_kind`` so we don't accidentally match guided directive rows.
+        try:
+            content = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(content, dict):
+            continue
+        if content.get("_kind") == "llm_call_audit":
+            rows.append(content)
+    return rows
+
+
+class TestE2ELLMCallAuditPersisted:
+    """End-to-end persistence: solve_chain → recorder → _persist_llm_calls → DB."""
+
+    def test_successful_solve_chain_persists_audit_row_with_status_success(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """Driving to STEP_3_TRANSFORMS via a working chain fires solve_chain
+        exactly once; the SUCCESS audit row must appear in the DB after the
+        route handler exits."""
+        session_id = _create_session(composer_test_client)
+
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_response_for_passthrough(),
+        ):
+            _drive_to_step_3_propose_chain(composer_test_client, session_id)
+
+        audits = _extract_llm_call_audits(composer_test_client, session_id)
+        # The wizard fires solve_chain exactly once on the STEP_2_5 → STEP_3
+        # transition (no recipe matched because required_fields=["text"] has
+        # no classifier keyword).
+        assert len(audits) == 1, f"expected exactly one llm_call_audit row; got {audits}"
+        row = audits[0]
+        assert row["status"] == "success", row
+        # Model is whatever ``settings.composer_model`` resolves to in the
+        # test client.  We don't pin a specific string here — the existence
+        # of a non-empty value proves the contract is wired, the specific
+        # value is set by fixture config.
+        assert row["model_requested"], "model_requested must be present in the audit row"
+
+    def test_litellm_api_error_persists_audit_row_with_status_api_error(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """A LiteLLMAPIError at the initial solve_chain site fires the auto-drop
+        AND lands an api_error audit row.  Both audit channels (tool_invocations
+        for the drop directive, llm_calls for the LLM-call record) must drain
+        in the same ``finally`` block.
+        """
+        from litellm.exceptions import APIError as LiteLLMAPIError
+
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        api_err = LiteLLMAPIError(
+            status_code=500,
+            message="upstream provider failure",
+            llm_provider="openai",
+            model="gpt-4o",
+        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=api_err,
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        # Sanity: the existing auto-drop behavior is preserved (200, dropped).
+        assert resp.status_code == 200, resp.json()
+
+        # The whole point of this fix: the LLM-call audit row exists alongside
+        # the existing drop invocation row.
+        audits = _extract_llm_call_audits(composer_test_client, session_id)
+        assert len(audits) == 1, f"expected exactly one llm_call_audit row; got {audits}"
+        assert audits[0]["status"] == "api_error", audits[0]
+
+        # And the sibling channel (drop invocation) still fired — proves the
+        # two drain calls inside the same finally block are independent.
+        drops = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert len(drops) == 1, f"expected exactly one drop invocation; got {drops}"

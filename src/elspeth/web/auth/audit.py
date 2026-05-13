@@ -12,6 +12,7 @@ from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable
 
 if TYPE_CHECKING:
     from elspeth.web.config import WebSettings
@@ -51,6 +52,18 @@ class AuthAuditWriter(Protocol):
         username: str,
         access_token: str,
         issuance_path: str,
+    ) -> None: ...
+
+    def record_auth_failure(
+        self,
+        request: Request,
+        *,
+        provider: AuthProviderType,
+        failure_category: str,
+        failure_stage: str,
+        user_id: str | None,
+        username: str | None,
+        exception_class: str | None,
     ) -> None: ...
 
 
@@ -114,6 +127,28 @@ def _token_issued_metadata(request: Request, *, access_token: str, issuance_path
     return metadata
 
 
+def classify_authentication_failure(exc: AuthenticationError) -> str:
+    """Classify auth errors without storing their external-data-bearing detail."""
+    if type(exc) is AuthProviderUnavailable:
+        return "provider_unavailable"
+
+    detail = exc.detail
+    if detail.startswith("Invalid tenant") or detail.startswith("Missing tenant claim"):
+        return "tenant_claim_invalid"
+    if detail.startswith("Missing required") or "group overage marker" in detail or detail.startswith("OIDC profile claim"):
+        return "claims_invalid"
+    if (
+        detail.startswith("Invalid token")
+        or detail.startswith("Token header")
+        or detail.startswith("No matching key")
+        or detail.startswith("JWKS key")
+    ):
+        return "invalid_token"
+    if detail.startswith("JWKS document") or detail.startswith("OIDC discovery document"):
+        return "provider_metadata_invalid"
+    return "authentication_error"
+
+
 @dataclass(frozen=True)
 class AuthAuditRecorder:
     """Synchronous Landscape writer for web authentication events."""
@@ -172,6 +207,32 @@ class AuthAuditRecorder:
                     access_token=access_token,
                     issuance_path=issuance_path,
                 ),
+            )
+
+    def record_auth_failure(
+        self,
+        request: Request,
+        *,
+        provider: AuthProviderType,
+        failure_category: str,
+        failure_stage: str,
+        user_id: str | None,
+        username: str | None,
+        exception_class: str | None,
+    ) -> None:
+        metadata = _request_metadata(request)
+        metadata["failure_stage"] = failure_stage
+        metadata["exception_class"] = exception_class
+        with LandscapeDB.from_url(self.landscape_url, passphrase=self.landscape_passphrase) as db:
+            RecorderFactory(db).auth_audit.record_auth_failure(
+                provider=provider,
+                user_id=user_id,
+                username=username,
+                failure_category=failure_category,
+                request_id=_request_id(request),
+                client_host=_client_host(request),
+                user_agent=_bounded_text(_optional_header(request, "user-agent")),
+                metadata=metadata,
             )
 
     def record_login_failure(

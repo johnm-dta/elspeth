@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.web.async_workers import run_sync_in_worker
-from elspeth.web.auth.audit import AuthAuditWriter
+from elspeth.web.auth.audit import AuthAuditWriter, classify_authentication_failure
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
@@ -284,14 +284,35 @@ def create_auth_router() -> APIRouter:
         # get_user_info() decodes it again to extract profile claims.
         # This is intentional — the middleware returns UserIdentity (minimal),
         # while /me needs the full UserProfile with groups/email/display_name.
+        settings: WebSettings = request.app.state.settings
         token: str = request.state.auth_token
         auth_provider: AuthProvider = request.app.state.auth_provider
 
         try:
             profile = await auth_provider.get_user_info(token)
         except AuthProviderUnavailable as exc:
+            recorder = _auth_audit_recorder(request)
+            recorder.record_auth_failure(
+                request,
+                provider=settings.auth_provider,
+                failure_category="provider_unavailable",
+                failure_stage="profile_lookup",
+                user_id=user.user_id,
+                username=user.username,
+                exception_class=type(exc).__name__,
+            )
             raise HTTPException(status_code=503, detail=exc.detail) from exc
         except AuthenticationError as exc:
+            recorder = _auth_audit_recorder(request)
+            recorder.record_auth_failure(
+                request,
+                provider=settings.auth_provider,
+                failure_category=classify_authentication_failure(exc),
+                failure_stage="profile_lookup",
+                user_id=user.user_id,
+                username=user.username,
+                exception_class=type(exc).__name__,
+            )
             raise HTTPException(status_code=401, detail=exc.detail) from exc
 
         return UserProfileResponse(

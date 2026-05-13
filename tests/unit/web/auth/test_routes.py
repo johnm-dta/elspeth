@@ -38,6 +38,9 @@ class _NoopAuthAuditRecorder:
     def record_token_issued(self, *args, **kwargs) -> None:
         return None
 
+    def record_auth_failure(self, *args, **kwargs) -> None:
+        return None
+
 
 def _create_test_app(provider, auth_provider_type: str = "local", **settings_overrides) -> FastAPI:
     """Create a FastAPI app with auth routes for testing."""
@@ -631,6 +634,29 @@ class TestMeEndpoint:
             response = await client.get("/api/auth/me")
         assert response.status_code == 401
 
+    async def test_me_unauthenticated_records_auth_failure(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.get("/api/auth/me", headers={"x-request-id": "missing-auth-1"})
+
+        assert response.status_code == 401
+        rows = _read_auth_event_rows(audit_url)
+        event = _only_auth_event(rows, "auth_failure")
+        metadata = json.loads(event.metadata_json)
+        assert event.outcome == "failure"
+        assert event.provider == "local"
+        assert event.failure_category == "missing_authorization_header"
+        assert event.user_id is None
+        assert metadata["failure_stage"] == "authorization_header"
+        assert metadata["exception_class"] is None
+
 
 @pytest.mark.asyncio
 class TestAuthConfigEndpoint:
@@ -747,6 +773,58 @@ class TestTokenRefreshNonLocal:
 class TestMeErrorPath:
     """Tests for /me when get_user_info raises."""
 
+    async def test_me_authenticate_invalid_tenant_records_classification_without_detail(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_provider = AsyncMock()
+        mock_provider.authenticate.side_effect = AuthenticationError("Invalid tenant: received tid='SECRET_TENANT'")
+        app = _create_test_app(mock_provider, auth_provider_type="entra", landscape_url=audit_url, **_ENTRA_FIELDS)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.get(
+                "/api/auth/me",
+                headers={"Authorization": "Bearer invalid-tenant-token", "x-request-id": "tenant-failure-1"},
+            )
+
+        assert response.status_code == 401
+        rows = _read_auth_event_rows(audit_url)
+        event = _only_auth_event(rows, "auth_failure")
+        metadata = json.loads(event.metadata_json)
+        assert event.provider == "entra"
+        assert event.failure_category == "tenant_claim_invalid"
+        assert event.user_id is None
+        assert event.request_id == "tenant-failure-1"
+        assert metadata["failure_stage"] == "authenticate"
+        assert metadata["exception_class"] == "AuthenticationError"
+        serialized = repr(dict(event._mapping))
+        assert "SECRET_TENANT" not in serialized
+        assert "invalid-tenant-token" not in serialized
+
+    async def test_me_authenticate_provider_unavailable_records_classification_without_detail(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_provider = AsyncMock()
+        mock_provider.authenticate.side_effect = AuthProviderUnavailable("JWKS unavailable: SECRET_URL")
+        app = _create_test_app(mock_provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.get(
+                "/api/auth/me",
+                headers={"Authorization": "Bearer maybe-valid-token", "x-request-id": "provider-down-1"},
+            )
+
+        assert response.status_code == 503
+        rows = _read_auth_event_rows(audit_url)
+        event = _only_auth_event(rows, "auth_failure")
+        metadata = json.loads(event.metadata_json)
+        assert event.provider == "oidc"
+        assert event.failure_category == "provider_unavailable"
+        assert metadata["failure_stage"] == "authenticate"
+        assert metadata["exception_class"] == "AuthProviderUnavailable"
+        serialized = repr(dict(event._mapping))
+        assert "SECRET_URL" not in serialized
+        assert "maybe-valid-token" not in serialized
+
     async def test_me_get_user_info_failure_returns_401(self) -> None:
         """If get_user_info raises, /me returns 401 with the detail."""
         mock_provider = AsyncMock()
@@ -760,6 +838,34 @@ class TestMeErrorPath:
             )
         assert response.status_code == 401
         assert response.json()["detail"] == "Profile lookup failed"
+
+    async def test_me_get_user_info_failure_records_profile_lookup_classification_without_detail(self, tmp_path) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        mock_provider = AsyncMock()
+        mock_provider.authenticate.return_value = UserIdentity(user_id="alice", username="alice")
+        mock_provider.get_user_info.side_effect = AuthenticationError("Missing required 'sub' claim SECRET_SUB")
+        app = _create_test_app(mock_provider, auth_provider_type="oidc", landscape_url=audit_url, **_OIDC_FIELDS)
+        _enable_auth_audit(app)
+
+        async with _client_for(app) as client:
+            response = await client.get(
+                "/api/auth/me",
+                headers={"Authorization": "Bearer valid-token", "x-request-id": "profile-failure-1"},
+            )
+
+        assert response.status_code == 401
+        rows = _read_auth_event_rows(audit_url)
+        event = _only_auth_event(rows, "auth_failure")
+        metadata = json.loads(event.metadata_json)
+        assert event.provider == "oidc"
+        assert event.failure_category == "claims_invalid"
+        assert event.user_id == "alice"
+        assert event.username == "alice"
+        assert metadata["failure_stage"] == "profile_lookup"
+        assert metadata["exception_class"] == "AuthenticationError"
+        serialized = repr(dict(event._mapping))
+        assert "SECRET_SUB" not in serialized
+        assert "valid-token" not in serialized
 
     async def test_me_get_user_info_unavailable_returns_503(self) -> None:
         """Provider availability failures during profile lookup return 503."""

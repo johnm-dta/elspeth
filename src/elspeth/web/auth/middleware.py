@@ -6,10 +6,22 @@ routes declare it via Depends(get_current_user).
 
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import HTTPException, Request
 
+from elspeth.web.auth.audit import AuthAuditWriter, classify_authentication_failure
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider
+from elspeth.web.config import WebSettings
+
+
+def _auth_audit_recorder(request: Request) -> AuthAuditWriter:
+    return cast(AuthAuditWriter, request.app.state.auth_audit_recorder)
+
+
+def _settings(request: Request) -> WebSettings:
+    return cast(WebSettings, request.app.state.settings)
 
 
 async def get_current_user(request: Request) -> UserIdentity:
@@ -23,15 +35,36 @@ async def get_current_user(request: Request) -> UserIdentity:
     route handlers (e.g. /me) can reuse it without re-parsing the
     Authorization header.
     """
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
+    settings = _settings(request)
+    recorder = _auth_audit_recorder(request)
+
+    if "Authorization" not in request.headers:
+        recorder.record_auth_failure(
+            request,
+            provider=settings.auth_provider,
+            failure_category="missing_authorization_header",
+            failure_stage="authorization_header",
+            user_id=None,
+            username=None,
+            exception_class=None,
+        )
         raise HTTPException(
             status_code=401,
             detail="Missing or invalid Authorization header",
         )
+    auth_header = request.headers["Authorization"]
 
     parts = auth_header.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        recorder.record_auth_failure(
+            request,
+            provider=settings.auth_provider,
+            failure_category="invalid_authorization_header",
+            failure_stage="authorization_header",
+            user_id=None,
+            username=None,
+            exception_class=None,
+        )
         raise HTTPException(
             status_code=401,
             detail="Missing or invalid Authorization header",
@@ -57,6 +90,24 @@ async def get_current_user(request: Request) -> UserIdentity:
     try:
         return await auth_provider.authenticate(token)
     except AuthProviderUnavailable as exc:
+        recorder.record_auth_failure(
+            request,
+            provider=settings.auth_provider,
+            failure_category="provider_unavailable",
+            failure_stage="authenticate",
+            user_id=None,
+            username=None,
+            exception_class=type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail=exc.detail) from exc
     except AuthenticationError as exc:
+        recorder.record_auth_failure(
+            request,
+            provider=settings.auth_provider,
+            failure_category=classify_authentication_failure(exc),
+            failure_stage="authenticate",
+            user_id=None,
+            username=None,
+            exception_class=type(exc).__name__,
+        )
         raise HTTPException(status_code=401, detail=exc.detail) from exc

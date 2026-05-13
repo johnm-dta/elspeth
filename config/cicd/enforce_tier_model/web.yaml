@@ -320,15 +320,10 @@ allow_hits:
   reason: Run cleanup is idempotent because unsubscribe and explicit cleanup can both remove the same run entry
   safety: Missing key simply means there are no remaining subscribers to clean up
   expires: null
-- key: web/auth/middleware.py:R6:get_current_user:fp=ea59abc681792adb
+- key: web/auth/middleware.py:R6:get_current_user:fp=85ef49ad42821944
   owner: web-auth
-  reason: "Tier 3 boundary \u2014 invalid JWT token raises PyJWTError; returns 401"
-  safety: Only PyJWTError caught; returns HTTP 401; no silent data loss
-  expires: null
-- key: web/auth/middleware.py:R1:get_current_user:fp=27850ac518f1116d
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 request.headers.get('Authorization') reads untrusted HTTP header"
-  safety: Missing header returns 401; malformed header returns 401; no default fabrication
+  reason: "Tier 3 boundary \u2014 invalid JWT token raises PyJWTError during best-effort unverified claim parsing; auth_provider.authenticate still makes the trust decision"
+  safety: Only PyJWTError caught; auth_claims is set to None as an explicit downstream result; authenticate still runs and failures are now recorded as auth_failure audit events
   expires: null
 - key: web/composer/state.py:R5:_declared_input_fields_option:fp=502f741cded36b7f
   owner: web-composer

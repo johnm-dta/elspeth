@@ -120,3 +120,29 @@ class AuthAuditRepository:
             user_agent=user_agent,
             metadata=metadata,
         )
+
+    def record_auth_failure(
+        self,
+        *,
+        provider: AuthProviderType,
+        user_id: str | None,
+        username: str | None,
+        failure_category: str,
+        request_id: str | None,
+        client_host: str | None,
+        user_agent: str | None,
+        metadata: Mapping[str, object],
+    ) -> str:
+        """Record an authentication or profile-lookup failure classification."""
+        return self.record_auth_event(
+            event_type="auth_failure",
+            outcome="failure",
+            provider=provider,
+            user_id=user_id,
+            username=username,
+            failure_category=failure_category,
+            request_id=request_id,
+            client_host=client_host,
+            user_agent=user_agent,
+            metadata=metadata,
+        )

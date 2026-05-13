@@ -33,6 +33,7 @@ export type {
 } from "./index";
 export type {
   ComposerRecoveryErrorFields,
+  ComposerRecoveryError,
   FailedTurn,
   RecoveryTranscriptRow,
 } from "./recovery";

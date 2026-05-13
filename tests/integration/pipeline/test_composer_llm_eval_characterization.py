@@ -8,17 +8,24 @@ red characterization failures that later child tickets must turn green.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import structlog
 import yaml
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.core.secrets import SecretResolutionError, resolve_secret_refs
@@ -29,7 +36,11 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
 from elspeth.web.composer.progress import ComposerProgressEvent
-from elspeth.web.composer.protocol import ComposerConvergenceError
+from elspeth.web.composer.protocol import ComposerConvergenceError, ComposerPluginCrashError
+from elspeth.web.composer.redaction import (
+    REDACTED_UNKNOWN_RESPONSE_KEY,
+    redact_tool_call_arguments,
+)
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.state import (
     CompositionState,
@@ -40,7 +51,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
     ValidationSummary,
 )
-from elspeth.web.composer.tools import execute_tool
+from elspeth.web.composer.tools import ToolResult, execute_tool
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
@@ -49,7 +60,7 @@ from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
-from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
 from tests.fixtures.factories import make_context
 from tests.integration.web.conftest import _make_session
 
@@ -104,6 +115,18 @@ class FakeChoice:
 @dataclass
 class FakeLLMResponse:
     choices: list[FakeChoice]
+
+
+class _ReplayLLM:
+    """Callable fake LLM for CL-PP compose-loop characterization cases."""
+
+    def __init__(self, responses: tuple[FakeLLMResponse, ...]) -> None:
+        self._responses = list(responses)
+
+    async def __call__(self, _messages: Any, _tools: Any) -> FakeLLMResponse:
+        if not self._responses:
+            return _make_llm_response(content="Done.")
+        return self._responses.pop(0)
 
 
 class _NoUserSecretStore:
@@ -207,6 +230,74 @@ def _session_service_for_characterization(
     return service
 
 
+def _composer_for_characterization(
+    *,
+    data_dir: Path,
+    session_id: str,
+    **settings_overrides: Any,
+) -> tuple[ComposerServiceImpl, SessionServiceImpl]:
+    settings = _web_settings(data_dir, **settings_overrides)
+    sessions_service = _session_service_for_characterization(
+        data_dir=data_dir,
+        session_id=session_id,
+    )
+    return (
+        ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=settings,
+            sessions_service=sessions_service,
+        ),
+        sessions_service,
+    )
+
+
+async def _run_one_turn_for_characterization(
+    service: ComposerServiceImpl,
+    *,
+    llm: _ReplayLLM,
+    session_id: str,
+    initial_state: CompositionState | None = None,
+) -> Any:
+    driver = cast(Any, service)
+    return await driver._run_one_turn_for_test(
+        llm=llm,
+        session_id=session_id,
+        initial_state=initial_state,
+    )
+
+
+def _chat_rows(sessions_service: SessionServiceImpl, *, session_id: str) -> list[Any]:
+    with sessions_service._engine.connect() as conn:
+        return list(
+            conn.execute(
+                text(
+                    "SELECT id, role, content, tool_calls, tool_call_id, parent_assistant_id "
+                    "FROM chat_messages WHERE session_id = :session_id ORDER BY sequence_no"
+                ),
+                {"session_id": session_id},
+            ).fetchall()
+        )
+
+
+@contextlib.contextmanager
+def _force_commit_failure(engine: Engine) -> Iterator[None]:
+    original_do_commit = engine.dialect.do_commit
+    fired = False
+
+    def _fail_once(dbapi_conn: object) -> None:
+        nonlocal fired
+        if not fired:
+            fired = True
+            raise sqlite3.OperationalError("simulated COMMIT failure (CL-PP characterization)")
+        original_do_commit(dbapi_conn)
+
+    engine.dialect.do_commit = _fail_once
+    try:
+        yield
+    finally:
+        engine.dialect.do_commit = original_do_commit
+
+
 def _write_scenario_csv(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -306,6 +397,247 @@ def _scenario_2_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     _write_scenario_csv(source_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     return data_dir, source_path, output_path
+
+
+@pytest.mark.asyncio
+async def test_cl_pp_9_mixed_redaction_policy_persists_sensitive_sentinel_and_public_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CL-PP-9: mixed sensitive/non-sensitive arguments persist through the manifest walker."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    session_id = "00000000-0000-4000-8000-000000000009"
+    service, _sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
+    raw_arguments = {
+        "filename": "secret.txt",
+        "mime_type": "text/plain",
+        "content": "top-secret",
+    }
+    llm = _ReplayLLM(
+        (
+            _make_llm_response(
+                tool_calls=[
+                    {
+                        "id": "call_sensitive",
+                        "name": "create_blob",
+                        "arguments": raw_arguments,
+                    }
+                ]
+            ),
+            _make_llm_response(content="Done."),
+        )
+    )
+
+    result = await _run_one_turn_for_characterization(service, llm=llm, session_id=session_id)
+
+    persisted_arguments = json.loads(result.persisted_assistant_tool_calls[0]["function"]["arguments"])
+    expected_arguments = redact_tool_call_arguments(
+        "create_blob",
+        raw_arguments,
+        telemetry=service._redaction_telemetry,  # type: ignore[attr-defined]
+    )
+    assert persisted_arguments == expected_arguments
+    assert persisted_arguments["filename"] == "secret.txt"
+    assert persisted_arguments["mime_type"] == "text/plain"
+    assert persisted_arguments["content"] != "top-secret"
+    assert persisted_arguments["content"] == "<inline-blob:10-bytes>"
+
+
+@pytest.mark.asyncio
+async def test_cl_pp_10a_commit_failure_without_plugin_crash_raises_audit_integrity_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CL-PP-10a: COMMIT failure without plugin crash is Tier-1 audit failure."""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    session_id = "00000000-0000-4000-8000-00000000010a"
+    service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
+    telemetry = build_sessions_telemetry()
+    service._telemetry = telemetry  # type: ignore[attr-defined]
+    sessions_service._telemetry = telemetry
+    llm = _ReplayLLM(
+        (
+            _make_llm_response(
+                tool_calls=[
+                    {
+                        "id": "call_ok",
+                        "name": "set_metadata",
+                        "arguments": {"patch": {"name": "commit failure replay"}},
+                    }
+                ]
+            ),
+            _make_llm_response(content="Done."),
+        )
+    )
+
+    with (
+        _force_commit_failure(sessions_service._engine),
+        pytest.raises(AuditIntegrityError) as exc_info,
+    ):
+        await _run_one_turn_for_characterization(service, llm=llm, session_id=session_id)
+
+    assert isinstance(exc_info.value.__cause__, OperationalError)
+    assert observed_value(telemetry.tool_row_tier1_violation_total) == 1
+    assert _chat_rows(sessions_service, session_id=session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_cl_pp_10b_commit_failure_during_plugin_crash_preserves_plugin_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CL-PP-10b: COMMIT failure on unwind increments counter, then plugin crash propagates."""
+
+    from structlog.testing import capture_logs
+
+    import elspeth.web.composer.service as composer_service_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    session_id = "00000000-0000-4000-8000-00000000010b"
+    service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
+    telemetry = build_sessions_telemetry()
+    sessions_service._telemetry = telemetry
+    original_execute_tool = composer_service_module.execute_tool
+    calls = 0
+
+    def _crash_on_second(tool_name: str, *args: Any, **kwargs: Any) -> ToolResult:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("CL-PP-10b synthetic plugin crash")
+        return original_execute_tool(tool_name, *args, **kwargs)
+
+    monkeypatch.setattr(composer_service_module, "execute_tool", _crash_on_second)
+    llm = _ReplayLLM(
+        (
+            _make_llm_response(
+                tool_calls=[
+                    {
+                        "id": "call_ok",
+                        "name": "set_metadata",
+                        "arguments": {"patch": {"name": "before crash"}},
+                    },
+                    {
+                        "id": "call_crash",
+                        "name": "set_metadata",
+                        "arguments": {"patch": {"description": "crash"}},
+                    },
+                ]
+            ),
+        )
+    )
+
+    with (
+        _force_commit_failure(sessions_service._engine),
+        capture_logs() as cap_logs,
+        pytest.raises(ComposerPluginCrashError) as exc_info,
+    ):
+        await _run_one_turn_for_characterization(service, llm=llm, session_id=session_id)
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert exc_info.value.failed_turn is not None
+    assert exc_info.value.failed_turn.assistant_message_id is None
+    assert observed_value(telemetry.tool_row_persist_failed_during_unwind_total) == 1
+    assert any(log["event"] == "audit_insert_failed_during_tool_failure_unwind" for log in cap_logs)
+    assert _chat_rows(sessions_service, session_id=session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_cl_pp_12_tool_call_cap_exceeded_writes_no_rows_and_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CL-PP-12: over-cap assistant turns fail before any tool executes or persists."""
+
+    import elspeth.web.composer.service as composer_service_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    session_id = "00000000-0000-4000-8000-000000000012"
+    service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
+    telemetry = build_sessions_telemetry()
+    service._telemetry = telemetry  # type: ignore[attr-defined]
+    service._max_tool_calls_per_turn = 16  # type: ignore[attr-defined]
+    execute_calls = 0
+
+    def _counting_execute_tool(*_args: Any, **_kwargs: Any) -> ToolResult:
+        nonlocal execute_calls
+        execute_calls += 1
+        raise AssertionError("execute_tool must not run when CL-PP-12 cap fires")
+
+    monkeypatch.setattr(composer_service_module, "execute_tool", _counting_execute_tool)
+    llm = _ReplayLLM(
+        (_make_llm_response(tool_calls=[{"id": f"call_{idx}", "name": "get_pipeline_state", "arguments": {}} for idx in range(17)]),)
+    )
+
+    with pytest.raises(ComposerConvergenceError) as exc_info:
+        await _run_one_turn_for_characterization(service, llm=llm, session_id=session_id)
+
+    assert exc_info.value.reason == "tool_call_cap_exceeded"
+    assert exc_info.value.evidence == {"observed": 17, "cap": 16}
+    assert execute_calls == 0
+    assert observed_value(telemetry.tool_call_cap_exceeded_total) == 1
+    assert _chat_rows(sessions_service, session_id=session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_cl_pp_13_unknown_response_key_redacted_in_persisted_tool_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CL-PP-13: declarative response-shape drift is sentinelized before persistence."""
+
+    import elspeth.web.composer.service as composer_service_module
+    from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+
+    class _StrayToolResult(ToolResult):
+        def to_dict(self) -> dict[str, Any]:
+            payload = super().to_dict()
+            payload["stray_provider_field"] = "do-not-persist"
+            return payload
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    session_id = "00000000-0000-4000-8000-000000000013"
+    service, _sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
+    redaction_telemetry = NoopRedactionTelemetry()
+    service._redaction_telemetry = redaction_telemetry  # type: ignore[attr-defined]
+
+    def _return_stray_result(
+        tool_name: str, _arguments: dict[str, Any], state: CompositionState, *_args: Any, **_kwargs: Any
+    ) -> ToolResult:
+        if tool_name != "set_metadata":
+            raise AssertionError(f"unexpected tool {tool_name!r}")
+        return _StrayToolResult(
+            success=True,
+            updated_state=state,
+            validation=state.validate(),
+            affected_nodes=(),
+        )
+
+    monkeypatch.setattr(composer_service_module, "execute_tool", _return_stray_result)
+    llm = _ReplayLLM(
+        (
+            _make_llm_response(
+                tool_calls=[
+                    {
+                        "id": "call_stray",
+                        "name": "set_metadata",
+                        "arguments": {"patch": {"name": "unknown response key replay"}},
+                    }
+                ]
+            ),
+            _make_llm_response(content="Done."),
+        )
+    )
+
+    result = await _run_one_turn_for_characterization(service, llm=llm, session_id=session_id)
+
+    persisted_tool_row = json.loads(result.persisted_tool_row_content[0])
+    assert persisted_tool_row["stray_provider_field"] == REDACTED_UNKNOWN_RESPONSE_KEY
+    assert persisted_tool_row["stray_provider_field"] == "<redacted-unknown-response-key>"
+    assert "do-not-persist" not in result.persisted_tool_row_content[0]
+    assert redaction_telemetry.unknown_response_key_calls == [{"tool_name": "set_metadata"}]
 
 
 def _format_validation_errors(result: ValidationResult) -> str:

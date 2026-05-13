@@ -2091,19 +2091,19 @@ git commit -am "test(integration): CL-PP-{N} extends failed_turn assertions (com
 
 ### Task 12b: Author CL-PP-9, 10a, 10b, 12, 13
 
-- [ ] **CL-PP-9: Mixed redaction policy (§8.2 line 2583).** A tool whose argument model has both `Sensitive[T]`-annotated and non-sensitive fields. Drive a turn that exercises both. Assert sensitive fields persist as sentinel/summarizer output; non-sensitive fields are byte-identical; structural shape preserved.
+- [x] **CL-PP-9: Mixed redaction policy (§8.2 line 2583).** A tool whose argument model has both `Sensitive[T]`-annotated and non-sensitive fields. Drive a turn that exercises both. Assert sensitive fields persist as sentinel/summarizer output; non-sensitive fields are byte-identical; structural shape preserved.
 
-- [ ] **CL-PP-10a: INSERT succeeded, COMMIT failed (no plugin crash).** Inject `OperationalError` on COMMIT via SQLAlchemy event hook. Assert `AuditIntegrityError` raised (chained from the injected error); `composer.audit.tool_row_tier1_violation_total` increments; caller propagates; no rows visible (transaction rolled back).
+- [x] **CL-PP-10a: INSERT succeeded, COMMIT failed (no plugin crash).** Inject `OperationalError` on COMMIT via SQLAlchemy event hook. Assert `AuditIntegrityError` raised (chained from the injected error); `composer.audit.tool_row_tier1_violation_total` increments; caller propagates; no rows visible (transaction rolled back).
 
-- [ ] **CL-PP-10b: COMMIT failed (plugin crash in flight).** Same injection plus a `RuntimeError` from the second tool. Assert `AuditOutcome(assistant_id=None, unwind_audit_failed=True)`; `tool_row_persist_failed_during_unwind_total` increments; log entry emitted; caller raises the captured `ComposerPluginCrashError`.
+- [x] **CL-PP-10b: COMMIT failed (plugin crash in flight).** Same injection plus a `RuntimeError` from the second tool. Assert `AuditOutcome(assistant_id=None, unwind_audit_failed=True)`; `tool_row_persist_failed_during_unwind_total` increments; log entry emitted; caller raises the captured `ComposerPluginCrashError`.
 
 - [ ] **CL-PP-10c: `asyncio.CancelledError` during shielded sync dispatch.** Inject cancellation after `persist_compose_turn_async` has entered its shielded worker dispatch but before COMMIT returns. Assert cancellation does not interrupt the commit; assistant/tool rows are durable; after the shield completes the caller observes the cancellation according to the route contract. This closes spec §5.5 rows 5-8 at integration level.
 
 - [ ] **CL-PP-10d: `asyncio.CancelledError` after COMMIT before response yield.** Inject cancellation after COMMIT succeeds and before the HTTP response is yielded. Assert the cancellation propagates to the client path without data loss; assistant/tool rows and composition-state rows remain queryable; no duplicate route-layer `_persist_tool_invocations` drain runs. This closes spec §5.5 rows 9-11 at integration level.
 
-- [ ] **CL-PP-12: Tool-call cap exceeded.** LLM emits 17 tool calls; loop raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")` BEFORE any tool execution; no DB writes; `composer.tool_call_cap_exceeded_total` increments.
+- [x] **CL-PP-12: Tool-call cap exceeded.** LLM emits 17 tool calls; loop raises `ComposerConvergenceError(reason="tool_call_cap_exceeded")` BEFORE any tool execution; no DB writes; `composer.tool_call_cap_exceeded_total` increments.
 
-- [ ] **CL-PP-13: Unknown response key fail-closed (§8.2 line 2627).** A declarative-manifest-entry tool returns a response containing a key not in `known_response_keys`. Assert the value is replaced with the fixed sentinel `<redacted-unknown-response-key>` (rev-5 form; no length disclosure); `composer.redaction.unknown_response_key_total` increments. The tool call completes successfully.
+- [x] **CL-PP-13: Unknown response key fail-closed (§8.2 line 2627).** A declarative-manifest-entry tool returns a response containing a key not in `known_response_keys`. Assert the value is replaced with the fixed sentinel `<redacted-unknown-response-key>` (rev-5 form; no length disclosure); `composer.redaction.unknown_response_key_total` increments. The tool call completes successfully.
 
 Each case follows: RED test → run → GREEN. Commit per case.
 

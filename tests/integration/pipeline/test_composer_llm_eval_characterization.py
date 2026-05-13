@@ -698,11 +698,12 @@ async def test_final_completion_claim_is_replaced_by_runtime_preflight_failure(t
     )
 
     assert result.message != "The pipeline is complete and valid."
-    # Positive content check: synthetic preflight-failure message must reference
-    # the actual reason. _runtime_preflight_failure_message echoes the first
-    # ValidationError.message verbatim, which for the end_of_source trigger
-    # case contains "end_of_source". A regression that replaces the message
-    # with a generic fallback would pass the negative check above but fail this.
+    # Positive content check: augmentation suffix must reference the actual
+    # reason. _compose_preflight_failure_message echoes the first
+    # ValidationError.message verbatim into the suffix, which for the
+    # end_of_source trigger case contains "end_of_source". A regression that
+    # replaces the suffix with a generic fallback would pass the negative
+    # check above but fail this.
     assert "end_of_source" in result.message
     assert result.raw_assistant_content == "The pipeline is complete and valid."
     assert result.runtime_preflight is not None

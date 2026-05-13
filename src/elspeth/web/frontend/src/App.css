@@ -3219,11 +3219,12 @@ summary:focus-visible {
 }
 
 .plugin-card-desc {
+  display: -webkit-box;
   font-size: 11px;
   color: var(--color-text-muted);
-  white-space: nowrap;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .plugin-card-expanded {

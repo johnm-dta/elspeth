@@ -86,7 +86,7 @@ describe("PluginCard — collapsed header", () => {
       />,
     );
     expect(screen.getByText("csv")).toBeInTheDocument();
-    expect(screen.getByText("CSV source")).toBeInTheDocument();
+    expect(screen.getByText("CSV source")).toHaveAttribute("title", "CSV source");
     // Expanded content does NOT render while collapsed.
     expect(screen.queryByText(/Loading/)).not.toBeInTheDocument();
   });

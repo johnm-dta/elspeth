@@ -2,7 +2,7 @@
 // PluginCard
 //
 // Collapsible card showing plugin name, description, and config schema.
-// Collapsed: name + one-line description. Expanded: config schema fields.
+// Collapsed: name + short description. Expanded: config schema fields.
 //
 // Handles two JSON-Schema shapes:
 //   1. Flat single-model schema: { properties, required } at the top level.
@@ -160,7 +160,9 @@ export function PluginCard({ plugin, schema, schemaError, onExpand, onRetrySchem
         className="plugin-card-header"
       >
         <span className="plugin-card-name">{plugin.name}</span>
-        <span className="plugin-card-desc">{plugin.description}</span>
+        <span className="plugin-card-desc" title={plugin.description}>
+          {plugin.description}
+        </span>
       </div>
 
       {/* Action button — sibling of the disclosure header, NOT a descendant.

@@ -4714,15 +4714,17 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="get_guided",
-                        channel="tool_invocations",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    # Terminal logger-of-last-resort: no safer channel exists if structlog itself raises here.
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="get_guided",
+                            channel="tool_invocations",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
                 try:
                     await _persist_llm_calls(
                         service,
@@ -4731,15 +4733,16 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="get_guided",
-                        channel="llm_calls",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="get_guided",
+                            channel="llm_calls",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
 
     @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)
     async def post_guided_respond(
@@ -5251,15 +5254,16 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="post_guided_respond",
-                        channel="tool_invocations",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="post_guided_respond",
+                            channel="tool_invocations",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
                 try:
                     await _persist_llm_calls(
                         service,
@@ -5268,15 +5272,16 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.audit_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="post_guided_respond",
-                        channel="llm_calls",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.audit_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="post_guided_respond",
+                            channel="llm_calls",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
 
     @router.post("/{session_id}/guided/chat", response_model=GuidedChatResponse)
     async def post_guided_chat(
@@ -5567,14 +5572,15 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                     )
                 except Exception as persist_exc:
-                    slog.error(
-                        "guided.chat_turn_persist_failed_during_exception_handling",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        site="post_guided_chat",
-                        exc_class=type(persist_exc).__name__,
-                        frames=_safe_frame_strings(persist_exc),
-                    )
+                    with contextlib.suppress(Exception):
+                        slog.error(
+                            "guided.chat_turn_persist_failed_during_exception_handling",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            site="post_guided_chat",
+                            exc_class=type(persist_exc).__name__,
+                            frames=_safe_frame_strings(persist_exc),
+                        )
 
     return router
 

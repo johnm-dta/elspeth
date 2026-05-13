@@ -764,3 +764,38 @@ class TestRejectionPathAuditDrain:
         # convention forbids.
         forbidden_keys = {"exc_message", "exception", "exc_info"}
         assert not (forbidden_keys & entry.keys()), f"slog entry has forbidden message/exc_info field: {entry}"
+
+    def test_audit_persist_failure_preserves_original_error_if_slog_raises(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A broken logger must not replace the original guided-response error.
+
+        The finally-drain ``except`` block has already reached the last-resort
+        logging channel. If structlog itself raises there, no further channel
+        exists that can safely report the audit-of-audit failure, so the route
+        must preserve the original HTTPException instead of surfacing a logger
+        pipeline error to the browser.
+        """
+        from elspeth.web.sessions import routes as routes_mod
+
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["csv"])
+
+        async def _raising_persist(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated audit-system failure")
+
+        def _raising_slog_error(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated logger failure")
+
+        monkeypatch.setattr(routes_mod, "_persist_tool_invocations", _raising_persist)
+        monkeypatch.setattr(routes_mod.slog, "error", _raising_slog_error)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": None},
+        )
+
+        assert resp.status_code == 400, resp.json()

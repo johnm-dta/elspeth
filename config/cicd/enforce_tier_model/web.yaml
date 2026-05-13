@@ -1649,7 +1649,7 @@ allow_hits:
   safety: Exception is stored on RuntimePreflightFailure.original_exc and re-raised at the caller site with full chain preservation;
     no silent swallowing
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=9539bd389a128fed
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=d6270af06c79fb7c
   owner: composer-guided
   reason: PR-review B3 finally-block drain (tool_invocations channel) — the broad except wraps _persist_tool_invocations
     inside the unconditional finally so an audit-system failure during exception handling cannot mask the in-flight
@@ -1662,7 +1662,15 @@ allow_hits:
     strings). The original HTTPException continues to propagate. The sibling try-block (llm_calls channel) still runs
     even if this one fails. No silent suppression; operators observe the audit-persist failure via the structured log event.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=828b3cb21637bc25
+- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=26048eb91e7a3e44
+  owner: composer-guided
+  reason: Terminal logger-of-last-resort guard around slog.error in the tool_invocations finally-drain; if structlog itself
+    raises during audit-system failure reporting, there is no safer channel left and the route must preserve the original
+    HTTPException rather than replacing it with a logger-pipeline error.
+  safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the original
+    route exception continues to propagate and a regression test patches slog.error to raise to verify that behaviour.
+  expires: null
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=76a14895c878e633
   owner: composer-guided
   reason: PR-review B3 finally-block drain (llm_calls channel) — the broad except wraps _persist_llm_calls inside the
     same unconditional finally as the sibling tool_invocations drain. Same rationale — a persist failure here must not
@@ -1672,7 +1680,14 @@ allow_hits:
     only (B1 convention) and a channel=llm_calls discriminator so operators can distinguish which audit channel failed.
     The original HTTPException continues to propagate. No silent suppression.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=039b5cc49cb21725
+- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=3413762ac69b61ba
+  owner: composer-guided
+  reason: Terminal logger-of-last-resort guard around slog.error in the llm_calls finally-drain; if structlog itself raises
+    during audit-system failure reporting, no safer channel remains and the route must preserve the original HTTPException.
+  safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the sibling
+    drain remains isolated and the original route exception continues to propagate.
+  expires: null
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=6e5af884e30671aa
   owner: composer-guided
   reason: PR-review B3 finally-block drain (tool_invocations channel) — same rationale as get_guided above. The
     post_guided_respond handler emits guided_turn_answered before the dispatcher's try-block can raise 400; the finally-
@@ -1684,7 +1699,15 @@ allow_hits:
     still runs even if this one fails. No silent suppression; operators observe the audit-persist failure via the
     structured log event.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=b8975428cdc7082c
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=a927749a4159a3a8
+  owner: composer-guided
+  reason: Terminal logger-of-last-resort guard around slog.error in the post_guided_respond tool_invocations finally-drain;
+    if structlog itself raises while reporting an audit-system failure, the original 400/409/500 must remain the surfaced
+    route outcome.
+  safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; covered by a
+    regression test that patches both _persist_tool_invocations and slog.error to raise.
+  expires: null
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=45762565a0a29885
   owner: composer-guided
   reason: PR-review B3 finally-block drain (llm_calls channel) — the broad except wraps _persist_llm_calls inside the
     same unconditional finally as the sibling tool_invocations drain. Same rationale — a persist failure here must not
@@ -1694,7 +1717,14 @@ allow_hits:
     only (B1 convention) and a channel=llm_calls discriminator so operators can distinguish which audit channel failed.
     The original HTTPException continues to propagate. No silent suppression.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=b5ea678d6a765d5e
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=ccf7cdf0d0c241b2
+  owner: composer-guided
+  reason: Terminal logger-of-last-resort guard around slog.error in the post_guided_respond llm_calls finally-drain; if
+    structlog itself raises while reporting an audit-system failure, no safer reporting channel remains.
+  safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the original
+    route exception continues to propagate and the sibling drain remains isolated.
+  expires: null
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=931ede04e03fe7a0
   owner: composer-guided
   reason: Phase A finally-block drain (chat_turns channel) — the broad except wraps _persist_chat_turns inside the
     unconditional finally so an audit-system failure during exception handling cannot mask the in-flight HTTPException.
@@ -1706,6 +1736,14 @@ allow_hits:
     channel=chat_turns discriminator so operators can distinguish which audit channel failed. The original HTTPException
     continues to propagate. No silent suppression; operators observe the audit-persist failure via the structured log
     event.
+  expires: null
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=951a6323ed3a4609
+  owner: composer-guided
+  reason: Terminal logger-of-last-resort guard around slog.error in the post_guided_chat chat_turns finally-drain; if
+    structlog itself raises while reporting an audit-system failure, no safer reporting channel remains and the original
+    route outcome must be preserved.
+  safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the original
+    route exception continues to propagate.
   expires: null
 - key: web/sessions/routes.py:R6:_persist_chat_turns:fp=9d29608614feacfe
   owner: composer-audit

@@ -338,24 +338,20 @@ class TestStep2IntraStep:
         assert body["next_turn"] is not None
         assert body["next_turn"]["type"] == "recipe_offer"
         payload = body["next_turn"]["payload"]
-        assert "recipe_name" in payload
-        assert payload["recipe_name"] == "classify-rows-llm-jsonl"
-        # Gap 6 wire-shape: payload exposes the unsatisfied required slots
-        # so the frontend can render an editable form for them.  classify-rows
-        # has three required slots not derivable from (source, sink):
-        # classifier_template, model, api_key_secret.
-        assert "unsatisfied_slots" in payload
-        unsatisfied_names = {entry["name"] for entry in payload["unsatisfied_slots"]}
+        assert payload["mode"] == "recipe_decision"
+        assert payload["recipe_context"]["recipe_name"] == "classify-rows-llm-jsonl"
+        assert payload["prefilled"]["label_field"] == "label"
+        # Recipe offers now expose the unsatisfied required slots as KnobSchema
+        # fields so the same SchemaFormTurn renderer handles plugin options and
+        # recipe decisions.
+        unsatisfied_names = {entry["name"] for entry in payload["knobs"]["fields"]}
         assert unsatisfied_names == {
             "classifier_template",
             "model",
             "api_key_secret",
         }
-        # ``required`` is absent from the wire shape: the RecipeMatch invariant
-        # guarantees every entry is required, so the field would be dead information.
-        for entry in payload["unsatisfied_slots"]:
-            assert set(entry.keys()) == {"name", "slot_type", "description"}
-            assert "required" not in entry
+        for entry in payload["knobs"]["fields"]:
+            assert entry["required"] is True
 
     def test_multi_select_response_commits_sink_to_state(self, composer_test_client: TestClient) -> None:
         """M1: MULTI_SELECT_WITH_CUSTOM → step 2.5 transition commits sink to composition_state.outputs.
@@ -476,7 +472,8 @@ class TestStep25RecipeAccept:
 
         # Verify recipe was offered
         assert recipe_body["next_turn"]["type"] == "recipe_offer"
-        offered_recipe = recipe_body["next_turn"]["payload"]["recipe_name"]
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
 
         # Accept the recipe — output_path must be under {data_dir}/outputs/
         body = _respond(
@@ -486,6 +483,7 @@ class TestStep25RecipeAccept:
             edited_values={
                 "recipe_name": offered_recipe,
                 "slots": {
+                    **payload["prefilled"],
                     "source_blob_id": blob_id,
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "anthropic/claude-3.5-sonnet",
@@ -537,7 +535,8 @@ class TestStep25RecipeAccept:
         session_id = _create_session(composer_test_client)
         recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out.jsonl")
-        offered_recipe = recipe_body["next_turn"]["payload"]["recipe_name"]
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
 
         _respond(
             composer_test_client,
@@ -546,6 +545,7 @@ class TestStep25RecipeAccept:
             edited_values={
                 "recipe_name": offered_recipe,
                 "slots": {
+                    **payload["prefilled"],
                     "source_blob_id": blob_id,
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "anthropic/claude-3.5-sonnet",

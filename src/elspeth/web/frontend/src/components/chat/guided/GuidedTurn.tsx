@@ -10,7 +10,7 @@
 //   "multi_select_with_custom"-> MultiSelectWithCustomTurn
 //   "schema_form"             -> SchemaFormTurn
 //   "propose_chain"           -> ProposeChainTurn
-//   "recipe_offer"            -> RecipeOfferTurn
+//   "recipe_offer"            -> SchemaFormTurn (mode="recipe_decision")
 //
 // Exhaustiveness assertion:
 //   The `default:` branch contains `const _exhaustive: never = turn.type`.
@@ -44,14 +44,12 @@ import type {
   MultiSelectWithCustomPayload,
   SchemaFormPayload,
   ProposeChainPayload,
-  RecipeOfferPayload,
 } from "@/types/guided";
 import { SingleSelectTurn } from "./SingleSelectTurn";
 import { InspectAndConfirmTurn } from "./InspectAndConfirmTurn";
 import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { SchemaFormTurn } from "./SchemaFormTurn";
 import { ProposeChainTurn } from "./ProposeChainTurn";
-import { RecipeOfferTurn } from "./RecipeOfferTurn";
 
 interface GuidedTurnProps {
   turn: TurnPayload;
@@ -107,8 +105,8 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
       );
     case "recipe_offer":
       return (
-        <RecipeOfferTurn
-          payload={turn.payload as RecipeOfferPayload}
+        <SchemaFormTurn
+          payload={turn.payload as SchemaFormPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
         />

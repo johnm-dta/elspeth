@@ -4759,11 +4759,10 @@ summary:focus-visible {
    ProposeChainTurn (Task 7.6)
    Classes prefixed guided-propose-*. Card-list layout -- no chip styles.
 
-   CARD-STYLE REUSE (Task 7.7): .guided-propose-step-card is SHARED with
-   RecipeOfferTurn.  It provides pure card chrome (surface-elevated, border-strong,
-   radius-lg, padding space-md) with no step-list-specific styling.  RecipeOfferTurn
-   applies it to a single card div; ProposeChainTurn applies it to each <li> in the
-   step list.  New recipe-specific rules live in the guided-recipe-* namespace below.
+   CARD-STYLE REUSE (Task 7.7): .guided-propose-step-card also carries the
+   recipe-decision card chrome. It provides pure card chrome (surface-elevated,
+   border-strong, radius-lg, padding space-md) with no step-list-specific styling.
+   ProposeChainTurn applies it to each <li> in the step list.
    --------------------------------------------------------------------------- */
 
 /* Overall rationale paragraph shown above the step cards */
@@ -4926,8 +4925,8 @@ summary:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
-   RecipeOfferTurn (Task 7.7)
-   Classes prefixed guided-recipe-*. Single-card layout.
+   Recipe decision header
+   Classes prefixed guided-recipe-*.
 
    Card chrome reuse: .guided-propose-step-card (Task 7.6, App.css:4285-4290)
    is applied as the outer card shell.  guided-recipe-* rules cover the

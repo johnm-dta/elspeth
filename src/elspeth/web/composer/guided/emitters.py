@@ -26,20 +26,18 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.web.catalog.knob_schema import KnobSchema
+from elspeth.web.catalog.knob_schema import KnobSchema, lower_slot_specs_to_knob_schema
 from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
     ProposeChainPayload,
-    RecipeOfferPayload,
     SchemaFormPayload,
     SingleSelectPayload,
     Turn,
     TurnType,
     _Observed,
     _Option,
-    _RecipeSlotInput,
 )
 
 if TYPE_CHECKING:
@@ -268,10 +266,11 @@ def build_step_2_multi_select_turn(
 def build_step_2_5_recipe_offer_turn(
     match: RecipeMatch,
 ) -> Turn:
-    """Build a ``recipe_offer`` Turn from a RecipeMatch.
+    """Build a ``recipe_offer`` Turn with a schema-form recipe decision payload.
 
-    Emitted at Step 2.5 when the deterministic recipe matcher finds a
-    registered recipe that fits the (source, sink) topology.
+    ``TurnType.RECIPE_OFFER`` is retained for guided state-machine routing,
+    while ``payload.mode == "recipe_decision"`` routes the shared one-knob
+    renderer on the frontend.
 
     Args:
         match: The matched recipe with its partial slot map.
@@ -280,20 +279,22 @@ def build_step_2_5_recipe_offer_turn(
         A ``Turn`` TypedDict ready for serialisation and hash.
     """
     from elspeth.contracts.freeze import deep_thaw
+    from elspeth.web.composer.guided.errors import InvariantError
+    from elspeth.web.composer.recipes import get_recipe
 
-    unsatisfied: list[_RecipeSlotInput] = [
-        _RecipeSlotInput(
-            name=name,
-            slot_type=spec.slot_type,
-            description=spec.description,
-        )
-        for name, spec in match.unsatisfied_slots.items()
-    ]
-    payload: RecipeOfferPayload = {
-        "recipe_name": match.recipe_name,
-        "slots": dict(deep_thaw(match.slots)),
-        "alternatives": ["build_manually"],
-        "unsatisfied_slots": unsatisfied,
+    recipe = get_recipe(match.recipe_name)
+    if recipe is None:
+        raise InvariantError(f"Recipe {match.recipe_name!r} disappeared from registry")
+
+    payload: SchemaFormPayload = {
+        "mode": "recipe_decision",
+        "knobs": lower_slot_specs_to_knob_schema(match.unsatisfied_slots),
+        "prefilled": dict(deep_thaw(match.slots)),
+        "recipe_context": {
+            "recipe_name": match.recipe_name,
+            "description": recipe.description,
+            "alternatives": ["build_manually"],
+        },
     }
     return Turn(
         type=TurnType.RECIPE_OFFER.value,

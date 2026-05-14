@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypedDict
 
-from elspeth.contracts.composer_slots import SlotType
 from elspeth.web.catalog.knob_schema import SchemaFormPayload as SchemaFormPayload
 
 
@@ -64,36 +63,6 @@ class ProposeChainPayload(TypedDict):
     steps: Sequence[_ProposedStep]
     why: str
     blockers: Sequence[str]
-
-
-class _RecipeSlotInput(TypedDict):
-    """Wire shape for one unsatisfied required slot in a recipe_offer turn.
-
-    ``slot_type`` reuses :data:`elspeth.web.composer.recipes.SlotType` directly
-    so the wire schema cannot drift from the source-of-truth Literal: adding a
-    new member to ``SlotType`` immediately fails type-checking here, in the
-    emitter, and (mirrored manually) in ``guided.ts``. The frontend renders an
-    editable input keyed by ``name`` and submits the typed value back as part
-    of ``edited_values.slots``.
-
-    ``required`` is intentionally absent from this wire shape: every entry in
-    ``RecipeOfferPayload.unsatisfied_slots`` is guaranteed required by the
-    :class:`~elspeth.web.composer.guided.recipe_match.RecipeMatch` invariant
-    (commit 83b17ca6, ``__post_init__`` Invariant 2). Sending a field that is
-    always ``True`` is dead information on the wire — the frontend can treat
-    all entries as required without reading a flag.
-    """
-
-    name: str
-    slot_type: SlotType
-    description: str
-
-
-class RecipeOfferPayload(TypedDict):
-    recipe_name: str
-    slots: Mapping[str, Any]
-    alternatives: Sequence[str]
-    unsatisfied_slots: Sequence[_RecipeSlotInput]
 
 
 class ControlSignal(StrEnum):
@@ -241,7 +210,11 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
     ),
     TurnType.SCHEMA_FORM: frozenset({"mode", "knobs", "prefilled"}),
     TurnType.PROPOSE_CHAIN: frozenset({"steps", "why", "blockers"}),
-    TurnType.RECIPE_OFFER: frozenset({"recipe_name", "slots", "alternatives", "unsatisfied_slots"}),
+    # The turn discriminator remains RECIPE_OFFER so the guided state machine
+    # can route Step 2.5 without changing its legal-turn matrix. The payload
+    # itself uses the SchemaFormPayload discriminator, where
+    # mode="recipe_decision" routes the shared one-knob renderer.
+    TurnType.RECIPE_OFFER: frozenset({"mode", "knobs", "prefilled", "recipe_context"}),
 }
 
 # Nested shape spec for recursive payload validation.
@@ -266,12 +239,7 @@ _NESTED_SHAPES: Mapping[TurnType, tuple[_NestedSpec, ...]] = {
         ("observed", "mapping", frozenset({"columns", "samples", "warnings"})),
     ),
     TurnType.SCHEMA_FORM: (("knobs", "mapping", frozenset({"fields"})),),
-    TurnType.RECIPE_OFFER: (
-        # "unsatisfied_slots" must be a Sequence; each element is a Mapping
-        # with these keys.  "required" is intentionally absent — the
-        # RecipeMatch invariant guarantees every entry is required.
-        ("unsatisfied_slots", "sequence_of_mappings", frozenset({"name", "slot_type", "description"})),
-    ),
+    TurnType.RECIPE_OFFER: (("knobs", "mapping", frozenset({"fields"})),),
 }
 
 
@@ -313,9 +281,11 @@ def validate_payload(turn_type: TurnType, payload: Mapping[str, Any]) -> str | N
                 if item_missing:
                     return f"{prefix}[{idx}] missing required keys: {sorted(item_missing)}"
 
-    if turn_type is TurnType.SCHEMA_FORM:
+    if turn_type in {TurnType.SCHEMA_FORM, TurnType.RECIPE_OFFER}:
         mode = payload["mode"]
         if mode == "plugin_options":
+            if turn_type is TurnType.RECIPE_OFFER:
+                return "payload for recipe_offer must use mode='recipe_decision'"
             if "plugin" not in payload:
                 return "payload for schema_form mode=plugin_options missing required keys: ['plugin']"
         elif mode == "recipe_decision":

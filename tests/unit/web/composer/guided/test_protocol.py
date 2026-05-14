@@ -9,7 +9,6 @@ from elspeth.web.composer.guided.protocol import (
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
     ProposeChainPayload,
-    RecipeOfferPayload,
     SchemaFormPayload,
     SingleSelectPayload,
     Turn,
@@ -79,45 +78,36 @@ class TestPayloadShapes:
         }
         assert len(payload["steps"]) == 1
 
-    def test_recipe_offer_payload(self) -> None:
-        payload: RecipeOfferPayload = {
-            "recipe_name": "classify-rows-llm-jsonl",
-            "slots": {},
-            "alternatives": [],
-            "unsatisfied_slots": [],
-        }
-        assert payload["recipe_name"] == "classify-rows-llm-jsonl"
-
-    def test_recipe_offer_payload_with_unsatisfied_slots(self) -> None:
-        """unsatisfied_slots carries the editable schema for unfilled required slots.
-
-        ``required`` is intentionally absent from the wire shape: the
-        RecipeMatch invariant guarantees every entry is required.
-        """
+    def test_recipe_offer_payload_is_recipe_decision_schema_form(self) -> None:
+        """RECIPE_OFFER keeps its turn discriminator but shares schema_form payloads."""
         from elspeth.web.composer.guided.protocol import validate_payload
 
-        payload: RecipeOfferPayload = {
-            "recipe_name": "classify-rows-llm-jsonl",
-            "slots": {"source_blob_id": "abc-uuid", "output_path": "out.jsonl"},
-            "alternatives": ["build_manually"],
-            "unsatisfied_slots": [
-                {
-                    "name": "classifier_template",
-                    "slot_type": "str",
-                    "description": "Jinja2 template",
-                },
-                {
-                    "name": "model",
-                    "slot_type": "str",
-                    "description": "LLM model identifier",
-                },
-            ],
+        payload: SchemaFormPayload = {
+            "mode": "recipe_decision",
+            "knobs": {
+                "fields": [
+                    {
+                        "name": "classifier_template",
+                        "label": "Classifier template",
+                        "description": "Jinja2 template",
+                        "kind": "text",
+                        "required": True,
+                        "nullable": False,
+                    }
+                ]
+            },
+            "prefilled": {"source_blob_id": "abc-uuid", "output_path": "out.jsonl"},
+            "recipe_context": {
+                "recipe_name": "classify-rows-llm-jsonl",
+                "description": "Classify CSV rows",
+                "alternatives": ["build_manually"],
+            },
         }
         assert validate_payload(TurnType.RECIPE_OFFER, payload) is None
-        assert payload["unsatisfied_slots"][0]["name"] == "classifier_template"
+        assert payload["recipe_context"]["recipe_name"] == "classify-rows-llm-jsonl"
 
-    def test_recipe_offer_payload_missing_unsatisfied_slots_rejected(self) -> None:
-        """A payload missing the new required key surfaces a validation error."""
+    def test_recipe_offer_legacy_payload_rejected(self) -> None:
+        """The old recipe_offer shape is not accepted alongside the new contract."""
         from elspeth.web.composer.guided.protocol import validate_payload
 
         err = validate_payload(
@@ -129,7 +119,7 @@ class TestPayloadShapes:
             },
         )
         assert err is not None
-        assert "unsatisfied_slots" in err
+        assert "mode" in err
 
 
 class TestTurnResponse:
@@ -336,90 +326,114 @@ class TestPayloadValidation:
         assert "mapping" in err
 
     def test_recipe_offer_golden_validates(self) -> None:
-        """Full valid RECIPE_OFFER payload with unsatisfied slots passes."""
+        """Full valid RECIPE_OFFER recipe-decision payload passes."""
         from elspeth.web.composer.guided.protocol import validate_payload
 
         err = validate_payload(
             TurnType.RECIPE_OFFER,
             {
-                "recipe_name": "r",
-                "slots": {},
-                "alternatives": [],
-                "unsatisfied_slots": [
-                    {"name": "x", "slot_type": "str", "description": "hint"},
-                ],
+                "mode": "recipe_decision",
+                "knobs": {
+                    "fields": [
+                        {
+                            "name": "x",
+                            "label": "X",
+                            "kind": "text",
+                            "required": True,
+                            "nullable": False,
+                        },
+                    ],
+                },
+                "prefilled": {},
+                "recipe_context": {
+                    "recipe_name": "r",
+                    "description": "Recipe",
+                    "alternatives": ["build_manually"],
+                },
             },
         )
         assert err is None
 
-    def test_recipe_offer_empty_unsatisfied_slots_valid(self) -> None:
-        """Empty unsatisfied_slots list is valid (resolver covered all required slots)."""
+    def test_recipe_offer_empty_knobs_valid(self) -> None:
+        """Empty knob fields list is valid when resolver covered all required slots."""
         from elspeth.web.composer.guided.protocol import validate_payload
 
         err = validate_payload(
             TurnType.RECIPE_OFFER,
             {
-                "recipe_name": "r",
-                "slots": {"x": 1},
-                "alternatives": [],
-                "unsatisfied_slots": [],
+                "mode": "recipe_decision",
+                "knobs": {"fields": []},
+                "prefilled": {"x": 1},
+                "recipe_context": {
+                    "recipe_name": "r",
+                    "description": "Recipe",
+                    "alternatives": [],
+                },
             },
         )
         assert err is None
 
-    def test_recipe_offer_unsatisfied_slot_missing_key(self) -> None:
-        """An unsatisfied slot entry missing ``slot_type`` — path-rooted error."""
+    def test_recipe_offer_knobs_missing_fields_key(self) -> None:
+        """A knobs mapping missing ``fields`` is rejected path-locally."""
         from elspeth.web.composer.guided.protocol import validate_payload
 
         err = validate_payload(
             TurnType.RECIPE_OFFER,
             {
-                "recipe_name": "r",
-                "slots": {},
-                "alternatives": [],
-                "unsatisfied_slots": [
-                    {"name": "x", "description": "d"},  # missing "slot_type"
-                ],
+                "mode": "recipe_decision",
+                "knobs": {},
+                "prefilled": {},
+                "recipe_context": {
+                    "recipe_name": "r",
+                    "description": "Recipe",
+                    "alternatives": [],
+                },
             },
         )
         assert err is not None
-        # Path-rooted: "payload.unsatisfied_slots[0] missing required keys: ..."
-        assert "payload.unsatisfied_slots[0]" in err
-        assert "slot_type" in err
+        assert "payload.knobs" in err
+        assert "fields" in err
 
-    def test_recipe_offer_unsatisfied_slots_not_sequence(self) -> None:
-        """``unsatisfied_slots`` is a Mapping, not a Sequence — type error is path-rooted."""
+    def test_recipe_offer_knobs_not_mapping(self) -> None:
+        """``knobs`` must be a Mapping, not a sequence or scalar."""
         from elspeth.web.composer.guided.protocol import validate_payload
 
         err = validate_payload(
             TurnType.RECIPE_OFFER,
             {
-                "recipe_name": "r",
-                "slots": {},
-                "alternatives": [],
-                "unsatisfied_slots": {"name": "x"},  # Mapping instead of Sequence
+                "mode": "recipe_decision",
+                "knobs": "not-a-mapping",
+                "prefilled": {},
+                "recipe_context": {
+                    "recipe_name": "r",
+                    "description": "Recipe",
+                    "alternatives": [],
+                },
             },
         )
         assert err is not None
-        assert "payload.unsatisfied_slots" in err
-        assert "sequence" in err
-
-    def test_recipe_offer_unsatisfied_slot_not_mapping(self) -> None:
-        """An unsatisfied slot entry is a string, not a Mapping — type error is path-rooted."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.RECIPE_OFFER,
-            {
-                "recipe_name": "r",
-                "slots": {},
-                "alternatives": [],
-                "unsatisfied_slots": ["not-a-mapping"],
-            },
-        )
-        assert err is not None
-        assert "payload.unsatisfied_slots[0]" in err
+        assert "payload.knobs" in err
         assert "mapping" in err
+
+    def test_recipe_offer_recipe_context_missing_key(self) -> None:
+        """recipe_context must carry the metadata banner fields."""
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.RECIPE_OFFER,
+            {
+                "mode": "recipe_decision",
+                "knobs": {"fields": []},
+                "prefilled": {},
+                "recipe_context": {
+                    "recipe_name": "r",
+                    "alternatives": [],
+                },
+            },
+        )
+        assert err is not None
+        assert "payload.recipe_context" in err
+        assert "description" in err
 
     def test_top_level_missing_key_error_takes_priority(self) -> None:
         """Missing top-level key is reported before nested checks run."""

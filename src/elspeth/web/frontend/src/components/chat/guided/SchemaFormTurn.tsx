@@ -50,7 +50,8 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false }: SchemaFo
 
   function handleContinue() {
     if (!canSubmit()) return;
-    const submitted: Record<string, unknown> = {};
+    const submitted: Record<string, unknown> =
+      payload.mode === "recipe_decision" ? { ...payload.prefilled } : {};
     for (const field of visibleFields()) {
       submitted[field.name] = submittedValue(field, values[field.name]);
     }
@@ -120,7 +121,7 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false }: SchemaFo
           onClick={handleContinue}
           disabled={disabled || !canSubmit()}
         >
-          Continue
+          {payload.mode === "recipe_decision" ? "Apply recipe" : "Continue"}
         </button>
         {payload.mode === "recipe_decision" && payload.recipe_context.alternatives.includes("build_manually") && (
           <button

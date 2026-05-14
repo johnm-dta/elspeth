@@ -233,7 +233,7 @@ describe("SchemaFormTurn", () => {
           knobs: {
             fields: [field({ name: "threshold", label: "Threshold", kind: "number-float", required: true })],
           },
-          prefilled: {},
+          prefilled: { source_blob_id: "blob-1" },
           recipe_context: {
             recipe_name: "split-by-score",
             description: "Split rows by score",
@@ -246,14 +246,14 @@ describe("SchemaFormTurn", () => {
 
     expect(screen.getByRole("heading", { level: 3, name: "split-by-score" })).toBeInTheDocument();
     await user.type(screen.getByRole("spinbutton", { name: "Threshold" }), "0.9");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Apply recipe" }));
 
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
         chosen: ["accept"],
         edited_values: {
           recipe_name: "split-by-score",
-          slots: { threshold: 0.9 },
+          slots: { source_blob_id: "blob-1", threshold: 0.9 },
         },
       }),
     );

@@ -19,7 +19,7 @@
 //   multi_select_with_custom -- payload.question text (legend text)
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
 //   propose_chain         -- "Accept proposal" button
-//   recipe_offer          -- <h3> recipe_name heading
+//   recipe_offer          -- SchemaFormTurn recipe-decision renderer
 // ============================================================================
 
 import { describe, it, expect, vi } from "vitest";
@@ -34,7 +34,6 @@ import type {
   MultiSelectWithCustomPayload,
   SchemaFormPayload,
   ProposeChainPayload,
-  RecipeOfferPayload,
 } from "@/types/guided";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -94,11 +93,15 @@ const PROPOSE_CHAIN_PAYLOAD: ProposeChainPayload = {
   blockers: [],
 };
 
-const RECIPE_OFFER_PAYLOAD: RecipeOfferPayload = {
-  recipe_name: "csv_to_json",
-  slots: {},
-  alternatives: ["build_manually"],
-  unsatisfied_slots: [],
+const RECIPE_OFFER_PAYLOAD: SchemaFormPayload = {
+  mode: "recipe_decision",
+  knobs: { fields: [] },
+  prefilled: {},
+  recipe_context: {
+    recipe_name: "csv_to_json",
+    description: "Convert CSV rows to JSON.",
+    alternatives: ["build_manually"],
+  },
 };
 
 /** Build a TurnPayload with the given type and typed payload. */
@@ -124,7 +127,7 @@ function makeTurn(
 ): TurnPayload;
 function makeTurn(
   type: "recipe_offer",
-  payload: RecipeOfferPayload,
+  payload: SchemaFormPayload,
 ): TurnPayload;
 function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
   return { type, step_index: 0, payload };
@@ -192,16 +195,15 @@ describe("GuidedTurn dispatcher — routing", () => {
     ).toBeTruthy();
   });
 
-  it("recipe_offer: renders RecipeOfferTurn (recipe_name h3 heading)", () => {
+  it("recipe_offer: renders SchemaFormTurn recipe decision", () => {
     render(
       <GuidedTurn
         turn={makeTurn("recipe_offer", RECIPE_OFFER_PAYLOAD)}
         onSubmit={vi.fn()}
       />,
     );
-    expect(
-      screen.getByRole("heading", { level: 3, name: "csv_to_json" }),
-    ).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 3, name: "csv_to_json" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Apply recipe" })).toBeTruthy();
   });
 });
 

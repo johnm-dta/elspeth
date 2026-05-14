@@ -162,7 +162,7 @@ export interface GuidedChatResponse {
 // Each widget owns its payload type; add yours when you implement the widget.
 // Field names use snake_case to mirror the wire (GuidedRespondRequest does too).
 //
-// SHARED across single_select / multi_select_with_custom / recipe_offer:
+// SHARED across single_select / multi_select_with_custom:
 export interface Option {
   id: string;
   label: string;
@@ -293,64 +293,7 @@ export interface ProposeChainPayload {
   blockers: string[];
 }
 
-/**
- * Wire: one unsatisfied required slot input for a recipe_offer turn
- * (protocol.py:_RecipeSlotInput).
- *
- * The frontend renders an editable input keyed by ``name`` and merges the
- * typed value into ``edited_values.slots`` before submitting.
- *
- * ``required`` is intentionally absent: the RecipeMatch invariant
- * (protocol.py:_RecipeSlotInput docstring, commit 83b17ca6) guarantees every
- * entry in unsatisfied_slots is required. All inputs rendered from this type
- * should be treated as required without reading a flag.
- */
+/** CI mirror for Python SlotType; recipe decisions render through KnobSchema. */
 export interface RecipeSlotInput {
-  name: string;
   slot_type: "blob_id" | "str" | "float" | "int" | "str_list";
-  description: string;
-}
-
-/**
- * Wire: RecipeOfferPayload (protocol.py:RecipeOfferPayload).
- *
- * recipe_name       -- matched recipe identifier.
- * slots             -- already-resolved slot values (Mapping[str, Any] on the
- *                      wire).  Typed as Record<string, unknown> — callers must
- *                      not assume any specific value shape.
- * alternatives      -- alternative recipe names or control signals the server
- *                      may suggest.  In the current backend (emitters.py), this
- *                      is always ["build_manually"].  Display when non-empty;
- *                      the "Build manually" button already acts on that signal,
- *                      so rendering it here is advisory only (informs the user
- *                      other paths exist — or may exist once the recipe
- *                      catalogue grows).
- * unsatisfied_slots -- the schema for required slots the resolver could NOT
- *                      pre-fill.  The widget renders an editable input per
- *                      entry; the typed values are merged into
- *                      ``edited_values.slots`` on Apply.  Empty when the
- *                      resolver covered every required slot.
- *
- * Submit shapes (verified against routes.py STEP_2_5_RECIPE_MATCH handler):
- *   Apply recipe:   { chosen: ["accept"],
- *                     edited_values: { recipe_name,
- *                                      slots: { ...payload.slots,
- *                                               ...operator_inputs } },
- *                     custom_inputs: null, accepted_step_index: null,
- *                     edit_step_index: null, control_signal: null }
- *   Build manually: { chosen: ["build_manually"],
- *                     edited_values: null, custom_inputs: null,
- *                     accepted_step_index: null, edit_step_index: null,
- *                     control_signal: null }
- *
- * NOTE: The "Apply recipe" path MUST send edited_values with recipe_name and
- * the merged slots (pre-filled + operator inputs).  The backend reconstructs
- * the RecipeMatch from edited_values and feeds slots to validate_slots; a
- * missing required slot produces a RecipeValidationError → HTTP 400.
- */
-export interface RecipeOfferPayload {
-  recipe_name: string;
-  slots: Record<string, unknown>;
-  alternatives: string[];
-  unsatisfied_slots: RecipeSlotInput[];
 }

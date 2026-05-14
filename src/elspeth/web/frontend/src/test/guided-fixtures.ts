@@ -1,6 +1,6 @@
 // ============================================================================
 // Guided-mode test fixtures — shared helpers for SingleSelectTurn,
-// MultiSelectWithCustomTurn, SchemaFormTurn, ProposeChainTurn, RecipeOfferTurn,
+// MultiSelectWithCustomTurn, SchemaFormTurn, ProposeChainTurn,
 // InspectAndConfirmTurn (Tasks 7.2-7.7).
 //
 // Convention: anything that pins the GuidedRespondRequest wire shape lives

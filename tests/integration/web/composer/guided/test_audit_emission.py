@@ -321,7 +321,8 @@ class TestRecipeMatchAuditEmission:
         output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
 
         assert recipe_body["next_turn"]["type"] == "recipe_offer"
-        offered_recipe = recipe_body["next_turn"]["payload"]["recipe_name"]
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
 
         _respond(
             composer_test_client,
@@ -330,6 +331,7 @@ class TestRecipeMatchAuditEmission:
             edited_values={
                 "recipe_name": offered_recipe,
                 "slots": {
+                    **payload["prefilled"],
                     "source_blob_id": blob_id,
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "anthropic/claude-3.5-sonnet",
@@ -352,7 +354,8 @@ class TestRecipeMatchAuditEmission:
         recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
 
-        offered_recipe = recipe_body["next_turn"]["payload"]["recipe_name"]
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
 
         _respond(
             composer_test_client,
@@ -361,6 +364,7 @@ class TestRecipeMatchAuditEmission:
             edited_values={
                 "recipe_name": offered_recipe,
                 "slots": {
+                    **payload["prefilled"],
                     "source_blob_id": blob_id,
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "anthropic/claude-3.5-sonnet",
@@ -383,7 +387,8 @@ class TestRecipeMatchAuditEmission:
         recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
 
-        offered_recipe = recipe_body["next_turn"]["payload"]["recipe_name"]
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
 
         _respond(
             composer_test_client,
@@ -392,6 +397,7 @@ class TestRecipeMatchAuditEmission:
             edited_values={
                 "recipe_name": offered_recipe,
                 "slots": {
+                    **payload["prefilled"],
                     "source_blob_id": blob_id,
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "anthropic/claude-3.5-sonnet",
@@ -414,7 +420,8 @@ class TestRecipeMatchAuditEmission:
         recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
 
-        offered_recipe = recipe_body["next_turn"]["payload"]["recipe_name"]
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
 
         final_body = _respond(
             composer_test_client,
@@ -423,6 +430,7 @@ class TestRecipeMatchAuditEmission:
             edited_values={
                 "recipe_name": offered_recipe,
                 "slots": {
+                    **payload["prefilled"],
                     "source_blob_id": blob_id,
                     "classifier_template": "Classify: {{ row['text'] }}",
                     "model": "anthropic/claude-3.5-sonnet",

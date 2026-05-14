@@ -2945,6 +2945,39 @@ summary:focus-visible {
   font-weight: 600;
 }
 
+.pending-overlay-pill {
+  position: absolute;
+  z-index: 5;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px dashed var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.spec-pending-proposal,
+.yaml-pending-summary {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  margin-bottom: var(--space-sm);
+  padding: var(--space-sm) 10px;
+  border-left: 4px dashed var(--color-warning);
+  background: color-mix(
+    in srgb,
+    var(--color-warning) 12%,
+    var(--color-surface)
+  );
+}
+
+.spec-pending-proposal {
+  flex-wrap: wrap;
+}
+
 /* ---------------------------------------------------------------------------
    ComposingIndicator
    --------------------------------------------------------------------------- */

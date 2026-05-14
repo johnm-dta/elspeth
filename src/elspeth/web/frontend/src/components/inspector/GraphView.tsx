@@ -122,6 +122,13 @@ function layoutGraph(
 
 export function GraphView() {
   const compositionState = useSessionStore((s) => s.compositionState);
+  const pendingProposalCount = useSessionStore(
+    (s) =>
+      s.compositionProposals.filter(
+        (proposal) =>
+          proposal.status === "pending" && proposal.affects.includes("graph"),
+      ).length,
+  );
   const selectedNodeId = useSessionStore((s) => s.selectedNodeId);
   const selectNode = useSessionStore((s) => s.selectNode);
   const { resolvedTheme } = useTheme();
@@ -567,11 +574,20 @@ export function GraphView() {
 
   return (
     <div
-      style={{ width: "100%", height: "100%" }}
+      style={{ width: "100%", height: "100%", position: "relative" }}
       aria-label={ariaLabel}
       aria-roledescription="Pipeline DAG diagram"
       role="img"
     >
+      {pendingProposalCount > 0 && (
+        <div
+          role="status"
+          className="pending-overlay-pill"
+          aria-label={`${pendingProposalCount} pending graph proposal${pendingProposalCount === 1 ? "" : "s"}`}
+        >
+          pending #{pendingProposalCount}
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}

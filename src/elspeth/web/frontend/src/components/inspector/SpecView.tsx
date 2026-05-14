@@ -241,6 +241,15 @@ function SuggestionBanner({ suggestions, onApply, isApplying }: SuggestionBanner
 
 export function SpecView() {
   const compositionState = useSessionStore((s) => s.compositionState);
+  const compositionProposals = useSessionStore((s) => s.compositionProposals);
+  const pendingProposals = useMemo(
+    () =>
+      compositionProposals.filter(
+        (proposal) =>
+          proposal.status === "pending" && proposal.affects.includes("graph"),
+      ),
+    [compositionProposals],
+  );
   const selectedNodeId = useSessionStore((s) => s.selectedNodeId);
   const selectNode = useSessionStore((s) => s.selectNode);
   const validationResult = useExecutionStore((s) => s.validationResult);
@@ -400,6 +409,13 @@ export function SpecView() {
             isApplying={isComposing}
           />
         )}
+
+      {pendingProposals.map((proposal, index) => (
+        <div key={proposal.id} className="spec-pending-proposal" role="note">
+          <strong>Pending proposal #{index + 1}</strong>
+          <span>{proposal.summary}</span>
+        </div>
+      ))}
 
       {/* Source card */}
       {compositionState.source && (

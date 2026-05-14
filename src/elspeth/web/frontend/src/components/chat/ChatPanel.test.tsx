@@ -4,7 +4,12 @@ import { ChatPanel } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
 import { useComposer } from "@/hooks/useComposer";
-import type { ChatMessage, ComposerProgressSnapshot, Session } from "@/types/api";
+import type {
+  ChatMessage,
+  ComposerProgressSnapshot,
+  CompositionProposal,
+  Session,
+} from "@/types/api";
 import type {
   GuidedSession,
   SingleSelectPayload,
@@ -18,9 +23,30 @@ vi.mock("@/hooks/useComposer", () => ({
 }));
 
 vi.mock("./MessageBubble", () => ({
-  MessageBubble: ({ message }: { message: ChatMessage }) => (
-    <div data-testid="message-bubble">{message.content}</div>
-  ),
+  MessageBubble: ({
+    message,
+    proposalsByToolCallId,
+    staleProposalIds,
+  }: {
+    message: ChatMessage;
+    proposalsByToolCallId?: Map<string, CompositionProposal>;
+    staleProposalIds?: string[];
+  }) => {
+    const toolCallId = message.tool_calls?.[0]?.id ?? null;
+    const proposal = toolCallId
+      ? proposalsByToolCallId?.get(toolCallId) ?? null
+      : null;
+    const isStale = proposal
+      ? staleProposalIds?.includes(proposal.id) ?? false
+      : false;
+    return (
+      <div data-testid="message-bubble">
+        <div>{message.content}</div>
+        {proposal && <div>{proposal.summary}</div>}
+        {isStale && <div>Stale proposal</div>}
+      </div>
+    );
+  },
 }));
 
 // Mock surfaces both the placeholder and the onSend wiring as inspectable
@@ -111,6 +137,58 @@ describe("ChatPanel", () => {
     expect(screen.getByText("The model requested plugin schemas.")).toBeInTheDocument();
     expect(screen.getByText("Checking available source, transform, and sink tools.")).toBeInTheDocument();
     expect(screen.queryByText("Working on: convert HTML into JSON")).not.toBeInTheDocument();
+  });
+
+  it("passes matching and stale proposal state to message bubbles", () => {
+    const session: Session = {
+      id: "session-1",
+      title: "Proposal session",
+      created_at: "2026-05-14T00:00:00Z",
+      updated_at: "2026-05-14T00:00:00Z",
+    };
+    const assistantMessage: ChatMessage = {
+      id: "assistant-1",
+      session_id: "session-1",
+      role: "assistant",
+      content: "I need approval.",
+      tool_calls: [
+        {
+          id: "call-1",
+          type: "function",
+          function: { name: "set_pipeline", arguments: "{}" },
+        },
+      ],
+      created_at: "2026-05-14T00:00:01Z",
+    };
+    const proposal: CompositionProposal = {
+      id: "proposal-1",
+      session_id: "session-1",
+      tool_call_id: "call-1",
+      tool_name: "set_pipeline",
+      status: "pending",
+      summary: "Replace the pipeline.",
+      rationale: "Requested by the current composer turn.",
+      affects: ["graph"],
+      arguments_redacted_json: {},
+      base_state_id: null,
+      committed_state_id: null,
+      audit_event_id: "event-1",
+      created_at: "2026-05-14T00:00:00Z",
+      updated_at: "2026-05-14T00:00:00Z",
+    };
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      sessions: [session],
+      messages: [assistantMessage],
+      compositionProposals: [proposal],
+      staleProposalIds: ["proposal-1"],
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByText("Replace the pipeline.")).toBeInTheDocument();
+    expect(screen.getByText("Stale proposal")).toBeInTheDocument();
   });
 });
 

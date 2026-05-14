@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { render, screen } from "@testing-library/react";
 import { GraphView } from "./GraphView";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
+import type { CompositionProposal, CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
 
 // Mock @xyflow/react — jsdom cannot do DOM measurements required by React Flow.
 // Render nodes and edges as simple divs so we can assert on their presence.
@@ -136,11 +136,33 @@ function makeState(overrides: Partial<CompositionState> = {}): CompositionState 
   };
 }
 
+function makeProposal(
+  overrides: Partial<CompositionProposal> = {},
+): CompositionProposal {
+  return {
+    id: "proposal-1",
+    session_id: "session-1",
+    tool_call_id: "call-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "Replace the pipeline.",
+    rationale: "Requested by the current composer turn.",
+    affects: ["graph", "validation", "yaml"],
+    arguments_redacted_json: {},
+    base_state_id: null,
+    committed_state_id: null,
+    audit_event_id: "event-1",
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe("GraphView", () => {
   beforeEach(() => {
-    useSessionStore.setState({ compositionState: null });
+    useSessionStore.setState({ compositionState: null, compositionProposals: [] });
     document.documentElement.removeAttribute("style");
   });
 
@@ -157,6 +179,25 @@ describe("GraphView", () => {
     expect(screen.getByText("classify")).toBeInTheDocument();
     // The plugin name
     expect(screen.getByText("llm_transform")).toBeInTheDocument();
+  });
+
+  it("renders a pending proposal pill when proposal affects graph", () => {
+    useSessionStore.setState({
+      compositionState: makeState({
+        nodes: [
+          makeNode({
+            id: "classify",
+            node_type: "transform",
+            plugin: "llm_transform",
+          }),
+        ],
+      }),
+      compositionProposals: [makeProposal()],
+    });
+
+    render(<GraphView />);
+
+    expect(screen.getByText("pending #1")).toBeInTheDocument();
   });
 
   it("renders edge labels for on_success", () => {

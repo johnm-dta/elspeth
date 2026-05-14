@@ -2579,7 +2579,7 @@ EOF
 - Test: `src/elspeth/web/frontend/src/components/inspector/YamlView.test.tsx`
 - Test: `src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx`
 
-- [ ] **Step 1: Add failing overlay tests**
+- [x] **Step 1: Add failing overlay tests**
 
 Add to `GraphView.test.tsx`:
 
@@ -2619,7 +2619,7 @@ Add equivalent assertions in `SpecView.test.tsx` for `Pending proposal` and `Yam
 
 Add a `ChatPanel.test.tsx` assertion that a message with `tool_calls[0].id === "call-1"` renders the matching proposal from `compositionProposals[0].tool_call_id === "call-1"` through `MessageBubble`/`ToolCallCard`, and that a stale proposal ID in `staleProposalIds` renders the stale badge. This locks the wiring path instead of only testing `MessageBubble` in isolation.
 
-- [ ] **Step 2: Run overlay tests to verify they fail**
+- [x] **Step 2: Run overlay tests to verify they fail**
 
 Run:
 
@@ -2630,7 +2630,9 @@ npm run test -- src/components/inspector/GraphView.test.tsx src/components/inspe
 
 Expected: FAIL because pending proposal overlays do not render.
 
-- [ ] **Step 3: Pass proposals into freeform message bubbles**
+Observed: FAIL in GraphView, SpecView, and YamlView overlay assertions; ChatPanel pass-through already passed because Task 8 wired the message bubble props.
+
+- [x] **Step 3: Pass proposals into freeform message bubbles**
 
 In `ChatPanel.tsx`, select proposals and actions:
 
@@ -2656,7 +2658,7 @@ Pass these props to `MessageBubble`:
               onRejectProposal={(proposalId) => void rejectProposal(proposalId)}
 ```
 
-- [ ] **Step 4: Add GraphView pending pill**
+- [x] **Step 4: Add GraphView pending pill**
 
 In `GraphView.tsx`, read pending proposals:
 
@@ -2680,7 +2682,7 @@ Inside the graph container above `<ReactFlow>`, render:
       )}
 ```
 
-- [ ] **Step 5: Add SpecView pending rows**
+- [x] **Step 5: Add SpecView pending rows**
 
 In `SpecView.tsx`, read pending proposals:
 
@@ -2701,7 +2703,7 @@ Render after validation banners:
       ))}
 ```
 
-- [ ] **Step 6: Add YamlView pending summary**
+- [x] **Step 6: Add YamlView pending summary**
 
 In `YamlView.tsx`, read pending proposals:
 
@@ -2721,7 +2723,7 @@ Render above the toolbar:
       )}
 ```
 
-- [ ] **Step 7: Add overlay CSS**
+- [x] **Step 7: Add overlay CSS**
 
 In `App.css`, add:
 
@@ -2750,7 +2752,7 @@ In `App.css`, add:
 }
 ```
 
-- [ ] **Step 8: Run overlay tests**
+- [x] **Step 8: Run overlay tests**
 
 Run:
 
@@ -2761,7 +2763,9 @@ npm run test -- src/components/inspector/GraphView.test.tsx src/components/inspe
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+Observed: PASS (`GraphView.test.tsx`, `SpecView.test.tsx`, `YamlView.test.tsx`, and `ChatPanel.test.tsx`: `49 passed`). Additional verification: `npm run typecheck` PASS; `npm run lint` PASS with five pre-existing warnings.
+
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx src/elspeth/web/frontend/src/components/inspector/GraphView.tsx src/elspeth/web/frontend/src/components/inspector/SpecView.tsx src/elspeth/web/frontend/src/components/inspector/YamlView.tsx src/elspeth/web/frontend/src/App.css src/elspeth/web/frontend/src/components/inspector/GraphView.test.tsx src/elspeth/web/frontend/src/components/inspector/SpecView.test.tsx src/elspeth/web/frontend/src/components/inspector/YamlView.test.tsx

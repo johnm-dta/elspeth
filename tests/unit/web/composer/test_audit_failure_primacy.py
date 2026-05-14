@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -321,8 +322,17 @@ async def test_compose_loop_rejects_unwind_audit_failure_without_plugin_crash(
 
     from elspeth.contracts.errors import AuditIntegrityError
     from elspeth.web.sessions._persist_payload import AuditOutcome
+    from elspeth.web.sessions.protocol import ComposerSessionPreferencesRecord
 
     class _ImpossibleOutcomeSessionsService:
+        async def get_composer_preferences(self, session_id: Any) -> ComposerSessionPreferencesRecord:
+            return ComposerSessionPreferencesRecord(
+                session_id=session_id,
+                trust_mode="auto_commit",
+                density_default="high",
+                updated_at=datetime.now(UTC),
+            )
+
         async def persist_compose_turn_async(self, **_kwargs: Any) -> AuditOutcome:
             return AuditOutcome(assistant_id=None, unwind_audit_failed=True)
 

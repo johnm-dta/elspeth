@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from sqlalchemy import text
@@ -12,7 +14,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_tool_call_response
 from elspeth.web.composer.service import ComposerServiceImpl
-from elspeth.web.sessions.protocol import CompositionStateData
+from elspeth.web.sessions.protocol import ComposerSessionPreferencesRecord, CompositionStateData
 
 
 async def _run_one_turn(
@@ -24,6 +26,18 @@ async def _run_one_turn(
 ) -> Any:
     driver = cast(Any, service)
     return await driver._run_one_turn_for_test(llm=llm, session_id=session_id, current_state_id=current_state_id)
+
+
+def _patch_auto_commit_preferences(monkeypatch: pytest.MonkeyPatch, sessions_service: Any) -> None:
+    async def _get_composer_preferences(session_id: UUID) -> ComposerSessionPreferencesRecord:
+        return ComposerSessionPreferencesRecord(
+            session_id=session_id,
+            trust_mode="auto_commit",
+            density_default="high",
+            updated_at=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(sessions_service, "get_composer_preferences", _get_composer_preferences)
 
 
 @pytest.mark.asyncio
@@ -220,10 +234,12 @@ async def test_step2_dispatches_one_persist_compose_turn_async_per_turn(
     fake_llm_two_tool_calls: Any,
     result_session_id: str,
     sqlalchemy_event_listener: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One tool-call turn is committed by one persist_compose_turn_async call."""
 
     sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    _patch_auto_commit_preferences(monkeypatch, sessions_service)
     counts = sqlalchemy_event_listener(sessions_service._engine)  # type: ignore[attr-defined]
 
     await _run_one_turn(
@@ -282,10 +298,12 @@ async def test_step2_audit_integrity_error_carries_failed_turn_metadata(
     fake_llm_two_tool_calls: Any,
     result_session_id: str,
     inject_commit_OperationalError: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Audit failures from the single dispatch keep route-visible turn context."""
 
     sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    _patch_auto_commit_preferences(monkeypatch, sessions_service)
     inject_commit_OperationalError(sessions_service._engine)  # type: ignore[attr-defined]
 
     with pytest.raises(AuditIntegrityError) as excinfo:

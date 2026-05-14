@@ -512,6 +512,8 @@ def result_session_id(composer_service_with_real_sessions: ComposerServiceImpl) 
                 user_id="phase3-test-user",
                 auth_provider_type="local",
                 title="Phase 3 test session",
+                trust_mode="auto_commit",
+                density_default="high",
                 created_at=now,
                 updated_at=now,
             )

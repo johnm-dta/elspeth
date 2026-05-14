@@ -62,7 +62,7 @@ Each choice cites the alternative considered and the finding it traces to.
 
 **Rejected:** (a) Delete `TurnType.RECIPE_OFFER` outright (silently absorbs a non-trivial state-machine refactor — solution-architect H1). (b) Keep two separate turn types renderers (defeats the directive).
 
-**Resolution:** `SchemaFormPayload` carries an optional `mode: "plugin_options" | "recipe_decision"` discriminator. When `mode == "recipe_decision"`, the payload additionally carries `recipe_context: RecipeContext`. The renderer dispatches on `mode`; for `recipe_decision` it composes the form fields with a `RecipeContextHeader` peer that shows recipe name, description, and the "build manually" alternative. `TurnType.RECIPE_OFFER` is **retained** as a distinct wire discriminator (for state-machine routing); only the rendering is unified.
+**Resolution:** `SchemaFormPayload` carries a required `mode: "plugin_options" | "recipe_decision"` discriminator. When `mode == "recipe_decision"`, the payload additionally carries `recipe_context: RecipeContext`. The renderer dispatches on `mode`; for `recipe_decision` it composes the form fields with a `RecipeContextHeader` peer that shows recipe name, description, and the "build manually" alternative. `TurnType.RECIPE_OFFER` is **retained** as a distinct wire discriminator (for state-machine routing); only the rendering is unified.
 
 This preserves four integration points without rewriting them:
 
@@ -89,7 +89,7 @@ This preserves four integration points without rewriting them:
 
 **Resolution:** `tier` is **omitted from the wire** when no annotation exists. Frontend treats absent as `"common"` for partitioning purposes today. The three-section partitioning UI itself is **deferred** until a second plugin demonstrates the need (solution-architect M1). Per-plugin annotation pass is also deferred. The wire shape is future-proofed; the UI work is not paid for now.
 
-**Replaces with right-sized enforcement:** A CI lint rule (`scripts/cicd/enforce_options_metadata.py`) asserts every plugin `config_model` field carries `title` and `description`. This is the systems-thinking review's #1 governance floor — independent of tier. It is in scope for this design.
+**Replaces with right-sized enforcement:** A CI lint rule (`scripts/cicd/enforce_options_metadata.py`) asserts every metadata-bearing plugin configuration field carries `title` and `description`, including provider-specific fields on discriminated variant models. This is the systems-thinking review's #1 governance floor — independent of tier. It is in scope for this design.
 
 **Traces to:** Report Finding 4; systems-thinking #1 second-order effect; solution-arch M1; llm-diagnostician Finding 5.
 
@@ -115,7 +115,7 @@ emitters.build_step_*_schema_form_turn
         │  Read PluginSchemaInfo.knob_schema directly; no lowering at request time
         ▼
 Turn { type: SCHEMA_FORM, payload: SchemaFormPayload }
-        │  Payload includes optional mode + recipe_context for Choice 4
+        │  Payload includes required mode + recipe_context for Choice 4
         ▼
 SchemaFormTurn.tsx  ◄── rewrite: closed kind dispatch
         │  - text / number-int / number-float / checkbox / enum
@@ -291,8 +291,9 @@ class KnobSchema(TypedDict):
                 '''Return (discriminator_field_name, {literal_value: variant_cls}).'''
 
         For LLMTransform this is a trivial wrapper over _PROVIDERS. The contract
-        is a Protocol declared in contracts/; not inheriting it raises
-        KnobSchemaLoweringError at catalog load.
+        is a structural Protocol declared in contracts/; catalog dispatch checks
+        for a callable discriminated_variants() method and raises
+        KnobSchemaLoweringError at catalog load if it is absent.
 
         Mandates the Pydantic `Annotated[Union[...], Field(discriminator="...")]`
         authoring form. The `Annotated[..., Discriminator(...)]` (pydantic v2
@@ -354,7 +355,7 @@ The forward path (plugin schema → KnobSchema → frontend) is described above.
 7. `int = 5` (explicit default) → wire emits `default: 5`.
 8. `int` (no default, required) → wire omits `default`.
 9. Discriminator switches from variant A to variant B mid-edit: only variant-B fields appear in `edited_values.options`; variant-A user-typed values are discarded; `_execute_set_*` accepts the submission and validates against variant B's schema.
-10. Operator submits an option value for a field whose `visible_when` does not match current discriminator: backend returns HTTP 400 `code="hidden_field_submitted"` with per-field predicate detail. No silent drop, no audit entry.
+10. Operator submits an option value for a field whose `visible_when` does not match current discriminator: backend emits `guided_hidden_field_rejected` through the existing composer audit recorder, then returns HTTP 400 `code="hidden_field_submitted"` with per-field predicate detail. No silent drop.
 
 `_execute_set_*` and the per-plugin configuration models are unchanged by this work.
 
@@ -377,7 +378,7 @@ Per Phase 9 convention 14 ("wire-contract changes ship in one commit"), the migr
 | 2 | Add `step_1_inspection_facts` to `GuidedSession` (additive field; persistence, no readers yet) | No (state schema only) |
 | 3 | **Atomic:** all three emitters (`build_step_1_schema_form_turn`, `build_step_2_schema_form_turn`, `build_step_3_schema_form_turn`) switch to `KnobSchema`; frontend `SchemaFormTurn.tsx` rewrite to consume new shape; inspection-fact prefill goes live | **Yes — atomic** |
 | 4 | Recipe-fold: add `mode` + `recipe_context` to `SchemaFormPayload`; `RecipeOfferTurn.tsx` deleted; recipe rendering composed inside `SchemaFormTurn` | **Yes — atomic** (separate commit from Step 3) |
-| 5a | **Audit + fill before renderer cutover:** sweep every plugin's `config_model`, fill missing `title` and `description` annotations, land as one commit (or one per-plugin commit chain) before Step 3 goes live | No |
+| 5a | **Audit + fill before renderer cutover:** sweep every plugin's metadata-bearing configuration model, including discriminated variants returned by `discriminated_variants()`, fill missing `title` and `description` annotations, land as one commit (or one per-plugin commit chain) before Step 3 goes live | No |
 | 5b | **Enforce:** land `scripts/cicd/enforce_options_metadata.py` as a CI-failing check. Wire to the CI matrix. Allowlist starts empty | No |
 | 6 | `composer_tier` annotation pass — deferred until second plugin demonstrates partitioning need | No |
 
@@ -387,13 +388,13 @@ The Step 3 emitter is bundled with Step 1/2 in step 3 of this sequence because a
 
 `knob_schema.py` is the hot module. Test corpus:
 
-- **Golden snapshots** for every `config_model` in the current plugin catalog. Run on Pydantic upgrades to detect schema-generation changes before they reach the wire.
+- **Golden snapshots** for every metadata-bearing configuration model in the current plugin catalog, including provider variants returned by `discriminated_variants()`. Run on Pydantic upgrades to detect schema-generation changes before they reach the wire.
 - **Live catalog smoke test:** instantiate the real plugin manager with `get_shared_plugin_manager()`, construct `CatalogServiceImpl`, and assert every registered plugin produces `knob_schema` without raising. This guards the live `$ref`, nullable array/object, object-map, array-of-model, complex-`anyOf`, and top-level-`oneOf` shapes found in the readiness review.
 - **Hypothesis property test:** random `BaseModel` subclasses with declared scalar and nullable field types → lowering returns a valid `KnobSchema` (all required fields present, `kind` in the Literal set, `nullable` consistent with `anyOf` presence) or raises `KnobSchemaLoweringError` only for malformed schemas/invariant violations. Never silent garbage.
 - **Discriminated-union round-trip:** lower `LLMTransform`'s discriminated union → verify the discriminator emerges as a single `kind="enum"` knob with both variant values; variant fields carry correct `visible_when` predicates; predicate-resolution against form state submits only the active-variant fields.
 - **Synthetic discriminated-union corpus** (not just the LLMTransform real case): a two-variant union with shared fields; a three-variant union; a variant with no extra fields beyond the discriminator; a variant whose discriminator literal is a non-string. Each round-trips through `from_discriminated_model` with stable `fields` order and correct `visible_when` predicates.
 - **`visible_when` negative cases:** predicate with `field` set to a non-existent KnobField name; predicate referencing a KnobField that is itself `visible_when`-gated (nesting attempt); predicate with extra keys beyond `{field, equals}`; predicate referencing a forward (later-declared) KnobField. Each raises `KnobSchemaLoweringError` at catalog load.
-- **Hidden-field rejection round-trip:** operator submits an option for a field whose predicate doesn't match current discriminator value → backend returns 400 with `code="hidden_field_submitted"` and the failing predicate in detail. No audit row recorded for the rejected submission.
+- **Hidden-field rejection round-trip:** operator submits an option for a field whose predicate doesn't match current discriminator value → backend emits `guided_hidden_field_rejected` through the existing composer audit recorder, then returns 400 with `code="hidden_field_submitted"` and the failing predicate in detail.
 - **Totality test** over `typing.get_args(SlotType)` for `KnobSchema.from_slot_specs`.
 - **Negative corpus:** malformed visibility predicates, malformed discriminator metadata, unknown `SlotType`, and unbounded `$ref` shapes should produce `KnobSchemaLoweringError`. Valid rich schemas must lower to `json-object`, `json-array`, or `json-value`.
 - **Field-order preservation:** verify `fields` order matches `model_json_schema()["properties"]` insertion order against a model where alphabetical and declaration order differ.
@@ -405,7 +406,7 @@ Frontend test surface gets simpler: the JSON textarea fallback tests are replace
 
 New script: `scripts/cicd/enforce_options_metadata.py`.
 
-- Walks every plugin's `config_model`.
+- Walks every plugin's metadata-bearing configuration model, including provider-specific models returned by `discriminated_variants()`; do not inspect only a discriminated plugin's base `config_model`.
 - Asserts each field has non-empty `title` (or carries `Annotated[T, Field(title=...)]`).
 - Asserts each field has non-empty `description`.
 - When `json_schema_extra` is used on a field, asserts the canonical `Annotated[T, Field(json_schema_extra={...})]` form (python-engineering review verified both forms produce identical schema output, but mixed usage creates a refactoring hazard — direct `Field(...)` without `json_schema_extra` remains accepted for simple title/description-only fields).

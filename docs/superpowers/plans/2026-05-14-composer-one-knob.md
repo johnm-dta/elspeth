@@ -62,12 +62,14 @@
 - `tests/unit/web/composer/test_knob_schema.py`
 - `tests/unit/web/composer/test_knob_schema_recipe_adapter.py`
 - `tests/unit/web/composer/test_knob_schema_discriminated.py`
+- `tests/unit/web/catalog/test_knob_schema_properties.py`
+- `tests/golden/web/catalog/knob_schema/*.json`
 - `tests/unit/web/catalog/test_eager_lowering.py`
-- `tests/unit/web/composer/test_hidden_field_rejection.py`
+- `tests/integration/web/composer/test_hidden_field_rejection.py`
 - `tests/unit/scripts/cicd/test_enforce_options_metadata.py`
 
 ### Plugin configuration models — bulk metadata fill (Task 16)
-- Every plugin `config_model` under `src/elspeth/plugins/{sources,transforms,sinks}/...` that lacks `title` or `description` on any field
+- Every metadata-bearing plugin configuration model under `src/elspeth/plugins/{sources,transforms,sinks}/...` that lacks `title` or `description` on any field, including provider-specific discriminated variants returned by `discriminated_variants()`
 
 ---
 
@@ -488,6 +490,32 @@ def test_optional_int_clear_round_trips_through_set_source_validator():
     }
     validated = SetSourceArgumentsModel.model_validate(payload)
     assert validated.options["skip_rows"] is None
+
+
+def test_optional_str_absent_round_trips_through_set_source_validator():
+    from elspeth.web.composer.redaction import SetSourceArgumentsModel
+
+    payload = {
+        "plugin": "csv",
+        "on_success": "continue",
+        "on_validation_failure": "quarantine",
+        "options": {"schema": {"mode": "observed"}},
+    }
+    validated = SetSourceArgumentsModel.model_validate(payload)
+    assert "encoding" not in validated.options
+
+
+def test_optional_str_clear_round_trips_through_set_source_validator():
+    from elspeth.web.composer.redaction import SetSourceArgumentsModel
+
+    payload = {
+        "plugin": "csv",
+        "on_success": "continue",
+        "on_validation_failure": "quarantine",
+        "options": {"schema": {"mode": "observed"}, "encoding": None},
+    }
+    validated = SetSourceArgumentsModel.model_validate(payload)
+    assert validated.options["encoding"] is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1299,9 +1327,42 @@ def test_catalog_init_raises_on_bad_plugin(plugin_manager_with_broken_plugin):
     """A plugin whose lowering fails halts startup."""
     with pytest.raises(KnobSchemaLoweringError):
         CatalogServiceImpl(plugin_manager_with_broken_plugin)
+
+
+@pytest.fixture
+def plugin_manager():
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+    return get_shared_plugin_manager()
+
+
+@pytest.fixture
+def plugin_manager_with_broken_plugin():
+    class _BrokenOptions(BaseModel):
+        missing_metadata: str
+
+    class _BrokenSource:
+        name = "broken_source"
+        config_model = _BrokenOptions
+
+        @classmethod
+        def get_config_schema(cls):
+            return cls.config_model.model_json_schema()
+
+    class _FakePluginManager:
+        def get_sources(self):
+            return [_BrokenSource]
+
+        def get_transforms(self):
+            return []
+
+        def get_sinks(self):
+            return []
+
+    return _FakePluginManager()
 ```
 
-(Fixtures `plugin_manager` and `plugin_manager_with_broken_plugin` may need to be added to the test conftest — examine the existing catalog test suite for the right fixture path.)
+Keep these fixtures local to `test_eager_lowering.py` unless the existing catalog test suite already has equivalent fixtures with the same behavior. Do not rely on undefined shared fixtures.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1325,6 +1386,12 @@ Replace with:
 class CatalogServiceImpl:
     def __init__(self, plugin_manager: PluginManager) -> None:
         self._pm = plugin_manager
+        # Preserve the live constructor's class-list caches before building
+        # schema records. Do not move the cache loop above these assignments.
+        self._source_classes = plugin_manager.get_sources()
+        self._transform_classes = plugin_manager.get_transforms()
+        self._sink_classes = plugin_manager.get_sinks()
+
         # Pre-materialise every plugin's schema at construction time.
         # KnobSchemaLoweringError surfaces here — halts process startup.
         self._schema_cache: dict[tuple[str, str], PluginSchemaInfo] = {}
@@ -1352,7 +1419,6 @@ class CatalogServiceImpl:
         name: str,
         plugin_cls: PluginClass,
     ) -> PluginSchemaInfo:
-        from elspeth.contracts.discriminated import DiscriminatedPlugin
         from elspeth.web.catalog.knob_schema import (
             lower_discriminated_to_knob_schema,
             lower_model_to_knob_schema,
@@ -1360,8 +1426,9 @@ class CatalogServiceImpl:
         )
 
         json_schema = self._catalog_schema(plugin_cls, plugin_type)
+        discriminated_variants = getattr(plugin_cls, "discriminated_variants", None)
 
-        if isinstance(plugin_cls, DiscriminatedPlugin):
+        if discriminated_variants is not None and callable(discriminated_variants):
             knob_schema = lower_discriminated_to_knob_schema(
                 plugin_cls, plugin_kind=plugin_type, plugin_name=name
             )
@@ -1503,7 +1570,7 @@ Edit `state_machine.py`:
 - Bump `GUIDED_SESSION_SCHEMA_VERSION` from 3 to 4 and update the schema-version tests.
 - Add `__post_init__` handling or an equivalent freeze guard so `step_1_inspection_facts` cannot carry mutable nested mappings after session construction. `SourceInspectionFacts` already freezes its mappings, but the new `GuidedSession` field must be covered by the existing freeze-guard discipline and tests.
 - Ensure the field is included in any `_replace` lifecycle that re-enters Step 1 (e.g., cleared on re-enter to a fresh state).
-- Add an operational migration note for staging/prod: existing persisted guided sessions using schema version 3 are intentionally incompatible and must be cleared before deploy; do not silently accept both versions.
+- Add an operational migration note for staging/prod: existing persisted guided sessions using schema version 3 are intentionally incompatible; the operator deletes the sessions DB before deploy. Do not silently accept both versions.
 
 (See the current shape at `state_machine.py:397, 422, 443, 478, 513` for matching the existing patterns.)
 
@@ -1581,7 +1648,7 @@ Expected: errors in `emitters.py` (consumers of old shape). These are fixed in T
 
 **Files:**
 - Modify: `src/elspeth/web/composer/guided/emitters.py:115-143, 181-209, 326-343`
-- Test: `tests/unit/web/composer/test_emitters.py` (extend existing)
+- Test: `tests/unit/web/composer/guided/test_emitters.py` (extend existing)
 
 - [ ] **Step 1: Update `build_step_1_schema_form_turn`**
 
@@ -1678,14 +1745,14 @@ def build_step_3_schema_form_turn(
 - [ ] **Step 3: Update tests**
 
 ```python
-# tests/unit/web/composer/test_emitters.py — find existing schema_form turn tests
+# tests/unit/web/composer/guided/test_emitters.py — find existing schema_form turn tests
 # Replace assertions on `payload["schema_block"]` with `payload["knobs"]`
 # and add `assert payload["mode"] == "plugin_options"`
 ```
 
 - [ ] **Step 4: Run emitter tests**
 
-Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_emitters.py -v`
+Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_emitters.py -v`
 Expected: PASS (after the assertion swap)
 
 ---
@@ -1734,9 +1801,10 @@ The rebuild path must deliver the same prefilled schema form after refresh. If t
 
 ```python
 # tests/integration/web/composer/test_guided_step1_prefill.py
-def test_step1_prefilled_from_inspection_facts(client, csv_blob_id):
-    sess = client.post("/api/sessions/").json()["id"]
+def test_step1_prefilled_from_inspection_facts(client):
+    sess = client.post("/api/sessions", json={"title": "step1-prefill"}).json()["id"]
     # Trigger INSPECT_AND_CONFIRM via blob upload
+    seed_csv_blob(client, sess)
     client.post(f"/api/sessions/{sess}/guided/respond", json=single_select_response("csv"))
     # Now the SCHEMA_FORM turn should have inspection-derived prefill
     state = client.get(f"/api/sessions/{sess}/guided").json()
@@ -1751,10 +1819,45 @@ def test_step1_prefill_survives_guided_get_rebuild(client, session_with_step1_in
     state = client.get(f"/api/sessions/{session_with_step1_inspection_facts}/guided").json()
     schema_prefill = state["turn"]["payload"]["prefilled"]["schema"]
     assert schema_prefill["fields"] == ["name: str", "age: int"]
+
+
+def single_select_response(plugin: str) -> dict[str, object]:
+    return {
+        "chosen": [plugin],
+        "edited_values": None,
+        "custom_inputs": None,
+        "accepted_step_index": None,
+        "edit_step_index": None,
+        "control_signal": None,
+    }
+
+
+@pytest.fixture
+def session_with_step1_inspection_facts(client):
+    sess = client.post("/api/sessions", json={"title": "step1-prefill-rebuild"}).json()["id"]
+    seed_csv_blob(client, sess)
+    resp = client.post(
+        f"/api/sessions/{sess}/guided/respond",
+        json=single_select_response("csv"),
+    )
+    assert resp.status_code == 200, resp.json()
+    state = client.get(f"/api/sessions/{sess}/guided").json()
+    assert state["turn"]["type"] == "schema_form"
+    assert state["turn"]["payload"]["prefilled"]["schema"]["mode"] == "flexible"
+    return sess
+
+
+def seed_csv_blob(client, session_id: str) -> str:
+    resp = client.post(
+        f"/api/sessions/{session_id}/blobs/inline",
+        json={"filename": "data.csv", "content": "name,age\nAda,37\n", "mime_type": "text/csv"},
+    )
+    assert resp.status_code == 201, resp.json()
+    return resp.json()["id"]
 ```
 
 The tests must fail if `_merge_inspection_into_prefill` only returns the old constant `{"schema": {"mode": "observed"}}`.
-Define `single_select_response(...)` in the test module using the existing guided response payload shape; do not assume a helper already exists.
+Define `single_select_response(...)`, `seed_csv_blob(...)`, and `session_with_step1_inspection_facts` in this test module using the repo's existing `/api/sessions/{id}/blobs/inline` route; do not assume any of those helpers already exist. Add `pytest` locally for the fixture.
 
 ---
 
@@ -1796,11 +1899,158 @@ def test_hidden_field_submission_returns_400(client, session_at_step_3_llm):
     body = resp.json()
     assert body["detail"]["code"] == "hidden_field_submitted"
     assert body["detail"]["field"] == "model"
-    audit_rows = audit_events_for_session(sess_id)
+    audit_rows = audit_events_for_session(client, sess_id)
     assert any(row.tool_name == "guided_hidden_field_rejected" for row in audit_rows)
+
+
+@pytest.fixture
+def session_at_step_3_llm(client):
+    sess = _create_session(client)
+    _drive_guided_flow_to_step_3_transform_schema(client, sess, transform_plugin="llm")
+    state = client.get(f"/api/sessions/{sess}/guided").json()
+    assert state["guided_session"]["step"] == "step_3_transforms"
+    assert state["turn"]["type"] == "schema_form"
+    assert state["turn"]["payload"]["plugin"] == "llm"
+    return sess
+
+
+def audit_events_for_session(client, session_id: str):
+    service = client.app.state.session_service
+    msgs = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+    rows = []
+    for msg in msgs:
+        if msg.role not in ("tool", "audit") or not msg.tool_calls:
+            continue
+        for tool_call in msg.tool_calls:
+            invocation = tool_call.get("invocation", {})
+            if invocation.get("tool_name"):
+                rows.append(SimpleNamespace(**invocation))
+    return rows
+
+
+def _create_session(client) -> str:
+    resp = client.post("/api/sessions", json={"title": "hidden-field-rejection"})
+    assert resp.status_code == 201, resp.json()
+    return resp.json()["id"]
+
+
+def _drive_guided_flow_to_step_3_transform_schema(client, session_id: str, *, transform_plugin: str) -> None:
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        new_callable=AsyncMock,
+        return_value=_fake_llm_response_for_transform(transform_plugin),
+    ):
+        blob_id, storage_path = _seed_blob(client, session_id)
+        output_path = _outputs_path(client, "out.jsonl")
+
+        _get_guided(client, session_id)
+        _respond(client, session_id, chosen=["csv"])
+        _respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "csv",
+                "options": {"path": storage_path, "schema": {"mode": "observed"}, "blob_id": blob_id},
+                "observed_columns": ["text", "note"],
+                "sample_rows": [{"text": "Hello world", "note": "greeting"}],
+            },
+        )
+        _respond(client, session_id, chosen=["json"])
+        _respond(
+            client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+        body = _respond(client, session_id, chosen=["text"], custom_inputs=[])
+        assert body["next_turn"]["type"] == "propose_chain"
+
+        edit_resp = client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": None,
+                "edited_values": None,
+                "custom_inputs": None,
+                "accepted_step_index": None,
+                "edit_step_index": 0,
+                "control_signal": None,
+            },
+        )
+        assert edit_resp.status_code == 200, edit_resp.json()
+
+
+def _fake_llm_response_for_transform(plugin: str):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {
+                                            "steps": [
+                                                {
+                                                    "plugin": plugin,
+                                                    "options": {"provider": "azure", "deployment": "gpt-4"},
+                                                    "rationale": "exercise variant visibility",
+                                                }
+                                            ],
+                                            "why": "single transform proposal for hidden-field rejection test",
+                                            "blockers": [],
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                    ]
+                )
+            )
+        ]
+    )
+
+
+def _get_guided(client, session_id: str) -> dict:
+    resp = client.get(f"/api/sessions/{session_id}/guided")
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
+def _respond(client, session_id: str, **kwargs) -> dict:
+    resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
+def _seed_blob(client, session_id: str) -> tuple[str, str]:
+    resp = client.post(
+        f"/api/sessions/{session_id}/blobs/inline",
+        json={"filename": "data.csv", "content": "text,note\nHello,greeting\n", "mime_type": "text/csv"},
+    )
+    assert resp.status_code == 201, resp.json()
+    blob_id = resp.json()["id"]
+    record = asyncio.run(client.app.state.blob_service.get_blob(UUID(blob_id)))
+    return blob_id, record.storage_path
+
+
+def _outputs_path(client, filename: str) -> str:
+    outputs_dir = client.app.state.settings.data_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    return str(outputs_dir / filename)
 ```
 
-Define `session_at_step_3_llm` and `audit_events_for_session` in the integration fixture setup using the repo's existing audit test helpers or direct audit DB query; do not assume they exist. The fixture must construct a real guided session at Step 3 with an LLM schema whose provider discriminator makes `model` hidden for the selected Azure branch.
+Define `session_at_step_3_llm`, `audit_events_for_session`, and the local route-driving helpers in this integration test module; do not assume they exist. The fixture must construct a real guided session at Step 3 with an LLM schema whose provider discriminator makes `model` hidden for the selected Azure branch. Add the needed local imports (`asyncio`, `json`, `SimpleNamespace`, `AsyncMock`, `patch`, `UUID`, `pytest`) in the same test file.
 
 - [ ] **Step 2: Implement `_reject_hidden_field_submissions`**
 
@@ -1811,6 +2061,9 @@ def _reject_hidden_field_submissions(
     knobs: KnobSchema,
     submitted_options: dict[str, Any],
     *,
+    recorder: ComposerToolRecorder,
+    composition_version: int,
+    actor: str,
     session_id: str,
     plugin_kind: str,
     plugin_name: str,
@@ -1832,6 +2085,17 @@ def _reject_hidden_field_submissions(
         try:
             target_val = submitted_options[pred["field"]]
         except KeyError as exc:
+            emit_hidden_field_rejected(
+                recorder,
+                session_id=session_id,
+                plugin_kind=plugin_kind,
+                plugin_name=plugin_name,
+                field=opt_name,
+                predicate=pred,
+                actual_state={},
+                composition_version=composition_version,
+                actor=actor,
+            )
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -1842,13 +2106,16 @@ def _reject_hidden_field_submissions(
                 },
             ) from exc
         if target_val != pred["equals"]:
-            _emit_guided_hidden_field_rejected(
+            emit_hidden_field_rejected(
+                recorder,
                 session_id=session_id,
                 plugin_kind=plugin_kind,
                 plugin_name=plugin_name,
                 field=opt_name,
                 predicate=pred,
                 actual_state={pred["field"]: target_val},
+                composition_version=composition_version,
+                actor=actor,
             )
             raise HTTPException(
                 status_code=400,
@@ -1867,7 +2134,7 @@ def _reject_hidden_field_submissions(
             )
 ```
 
-Audit policy: hidden-field rejection is security-relevant and must emit an audit event before the 400 response. Add a small `guided_hidden_field_rejected` audit directive/event with session id, plugin kind/name, rejected field, predicate, and submitted discriminator value. Do not log row-level values; keep the event structural.
+Audit policy: hidden-field rejection is security-relevant and must emit an audit event before the 400 response. Add `emit_hidden_field_rejected()` to `src/elspeth/web/composer/guided/audit.py` using the existing `_build_invocation(...)` helper and `tool_name="guided_hidden_field_rejected"`; do not invent a new audit primitive or log this decision. The canonical payload must include session id, plugin kind/name, rejected field, predicate, and submitted discriminator value. Thread `recorder`, `composition_version=state.version`, and `actor=user_id` from `_dispatch_guided_respond` into `_reject_hidden_field_submissions(...)` at every call site.
 
 Also validate `blob-ref` values as UUID strings at the same Tier-3 boundary before dispatching to plugin validators. Invalid UUIDs should return a structured 400 instead of flowing as arbitrary text.
 
@@ -1877,7 +2144,16 @@ At each `SCHEMA_FORM` branch in `_dispatch_guided_respond` (Step 1, Step 2, Step
 
 ```python
 schema_info = catalog.get_schema(plugin_kind, plugin_name)
-_reject_hidden_field_submissions(schema_info.knob_schema, options_raw)
+_reject_hidden_field_submissions(
+    schema_info.knob_schema,
+    options_raw,
+    recorder=recorder,
+    composition_version=state.version,
+    actor=user_id,
+    session_id=session_id,
+    plugin_kind=plugin_kind,
+    plugin_name=plugin_name,
+)
 ```
 
 - [ ] **Step 4: Run the test**
@@ -2294,6 +2570,7 @@ describe("SchemaFormTurn", () => {
 Required frontend coverage:
 
 - Add parametrised tests for every `FieldKind`, including `number-int`, `number-float`, `json-object`, `json-array`, and `json-value`.
+- Add a required-text clear test: type into a required `text` field, clear it, assert the Continue button is disabled and `onSubmit` is not called. This covers spec §7 case 4.
 - Add the `never` exhaustiveness check shown above; no default renderer arm.
 - Add a11y assertions for `aria-describedby`, clear-button accessible name, heading hierarchy when `RecipeContextHeader` is present, and keyboard editing of `string-list`.
 - Add a `blob-ref` test that submits an invalid UUID and verify the backend boundary rejects it; the frontend may show text, but the server owns validation.
@@ -2491,7 +2768,7 @@ bindings) are unchanged; only the rendering path is unified.
 **Execution order:** run this task in Phase C2 before Phase D, even though it is documented next to the permanent CI lint. The renderer cutover is blocked until this audit is clean.
 
 **Files:**
-- Modify: every plugin `config_model` under `src/elspeth/plugins/` lacking `title` or `description` on any field
+- Modify: every metadata-bearing plugin configuration model under `src/elspeth/plugins/` lacking `title` or `description` on any field, including provider-specific discriminated variants returned by `discriminated_variants()`
 
 - [ ] **Step 1: Discover the gap**
 
@@ -2500,33 +2777,42 @@ Run a quick audit script:
 ```bash
 .venv/bin/python -c "
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-from pydantic_core import PydanticUndefined
-import sys
 
 pm = get_shared_plugin_manager()
 gaps = []
+
+def iter_metadata_models(kind, cls):
+    variants_fn = getattr(cls, 'discriminated_variants', None)
+    if variants_fn is not None and callable(variants_fn):
+        _, variants = variants_fn()
+        for variant_name, model in variants.items():
+            yield f'{kind}/{cls.name}[{variant_name}]', model
+        return
+
+    opts = getattr(cls, 'config_model', None)
+    if opts is not None:
+        yield f'{kind}/{cls.name}', opts
+
 for kind in ('source', 'transform', 'sink'):
     listing = pm.get_sources() if kind == 'source' else (pm.get_transforms() if kind == 'transform' else pm.get_sinks())
     for cls in listing:
-        opts = getattr(cls, 'config_model', None)
-        if opts is None:
-            continue
-        for name, info in opts.model_fields.items():
-            if not info.title:
-                gaps.append((kind, cls.__name__, name, 'missing title'))
-            if not info.description:
-                gaps.append((kind, cls.__name__, name, 'missing description'))
+        for model_id, opts in iter_metadata_models(kind, cls):
+            for name, info in opts.model_fields.items():
+                if not info.title:
+                    gaps.append((model_id, name, 'missing title'))
+                if not info.description:
+                    gaps.append((model_id, name, 'missing description'))
 print(f'{len(gaps)} gaps')
 for g in gaps[:50]:
     print(g)
 "
 ```
 
-This produces an initial gap list. Adjust the listing iteration to match the live plugin manager API if a specific list method differs, but keep `get_shared_plugin_manager()` and `config_model`.
+This produces an initial gap list. Adjust the listing iteration to match the live plugin manager API if a specific list method differs, but keep `get_shared_plugin_manager()`. For discriminated plugins such as `LLMTransform`, audit every model returned by `discriminated_variants()` rather than only the base `config_model`, because the variant-only fields are exactly what become variant-specific knobs.
 
 - [ ] **Step 2: Fill the gaps**
 
-For each gap, edit the plugin's `config_model` to add `Field(title=..., description=...)` (preferring the canonical `Annotated[T, Field(...)]` form). Group commits by plugin package to keep commits reviewable.
+For each gap, edit the owning plugin configuration model to add `Field(title=..., description=...)` (preferring the canonical `Annotated[T, Field(...)]` form). For discriminated plugins, this includes provider-specific variant models, not only the base `config_model`. Group commits by plugin package to keep commits reviewable.
 
 - [ ] **Step 3: Re-run the audit until empty**
 
@@ -2578,26 +2864,52 @@ def test_enforce_metadata_fails_on_missing_title(tmp_path, monkeypatch):
     broken_catalog = make_plugin_manager_with_missing_metadata()
     failures = run_metadata_lint(plugin_manager=broken_catalog, allowlist=set())
     assert any("missing title" in failure for failure in failures)
+
+
+def make_plugin_manager_with_missing_metadata():
+    from pydantic import BaseModel, Field
+
+    class _Options(BaseModel):
+        missing_title: str = Field(description="Has description but no title")
+
+    class _Source:
+        name = "metadata_gap"
+        config_model = _Options
+
+    class _FakePluginManager:
+        def get_sources(self):
+            return [_Source]
+
+        def get_transforms(self):
+            return []
+
+        def get_sinks(self):
+            return []
+
+    return _FakePluginManager()
 ```
 
 - [ ] **Step 2: Implement the script**
 
 ```python
 #!/usr/bin/env python
-"""CI lint: enforce title + description on every plugin config_model field.
+"""CI lint: enforce title + description on every plugin configuration field.
 
 Run from the project root: .venv/bin/python scripts/cicd/enforce_options_metadata.py
 
 Allowlist at config/cicd/enforce_options_metadata/allowlist.yaml — entries are
-of the form `<plugin_kind>/<plugin_name>:<field_name>` with a `reason` string.
-Empty allowlist enforces strictly."""
+of the form `<plugin_kind>/<plugin_name>:<field_name>` for single-model plugins
+or `<plugin_kind>/<plugin_name>[<variant>]:<field_name>` for discriminated
+variants, with a `reason` string. Empty allowlist enforces strictly."""
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
+from pydantic import BaseModel
 
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
@@ -2605,24 +2917,34 @@ from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 def run_metadata_lint(*, plugin_manager: object, allowlist: set[str]) -> list[str]:
     failures: list[str] = []
     pm = plugin_manager
+
+    def iter_metadata_models(kind: str, cls: object) -> Iterator[tuple[str, type[BaseModel]]]:
+        variants_fn = getattr(cls, "discriminated_variants", None)
+        if variants_fn is not None and callable(variants_fn):
+            _, variants = variants_fn()
+            for variant_name, model in variants.items():
+                yield f"{kind}/{cls.name}[{variant_name}]", model
+            return
+
+        opts = getattr(cls, "config_model", None)
+        if opts is not None:
+            yield f"{kind}/{cls.name}", opts
+
     for kind, listing in (
         ("source", pm.get_sources()),
         ("transform", pm.get_transforms()),
         ("sink", pm.get_sinks()),
     ):
         for cls in listing:
-            opts = getattr(cls, "config_model", None)
-            if opts is None:
-                continue
-            name = cls.name
-            for fname, info in opts.model_fields.items():
-                ident = f"{kind}/{name}:{fname}"
-                if ident in allowlist:
-                    continue
-                if not info.title:
-                    failures.append(f"{ident}: missing title")
-                if not info.description:
-                    failures.append(f"{ident}: missing description")
+            for model_id, opts in iter_metadata_models(kind, cls):
+                for fname, info in opts.model_fields.items():
+                    ident = f"{model_id}:{fname}"
+                    if ident in allowlist:
+                        continue
+                    if not info.title:
+                        failures.append(f"{ident}: missing title")
+                    if not info.description:
+                        failures.append(f"{ident}: missing description")
     return failures
 
 
@@ -2703,7 +3025,7 @@ remediation.
 | §4.1 Discriminated-union + visible_when | Task 5 (lowering), Task 6 (validator), Task 14 (frontend evaluation), Task 13 (backend rejection) |
 | §5 Lowering function | Tasks 3, 4, 5 |
 | §6 Failure modes | Task 2 (`KnobSchemaLoweringError`), Tasks 3, 5, 6, 13 |
-| §7 Return-path round-trip | Task 3 return-path validator tests (cases 1-4), Task 14 test (case 9), Task 13 test (case 10) |
+| §7 Return-path round-trip | Task 3 return-path validator tests (cases 1-3), Task 14 tests (cases 4 and 9), Task 13 test (case 10) |
 | §8 Trust-tier table | Implicit in design; emitter doesn't change tier (Task 11) |
 | §9 Sequencing | Phase A=step 1; Phase B continues step 1; Phase C=step 2; Phase D=step 3 atomic; Phase E=step 4; Phase F=steps 5a/5b |
 | §10 Test strategy | Tasks 3-6 plus Task 6.5 (golden snapshots + Hypothesis), Task 8 integration smoke |
@@ -2723,7 +3045,7 @@ No "TBD" / "TODO" / "Add appropriate error handling" / "Similar to Task N" patte
 - `KnobField` shape consistent across tasks 2, 3, 4, 5 (Python) and Task 14 (TypeScript).
 - `lower_model_to_knob_schema`, `lower_discriminated_to_knob_schema`, `lower_slot_specs_to_knob_schema` — all three lowering functions defined and consumed in Task 8 (`CatalogServiceImpl._build_schema_info`).
 - `validate_knob_schema` — defined in Task 6, called in Task 8.
-- `DiscriminatedPlugin` protocol — defined in Task 1, used in Tasks 5, 8.
+- `DiscriminatedPlugin` protocol — defined in Task 1; Tasks 5 and 8 dispatch structurally with `getattr(..., "discriminated_variants", None)` plus `callable(...)`, matching the spec's runtime catalog-load behavior.
 - `_reject_hidden_field_submissions` — defined in Task 13, called in Task 13 (and again in Task 15 implicitly via the recipe-fold dispatch).
 - `SourceInspectionFacts` — already exists in codebase; persisted on `GuidedSession` in Task 9; consumed in Task 11 emitter.
 

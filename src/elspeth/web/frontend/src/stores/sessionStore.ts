@@ -5,7 +5,9 @@ import type {
   ChatMessage,
   CompositionState,
   CompositionStateVersion,
+  ComposerPreferences,
   ComposerProgressSnapshot,
+  CompositionProposal,
   ApiError,
   ComposerRecoveryError,
   ValidationResult,
@@ -49,6 +51,13 @@ function isAbortError(err: unknown): boolean {
   return name === "AbortError" || name === "TimeoutError";
 }
 
+function isHttpConflict(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) {
+    return false;
+  }
+  return (err as { status?: unknown }).status === 409;
+}
+
 let composerProgressPollTimer: ReturnType<typeof setInterval> | null = null;
 let composerProgressPollSessionId: string | null = null;
 
@@ -77,6 +86,20 @@ function formatLlmUnavailableError(apiErr: ApiError): string {
 
 function formatLlmAuthError(apiErr: ApiError): string {
   return `${LLM_AUTH_ERROR_MESSAGE}${formatProviderDiagnostic(apiErr)}`;
+}
+
+function mergeCompositionProposals(
+  existing: CompositionProposal[],
+  incoming: CompositionProposal[],
+): CompositionProposal[] {
+  if (incoming.length === 0) {
+    return existing;
+  }
+  const byId = new Map(existing.map((proposal) => [proposal.id, proposal]));
+  for (const proposal of incoming) {
+    byId.set(proposal.id, proposal);
+  }
+  return Array.from(byId.values());
 }
 
 // Resetting guided-mode state landed in five places: initialState plus
@@ -129,6 +152,10 @@ interface SessionState {
   activeSessionId: string | null;
   messages: ChatMessage[];
   compositionState: CompositionState | null;
+  compositionProposals: CompositionProposal[];
+  composerPreferences: ComposerPreferences | null;
+  staleProposalIds: string[];
+  proposalActionPendingIds: string[];
   composerProgress: ComposerProgressSnapshot | null;
   isComposing: boolean;
   stateVersions: CompositionStateVersion[];
@@ -145,6 +172,9 @@ interface SessionState {
   selectSession: (id: string) => Promise<void>;
   archiveSession: (id: string) => Promise<void>;
   sendMessage: (content: string, signal?: AbortSignal) => Promise<void>;
+  loadCompositionProposals: (sessionId?: string) => Promise<void>;
+  acceptProposal: (proposalId: string) => Promise<void>;
+  rejectProposal: (proposalId: string) => Promise<void>;
   loadComposerProgress: (sessionId?: string) => Promise<void>;
   startComposerProgressPolling: (sessionId: string) => void;
   stopComposerProgressPolling: (sessionId?: string) => void;
@@ -190,6 +220,10 @@ const initialState = {
   activeSessionId: null as string | null,
   messages: [] as ChatMessage[],
   compositionState: null as CompositionState | null,
+  compositionProposals: [] as CompositionProposal[],
+  composerPreferences: null as ComposerPreferences | null,
+  staleProposalIds: [] as string[],
+  proposalActionPendingIds: [] as string[],
   composerProgress: null as ComposerProgressSnapshot | null,
   isComposing: false,
   stateVersions: [] as CompositionStateVersion[],
@@ -221,6 +255,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         activeSessionId: session.id,
         messages: [],
         compositionState: null,
+        compositionProposals: [],
+        composerPreferences: null,
+        staleProposalIds: [],
+        proposalActionPendingIds: [],
         composerProgress: null,
         stateVersions: [],
         error: null,
@@ -255,6 +293,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 activeSessionId: null,
                 messages: [],
                 compositionState: null,
+                compositionProposals: [],
+                composerPreferences: null,
+                staleProposalIds: [],
+                proposalActionPendingIds: [],
                 composerProgress: null,
                 stateVersions: [],
                 isComposing: false,
@@ -280,6 +322,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       activeSessionId: id,
       messages: [],
       compositionState: null,
+      compositionProposals: [],
+      composerPreferences: null,
+      staleProposalIds: [],
+      proposalActionPendingIds: [],
       composerProgress: null,
       stateVersions: [],
       isComposing: false,
@@ -290,11 +336,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
 
     try {
-      const [messages, compositionState] = await Promise.all([
+      const [
+        messages,
+        compositionState,
+        compositionProposals,
+        composerPreferences,
+      ] = await Promise.all([
         api.fetchMessages(id),
         api.fetchCompositionState(id),
+        api.fetchCompositionProposals(id),
+        api.fetchComposerPreferences(id),
       ]);
-      set({ messages, compositionState });
+      set({
+        messages,
+        compositionState,
+        compositionProposals: compositionProposals ?? [],
+        composerPreferences: composerPreferences ?? null,
+      });
 
       // Auto-start guided mode for the selected session.
       //
@@ -346,6 +404,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const stateId = get().compositionState?.id;
       const result = await api.sendMessage(activeSessionId, content, stateId, signal);
       const { message, state } = result;
+      const proposals = result.proposals ?? [];
       set((s) => {
         const previousVersion = s.compositionState?.version ?? null;
         const newVersion = state?.version ?? null;
@@ -371,6 +430,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               : existing,
           ).concat(message),
           compositionState: newState,
+          compositionProposals: mergeCompositionProposals(
+            s.compositionProposals,
+            proposals,
+          ),
           isComposing: false,
           ...(nodeStillExists ? {} : { selectedNodeId: null }),
         };
@@ -426,6 +489,138 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }));
     } finally {
       get().stopComposerProgressPolling(activeSessionId);
+    }
+  },
+
+  async loadCompositionProposals(sessionId?: string) {
+    const targetSessionId = sessionId ?? get().activeSessionId;
+    if (!targetSessionId) return;
+
+    try {
+      const proposals = await api.fetchCompositionProposals(targetSessionId);
+      if (get().activeSessionId !== targetSessionId) {
+        return;
+      }
+      set({ compositionProposals: proposals ?? [] });
+    } catch {
+      set({ error: "Failed to load composition proposals. Please try again." });
+    }
+  },
+
+  async acceptProposal(proposalId: string) {
+    const { activeSessionId } = get();
+    if (!activeSessionId) {
+      throw new Error("acceptProposal called without active session");
+    }
+
+    set((state) => ({
+      error: null,
+      proposalActionPendingIds: Array.from(
+        new Set([...state.proposalActionPendingIds, proposalId]),
+      ),
+      staleProposalIds: state.staleProposalIds.filter((id) => id !== proposalId),
+    }));
+
+    try {
+      const proposal = await api.acceptCompositionProposal(
+        activeSessionId,
+        proposalId,
+      );
+      const [compositionState, proposals] = await Promise.all([
+        api.fetchCompositionState(activeSessionId),
+        api.fetchCompositionProposals(activeSessionId),
+      ]);
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
+      getExecutionStore().clearValidation();
+      set({
+        compositionState,
+        compositionProposals: mergeCompositionProposals(
+          proposals ?? [],
+          [proposal],
+        ),
+      });
+    } catch (err) {
+      if (isHttpConflict(err)) {
+        await get().loadCompositionProposals(activeSessionId);
+        if (get().activeSessionId === activeSessionId) {
+          set((state) => ({
+            staleProposalIds: Array.from(
+              new Set([...state.staleProposalIds, proposalId]),
+            ),
+          }));
+        }
+      } else {
+        const apiErr = err as ApiError;
+        set({
+          error: apiErr.detail ?? "Failed to accept proposal. Please try again.",
+        });
+      }
+    } finally {
+      if (get().activeSessionId === activeSessionId) {
+        set((state) => ({
+          proposalActionPendingIds: state.proposalActionPendingIds.filter(
+            (id) => id !== proposalId,
+          ),
+        }));
+      }
+    }
+  },
+
+  async rejectProposal(proposalId: string) {
+    const { activeSessionId } = get();
+    if (!activeSessionId) {
+      throw new Error("rejectProposal called without active session");
+    }
+
+    set((state) => ({
+      error: null,
+      proposalActionPendingIds: Array.from(
+        new Set([...state.proposalActionPendingIds, proposalId]),
+      ),
+      staleProposalIds: state.staleProposalIds.filter((id) => id !== proposalId),
+    }));
+
+    try {
+      const proposal = await api.rejectCompositionProposal(
+        activeSessionId,
+        proposalId,
+      );
+      const proposals = await api.fetchCompositionProposals(activeSessionId);
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
+      set({
+        compositionProposals: mergeCompositionProposals(
+          proposals ?? [],
+          [proposal],
+        ),
+      });
+    } catch (err) {
+      if (isHttpConflict(err)) {
+        await get().loadCompositionProposals(activeSessionId);
+        if (get().activeSessionId === activeSessionId) {
+          set((state) => ({
+            staleProposalIds: Array.from(
+              new Set([...state.staleProposalIds, proposalId]),
+            ),
+          }));
+        }
+      } else {
+        const apiErr = err as ApiError;
+        set({
+          error: apiErr.detail ?? "Failed to reject proposal. Please try again.",
+        });
+      }
+    } finally {
+      if (get().activeSessionId === activeSessionId) {
+        set((state) => ({
+          proposalActionPendingIds: state.proposalActionPendingIds.filter(
+            (id) => id !== proposalId,
+          ),
+        }));
+      }
     }
   },
 
@@ -524,6 +719,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // would insert a duplicate user message.
       const result = await api.recompose(activeSessionId, signal);
       const { message: assistantMessage, state } = result;
+      const proposals = result.proposals ?? [];
       set((s) => {
         const previousVersion = s.compositionState?.version ?? null;
         const newVersion = state?.version ?? null;
@@ -547,6 +743,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               : existing,
           ).concat(assistantMessage),
           compositionState: newState,
+          compositionProposals: mergeCompositionProposals(
+            s.compositionProposals,
+            proposals,
+          ),
           isComposing: false,
           ...(nodeStillExists ? {} : { selectedNodeId: null }),
         };
@@ -612,6 +812,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         activeSessionId: result.session.id,
         messages: result.messages,
         compositionState: result.composition_state,
+        compositionProposals: [],
+        composerPreferences: null,
+        staleProposalIds: [],
+        proposalActionPendingIds: [],
         composerProgress: null,
         stateVersions: [],
         isComposing: false,

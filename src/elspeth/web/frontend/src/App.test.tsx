@@ -350,6 +350,7 @@ describe("App composer recovery panel", () => {
     vi.spyOn(api, "sendMessage").mockResolvedValue({
       message: makeAssistantMessage(),
       state: makeState(2),
+      proposals: [],
     });
     useSessionStore.setState({
       activeSessionId: "session-1",

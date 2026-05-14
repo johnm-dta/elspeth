@@ -1857,7 +1857,7 @@ EOF
 - Modify: `src/elspeth/web/frontend/src/stores/sessionStore.ts`
 - Test: `src/elspeth/web/frontend/src/stores/sessionStore.test.ts`
 
-- [ ] **Step 1: Add failing store tests**
+- [x] **Step 1: Add failing store tests**
 
 Add to `src/elspeth/web/frontend/src/stores/sessionStore.test.ts`:
 
@@ -1951,7 +1951,7 @@ it("marks stale proposals after accept returns a stale-state conflict", async ()
 });
 ```
 
-- [ ] **Step 2: Run the store test to verify it fails**
+- [x] **Step 2: Run the store test to verify it fails**
 
 Run:
 
@@ -1962,7 +1962,9 @@ npm run test -- src/stores/sessionStore.test.ts
 
 Expected: FAIL with missing API/store fields.
 
-- [ ] **Step 3: Add frontend types**
+Observed: FAIL with `compositionProposals` undefined and missing `acceptProposal`; initial run was blocked by missing frontend `node_modules`, then `npm ci` installed the lockfile dependencies.
+
+- [x] **Step 3: Add frontend types**
 
 In `src/elspeth/web/frontend/src/types/index.ts`, add:
 
@@ -2004,7 +2006,7 @@ export interface MessageWithStateResponse {
 
 Re-export them from `src/elspeth/web/frontend/src/types/api.ts`.
 
-- [ ] **Step 4: Add API client methods**
+- [x] **Step 4: Add API client methods**
 
 In `src/elspeth/web/frontend/src/api/client.ts`, add:
 
@@ -2074,7 +2076,7 @@ export async function recomposeMessage(...): Promise<MessageWithStateResponse> {
 }
 ```
 
-- [ ] **Step 5: Add store state and actions**
+- [x] **Step 5: Add store state and actions**
 
 In `src/elspeth/web/frontend/src/stores/sessionStore.ts`, add fields:
 
@@ -2190,7 +2192,7 @@ Add actions:
 
 Use the repository's existing API-error shape when implementing `isHttpConflict(error)`; if no helper exists, add one in the API/store test seam and pin it with the stale-state regression above. The UX contract is: 409 from accept does not become an unhandled fetch error; the store refreshes proposals and records the clicked proposal ID as stale for rendering.
 
-- [ ] **Step 6: Run store tests**
+- [x] **Step 6: Run store tests**
 
 Run:
 
@@ -2201,7 +2203,9 @@ npm run test -- src/stores/sessionStore.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+Observed: PASS (`21 passed`). Additional verification: `npm run typecheck` PASS after updating the App-level compose mock to include `proposals: []`; `npm run lint` PASS with five pre-existing warnings in unrelated components.
+
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/types/index.ts src/elspeth/web/frontend/src/types/api.ts src/elspeth/web/frontend/src/api/client.ts src/elspeth/web/frontend/src/stores/sessionStore.ts src/elspeth/web/frontend/src/stores/sessionStore.test.ts

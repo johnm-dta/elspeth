@@ -446,6 +446,55 @@ def _make_app(
     return app, service
 
 
+def test_get_composer_preferences_returns_defaults(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Prefs"}).json()
+
+    response = test_client.get(f"/api/sessions/{session['id']}/composer/preferences")
+
+    assert response.status_code == 200
+    assert response.json()["trust_mode"] == "explicit_approve"
+    assert response.json()["density_default"] == "high"
+
+
+def test_patch_composer_preferences_records_event(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Prefs"}).json()
+
+    response = test_client.patch(
+        f"/api/sessions/{session['id']}/composer/preferences",
+        json={"trust_mode": "auto_commit", "density_default": "medium"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["trust_mode"] == "auto_commit"
+    events = test_client.get(f"/api/sessions/{session['id']}/proposal-events").json()
+    assert events[-1]["event_type"] == "trust_mode.changed"
+
+
+def test_list_proposals_is_session_scoped(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Proposals"}).json()
+
+    response = test_client.get(f"/api/sessions/{session['id']}/proposals")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_send_message_response_includes_empty_proposals_array(tmp_path) -> None:
+    mock_composer = _make_composer_mock(response_text="Got it!")
+    app, _service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Chat"}).json()
+
+    response = client.post(
+        f"/api/sessions/{session['id']}/messages",
+        json={"content": "Hello"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["proposals"] == []
+
+
 def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
     """Create audit records that route three rows to the virtual discard sink."""
     (settings.data_dir / "runs").mkdir(parents=True, exist_ok=True)

@@ -1423,14 +1423,14 @@ allow_hits:
     module import.
   safety: Same as prior _get_session_compose_lock_registry entry.
   expires: null
-- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=9699ad7e5e06ff81
+- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=f5bcd8e7fcd6eba4
   owner: web-sessions
   reason: "Optional LiteLLM/provider exception metadata \u2014 status_code is not guaranteed on every provider error object;\
     \ FP changed after ruff-format; FP rotated by _DATA_ERROR_KEY import in routes.py (Task 5.1 polish). FP rotated again\
     \ by I2 _guided_solve_chain.py module import."
   safety: Same as prior _litellm_error_detail entry.
   expires: null
-- key: web/sessions/routes.py:R1:_state_response:fp=c1a8fc752bca99a6
+- key: web/sessions/routes.py:R1:_state_response:fp=2dd0d8c4268ebbc0
   owner: web-sessions
   reason: "Unwrapping redact_source_storage_path() output \u2014 helper returns dict with \"source\" key; FP rotated by _DATA_ERROR_KEY\
     \ import in routes.py (Task 5.1 polish). FP rotated again by I2 _guided_solve_chain.py module import."
@@ -2273,14 +2273,14 @@ allow_hits:
     \ never an empty list). Pydantic causes feed ``errors()`` unwrapped (offensive \u2014 if Pydantic's own errors() raises,\
     \ that's a Pydantic-internal bug and propagates). Pinned by tests/unit/web/composer/test_audit_arg_error_validation_errors.py."
   expires: null
-- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=365d3ef16216d427
+- key: web/sessions/routes.py:R5:_composer_persisted_validation:fp=0f1c3a0ec9b29827
   owner: web-sessions
   reason: "isinstance(runtime_preflight, _RuntimePreflightFailed) dispatches the _RuntimePreflightOutcome union type \u2014\
     \ sentinel, ValidationResult, and None are the three legal values; isinstance is the only way to distinguish sentinel\
     \ from result without adding a separate boolean parameter. FP rotated during RC5.2 per-step-chat merge."
   safety: Exhaustive dispatch with ValueError for invalid combinations; no silent default
   expires: null
-- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=7039c11cb7728030
+- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=f49a64ebabf69ed0
   owner: web-sessions
   reason: "state.validate() may fail on structurally damaged partial-state from LLM convergence/crash \u2014 catch (ValueError,\
     \ TypeError, KeyError) mirrors the pre-existing guard in _handle_convergence_error and _handle_plugin_crash to produce\
@@ -2288,14 +2288,14 @@ allow_hits:
   safety: Falls back to ValidationSummary(is_valid=False) with a generic error entry; does not swallow the damage, just allows
     persistence to proceed
   expires: null
-- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=4cef20e1be8eda63
+- key: web/sessions/routes.py:R5:_state_data_from_composer_state:fp=53c3d35aadf4a50b
   owner: web-sessions
   reason: "isinstance(runtime, ValidationResult) dispatches the _RuntimePreflightOutcome union type to emit telemetry \u2014\
     \ sentinel and ValidationResult must be distinguished to record pass/fail vs exception metrics correctly. FP rotated during\
     \ RC5.2 per-step-chat merge."
   safety: Read-only dispatch for telemetry emission; no state mutation
   expires: null
-- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=7de620e7360d432e
+- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=bcbf5c4626d8e96a
   owner: web-sessions
   reason: "Convergence partial-state save may fail \u2014 catch covers the full SQLAlchemyError family (IntegrityError, OperationalError\
     \ for lock timeout or pool disconnect, ProgrammingError for schema drift, and siblings). A narrow IntegrityError catch\
@@ -2308,7 +2308,7 @@ allow_hits:
     \ and the HTTP response body (partial_state_save_error=ClassName) carry the exception class name only \u2014 no SQL statement,\
     \ no bound parameters, no __cause__ text."
   expires: null
-- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=271e6f50b94dbb9f
+- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=5a48083dbb6dc839
   owner: web-sessions
   reason: "Plugin-crash partial-state save may fail \u2014 catch covers the full SQLAlchemyError family. A narrow IntegrityError\
     \ catch would let OperationalError, ProgrammingError, and siblings escape and mask the redacted 500 plugin-crash response.\
@@ -2320,7 +2320,7 @@ allow_hits:
   safety: Returns 500 with structured error; logs exc_class (no traceback, same redaction policy as the convergence path).
     Original plugin crash still propagates via the outer `raise HTTPException(...) from crash.original_exc`.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=4a47628c3308b8dc
+- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=4e74edda096f6cfc
   owner: web-sessions
   reason: "Runtime-preflight partial-state save may fail \u2014 catch covers the full SQLAlchemyError family, structurally\
     \ identical to the sibling _handle_plugin_crash and _handle_convergence_error helpers. A narrow IntegrityError catch would\
@@ -2334,7 +2334,7 @@ allow_hits:
     same redaction policy as the sibling helpers). Original runtime-preflight cause still propagates via the outer `raise
     HTTPException(...) from rpf_exc.original_exc` at the call site.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=a9f9dc3bfa2eb7d7
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=bea04585d23dd48c
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 Step-1 SCHEMA_FORM edited_values plugin must be a non-empty string\
     \ per the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the offending\
@@ -2342,7 +2342,7 @@ allow_hits:
     \ again by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=5df49bf2c8b76c6e
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=a2becd0ee9923e4e
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 Step-1 SCHEMA_FORM edited_values options must be a Mapping per the\
     \ SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type\
@@ -2350,7 +2350,7 @@ allow_hits:
     \ by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=d7268da91f21c9db
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=a2aae5b93c83a933
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 Step-1 SCHEMA_FORM edited_values observed_columns must be a list\
     \ per the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual\
@@ -2358,7 +2358,7 @@ allow_hits:
     \ again by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=aa6875e8380ffc7c
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=a6ae3dda1abd92b2
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 Step-1 SCHEMA_FORM edited_values sample_rows must be a list per\
     \ the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual\
@@ -2366,12 +2366,12 @@ allow_hits:
     \ again by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=23c4f2781a3574ea
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=fa9df608818af70f
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 Step-1 SCHEMA_FORM edited_values sample_rows elements must be mappings before SourceResolved construction; isinstance here is offensive validation (raises HTTPException 400 with the actual type in the detail), not error suppression."
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=8c3891b1e4924ccd
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=e11ccc7e0d44df63
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 post-advance INSPECT_AND_CONFIRM edited_values columns must be a\
     \ list per the narrow wire contract (Pair 5a); isinstance here is offensive validation (raises HTTPException 400 with\
@@ -2379,7 +2379,7 @@ allow_hits:
     \ FP rotated again by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=1ce2be5d128bcb12
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=8dc1e16b19763d3b
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 Step-2 SCHEMA_FORM edited_values plugin must be a non-empty string\
     \ per the SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the offending\
@@ -2387,7 +2387,7 @@ allow_hits:
     \ again by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=1480a8c4acabb79e
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=7b3d92ce8c2f7438
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 Step-2 SCHEMA_FORM edited_values options must be a Mapping per the\
     \ SchemaFormTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type\
@@ -2395,7 +2395,7 @@ allow_hits:
     \ by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=31c7a0fa9740d257
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=3f2d5c8ecf75f268
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 recipe_offer accept edited_values recipe_name must be a non-empty\
     \ string per the RecipeOfferTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with\
@@ -2403,7 +2403,7 @@ allow_hits:
     \ again by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending value in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=81546e783901d055
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=1a7b6289fbbeebb2
   owner: web-sessions
   reason: "HTTP-boundary trust-boundary validation \u2014 recipe_offer accept edited_values slots must be a Mapping per the\
     \ RecipeOfferTurn widget contract; isinstance here is offensive validation (raises HTTPException 400 with the actual type\
@@ -2411,22 +2411,22 @@ allow_hits:
     \ by I2 _guided_solve_chain.py module import. FP rotated during RC5.2 per-step-chat merge."
   safety: Contract violation raises HTTPException 400 with the offending type name in the detail; no fall-through, no fabrication.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=b756472ec308e14d
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=e088fcfc3035de76
   owner: web-sessions
   reason: "Guided Step-3 proposal edit path validates the staged ChainProposal step plugin before rebuilding a schema_form turn; this is an audit-state invariant check, not a fallback or coercion path."
   safety: Invalid proposal state raises InvariantError immediately; no malformed proposal is emitted to the client and no option values are fabricated.
   expires: null
-- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=6683a953ecca06a1
+- key: web/sessions/routes.py:R5:_dispatch_guided_respond:fp=c9332a924f950931
   owner: web-sessions
   reason: "Guided Step-3 proposal edit path validates the staged ChainProposal step options before rebuilding a schema_form turn; this is an audit-state invariant check, not a fallback or coercion path."
   safety: Invalid proposal state raises InvariantError immediately; no malformed proposal is emitted to the client and no option values are fabricated.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=63bc416701eaf8ad
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=9f90adcbe3922a3f
   reason: FP rotated during RC5.2 per-step-chat merge.
   safety: Existing reviewed exception; this entry updates only the merged-code fingerprint and preserves the prior boundary
     rationale.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=17a14203f5641e28
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=aa704681335f0d3a
   owner: web-sessions
   reason: contextlib.suppress(asyncio.CancelledError) wraps the shielded cancelled-LLM-call audit persistence in the send_message
     cancellation handler. asyncio.shield re-raises CancelledError to the cancelling task while the inner persistence coroutine
@@ -2437,86 +2437,86 @@ allow_hits:
     only) without raising, preserving the primary CancelledError. The explicit raise after the progress publish then restores
     the cancellation chain.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=386ae106087282ef
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=bc904008c41edb03
   reason: FP rotated during RC5.2 per-step-chat merge.
   safety: Existing reviewed exception; this entry updates only the merged-code fingerprint and preserves the prior boundary
     rationale.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=18bd64c26e7b5671
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=d0584f25b3d54910
   owner: web-sessions
   reason: "Mirror of the send_message cancelled-LLM-call audit persistence suppress above \u2014 recompose has the same cancellation\
     \ and audit-sidecar contract. FP rotated during RC5.2 per-step-chat merge."
   safety: "Same as the send_message audit entry above \u2014 shielded audit persistence is best-effort, sanitized, and followed\
     \ by an explicit re-raise that preserves cancellation semantics."
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=df875fdaa215143d
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=43a3ad1bc2167fe9
   owner: web-sessions
   reason: "isinstance check on deserialized composition state source \u2014 Tier 3 boundary. FP rotated during RC5.2 per-step-chat\
     \ merge."
   safety: Validates structure from persisted state
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=da535130811b8363
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=5e78ce17e6198f78
   owner: web-sessions
   reason: "source_dict.get() on Tier 3 composition state \u2014 optional source options. FP rotated during RC5.2 per-step-chat\
     \ merge."
   safety: Returns None on miss, and the blob rewrite path is skipped
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=183a6abeb1026e76
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=2702b0fbed37059c
   owner: web-sessions
   reason: isinstance(options, dict) validates persisted source.options before mutating nested fields during fork blob rewrite
     FP rotated during RC5.2 per-step-chat merge.
   safety: Non-dict raises AuditIntegrityError immediately; no silent skip or coercion
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=c6eeafa3af64eb41
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=1c594c45ec34fb69
   owner: web-sessions
   reason: "options.get() on Tier 3 state source \u2014 blob_ref is optional. FP rotated during RC5.2 per-step-chat merge."
   safety: Returns None on miss, handled by conditional below
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=16d74f5cec58147c
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=0e9d242744460358
   owner: web-sessions
   reason: "isinstance check on blob_ref \u2014 may be str or UUID from persisted state. FP rotated during RC5.2 per-step-chat\
     \ merge."
   safety: "Tier 3 boundary \u2014 persisted blob_ref type is not guaranteed"
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=6075da6440d486ed
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=b1ebf4a544c61799
   owner: web-sessions
   reason: "blob_map.get() on copied blob UUID \u2014 not every source reference is guaranteed to have a copied blob target,\
     \ so fork rewrite falls back to path/file matching FP rotated during RC5.2 per-step-chat merge."
   safety: None result only triggers the secondary path/file rewrite probe; no fabricated blob mapping is introduced
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=200b718c3a794aa0
+- key: web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=d324ff08d2eaf8b5
   owner: web-sessions
   reason: "options.get(path_key) on persisted source options \u2014 path/file keys are optional and used only for fallback\
     \ blob rewrite FP rotated during RC5.2 per-step-chat merge."
   safety: None result skips that fallback key and continues scanning remaining candidates
   expires: null
-- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=698f439e63ef41c9
+- key: web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=44e3334e45c4bc5b
   owner: web-sessions
   reason: isinstance(path_value, str) guards source_blob_path_map lookup against non-string persisted path/file values FP
     rotated during RC5.2 per-step-chat merge.
   safety: Only string values participate in the fallback rewrite; non-string values remain unchanged and can still fail later
     validation instead of being silently coerced
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=188c74f017277446
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=5542f163fb682eb7
   owner: web-sessions
   reason: "Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the BlobQuotaExceededError path \u2014\
     \ DB/IO faults expected during cleanup; programmer bugs still propagate FP rotated during RC5.2 per-step-chat merge."
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on the HTTPException(413) that propagates; orphan sessions.id
     flagged for manual cleanup; user-facing 413 response remains intact even when cleanup fails
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=5a3c402acda487af
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=2f5dfc5097a1c339
   owner: web-sessions
   reason: "Narrow (SQLAlchemyError, OSError) around fork-rollback archive_session in the generic except Exception path \u2014\
     \ DB/IO faults expected during cleanup; programmer bugs still propagate FP rotated during RC5.2 per-step-chat merge."
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan sessions.id; bare `raise` preserves
     primary_exc and its original traceback as the headline (regression-tested by test_fork_cleanup_failure_preserves_primary_exception_with_note)
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=3be245247a4b7ef4
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=56cf9c85001eb467
   reason: FP rotated during RC5.2 per-step-chat merge.
   safety: Existing reviewed exception; this entry updates only the merged-code fingerprint and preserves the prior boundary
     rationale.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=85972ab0941e62ae
+- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=20c47d77b7b32184
   owner: composer-guided
   reason: Terminal logger-of-last-resort guard around slog.error in the tool_invocations finally-drain; if structlog itself
     raises during audit-system failure reporting, there is no safer channel left and the route must preserve the original
@@ -2524,7 +2524,7 @@ allow_hits:
   safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the original
     route exception continues to propagate and a regression test patches slog.error to raise to verify that behaviour.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=6a3247295eda80aa
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=8bfc3b87f5c1d9c3
   owner: composer-guided
   reason: "PR-review B3 finally-block drain (tool_invocations channel) \u2014 the broad except wraps _persist_tool_invocations\
     \ inside the unconditional finally so an audit-system failure during exception handling cannot mask the in-flight HTTPException.\
@@ -2537,7 +2537,7 @@ allow_hits:
     \ strings). The original HTTPException continues to propagate. The sibling try-block (llm_calls channel) still runs even\
     \ if this one fails. No silent suppression; operators observe the audit-persist failure via the structured log event."
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=966f88adb1434377
+- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=78bc2fed2350ef44
   owner: composer-guided
   reason: Terminal logger-of-last-resort guard around slog.error in the llm_calls finally-drain; if structlog itself raises
     during audit-system failure reporting, no safer channel remains and the route must preserve the original HTTPException.
@@ -2545,12 +2545,12 @@ allow_hits:
   safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the sibling
     drain remains isolated and the original route exception continues to propagate.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=d1aa651f0facc0d8
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=0a185bce694591fe
   reason: FP rotated during RC5.2 per-step-chat merge.
   safety: Existing reviewed exception; this entry updates only the merged-code fingerprint and preserves the prior boundary
     rationale.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=8ea28da35b0b936a
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=3e7f7f8074edc15c
   owner: composer-guided
   reason: Terminal logger-of-last-resort guard around slog.error in the post_guided_respond tool_invocations finally-drain;
     if structlog itself raises while reporting an audit-system failure, the original 400/409/500 must remain the surfaced
@@ -2558,7 +2558,7 @@ allow_hits:
   safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; covered by a
     regression test that patches both _persist_tool_invocations and slog.error to raise.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=52a7bb99c483c2d9
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=96a5143d522ef927
   owner: composer-guided
   reason: "PR-review B3 finally-block drain (tool_invocations channel) \u2014 same rationale as get_guided above. The post_guided_respond\
     \ handler emits guided_turn_answered before the dispatcher's try-block can raise 400; the finally- drain ensures that\
@@ -2569,7 +2569,7 @@ allow_hits:
     (B1 convention). The original HTTPException continues to propagate. The sibling try-block (llm_calls channel) still runs
     even if this one fails. No silent suppression; operators observe the audit-persist failure via the structured log event.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=19255780ca251044
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=5ee638511b76ba23
   owner: composer-guided
   reason: Terminal logger-of-last-resort guard around slog.error in the post_guided_respond llm_calls finally-drain; if structlog
     itself raises while reporting an audit-system failure, no safer reporting channel remains. FP rotated during RC5.2 per-step-chat
@@ -2577,7 +2577,7 @@ allow_hits:
   safety: contextlib.suppress catches Exception only, not BaseException subclasses such as KeyboardInterrupt; the original
     route exception continues to propagate and the sibling drain remains isolated.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=3f2048df7da61b52
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=9556c37fe3ba23af
   owner: composer-guided
   reason: "Phase A finally-block drain (chat_turns channel) \u2014 the broad except wraps _persist_chat_turns inside the unconditional\
     \ finally only when the primary route body is already unwinding, so an audit-system failure during exception handling\
@@ -2590,7 +2590,7 @@ allow_hits:
     \ continues to propagate. No success-path suppression remains; tests/unit/web/sessions/test_routes.py pins that chat-turn\
     \ audit insert failures return 500 after state persistence."
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=637bcc0bd66e5c9f
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=69491c6af4d79376
   owner: composer-guided
   reason: Terminal logger-of-last-resort guard around slog.error in the post_guided_chat chat_turns finally-drain; if structlog
     itself raises while reporting an audit-system failure during exception unwinding, no safer reporting channel remains

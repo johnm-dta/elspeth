@@ -1064,7 +1064,7 @@ EOF
 - Modify: `src/elspeth/web/sessions/routes.py`
 - Test: `tests/unit/web/sessions/test_routes.py`
 
-- [ ] **Step 1: Add failing route tests**
+- [x] **Step 1: Add failing route tests**
 
 Append to `tests/unit/web/sessions/test_routes.py`:
 
@@ -1118,7 +1118,9 @@ def test_send_message_response_includes_empty_proposals_array(tmp_path) -> None:
     assert response.json()["proposals"] == []
 ```
 
-- [ ] **Step 2: Run route tests to verify they fail**
+- [x] **Step 2: Run route tests to verify they fail**
+
+Task result: focused route tests failed with 404 responses for the new preferences/proposals endpoints and `KeyError: 'proposals'` for the send-message response, matching the missing API/contract shape.
 
 Run:
 
@@ -1128,7 +1130,7 @@ Run:
 
 Expected: FAIL with 404 route responses or missing schemas.
 
-- [ ] **Step 3: Add Pydantic schemas**
+- [x] **Step 3: Add Pydantic schemas**
 
 In `src/elspeth/web/sessions/schemas.py`, add:
 
@@ -1187,7 +1189,7 @@ class MessageWithStateResponse(_StrictResponse):
 
 Import `ProposalLifecycleStatus` into `routes.py` from `elspeth.web.sessions.protocol` when adding the `status` query parameter above. The route boundary must reject unknown status values with FastAPI's Literal validation instead of silently returning an empty list for `?status=garbage`.
 
-- [ ] **Step 4: Add route converters and endpoints**
+- [x] **Step 4: Add route converters and endpoints**
 
 In `src/elspeth/web/sessions/routes.py`, import the new schemas and add converters near `_session_response`:
 
@@ -1290,7 +1292,7 @@ Add endpoints inside `create_session_router()`:
         return _composition_proposal_response(proposal)
 ```
 
-- [ ] **Step 5: Return proposals from compose/recompose responses**
+- [x] **Step 5: Return proposals from compose/recompose responses**
 
 Add a helper near `_composition_proposal_response` so both compose response paths share the same server-side shape:
 
@@ -1316,7 +1318,9 @@ Update both existing `MessageWithStateResponse(...)` construction sites in `send
 
 Do not only update frontend API types. This is a backend contract change: every live `POST /api/sessions/{session_id}/messages` and recompose response must include `proposals`, even when the array is empty. The route test in Step 1 pins the empty-array shape before Task 5 creates real proposal rows.
 
-- [ ] **Step 6: Run route tests**
+- [x] **Step 6: Run route tests**
+
+Task result: focused route contract command passed with `4 passed`; `ruff check`, `mypy` for `schemas.py`/`routes.py`, and tier-model check passed after refreshing stale route allowlist fingerprints caused by line shifts.
 
 Run:
 
@@ -1326,7 +1330,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/schemas.py src/elspeth/web/sessions/routes.py tests/unit/web/sessions/test_routes.py

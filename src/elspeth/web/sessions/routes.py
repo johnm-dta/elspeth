@@ -118,9 +118,13 @@ from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     ChatMessageRecord,
     ChatMessageRole,
+    ComposerSessionPreferencesRecord,
+    CompositionProposalRecord,
     CompositionStateData,
     CompositionStateRecord,
     InvalidForkTargetError,
+    ProposalEventRecord,
+    ProposalLifecycleStatus,
     RunRecord,
     SessionRecord,
     SessionServiceProtocol,
@@ -128,6 +132,8 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.schemas import (
     ChatMessageResponse,
     ChatTurnResponse,
+    ComposerPreferencesResponse,
+    CompositionProposalResponse,
     CompositionStateResponse,
     CreateSessionRequest,
     ForkSessionRequest,
@@ -139,6 +145,8 @@ from elspeth.web.sessions.schemas import (
     GuidedRespondResponse,
     GuidedSessionResponse,
     MessageWithStateResponse,
+    ProposalEventResponse,
+    RejectProposalRequest,
     RevertStateRequest,
     RunResponse,
     SendMessageRequest,
@@ -146,6 +154,7 @@ from elspeth.web.sessions.schemas import (
     TerminalStateResponse,
     TurnPayloadResponse,
     TurnRecordResponse,
+    UpdateComposerPreferencesRequest,
     ValidationEntryResponse,
 )
 
@@ -252,6 +261,54 @@ def _session_response(session: SessionRecord) -> SessionResponse:
         forked_from_session_id=str(session.forked_from_session_id) if session.forked_from_session_id else None,
         forked_from_message_id=str(session.forked_from_message_id) if session.forked_from_message_id else None,
     )
+
+
+def _composer_preferences_response(record: ComposerSessionPreferencesRecord) -> ComposerPreferencesResponse:
+    return ComposerPreferencesResponse(
+        session_id=str(record.session_id),
+        trust_mode=record.trust_mode,
+        density_default=record.density_default,
+        updated_at=record.updated_at,
+    )
+
+
+def _composition_proposal_response(record: CompositionProposalRecord) -> CompositionProposalResponse:
+    return CompositionProposalResponse(
+        id=str(record.id),
+        session_id=str(record.session_id),
+        tool_call_id=record.tool_call_id,
+        tool_name=record.tool_name,
+        status=record.status,
+        summary=record.summary,
+        rationale=record.rationale,
+        affects=list(record.affects),
+        arguments_redacted_json=deep_thaw(record.arguments_redacted_json),
+        base_state_id=str(record.base_state_id) if record.base_state_id else None,
+        committed_state_id=str(record.committed_state_id) if record.committed_state_id else None,
+        audit_event_id=str(record.audit_event_id) if record.audit_event_id else None,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+def _proposal_event_response(record: ProposalEventRecord) -> ProposalEventResponse:
+    return ProposalEventResponse(
+        id=str(record.id),
+        session_id=str(record.session_id),
+        proposal_id=str(record.proposal_id) if record.proposal_id else None,
+        event_type=record.event_type,
+        actor=record.actor,
+        payload=deep_thaw(record.payload),
+        created_at=record.created_at,
+    )
+
+
+async def _pending_proposal_responses(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+) -> list[CompositionProposalResponse]:
+    proposals = await service.list_composition_proposals(session_id, status="pending")
+    return [_composition_proposal_response(proposal) for proposal in proposals]
 
 
 def _message_response(msg: ChatMessageRecord, *, include_raw_content: bool = False) -> ChatMessageResponse:
@@ -3162,6 +3219,90 @@ def create_session_router() -> APIRouter:
         registry = _get_composer_progress_registry(request)
         return await registry.get_latest(str(session.id))
 
+    @router.get(
+        "/{session_id}/composer/preferences",
+        response_model=ComposerPreferencesResponse,
+    )
+    async def get_composer_preferences(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> ComposerPreferencesResponse:
+        session = await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        prefs = await service.get_composer_preferences(session.id)
+        return _composer_preferences_response(prefs)
+
+    @router.patch(
+        "/{session_id}/composer/preferences",
+        response_model=ComposerPreferencesResponse,
+    )
+    async def update_composer_preferences(
+        session_id: UUID,
+        body: UpdateComposerPreferencesRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> ComposerPreferencesResponse:
+        session = await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        prefs = await service.update_composer_preferences(
+            session.id,
+            trust_mode=body.trust_mode,
+            density_default=body.density_default,
+            actor=f"user:{user.user_id}",
+        )
+        return _composer_preferences_response(prefs)
+
+    @router.get(
+        "/{session_id}/proposals",
+        response_model=list[CompositionProposalResponse],
+    )
+    async def list_composition_proposals(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        status: ProposalLifecycleStatus | None = Query(None),  # noqa: B008
+    ) -> list[CompositionProposalResponse]:
+        session = await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        proposals = await service.list_composition_proposals(session.id, status=status)
+        return [_composition_proposal_response(proposal) for proposal in proposals]
+
+    @router.get(
+        "/{session_id}/proposal-events",
+        response_model=list[ProposalEventResponse],
+    )
+    async def list_proposal_events(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> list[ProposalEventResponse]:
+        session = await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        events = await service.list_proposal_events(session.id)
+        return [_proposal_event_response(event) for event in events]
+
+    @router.post(
+        "/{session_id}/proposals/{proposal_id}/reject",
+        response_model=CompositionProposalResponse,
+    )
+    async def reject_composition_proposal(
+        session_id: UUID,
+        proposal_id: UUID,
+        body: RejectProposalRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> CompositionProposalResponse:
+        session = await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        proposal = await service.reject_composition_proposal(
+            session_id=session.id,
+            proposal_id=proposal_id,
+            actor=f"user:{user.user_id}",
+        )
+        _ = body
+        return _composition_proposal_response(proposal)
+
     @router.delete("/{session_id}", status_code=204)
     async def delete_session(
         session_id: UUID,
@@ -3804,9 +3945,11 @@ def create_session_router() -> APIRouter:
                 # ``status=completed`` for a request that ultimately 500'd.
                 # The flag flips only once the response is fully
                 # constructed and ready to hand back to FastAPI.
+                proposals = await _pending_proposal_responses(service, session.id)
                 response = MessageWithStateResponse(
                     message=_message_response(assistant_msg),
                     state=state_response,
+                    proposals=proposals,
                 )
                 terminal_status = "completed"
                 return response
@@ -4340,9 +4483,11 @@ def create_session_router() -> APIRouter:
 
                 # See send_message return-flow comment for why response
                 # construction precedes the terminal_status flip.
+                proposals = await _pending_proposal_responses(service, session.id)
                 response = MessageWithStateResponse(
                     message=_message_response(assistant_msg),
                     state=state_response,
+                    proposals=proposals,
                 )
                 terminal_status = "completed"
                 return response

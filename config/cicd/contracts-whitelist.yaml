@@ -456,6 +456,7 @@ allowed_dict_patterns:
   - "src/elspeth/composer_mcp/server.py:_build_tool_defs:return (list)"
   - "src/elspeth/composer_mcp/server.py:_dispatch_tool:arguments"
   - "src/elspeth/composer_mcp/server.py:_dispatch_tool:return"
+  - "src/elspeth/composer_mcp/server.py:_session_id_argument:arguments"
   - "src/elspeth/composer_mcp/server.py:_dispatch_session_tool:arguments"
   - "src/elspeth/composer_mcp/server.py:_dispatch_session_tool:return"
   - "src/elspeth/composer_mcp/server.py:call_tool:arguments"

@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -27,7 +27,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 from pydantic import BaseModel
 
 from elspeth.composer_mcp.audit import JsonlEventRecorder
-from elspeth.composer_mcp.session import SessionManager, SessionNotFoundError
+from elspeth.composer_mcp.session import InvalidSessionIdError, SessionManager, SessionNotFoundError, _validate_session_id
 from elspeth.contracts.composer_audit import (
     ComposerToolInvocation,
     ComposerToolRecorder,
@@ -37,6 +37,7 @@ from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import build_canonicalization_sentinel
+from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import (
@@ -373,6 +374,35 @@ def _validation_to_dict(validation: Any) -> _ValidationPayload:
     }
 
 
+def _session_id_argument(arguments: dict[str, Any]) -> str:
+    """Return a validated session_id or raise the Tier-3 argument exception."""
+    try:
+        session_id = arguments["session_id"]
+    except KeyError as exc:
+        raise ToolArgumentError(
+            argument="session_id",
+            expected="a 12-character lowercase hex string",
+            actual_type="missing",
+        ) from exc
+
+    try:
+        _validate_session_id(session_id)
+    except InvalidSessionIdError as exc:
+        raise ToolArgumentError(
+            argument="session_id",
+            expected="a 12-character lowercase hex string",
+            actual_type="invalid_session_id",
+        ) from exc
+    except TypeError as exc:
+        raise ToolArgumentError(
+            argument="session_id",
+            expected="a 12-character lowercase hex string",
+            actual_type=type(session_id).__name__,
+        ) from exc
+
+    return cast(str, session_id)
+
+
 def _dispatch_session_tool(
     tool_name: str,
     arguments: dict[str, Any],
@@ -393,7 +423,7 @@ def _dispatch_session_tool(
         }
 
     if tool_name == "save_session":
-        session_id = arguments["session_id"]
+        session_id = _session_id_argument(arguments)
         manager.save(session_id, state)
         return {
             "success": True,
@@ -402,7 +432,7 @@ def _dispatch_session_tool(
         }
 
     if tool_name == "load_session":
-        session_id = arguments["session_id"]
+        session_id = _session_id_argument(arguments)
         try:
             loaded = manager.load(session_id)
         except SessionNotFoundError:
@@ -426,7 +456,7 @@ def _dispatch_session_tool(
         }
 
     if tool_name == "delete_session":
-        session_id = arguments["session_id"]
+        session_id = _session_id_argument(arguments)
         try:
             manager.delete(session_id)
         except SessionNotFoundError:
@@ -592,22 +622,16 @@ def create_server(
 
         def _argument_error_result(exc: Exception) -> CallToolResult:
             nonlocal status, error_class, error_message, error_payload_for_audit
-            # Bad LLM arguments (wrong keys, invalid values), or a
-            # ``CorruptSessionFileError``/``InvalidSessionIdError`` from
-            # the session subsystem. Per Python-engineer review W1:
-            # ``str(exc)`` from these classes can carry operator-readable
-            # filesystem paths via ``CorruptSessionFileError.reason``.
-            # Use class-name only (matches the PLUGIN_CRASH discipline)
-            # — we trade message detail for guaranteed leak-safety.
+            # Bad LLM arguments only. ToolArgumentError messages are
+            # safe by construction; the canonicalization pre-dispatch
+            # ValueError path uses class-name only to avoid echoing raw
+            # argument values.
             status = ComposerToolStatus.ARG_ERROR
             error_class = type(exc).__name__
             error_message = type(exc).__name__
             # Build a structured payload so the LLM and the audit row
             # see the same string (Solution-architect H4 symmetry fix).
-            # ``exc.args[0]`` for ToolArgumentError is safe by construction;
-            # for other ValueError/KeyError/TypeError it may carry detail
-            # we do not want echoed — use class name only.
-            safe_message = error_message
+            safe_message = str(exc.args[0]) if type(exc) is ToolArgumentError and exc.args else error_message
             error_payload_for_audit = {
                 "error": f"Tool error: {safe_message}",
                 "isError": True,
@@ -669,7 +693,7 @@ def create_server(
                     baseline=baseline_ref[0],
                     runtime_preflight=runtime_preflight_callback,
                 )
-            except (ValueError, KeyError, TypeError) as exc:
+            except ToolArgumentError as exc:
                 return _argument_error_result(exc)
             except Exception as exc:
                 _capture_plugin_crash(exc)

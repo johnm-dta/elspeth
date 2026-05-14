@@ -88,17 +88,15 @@ async def test_arg_error_path_records_before_return() -> None:
         scratch = Path(td)
         probe = _ProbeRecorder()
         server = create_server(catalog, scratch, recorder=probe)
-        # NOT_HEX is rejected by InvalidSessionIdError (a ValueError subclass).
-        await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+        response = await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+    assert response.root.isError is True
+    assert "session_id" in response.root.content[0].text
     assert len(probe.invocations) == 1
     inv = probe.invocations[0]
     assert inv.status == ComposerToolStatus.ARG_ERROR
     assert inv.tool_name == "load_session"
-    assert inv.error_class == "InvalidSessionIdError"
-    # Per the redaction discipline: error_message is the class name only,
-    # NOT exc.args[0] (which could carry filesystem paths via
-    # CorruptSessionFileError). This pins the Python-W1 fix.
-    assert inv.error_message == "InvalidSessionIdError"
+    assert inv.error_class == "ToolArgumentError"
+    assert inv.error_message == "ToolArgumentError"
     # ARG_ERROR ⇒ version_after is None (the dispatch did not complete).
     assert inv.version_after is None
 
@@ -112,7 +110,8 @@ async def test_arg_error_payload_recorded_for_audit_replay() -> None:
         scratch = Path(td)
         probe = _ProbeRecorder()
         server = create_server(catalog, scratch, recorder=probe)
-        await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+        response = await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+    assert response.root.isError is True
     inv = probe.invocations[0]
     assert inv.status == ComposerToolStatus.ARG_ERROR
     # H4 fix: result_canonical mirrors what the LLM saw.
@@ -121,7 +120,7 @@ async def test_arg_error_payload_recorded_for_audit_replay() -> None:
 
     payload = _json.loads(inv.result_canonical)
     assert payload["isError"] is True
-    assert "Tool error" in payload["error"]
+    assert "session_id" in payload["error"]
 
 
 @pytest.mark.asyncio
@@ -256,6 +255,38 @@ async def test_plugin_crash_path_records_before_reraise() -> None:
     # No result_canonical or result_hash on the crash path — the LLM
     # never saw a tool result, so the audit row faithfully records
     # "no result was produced".
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
+
+
+@pytest.mark.asyncio
+async def test_bare_dispatch_value_error_is_plugin_crash_not_arg_error() -> None:
+    """Internal ValueError escaping dispatch is a plugin bug, not bad LLM args."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        with patch(
+            "elspeth.composer_mcp.server._dispatch_tool",
+            side_effect=ValueError("synthetic internal bug"),
+        ):
+            response = await _call_handler(
+                server.request_handlers,
+                "new_session",
+                {"name": "CrashTest"},
+            )
+
+    call_result = response.root
+    assert call_result.isError is True
+
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "new_session"
+    assert inv.error_class == "ValueError"
+    assert inv.error_message == "ValueError"
+    assert inv.version_after is None
     assert inv.result_canonical is None
     assert inv.result_hash is None
 

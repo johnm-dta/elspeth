@@ -13,7 +13,7 @@ per_file_rules:
   expires: null
   max_hits: 4
 allow_hits:
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=78a0cc4b4f3ce402
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=bbe2757f46dc0db3
   owner: composer-audit
   reason: Trust-boundary recovery — canonical_json/stable_hash on LLM-supplied arguments
     can raise on Tier-3 input (non-finite floats, non-serializable types). The catch
@@ -28,7 +28,7 @@ allow_hits:
     adds bounded, leak-safe metadata (top-level argument keys + rfc8785-allowlisted
     detail) so auditors can fingerprint the failure shape from the sentinel alone."
   expires: null
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=eb7d5c3932aeddac
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=7bdf391d96072609
   owner: composer-audit
   reason: Trust-boundary recovery — canonical_json/stable_hash on the success-path result_dict
     runs in finally to compute the audit row. A non-finite float in our own dispatch output

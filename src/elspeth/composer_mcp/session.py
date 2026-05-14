@@ -46,9 +46,10 @@ _SESSION_LOCKS_REGISTRY_MUTEX = threading.Lock()
 class InvalidSessionIdError(ValueError):
     """Raised when a session_id does not match the allowed shape.
 
-    Subclasses ``ValueError`` so the MCP server's existing ``except
-    (ValueError, KeyError, TypeError)`` handler at ``server.py`` surfaces
-    it as a clean ``isError=True`` tool response without a stack trace.
+    Subclasses ``ValueError`` for compatibility with callers that treat
+    invalid identifier syntax as a value-domain failure. The MCP tool
+    boundary converts this specific exception to ``ToolArgumentError``;
+    generic ``ValueError`` escaping dispatch remains a plugin crash.
     """
 
     def __init__(self, session_id: str) -> None:

@@ -3128,6 +3128,7 @@ class ComposerServiceImpl:
                         user_id=user_id,
                         prior_validation=_last_validation,
                         runtime_preflight=_runtime_preflight_callback,
+                        max_blob_storage_per_session_bytes=self._settings.max_blob_storage_per_session_bytes,
                     )
 
                 # ``_arg_error_payload`` is a module-level helper (F2 — testable

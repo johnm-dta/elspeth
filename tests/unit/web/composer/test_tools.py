@@ -147,6 +147,24 @@ def _session_engine_with_session() -> tuple[Any, str]:
     return engine, session_id
 
 
+def test_execute_create_blob_honors_configured_session_quota(tmp_path: Path) -> None:
+    engine, session_id = _session_engine_with_session()
+    result = execute_tool(
+        "create_blob",
+        {"filename": "too-large.txt", "mime_type": "text/plain", "content": "exceeds"},
+        _empty_state(),
+        _mock_catalog(),
+        data_dir=str(tmp_path),
+        session_engine=engine,
+        session_id=session_id,
+        max_blob_storage_per_session_bytes=3,
+    )
+
+    assert result.success is False
+    assert "3 byte limit" in result.data["error"]
+    assert list((tmp_path / "blobs" / session_id).glob("*")) == []
+
+
 class TestToolResult:
     def test_frozen(self) -> None:
         state = _empty_state()

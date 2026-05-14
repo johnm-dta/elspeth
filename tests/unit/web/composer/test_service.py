@@ -429,6 +429,55 @@ class TestComposerTextOnlyResponse:
 
 class TestComposerSingleToolCall:
     @pytest.mark.asyncio
+    async def test_tool_dispatch_receives_configured_blob_quota(self) -> None:
+        """Composer dispatch must thread WebSettings blob quota into tool execution."""
+
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(max_blob_storage_per_session_bytes=3),
+        )
+        state = _empty_state()
+        captured_quota: list[int | None] = []
+
+        def fake_execute_tool(
+            _tool_name: str,
+            _arguments: dict[str, Any],
+            _state: CompositionState,
+            _catalog: CatalogService,
+            *args: Any,
+            max_blob_storage_per_session_bytes: int | None = None,
+            **kwargs: Any,
+        ) -> ToolResult:
+            del args, kwargs
+            captured_quota.append(max_blob_storage_per_session_bytes)
+            return ToolResult(
+                success=True,
+                updated_state=_state.with_metadata({"name": "captured"}),
+                validation=ValidationSummary(is_valid=True, errors=()),
+                affected_nodes=("metadata",),
+            )
+
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_set_metadata",
+                    "name": "set_metadata",
+                    "arguments": {"patch": {"name": "captured"}},
+                }
+            ],
+        )
+        done = _make_llm_response(content="Done.")
+
+        with (
+            patch("elspeth.web.composer.service.execute_tool", side_effect=fake_execute_tool),
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_llm.side_effect = [turn, done]
+            await service.compose("Update metadata", [], state)
+
+        assert captured_quota == [3]
+
+    @pytest.mark.asyncio
     async def test_explicit_approve_mutating_tool_creates_pending_proposal_without_state_mutation(
         self,
         composer_service_with_real_sessions: ComposerServiceImpl,

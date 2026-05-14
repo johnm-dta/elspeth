@@ -2933,6 +2933,10 @@ _ALLOWED_BLOB_MIME_TYPES: frozenset[str] = frozenset(
 _BLOB_QUOTA_BYTES: int = 500 * 1024 * 1024
 
 
+def _resolve_blob_quota_bytes(max_blob_storage_per_session_bytes: int | None) -> int:
+    return _BLOB_QUOTA_BYTES if max_blob_storage_per_session_bytes is None else max_blob_storage_per_session_bytes
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedBlobCreate:
     """Validated blob-create payload ready for filesystem/DB persistence."""
@@ -2954,7 +2958,13 @@ def _blob_storage_path(data_dir: str, session_id: str, blob_id: str, filename: s
     return Path(data_dir).resolve() / "blobs" / session_id / f"{blob_id}_{filename}"
 
 
-def _check_blob_quota(conn: Any, session_id: str, additional_bytes: int) -> str | None:
+def _check_blob_quota(
+    conn: Any,
+    session_id: str,
+    additional_bytes: int,
+    *,
+    quota_bytes: int | None = None,
+) -> str | None:
     """Check if adding bytes would exceed the session blob quota.
 
     Returns an error message if quota exceeded, None if OK.
@@ -2964,8 +2974,9 @@ def _check_blob_quota(conn: Any, session_id: str, additional_bytes: int) -> str 
         select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id)
     ).scalar()
     current_total = int(current_total)
-    if current_total + additional_bytes > _BLOB_QUOTA_BYTES:
-        return f"Session blob quota exceeded: {current_total + additional_bytes} bytes would exceed {_BLOB_QUOTA_BYTES} byte limit."
+    resolved_quota = _resolve_blob_quota_bytes(quota_bytes)
+    if current_total + additional_bytes > resolved_quota:
+        return f"Session blob quota exceeded: {current_total + additional_bytes} bytes would exceed {resolved_quota} byte limit."
     return None
 
 
@@ -3115,6 +3126,7 @@ def _persist_prepared_blob_create(
     *,
     session_engine: Engine,
     session_id: str,
+    max_blob_storage_per_session_bytes: int | None = None,
 ) -> str | None:
     """Persist a prepared blob create payload, returning a quota error if any."""
     prepared.storage_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3123,7 +3135,12 @@ def _persist_prepared_blob_create(
     now = datetime.now(UTC)
     try:
         with session_engine.begin() as conn:
-            quota_error = _check_blob_quota(conn, session_id, len(prepared.content_bytes))
+            quota_error = _check_blob_quota(
+                conn,
+                session_id,
+                len(prepared.content_bytes),
+                quota_bytes=max_blob_storage_per_session_bytes,
+            )
             if quota_error is not None:
                 prepared.storage_path.unlink(missing_ok=True)
                 return quota_error
@@ -3168,6 +3185,7 @@ def _execute_create_blob(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
+    max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Create a new blob (file) in the session from inline content.
 
@@ -3212,7 +3230,12 @@ def _execute_create_blob(
     # to ARG_ERROR (CEC1 channel discipline).
     prepared = _prepare_blob_create(validated.model_dump(), data_dir=data_dir, session_id=session_id)
 
-    quota_error = _persist_prepared_blob_create(prepared, session_engine=session_engine, session_id=session_id)
+    quota_error = _persist_prepared_blob_create(
+        prepared,
+        session_engine=session_engine,
+        session_id=session_id,
+        max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
+    )
     if quota_error is not None:
         return _failure_result(state, quota_error)
 
@@ -3367,6 +3390,7 @@ def _execute_update_blob(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
+    max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Update the content of an existing blob.
 
@@ -3525,7 +3549,12 @@ def _execute_update_blob(
                     ).scalar_one()
                     size_delta = new_size - current_size
                     if size_delta > 0:
-                        quota_error = _check_blob_quota(conn, session_id, size_delta)
+                        quota_error = _check_blob_quota(
+                            conn,
+                            session_id,
+                            size_delta,
+                            quota_bytes=max_blob_storage_per_session_bytes,
+                        )
                         if quota_error is not None:
                             # Raising inside the ``with`` rolls the DB
                             # transaction back before the outer handler
@@ -3955,6 +3984,7 @@ def _execute_apply_pipeline_recipe(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
+    max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
 
@@ -4028,6 +4058,7 @@ def _execute_apply_pipeline_recipe(
         data_dir,
         session_engine=session_engine,
         session_id=session_id,
+        max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
     )
 
     # Only annotate successful replacements over a non-empty prior state.
@@ -4218,6 +4249,7 @@ def _execute_set_pipeline(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
+    max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Atomically replace the entire pipeline composition state.
 
@@ -4565,6 +4597,7 @@ def _execute_set_pipeline(
             prepared_inline_blob,
             session_engine=session_engine,
             session_id=session_id,
+            max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
         )
         if quota_error is not None:
             return _failure_result(state, quota_error)
@@ -6110,6 +6143,13 @@ _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
     "delete_blob": _execute_delete_blob,
     "apply_pipeline_recipe": _execute_apply_pipeline_recipe,
 }
+_BLOB_QUOTA_MUTATION_TOOLS: frozenset[str] = frozenset(
+    {
+        "create_blob",
+        "update_blob",
+        "apply_pipeline_recipe",
+    }
+)
 
 # Secret tools use an extended handler signature with secret_service + user_id kwargs
 _SECRET_DISCOVERY_TOOLS: dict[str, SecretToolHandler] = {
@@ -6189,6 +6229,7 @@ def execute_tool(
     baseline: CompositionState | None = None,
     prior_validation: ValidationSummary | None = None,
     runtime_preflight: RuntimePreflight | None = None,
+    max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Execute a composition tool by name.
 
@@ -6215,6 +6256,10 @@ def execute_tool(
             Only applied to preview_pipeline. Pre-computed in the async
             compose loop and injected here as a cheap synchronous callback
             so execute_tool() stays synchronous.
+        max_blob_storage_per_session_bytes: Configured per-session blob
+            storage quota for assistant-created session artifacts. Defaults to
+            the historical BlobServiceImpl-compatible value for direct tests
+            and non-web callers.
     """
     # preview_pipeline has an extended signature with runtime_preflight kwarg
     # plus session context (session_engine, session_id) so the proof step
@@ -6253,6 +6298,7 @@ def execute_tool(
             data_dir,
             session_engine=session_engine,
             session_id=session_id,
+            max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
         )
         return _inject_prior_validation(result, prior)
 
@@ -6275,7 +6321,19 @@ def execute_tool(
     blob_mutation = _BLOB_MUTATION_TOOLS.get(tool_name)
     if blob_mutation is not None:
         prior = prior_validation if prior_validation is not None else state.validate()
-        result = blob_mutation(arguments, state, catalog, data_dir, session_engine=session_engine, session_id=session_id)
+        blob_kwargs: dict[str, Any] = {
+            "session_engine": session_engine,
+            "session_id": session_id,
+        }
+        if tool_name in _BLOB_QUOTA_MUTATION_TOOLS:
+            blob_kwargs["max_blob_storage_per_session_bytes"] = max_blob_storage_per_session_bytes
+        result = blob_mutation(
+            arguments,
+            state,
+            catalog,
+            data_dir,
+            **blob_kwargs,
+        )
         return _inject_prior_validation(result, prior)
 
     # Check secret tools (extended signature with secret_service + user_id)

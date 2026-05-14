@@ -421,7 +421,7 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=64f61a530e62b301
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=ed7904aa063ccdb3
   owner: web-composer
   reason: "Narrow OSError around storage_path.write_bytes(old_content) rollback \u2014 disk faults during post-replace divergence\
     \ rollback expected; programmer bugs still propagate"
@@ -429,13 +429,13 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=b741cad5d808aa2c
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=9ac78f071c1373f2
   owner: web-composer
   reason: "Narrow OSError around tombstone restore after a failed blob delete \u2014 compensation disk faults must not bury\
     \ the primary DB exception"
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=603c865daf5b6a39
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=0a3c014aed88280c
   owner: web-composer
   reason: "Tier-3 trust boundary \u2014 UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure\
     \ mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content). Failure\
@@ -445,7 +445,7 @@ allow_hits:
     lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the audit-bound facts.warnings
     tuple; integrity guards (status=ready, hash match) remain authoritative.
   expires: null
-- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=10ed81db93310f4a
+- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=de099af9095b0a2f
   owner: web-composer
   reason: "Preview proof boundary \u2014 ExpressionEvaluationError from evaluating a gate condition against bounded observed-CSV\
     \ sample rows is the exact runtime failure class this proof diagnostic exists to catch."

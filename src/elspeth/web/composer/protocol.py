@@ -661,6 +661,9 @@ class ComposerSettings(Protocol):
     def composer_advisor_timeout_seconds(self) -> float: ...
 
     @property
+    def max_blob_storage_per_session_bytes(self) -> int: ...
+
+    @property
     def data_dir(self) -> Any: ...
 
 

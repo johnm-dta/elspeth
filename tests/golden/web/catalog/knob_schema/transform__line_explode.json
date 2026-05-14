@@ -4,7 +4,7 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
@@ -14,7 +14,7 @@
         "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
         "item_kind": "text",
         "kind": "string-list",
-        "label": "required_input_fields",
+        "label": "Required Input Fields",
         "name": "required_input_fields",
         "nullable": true,
         "required": false
@@ -22,7 +22,7 @@
       {
         "description": "Name of the string field to split into lines",
         "kind": "text",
-        "label": "source_field",
+        "label": "Source Field",
         "name": "source_field",
         "nullable": false,
         "required": true
@@ -31,7 +31,7 @@
         "default": "line",
         "description": "Name for each emitted line",
         "kind": "text",
-        "label": "output_field",
+        "label": "Output Field",
         "name": "output_field",
         "nullable": false,
         "required": false
@@ -40,7 +40,7 @@
         "default": true,
         "description": "Whether to include a line index field",
         "kind": "checkbox",
-        "label": "include_index",
+        "label": "Include Index",
         "name": "include_index",
         "nullable": false,
         "required": false
@@ -49,7 +49,7 @@
         "default": "line_index",
         "description": "Name for the emitted line index",
         "kind": "text",
-        "label": "index_field",
+        "label": "Index Field",
         "name": "index_field",
         "nullable": false,
         "required": false

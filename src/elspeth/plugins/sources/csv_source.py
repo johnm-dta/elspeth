@@ -31,9 +31,9 @@ class CSVSourceConfig(TabularSourceDataConfig):
     - columns, field_mapping (field normalization is mandatory)
     """
 
-    delimiter: str = ","
-    encoding: str = "utf-8"
-    skip_rows: int = Field(default=0, ge=0)
+    delimiter: str = Field(default=",", description="Single-character delimiter used to split CSV fields.")
+    encoding: str = Field(default="utf-8", description="Text encoding used to decode the CSV file.")
+    skip_rows: int = Field(default=0, ge=0, description="Number of leading physical rows to skip before reading headers or data.")
 
     @field_validator("delimiter")
     @classmethod
@@ -76,7 +76,7 @@ class CSVSource(BaseSource):
 
     name = "csv"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c93b8b0f8bb509c6"
+    source_file_hash: str | None = "sha256:9f3618e6d858c0a9"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str

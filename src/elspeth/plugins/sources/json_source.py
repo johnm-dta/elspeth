@@ -14,7 +14,7 @@ import json
 from collections.abc import Iterator, Mapping
 from typing import Any, Literal
 
-from pydantic import ValidationError, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from elspeth.contracts import PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
@@ -74,10 +74,19 @@ class JSONSourceConfig(SourceDataConfig):
     Supports field_mapping for overriding normalized field names.
     """
 
-    format: Literal["json", "jsonl"] | None = None
-    data_key: str | None = None
-    encoding: str = "utf-8"
-    field_mapping: dict[str, str] | None = None
+    format: Literal["json", "jsonl"] | None = Field(
+        default=None,
+        description="Input JSON format. When omitted, the source auto-detects JSONL from a .jsonl filename and JSON otherwise.",
+    )
+    data_key: str | None = Field(
+        default=None,
+        description="Optional top-level object key containing the array of records to read from a JSON document.",
+    )
+    encoding: str = Field(default="utf-8", description="Text encoding used to decode the JSON or JSONL file.")
+    field_mapping: dict[str, str] | None = Field(
+        default=None,
+        description="Optional mapping from observed JSON object keys to normalized pipeline field names.",
+    )
 
     @field_validator("encoding")
     @classmethod
@@ -136,7 +145,7 @@ class JSONSource(BaseSource):
 
     name = "json"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ac27ba8d557f48a7"
+    source_file_hash: str | None = "sha256:b6ec4f1922589c69"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str

@@ -72,18 +72,34 @@ class RAGRetrievalConfig(TransformDataConfig):
             return SchemaConfig.from_dict(v)
         return v
 
-    output_prefix: str
-    query_field: str
-    query_template: str | None = None
-    query_pattern: str | None = None
-    provider: str
-    provider_config: dict[str, Any]
-    top_k: int = Field(default=5, ge=1, le=100)
-    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    on_no_results: Literal["quarantine", "continue"] = "quarantine"
-    context_format: Literal["numbered", "separated", "raw"] = "numbered"
-    context_separator: str = "\n---\n"
-    max_context_length: int | None = Field(default=None, ge=1)
+    output_prefix: str = Field(description="Prefix used for fields emitted by retrieval, such as contexts and scores.")
+    query_field: str = Field(description="Input row field containing the retrieval query text.")
+    query_template: str | None = Field(
+        default=None,
+        description="Optional template used to build the retrieval query from row fields.",
+    )
+    query_pattern: str | None = Field(
+        default=None,
+        description="Optional regular expression used to extract the retrieval query from query_field.",
+    )
+    provider: str = Field(description="Retrieval provider name registered in the RAG provider catalog.")
+    provider_config: dict[str, Any] = Field(description="Provider-specific retrieval configuration passed to the selected provider.")
+    top_k: int = Field(default=5, ge=1, le=100, description="Maximum number of matching documents to return for each query.")
+    min_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum relevance score required for a retrieved document.")
+    on_no_results: Literal["quarantine", "continue"] = Field(
+        default="quarantine",
+        description="Behavior when no retrieval results satisfy the score threshold.",
+    )
+    context_format: Literal["numbered", "separated", "raw"] = Field(
+        default="numbered",
+        description="Formatting style used when combining retrieved contexts into output text.",
+    )
+    context_separator: str = Field(default="\n---\n", description="Separator inserted between retrieved contexts when applicable.")
+    max_context_length: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional maximum character length for the combined context output.",
+    )
 
     @field_validator("output_prefix")
     @classmethod

@@ -646,7 +646,7 @@ allow_hits:
   safety: Only KeyError and ShutdownError are discarded; the row was already timed
     out or shutdown, so no success is fabricated and no waiter is stranded.
   expires: null
-- key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=d62fb21952dcf3f2
+- key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=06bc6e6d57f87e71
   owner: plugin-validation
   reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
     field is documented but Pydantic does not guarantee its presence in every error

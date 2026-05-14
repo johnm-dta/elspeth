@@ -15,7 +15,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from typing import Any
 
-from pydantic import ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator
 
 from elspeth.contracts import PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
@@ -42,10 +42,10 @@ def _surrogateescape_line_to_bytes(value: str, encoding: str) -> bytes:
 class TextSourceConfig(SourceDataConfig):
     """Configuration for the plain-text line source plugin."""
 
-    column: str
-    encoding: str = "utf-8"
-    strip_whitespace: bool = True
-    skip_blank_lines: bool = True
+    column: str = Field(description="Pipeline field name that receives each emitted text line.")
+    encoding: str = Field(default="utf-8", description="Text encoding used to decode the input file.")
+    strip_whitespace: bool = Field(default=True, description="Whether to trim leading and trailing whitespace from each line.")
+    skip_blank_lines: bool = Field(default=True, description="Whether to drop blank lines after optional whitespace trimming.")
 
     @field_validator("column")
     @classmethod
@@ -71,7 +71,7 @@ class TextSource(BaseSource):
 
     name = "text"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c76a93b112ac51ca"
+    source_file_hash: str | None = "sha256:13330414d4bf9b53"
     config_model = TextSourceConfig
     _on_validation_failure: str
 

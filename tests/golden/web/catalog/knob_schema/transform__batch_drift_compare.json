@@ -4,7 +4,7 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
@@ -14,7 +14,7 @@
         "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
         "item_kind": "text",
         "kind": "string-list",
-        "label": "required_input_fields",
+        "label": "Required Input Fields",
         "name": "required_input_fields",
         "nullable": true,
         "required": false
@@ -22,7 +22,7 @@
       {
         "description": "Field that partitions rows into baseline/current cohorts",
         "kind": "text",
-        "label": "cohort_field",
+        "label": "Cohort Field",
         "name": "cohort_field",
         "nullable": false,
         "required": true
@@ -30,7 +30,7 @@
       {
         "description": "Field whose distribution should be compared",
         "kind": "text",
-        "label": "value_field",
+        "label": "Value Field",
         "name": "value_field",
         "nullable": false,
         "required": true
@@ -43,7 +43,7 @@
           "categorical"
         ],
         "kind": "enum",
-        "label": "value_type",
+        "label": "Value Type",
         "name": "value_type",
         "nullable": false,
         "required": false
@@ -52,7 +52,7 @@
         "default": null,
         "description": "Optional baseline cohort. When omitted, the first-seen cohort is the baseline.",
         "kind": "json-value",
-        "label": "baseline_cohort",
+        "label": "Baseline Cohort",
         "name": "baseline_cohort",
         "nullable": false,
         "required": false

@@ -4,7 +4,7 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
@@ -12,7 +12,7 @@
       {
         "description": "Dataverse environment URL (e.g., https://myorg.crm.dynamics.com)",
         "kind": "text",
-        "label": "environment_url",
+        "label": "Environment URL",
         "name": "environment_url",
         "nullable": false,
         "required": true
@@ -20,7 +20,7 @@
       {
         "description": "Authentication configuration",
         "kind": "json-object",
-        "label": "auth",
+        "label": "Auth",
         "name": "auth",
         "nullable": false,
         "required": true
@@ -29,7 +29,7 @@
         "default": "v9.2",
         "description": "Dataverse Web API version",
         "kind": "text",
-        "label": "api_version",
+        "label": "API Version",
         "name": "api_version",
         "nullable": false,
         "required": false
@@ -37,7 +37,7 @@
       {
         "description": "Target entity logical name",
         "kind": "text",
-        "label": "entity",
+        "label": "Entity",
         "name": "entity",
         "nullable": false,
         "required": true
@@ -49,7 +49,7 @@
           "upsert"
         ],
         "kind": "enum",
-        "label": "mode",
+        "label": "Mode",
         "name": "mode",
         "nullable": false,
         "required": false
@@ -57,7 +57,7 @@
       {
         "description": "Pipeline field \u2192 Dataverse column mapping",
         "kind": "json-object",
-        "label": "field_mapping",
+        "label": "Field Mapping",
         "name": "field_mapping",
         "nullable": false,
         "required": true
@@ -65,7 +65,7 @@
       {
         "description": "Business key field for upsert (PATCH with alternate key)",
         "kind": "text",
-        "label": "alternate_key",
+        "label": "Alternate Key",
         "name": "alternate_key",
         "nullable": false,
         "required": true
@@ -74,7 +74,7 @@
         "default": null,
         "description": "Lookup field bindings for navigation properties",
         "kind": "json-object",
-        "label": "lookups",
+        "label": "Lookups",
         "name": "lookups",
         "nullable": true,
         "required": false
@@ -84,7 +84,7 @@
         "description": "Additional Dataverse domain patterns for SSRF allowlist",
         "item_kind": "text",
         "kind": "string-list",
-        "label": "additional_domains",
+        "label": "Additional Domains",
         "name": "additional_domains",
         "nullable": true,
         "required": false

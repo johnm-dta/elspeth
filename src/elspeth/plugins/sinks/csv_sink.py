@@ -15,7 +15,7 @@ import os
 from collections.abc import Sequence
 from typing import IO, TYPE_CHECKING, Any, Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
@@ -50,9 +50,9 @@ class CSVSinkConfig(SinkPathConfig):
     - Header output mode (headers: normalized | original | {mapping})
     """
 
-    delimiter: str = ","
-    encoding: str = "utf-8"
-    mode: Literal["write", "append"] = "write"
+    delimiter: str = Field(default=",", description="Single-character delimiter used when writing CSV fields.")
+    encoding: str = Field(default="utf-8", description="Text encoding used when writing the CSV file.")
+    mode: Literal["write", "append"] = Field(default="write", description="Whether to create/replace the CSV file or append rows.")
 
     @field_validator("delimiter")
     @classmethod
@@ -110,7 +110,7 @@ class CSVSink(BaseSink):
 
     name = "csv"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7f5258e0f96d11e5"
+    source_file_hash: str | None = "sha256:3ffa924b73275f02"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

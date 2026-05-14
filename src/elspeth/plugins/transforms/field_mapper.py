@@ -31,9 +31,12 @@ class FieldMapperConfig(TransformDataConfig):
     Use 'schema: {mode: observed}' for dynamic field handling.
     """
 
-    mapping: dict[str, str] = Field(default_factory=dict)
-    select_only: bool = False
-    strict: bool = False
+    mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping from existing input field names to output field names.",
+    )
+    select_only: bool = Field(default=False, description="When true, emit only fields named in the mapping.")
+    strict: bool = Field(default=False, description="When true, fail if any mapped source field is missing from an input row.")
 
     @model_validator(mode="after")
     def _reject_duplicate_targets(self) -> FieldMapperConfig:
@@ -111,7 +114,7 @@ class FieldMapper(BaseTransform):
 
     name = "field_mapper"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9b8ff6b4d0c4c3e9"
+    source_file_hash: str | None = "sha256:b6c0765565548772"
     config_model = FieldMapperConfig
 
     @classmethod

@@ -82,11 +82,14 @@ class ChromaSinkConfig(DataPluginConfig):
 
     collection: str = Field(description="ChromaDB collection name")
     mode: Literal["persistent", "client"] = Field(description="Connection mode")
-    persist_directory: str | None = Field(default=None)
-    host: str | None = Field(default=None)
-    port: int = Field(default=8000, ge=1, le=65535)
-    ssl: bool = Field(default=True)
-    distance_function: Literal["cosine", "l2", "ip"] = Field(default="cosine")
+    persist_directory: str | None = Field(default=None, description="Local persistence directory for persistent Chroma mode.")
+    host: str | None = Field(default=None, description="Chroma server host for client mode.")
+    port: int = Field(default=8000, ge=1, le=65535, description="Chroma server port for client mode.")
+    ssl: bool = Field(default=True, description="Whether to use TLS when connecting to a Chroma server.")
+    distance_function: Literal["cosine", "l2", "ip"] = Field(
+        default="cosine",
+        description="Vector distance function used when creating the Chroma collection.",
+    )
 
     field_mapping: FieldMappingConfig = Field(description="Maps row fields to ChromaDB document/id/metadata")
     on_duplicate: Literal["overwrite", "skip", "error"] = Field(
@@ -169,7 +172,7 @@ class ChromaSink(BaseSink):
 
     name = "chroma_sink"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2d5637e16b4ebeb1"
+    source_file_hash: str | None = "sha256:6c2e9ee70616c942"
     config_model = ChromaSinkConfig
     supports_resume = False
 

@@ -4,14 +4,15 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
       },
       {
+        "description": "Filesystem path for the source input or sink output, resolved relative to the run data directory.",
         "kind": "text",
-        "label": "path",
+        "label": "Path",
         "name": "path",
         "nullable": false,
         "required": true
@@ -20,7 +21,7 @@
         "default": null,
         "description": "Header output mode: 'normalized', 'original', or {field: header} mapping",
         "kind": "json-value",
-        "label": "headers",
+        "label": "Headers",
         "name": "headers",
         "nullable": false,
         "required": false
@@ -34,35 +35,38 @@
           "append_or_create"
         ],
         "kind": "enum",
-        "label": "collision_policy",
+        "label": "Collision Policy",
         "name": "collision_policy",
         "nullable": true,
         "required": false
       },
       {
         "default": ",",
+        "description": "Single-character delimiter used when writing CSV fields.",
         "kind": "text",
-        "label": "delimiter",
+        "label": "Delimiter",
         "name": "delimiter",
         "nullable": false,
         "required": false
       },
       {
         "default": "utf-8",
+        "description": "Text encoding used when writing the CSV file.",
         "kind": "text",
-        "label": "encoding",
+        "label": "Encoding",
         "name": "encoding",
         "nullable": false,
         "required": false
       },
       {
         "default": "write",
+        "description": "Whether to create/replace the CSV file or append rows.",
         "enum": [
           "write",
           "append"
         ],
         "kind": "enum",
-        "label": "mode",
+        "label": "Mode",
         "name": "mode",
         "nullable": false,
         "required": false

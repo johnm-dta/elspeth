@@ -4,7 +4,7 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
@@ -14,7 +14,7 @@
         "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
         "item_kind": "text",
         "kind": "string-list",
-        "label": "required_input_fields",
+        "label": "Required Input Fields",
         "name": "required_input_fields",
         "nullable": true,
         "required": false
@@ -22,7 +22,7 @@
       {
         "description": "Azure Content Safety endpoint URL",
         "kind": "text",
-        "label": "endpoint",
+        "label": "Endpoint",
         "name": "endpoint",
         "nullable": false,
         "required": true
@@ -30,7 +30,7 @@
       {
         "description": "Azure Content Safety API key",
         "kind": "text",
-        "label": "api_key",
+        "label": "API Key",
         "name": "api_key",
         "nullable": false,
         "required": true
@@ -38,7 +38,7 @@
       {
         "description": "Field name(s) to analyze, or 'all' for all string fields",
         "kind": "json-value",
-        "label": "fields",
+        "label": "Fields",
         "name": "fields",
         "nullable": false,
         "required": true
@@ -47,7 +47,7 @@
         "default": 3600,
         "description": "Max seconds to retry capacity errors",
         "kind": "number-int",
-        "label": "max_capacity_retry_seconds",
+        "label": "Max Capacity Retry Seconds",
         "name": "max_capacity_retry_seconds",
         "nullable": false,
         "required": false
@@ -56,7 +56,7 @@
         "default": 3600,
         "description": "Max seconds to wait for a batch row result",
         "kind": "number-int",
-        "label": "batch_wait_timeout_seconds",
+        "label": "Batch Wait Timeout Seconds",
         "name": "batch_wait_timeout_seconds",
         "nullable": false,
         "required": false
@@ -64,7 +64,7 @@
       {
         "description": "Per-category severity thresholds (0-6)",
         "kind": "json-object",
-        "label": "thresholds",
+        "label": "Thresholds",
         "name": "thresholds",
         "nullable": false,
         "required": true

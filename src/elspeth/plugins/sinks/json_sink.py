@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
@@ -51,10 +51,16 @@ class JSONSinkConfig(SinkPathConfig):
     - Header output mode (headers: normalized | original | {mapping})
     """
 
-    format: Literal["json", "jsonl"] | None = None
-    indent: int | None = None
-    encoding: str = "utf-8"
-    mode: Literal["write", "append"] = "write"  # "write" (truncate) or "append"
+    format: Literal["json", "jsonl"] | None = Field(
+        default=None,
+        description="Output JSON format. When omitted, the sink auto-detects JSONL from a .jsonl filename and JSON otherwise.",
+    )
+    indent: int | None = Field(default=None, description="Indentation level for JSON array output; null writes compact JSON.")
+    encoding: str = Field(default="utf-8", description="Text encoding used when writing JSON output.")
+    mode: Literal["write", "append"] = Field(
+        default="write",
+        description="Whether to create/replace the JSON output file or append JSONL rows.",
+    )
 
     @model_validator(mode="after")
     def _validate_mode_format_compatibility(self) -> "JSONSinkConfig":
@@ -94,7 +100,7 @@ class JSONSink(BaseSink):
 
     name = "json"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:331f354fb3ba30f1"
+    source_file_hash: str | None = "sha256:fbcf7af17e132faf"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

@@ -132,18 +132,27 @@ class WebScrapeConfig(TransformDataConfig):
             "value_transform that prepends 'https://' before this transform."
         ),
     )
-    content_field: str
-    fingerprint_field: str
-    format: Literal["markdown", "text", "raw"] = "markdown"
+    content_field: str = Field(description="Output field that receives the fetched page content.")
+    fingerprint_field: str = Field(description="Output field that receives the page fingerprint.")
+    format: Literal["markdown", "text", "raw"] = Field(
+        default="markdown",
+        description="Content extraction format to emit: markdown, plain text, or raw HTML.",
+    )
     text_separator: str = Field(
         default=" ",
         min_length=1,
         max_length=16,
         description="Separator inserted between DOM text nodes when format is text.",
     )
-    fingerprint_mode: Literal["content", "full"] = "content"
-    strip_elements: list[str] = Field(default_factory=lambda: ["script", "style"])
-    http: WebScrapeHTTPConfig
+    fingerprint_mode: Literal["content", "full"] = Field(
+        default="content",
+        description="Whether fingerprints cover processed content only or the full fetch response context.",
+    )
+    strip_elements: list[str] = Field(
+        default_factory=lambda: ["script", "style"],
+        description="HTML element names to remove before extracting page text.",
+    )
+    http: WebScrapeHTTPConfig = Field(description="HTTP fetching policy, timeout, contact, and host allowlist settings.")
 
     @field_validator("url_field", "content_field", "fingerprint_field")
     @classmethod
@@ -330,7 +339,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:975a6c280112b152"
+    source_file_hash: str | None = "sha256:4b5cf12339422ebe"
     config_model = WebScrapeConfig
     passes_through_input = True
 

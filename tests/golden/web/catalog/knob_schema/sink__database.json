@@ -4,33 +4,36 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
       },
       {
+        "description": "Database connection URL for SQLAlchemy.",
         "kind": "text",
-        "label": "url",
+        "label": "URL",
         "name": "url",
         "nullable": false,
         "required": true
       },
       {
+        "description": "Database table name to write rows into.",
         "kind": "text",
-        "label": "table",
+        "label": "Table",
         "name": "table",
         "nullable": false,
         "required": true
       },
       {
         "default": "append",
+        "description": "Whether to append to an existing table or replace it before writing.",
         "enum": [
           "append",
           "replace"
         ],
         "kind": "enum",
-        "label": "if_exists",
+        "label": "If Exists",
         "name": "if_exists",
         "nullable": false,
         "required": false

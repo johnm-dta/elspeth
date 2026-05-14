@@ -4,7 +4,7 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
@@ -14,7 +14,7 @@
         "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
         "item_kind": "text",
         "kind": "string-list",
-        "label": "required_input_fields",
+        "label": "Required Input Fields",
         "name": "required_input_fields",
         "nullable": true,
         "required": false
@@ -22,7 +22,7 @@
       {
         "description": "Name of the numeric field to evaluate",
         "kind": "text",
-        "label": "value_field",
+        "label": "Value Field",
         "name": "value_field",
         "nullable": false,
         "required": true
@@ -30,7 +30,7 @@
       {
         "description": "Named thresholds to evaluate",
         "kind": "json-array",
-        "label": "thresholds",
+        "label": "Thresholds",
         "name": "thresholds",
         "nullable": false,
         "required": true

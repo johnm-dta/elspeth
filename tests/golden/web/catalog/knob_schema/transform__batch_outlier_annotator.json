@@ -4,7 +4,7 @@
       {
         "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
         "kind": "json-value",
-        "label": "schema_config",
+        "label": "Schema",
         "name": "schema_config",
         "nullable": false,
         "required": true
@@ -14,7 +14,7 @@
         "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
         "item_kind": "text",
         "kind": "string-list",
-        "label": "required_input_fields",
+        "label": "Required Input Fields",
         "name": "required_input_fields",
         "nullable": true,
         "required": false
@@ -22,7 +22,7 @@
       {
         "description": "Name of the numeric field to annotate",
         "kind": "text",
-        "label": "value_field",
+        "label": "Value Field",
         "name": "value_field",
         "nullable": false,
         "required": true
@@ -31,7 +31,7 @@
         "default": "outlier",
         "description": "Prefix used for emitted annotation fields",
         "kind": "text",
-        "label": "output_prefix",
+        "label": "Output Prefix",
         "name": "output_prefix",
         "nullable": false,
         "required": false
@@ -40,7 +40,7 @@
         "default": 3.0,
         "description": "Absolute sample z-score threshold for outlier annotation",
         "kind": "number-float",
-        "label": "z_threshold",
+        "label": "Z Threshold",
         "name": "z_threshold",
         "nullable": false,
         "required": false
@@ -49,7 +49,7 @@
         "default": 3.5,
         "description": "Absolute modified z-score threshold based on median absolute deviation",
         "kind": "number-float",
-        "label": "robust_z_threshold",
+        "label": "Robust Z Threshold",
         "name": "robust_z_threshold",
         "nullable": false,
         "required": false

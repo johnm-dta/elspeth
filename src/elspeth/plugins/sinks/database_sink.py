@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from sqlalchemy import Boolean, Column, Float, Integer, MetaData, Table, Text, create_engine, insert
 
 if TYPE_CHECKING:
@@ -55,9 +55,12 @@ class DatabaseSinkConfig(DataPluginConfig):
 
     _plugin_component_type: ClassVar[str | None] = "sink"
 
-    url: str
-    table: str
-    if_exists: Literal["append", "replace"] = "append"
+    url: str = Field(description="Database connection URL for SQLAlchemy.")
+    table: str = Field(description="Database table name to write rows into.")
+    if_exists: Literal["append", "replace"] = Field(
+        default="append",
+        description="Whether to append to an existing table or replace it before writing.",
+    )
 
     @field_validator("table")
     @classmethod
@@ -97,7 +100,7 @@ class DatabaseSink(BaseSink):
 
     name = "database"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2bb13107950caab9"
+    source_file_hash: str | None = "sha256:bc72839481df1d5c"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

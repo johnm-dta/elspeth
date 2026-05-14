@@ -1,0 +1,127 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "required_input_fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "kind": "text",
+        "label": "output_prefix",
+        "name": "output_prefix",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "query_field",
+        "name": "query_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "kind": "text",
+        "label": "query_template",
+        "name": "query_template",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "kind": "text",
+        "label": "query_pattern",
+        "name": "query_pattern",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "kind": "text",
+        "label": "provider",
+        "name": "provider",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "json-object",
+        "label": "provider_config",
+        "name": "provider_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": 5,
+        "kind": "number-int",
+        "label": "top_k",
+        "name": "top_k",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 0.0,
+        "kind": "number-float",
+        "label": "min_score",
+        "name": "min_score",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "quarantine",
+        "enum": [
+          "quarantine",
+          "continue"
+        ],
+        "kind": "enum",
+        "label": "on_no_results",
+        "name": "on_no_results",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "numbered",
+        "enum": [
+          "numbered",
+          "separated",
+          "raw"
+        ],
+        "kind": "enum",
+        "label": "context_format",
+        "name": "context_format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "\n---\n",
+        "kind": "text",
+        "label": "context_separator",
+        "name": "context_separator",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "kind": "number-int",
+        "label": "max_context_length",
+        "name": "max_context_length",
+        "nullable": true,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "rag_retrieval"
+}

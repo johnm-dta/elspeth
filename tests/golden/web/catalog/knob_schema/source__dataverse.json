@@ -1,0 +1,132 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Dataverse environment URL (e.g., https://myorg.crm.dynamics.com)",
+        "kind": "text",
+        "label": "environment_url",
+        "name": "environment_url",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Authentication configuration",
+        "kind": "json-object",
+        "label": "auth",
+        "name": "auth",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "v9.2",
+        "description": "Dataverse Web API version",
+        "kind": "text",
+        "label": "api_version",
+        "name": "api_version",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Sink name for non-conformant rows, or 'discard' for explicit drop",
+        "kind": "text",
+        "label": "on_validation_failure",
+        "name": "on_validation_failure",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Entity logical name (e.g., 'contact')",
+        "kind": "text",
+        "label": "entity",
+        "name": "entity",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "$select fields (None = all)",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "select",
+        "name": "select",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "$filter expression (static OData only)",
+        "kind": "text",
+        "label": "filter",
+        "name": "filter",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "$orderby expression",
+        "kind": "text",
+        "label": "orderby",
+        "name": "orderby",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "$top limit (None = all records)",
+        "kind": "number-int",
+        "label": "top",
+        "name": "top",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Raw FetchXML string",
+        "kind": "text",
+        "label": "fetch_xml",
+        "name": "fetch_xml",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Manual field name overrides",
+        "kind": "json-object",
+        "label": "field_mapping",
+        "name": "field_mapping",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": false,
+        "description": "Preserve Dataverse formatted value annotations",
+        "kind": "checkbox",
+        "label": "include_formatted_values",
+        "name": "include_formatted_values",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Additional Dataverse domain patterns for SSRF allowlist",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "additional_domains",
+        "name": "additional_domains",
+        "nullable": true,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "source",
+  "plugin_name": "dataverse"
+}

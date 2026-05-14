@@ -1,0 +1,103 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "ChromaDB collection name",
+        "kind": "text",
+        "label": "collection",
+        "name": "collection",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Connection mode",
+        "enum": [
+          "persistent",
+          "client"
+        ],
+        "kind": "enum",
+        "label": "mode",
+        "name": "mode",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "kind": "text",
+        "label": "persist_directory",
+        "name": "persist_directory",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "kind": "text",
+        "label": "host",
+        "name": "host",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": 8000,
+        "kind": "number-int",
+        "label": "port",
+        "name": "port",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "kind": "checkbox",
+        "label": "ssl",
+        "name": "ssl",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "cosine",
+        "enum": [
+          "cosine",
+          "l2",
+          "ip"
+        ],
+        "kind": "enum",
+        "label": "distance_function",
+        "name": "distance_function",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Maps row fields to ChromaDB document/id/metadata",
+        "kind": "json-object",
+        "label": "field_mapping",
+        "name": "field_mapping",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "overwrite",
+        "description": "Behaviour when a document ID already exists",
+        "enum": [
+          "overwrite",
+          "skip",
+          "error"
+        ],
+        "kind": "enum",
+        "label": "on_duplicate",
+        "name": "on_duplicate",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "chroma_sink"
+}

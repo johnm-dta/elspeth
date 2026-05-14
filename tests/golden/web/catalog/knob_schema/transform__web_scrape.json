@@ -1,0 +1,97 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "required_input_fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Name of the row field whose value is the absolute URL to fetch. Values MUST include an explicit 'http://' or 'https://' scheme; bare hostnames (e.g. 'www.example.gov.au') are rejected at fetch time by the SSRF guard. If the upstream source emits scheme-less values, normalize them in the source data or add an upstream value_transform that prepends 'https://' before this transform.",
+        "kind": "text",
+        "label": "url_field",
+        "name": "url_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "content_field",
+        "name": "content_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "fingerprint_field",
+        "name": "fingerprint_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "markdown",
+        "enum": [
+          "markdown",
+          "text",
+          "raw"
+        ],
+        "kind": "enum",
+        "label": "format",
+        "name": "format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": " ",
+        "description": "Separator inserted between DOM text nodes when format is text.",
+        "kind": "text",
+        "label": "text_separator",
+        "name": "text_separator",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "content",
+        "enum": [
+          "content",
+          "full"
+        ],
+        "kind": "enum",
+        "label": "fingerprint_mode",
+        "name": "fingerprint_mode",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "strip_elements",
+        "name": "strip_elements",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "kind": "json-object",
+        "label": "http",
+        "name": "http",
+        "nullable": false,
+        "required": true
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "web_scrape"
+}

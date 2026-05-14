@@ -1,0 +1,67 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "path",
+        "name": "path",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Sink name for non-conformant rows, or 'discard' for explicit drop",
+        "kind": "text",
+        "label": "on_validation_failure",
+        "name": "on_validation_failure",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "enum": [
+          "json",
+          "jsonl"
+        ],
+        "kind": "enum",
+        "label": "format",
+        "name": "format",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "kind": "text",
+        "label": "data_key",
+        "name": "data_key",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": "utf-8",
+        "kind": "text",
+        "label": "encoding",
+        "name": "encoding",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "kind": "json-object",
+        "label": "field_mapping",
+        "name": "field_mapping",
+        "nullable": true,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "source",
+  "plugin_name": "json"
+}

@@ -1,0 +1,42 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "url",
+        "name": "url",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "table",
+        "name": "table",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "append",
+        "enum": [
+          "append",
+          "replace"
+        ],
+        "kind": "enum",
+        "label": "if_exists",
+        "name": "if_exists",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "database"
+}

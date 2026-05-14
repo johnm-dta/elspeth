@@ -1,0 +1,135 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Azure Storage connection string",
+        "kind": "text",
+        "label": "connection_string",
+        "name": "connection_string",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Azure Storage SAS token (with or without leading '?')",
+        "kind": "text",
+        "label": "sas_token",
+        "name": "sas_token",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": false,
+        "description": "Use Azure Managed Identity for authentication",
+        "kind": "checkbox",
+        "label": "use_managed_identity",
+        "name": "use_managed_identity",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Azure Storage account URL (e.g., https://mystorageaccount.blob.core.windows.net)",
+        "kind": "text",
+        "label": "account_url",
+        "name": "account_url",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Azure AD tenant ID for Service Principal auth",
+        "kind": "text",
+        "label": "tenant_id",
+        "name": "tenant_id",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Azure AD client ID for Service Principal auth",
+        "kind": "text",
+        "label": "client_id",
+        "name": "client_id",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Azure AD client secret for Service Principal auth",
+        "kind": "text",
+        "label": "client_secret",
+        "name": "client_secret",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Azure Blob container name",
+        "kind": "text",
+        "label": "container",
+        "name": "container",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Path to blob within container (supports Jinja2 templates)",
+        "kind": "text",
+        "label": "blob_path",
+        "name": "blob_path",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "csv",
+        "description": "Data format: csv, json (array), or jsonl (newline-delimited)",
+        "enum": [
+          "csv",
+          "json",
+          "jsonl"
+        ],
+        "kind": "enum",
+        "label": "format",
+        "name": "format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to overwrite existing blob (if False, raises if exists)",
+        "kind": "checkbox",
+        "label": "overwrite",
+        "name": "overwrite",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "CSV writing options (delimiter, encoding, include_header)",
+        "kind": "json-object",
+        "label": "csv_options",
+        "name": "csv_options",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Header output mode: 'normalized', 'original', or {field: header} mapping",
+        "kind": "json-value",
+        "label": "headers",
+        "name": "headers",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "azure_blob"
+}

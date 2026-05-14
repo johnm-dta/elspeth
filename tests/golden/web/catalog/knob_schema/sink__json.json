@@ -1,0 +1,86 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "schema_config",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "kind": "text",
+        "label": "path",
+        "name": "path",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Header output mode: 'normalized', 'original', or {field: header} mapping",
+        "kind": "json-value",
+        "label": "headers",
+        "name": "headers",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional local output collision policy. 'fail_if_exists' refuses an existing write target; 'auto_increment' picks a free sibling path; 'append_or_create' is valid with append mode.",
+        "enum": [
+          "fail_if_exists",
+          "auto_increment",
+          "append_or_create"
+        ],
+        "kind": "enum",
+        "label": "collision_policy",
+        "name": "collision_policy",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "enum": [
+          "json",
+          "jsonl"
+        ],
+        "kind": "enum",
+        "label": "format",
+        "name": "format",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "kind": "number-int",
+        "label": "indent",
+        "name": "indent",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": "utf-8",
+        "kind": "text",
+        "label": "encoding",
+        "name": "encoding",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "write",
+        "enum": [
+          "write",
+          "append"
+        ],
+        "kind": "enum",
+        "label": "mode",
+        "name": "mode",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "json"
+}

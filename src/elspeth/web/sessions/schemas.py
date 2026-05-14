@@ -22,7 +22,13 @@ import pydantic
 from pydantic import BaseModel, ConfigDict, JsonValue, field_validator
 
 from elspeth.web.execution.schemas import DiscardSummary, RunAccounting
-from elspeth.web.sessions.protocol import SessionRunStatus
+from elspeth.web.sessions.protocol import (
+    ComposerDensityDefault,
+    ComposerTrustMode,
+    ProposalEventType,
+    ProposalLifecycleStatus,
+    SessionRunStatus,
+)
 from elspeth.web.validation import has_visible_content
 
 
@@ -131,6 +137,7 @@ class MessageWithStateResponse(_StrictResponse):
 
     message: ChatMessageResponse
     state: CompositionStateResponse | None = None
+    proposals: list[CompositionProposalResponse]
 
 
 class ValidationEntryResponse(_StrictResponse):
@@ -146,6 +153,49 @@ class ValidationEntryResponse(_StrictResponse):
 
 type CompositionObject = dict[str, JsonValue]
 type CompositionObjectList = list[CompositionObject]
+
+
+class ComposerPreferencesResponse(_StrictResponse):
+    session_id: str
+    trust_mode: ComposerTrustMode
+    density_default: ComposerDensityDefault
+    updated_at: datetime
+
+
+class UpdateComposerPreferencesRequest(_RequestModel):
+    trust_mode: ComposerTrustMode
+    density_default: ComposerDensityDefault
+
+
+class CompositionProposalResponse(_StrictResponse):
+    id: str
+    session_id: str
+    tool_call_id: str
+    tool_name: str
+    status: ProposalLifecycleStatus
+    summary: str
+    rationale: str
+    affects: list[str]
+    arguments_redacted_json: CompositionObject
+    base_state_id: str | None = None
+    committed_state_id: str | None = None
+    audit_event_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RejectProposalRequest(_RequestModel):
+    reason: str | None = None
+
+
+class ProposalEventResponse(_StrictResponse):
+    id: str
+    session_id: str
+    proposal_id: str | None = None
+    event_type: ProposalEventType
+    actor: str
+    payload: CompositionObject
+    created_at: datetime
 
 
 class CompositionStateResponse(_StrictResponse):

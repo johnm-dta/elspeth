@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         "--base-snapshot",
         required=True,
         type=Path,
-        help="Path to the base (origin/main) snapshot JSON file.",
+        help="Path to the base-branch snapshot JSON file.",
     )
     parser.add_argument(
         "--head-snapshot",

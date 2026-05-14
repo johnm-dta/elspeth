@@ -357,6 +357,16 @@ class _ProgressRouteSessionService:
         self.current_state = record
         return record
 
+    async def list_composition_proposals(
+        self,
+        session_id: uuid.UUID,
+        status: str | None = None,
+    ) -> list[Any]:
+        if session_id != self.session.id:
+            raise ValueError("Session not found")
+        del status
+        return []
+
 
 def _make_progress_route_app(
     tmp_path: Path,
@@ -444,6 +454,207 @@ def _make_app(
     app.include_router(router)
 
     return app, service
+
+
+def test_get_composer_preferences_returns_defaults(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Prefs"}).json()
+
+    response = test_client.get(f"/api/sessions/{session['id']}/composer/preferences")
+
+    assert response.status_code == 200
+    assert response.json()["trust_mode"] == "explicit_approve"
+    assert response.json()["density_default"] == "high"
+
+
+def test_patch_composer_preferences_records_event(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Prefs"}).json()
+
+    response = test_client.patch(
+        f"/api/sessions/{session['id']}/composer/preferences",
+        json={"trust_mode": "auto_commit", "density_default": "medium"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["trust_mode"] == "auto_commit"
+    events = test_client.get(f"/api/sessions/{session['id']}/proposal-events").json()
+    assert events[-1]["event_type"] == "trust_mode.changed"
+
+
+def test_list_proposals_is_session_scoped(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Proposals"}).json()
+
+    response = test_client.get(f"/api/sessions/{session['id']}/proposals")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_send_message_response_includes_empty_proposals_array(tmp_path) -> None:
+    mock_composer = _make_composer_mock(response_text="Got it!")
+    app, _service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Chat"}).json()
+
+    response = client.post(
+        f"/api/sessions/{session['id']}/messages",
+        json={"content": "Hello"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["proposals"] == []
+
+
+def test_send_message_response_includes_pending_proposals_created_during_compose(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    mock_composer = AsyncMock()
+
+    async def _compose_with_pending_proposal(*args: object, **kwargs: object) -> ComposerResult:
+        del args
+        session_id = uuid.UUID(str(kwargs["session_id"]))
+        await service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline.",
+            rationale="Requested by the current composer turn.",
+            affects=("graph", "yaml"),
+            arguments_json={"source": {"plugin": "csv", "options": {}}},
+            arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+            base_state_id=None,
+            actor="composer-web:alice",
+        )
+        return ComposerResult(message="Needs approval.", state=_EMPTY_STATE)
+
+    mock_composer.compose = AsyncMock(side_effect=_compose_with_pending_proposal)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Atomic proposals"}).json()
+
+    response = client.post(
+        f"/api/sessions/{session['id']}/messages",
+        json={"content": "Build a csv pipeline"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["message"]["content"] == "Needs approval."
+    assert body["proposals"][0]["tool_call_id"] == "call_set_pipeline"
+    assert body["proposals"][0]["status"] == "pending"
+
+
+def test_accept_unknown_proposal_returns_404(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Accept"}).json()
+
+    response = test_client.post(f"/api/sessions/{session['id']}/proposals/00000000-0000-0000-0000-000000000000/accept")
+
+    assert response.status_code == 404
+
+
+def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) -> None:
+    from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+
+    app, service = _make_app(tmp_path)
+    app.state.session_engine = service._engine
+    catalog = MagicMock()
+    catalog.list_sources.return_value = [
+        PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+    ]
+    catalog.list_transforms.return_value = [
+        PluginSummary(name="passthrough", description="Passthrough", plugin_type="transform", config_fields=[]),
+    ]
+    catalog.list_sinks.return_value = [
+        PluginSummary(name="csv", description="CSV sink", plugin_type="sink", config_fields=[]),
+    ]
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="csv",
+        plugin_type="source",
+        description="CSV source",
+        json_schema={"title": "Config", "properties": {}},
+    )
+    app.state.catalog_service = catalog
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    input_path = tmp_path / "blobs" / "input.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("value\n1\n", encoding="utf-8")
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Accept"}).json()
+    session_id = uuid.UUID(session["id"])
+    proposal = asyncio.run(
+        service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline.",
+            rationale="Requested by the current composer turn.",
+            affects=("graph", "validation", "yaml"),
+            arguments_json={
+                "source": {
+                    "plugin": "csv",
+                    "on_success": "source_out",
+                    "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+                    "on_validation_failure": "quarantine",
+                },
+                "nodes": [
+                    {
+                        "id": "t1",
+                        "node_type": "transform",
+                        "plugin": "passthrough",
+                        "input": "source_out",
+                        "on_success": "main",
+                        "on_error": "discard",
+                        "options": {"schema": {"mode": "observed"}},
+                    }
+                ],
+                "edges": [
+                    {
+                        "id": "e1",
+                        "from_node": "source",
+                        "to_node": "t1",
+                        "edge_type": "on_success",
+                        "label": None,
+                    }
+                ],
+                "outputs": [
+                    {
+                        "sink_name": "main",
+                        "plugin": "csv",
+                        "options": {
+                            "path": str(tmp_path / "outputs" / "output.csv"),
+                            "schema": {"mode": "observed"},
+                            "collision_policy": "auto_increment",
+                        },
+                        "on_write_failure": "discard",
+                    }
+                ],
+                "metadata": {"name": "accepted-proposal"},
+            },
+            arguments_redacted_json={"summary": "redacted"},
+            base_state_id=None,
+            actor="composer-web:user:alice",
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session['id']}/proposals/{proposal.id}/accept")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "committed"
+    assert body["committed_state_id"] is not None
+    persisted = asyncio.run(service.get_current_state(session_id))
+    assert persisted is not None
+    from sqlalchemy import select
+
+    from elspeth.web.sessions.models import composition_states_table
+
+    with service._engine.begin() as conn:
+        provenance = conn.execute(
+            select(composition_states_table.c.provenance).where(composition_states_table.c.id == str(persisted.id))
+        ).scalar_one()
+    assert provenance == "tool_call"
 
 
 def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
@@ -1076,7 +1287,13 @@ class TestIDORCoverageDrift:
             "get_messages",
             "send_message",
             "recompose",
+            "get_composer_preferences",
+            "update_composer_preferences",
             "get_composer_progress",
+            "list_composition_proposals",
+            "list_proposal_events",
+            "accept_composition_proposal",
+            "reject_composition_proposal",
             "list_session_runs",
             "get_current_state",
             "get_state_versions",

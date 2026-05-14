@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import structlog
@@ -226,6 +226,8 @@ def _session_engine_with_session() -> tuple[Any, str]:
                 user_id="test-user",
                 auth_provider_type="local",
                 title="Test Session",
+                trust_mode="auto_commit",
+                density_default="high",
                 created_at=now,
                 updated_at=now,
             )
@@ -426,6 +428,70 @@ class TestComposerTextOnlyResponse:
 
 
 class TestComposerSingleToolCall:
+    @pytest.mark.asyncio
+    async def test_explicit_approve_mutating_tool_creates_pending_proposal_without_state_mutation(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_one_set_pipeline_tool_call: Any,
+    ) -> None:
+        """Explicit approval mode stores mutating tool calls as pending proposals."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_one_set_pipeline_tool_call,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert len(proposals) == 1
+        assert proposals[0].tool_call_id == "call_set_pipeline"
+        assert proposals[0].tool_name == "set_pipeline"
+        assert proposals[0].status == "pending"
+        assert "Replace the pipeline" in proposals[0].summary
+        assert result.tool_outcomes[0].post_version == state.version
+
+    @pytest.mark.asyncio
+    async def test_auto_commit_mutating_tool_preserves_existing_state_mutation_path(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_one_set_pipeline_tool_call: Any,
+    ) -> None:
+        """Auto-commit mode still executes mutating tools through the existing path."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="auto_commit",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_one_set_pipeline_tool_call,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert proposals == []
+        assert result.tool_outcomes[0].post_version > state.version
+
     @pytest.mark.asyncio
     async def test_single_tool_call_then_text(self) -> None:
         """LLM makes one tool call, then responds with text."""
@@ -2915,6 +2981,8 @@ class TestPluginCrashSessionPersistence:
                     user_id="test-user",
                     auth_provider_type="local",
                     title="Test",
+                    trust_mode="auto_commit",
+                    density_default="high",
                     created_at=self.seeded_at,
                     updated_at=self.seeded_at,
                 )
@@ -3668,6 +3736,8 @@ class TestToolArgumentErrorAcrossThreadBoundary:
                     user_id="test-user",
                     auth_provider_type="local",
                     title="Test",
+                    trust_mode="auto_commit",
+                    density_default="high",
                     created_at=now,
                     updated_at=now,
                 )

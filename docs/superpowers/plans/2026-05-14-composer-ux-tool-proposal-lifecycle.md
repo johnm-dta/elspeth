@@ -80,7 +80,9 @@ Tests:
 - Read-only verification across current source tree
 - No code changes
 
-- [ ] **Step 1: Confirm the execution checkout and branch**
+- [x] **Step 1: Confirm the execution checkout and branch**
+
+Preflight result: implementation moved to isolated worktree `/home/john/elspeth/.worktrees/composer-proposal-lifecycle` on branch `composer-proposal-lifecycle` at handoff commit `69a6d55d1`; `git status --short` was clean.
 
 Run:
 
@@ -93,7 +95,9 @@ git status --short
 
 Expected: implementation happens in a dedicated checkout such as `/home/john/elspeth/.worktrees/composer-proposal-lifecycle/`, or the operator explicitly confirms that the current branch/worktree is dedicated to this work. Do not start implementation in the dirty main checkout by accident.
 
-- [ ] **Step 2: Confirm the worktree-local Python environment**
+- [x] **Step 2: Confirm the worktree-local Python environment**
+
+Preflight result: created and targeted the worktree-local venv explicitly after detecting the shell had `VIRTUAL_ENV=/home/john/elspeth/.venv`; confirmed `.venv/bin/python` resolves to `/home/john/elspeth/.worktrees/composer-proposal-lifecycle/.venv/bin/python`, Python 3.13.1, with `pytest-asyncio` present in `pyproject.toml`.
 
 Run:
 
@@ -104,7 +108,9 @@ rg -n "pytest-asyncio|asyncio_mode" pyproject.toml
 
 Expected: Python 3.13.x in the worktree venv, and `pytest-asyncio` present in `pyproject.toml`. If the venv resolves outside the worktree or uses an older Python, recreate the venv before running tier-model checks so spurious policy violations do not swamp the real diff.
 
-- [ ] **Step 3: Capture policy-gate baseline before edits**
+- [x] **Step 3: Capture policy-gate baseline before edits**
+
+Preflight result: the literal plan command is stale because `enforce_tier_model.py check` now requires `--root`; the current repo-standard command `.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model` passed with `No bug-hiding patterns detected. Check passed.`
 
 Run on the unchanged branch:
 
@@ -114,7 +120,9 @@ Run on the unchanged branch:
 
 Expected: either PASS, or a recorded baseline of pre-existing violations. Any new violation after this plan lands must be fixed or explicitly narrowed in `config/cicd/enforce_tier_model/`.
 
-- [ ] **Step 4: Verify fragile codebase assumptions before editing**
+- [x] **Step 4: Verify fragile codebase assumptions before editing**
+
+Preflight result: `compose(...)` still uses the construction-wired session service; `_require_sessions_service()`, `turn_has_mutation`, `MANIFEST`, `redact_tool_call_arguments`, `_state_from_record`, `_state_data_from_composer_state`, `run_sync_in_worker`, `_FakeComposeLLM`, `_fake_llm_response`, and LiteLLM-shaped frontend `ToolCall` are present. `fake_llm_one_set_pipeline_tool_call` is still absent and belongs to Task 5. `catalog_service`, `session_service`, and `phase3_engine` are app-state attributes in live/test code; `data_dir` and `secrets_service` are not app-state attributes in the grep result, so the accept route must reuse the existing route-local settings/secrets source. No shared frontend `isHttpConflict` helper exists; Task 7 must add or centralize one at the API/store seam.
 
 Run:
 
@@ -140,7 +148,9 @@ Expected current shape as of this plan repair:
 - Frontend `ToolCall` uses LiteLLM/OpenAI shape with `id` and `function.name`/`function.arguments`.
 - If no frontend HTTP-conflict helper exists, Task 7 must add one at the API/store seam and test it with the stale-proposal regression.
 
-- [ ] **Step 5: Resolve the active session DB and plan reset**
+- [x] **Step 5: Resolve the active session DB and plan reset**
+
+Preflight result: `WebSettings.get_session_db_url()` still resolves `session_db_url`, then `data_dir / "sessions.db"`. The isolated worktree does not carry the ignored staging env file. The live staging checkout has `/home/john/elspeth/deploy/elspeth-web.env`, but redacted inspection found neither `ELSPETH_WEB__SESSION_DB_URL` nor `ELSPETH_WEB__DATA_DIR`, so staging resolves to `/home/john/elspeth/data/sessions.db`. SQLite reset must archive/delete `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` together using `docs/runbooks/staging-session-db-recreation.md`; no live reset/restart has been performed.
 
 This schema slice adds columns/tables and this project does not use Alembic migrations for the web session DB. Fresh test DBs work because `initialize_session_schema()` creates current metadata; existing dev/staging DBs must be reset before running the changed server.
 
@@ -165,7 +175,9 @@ Staging reset:
 - Stop `elspeth-web.service`, archive/delete the resolved SQLite artifact set, then restart after the schema lands. Use `docs/runbooks/staging-session-db-recreation.md` as the operator runbook.
 - If Codex cannot access systemd/sudo because of sandbox `no_new_privileges` or bus restrictions, report that blocker and do not claim live staging was reset or restarted.
 
-- [ ] **Step 6: Verify frontend dist policy**
+- [x] **Step 6: Verify frontend dist policy**
+
+Preflight result: `src/elspeth/web/frontend/dist/index.html` is ignored by `.gitignore:51` and not tracked by git, so build artifacts must not be committed.
 
 Run:
 
@@ -176,7 +188,9 @@ git ls-files src/elspeth/web/frontend/dist/index.html
 
 Expected: if `dist/` is ignored and untracked, do not commit it. Still run `npm run build` and live-check/locally inspect the generated asset names during deployment verification.
 
-- [ ] **Step 7: Use the required commit trailer**
+- [x] **Step 7: Use the required commit trailer**
+
+Preflight result: all implementation commits in this worktree must include `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
 
 Every commit step in this plan must use this message shape, changing only the subject:
 
@@ -196,7 +210,7 @@ EOF
 - Modify: `src/elspeth/web/sessions/protocol.py`
 - Test: `tests/unit/web/sessions/test_composer_proposals.py`
 
-- [ ] **Step 1: Write the failing schema tests**
+- [x] **Step 1: Write the failing schema tests**
 
 Create `tests/unit/web/sessions/test_composer_proposals.py` with:
 
@@ -316,7 +330,9 @@ def test_default_session_preferences_are_inserted_by_database(engine) -> None:
 
 This default test intentionally uses raw `insert(sessions_table)` while `_insert_session()` passes explicit values. After implementing the columns, also inspect `SessionServiceImpl.create_session()` and add/update a focused assertion if the production session-creation path explicitly sets preferences instead of relying on server defaults. Both paths must remain valid.
 
-- [ ] **Step 2: Run the schema tests to verify they fail**
+- [x] **Step 2: Run the schema tests to verify they fail**
+
+Task result: `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py -q` failed during collection with `ImportError: cannot import name 'composition_proposals_table'`, the expected missing-schema failure.
 
 Run:
 
@@ -326,7 +342,7 @@ Run:
 
 Expected: FAIL with missing `composition_proposals_table`, missing `proposal_events_table`, or missing session preference columns.
 
-- [ ] **Step 3: Add closed protocol types and records**
+- [x] **Step 3: Add closed protocol types and records**
 
 In `src/elspeth/web/sessions/protocol.py`, add these imports and definitions near the existing chat/session closed domains:
 
@@ -396,7 +412,7 @@ class ProposalEventRecord:
         freeze_fields(self, "payload")
 ```
 
-- [ ] **Step 4: Add the SQLAlchemy tables and constraints**
+- [x] **Step 4: Add the SQLAlchemy tables and constraints**
 
 In `src/elspeth/web/sessions/models.py`, no new import is required; `server_default` is a keyword argument on `Column`.
 
@@ -507,7 +523,9 @@ Index(
 )
 ```
 
-- [ ] **Step 5: Run the schema tests to verify they pass**
+- [x] **Step 5: Run the schema tests to verify they pass**
+
+Task result: `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py tests/unit/web/sessions/test_schema.py -q` passed with `14 passed`.
 
 Run:
 
@@ -517,7 +535,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/models.py src/elspeth/web/sessions/protocol.py tests/unit/web/sessions/test_composer_proposals.py
@@ -536,7 +554,7 @@ EOF
 - Modify: `src/elspeth/web/sessions/protocol.py`
 - Test: `tests/unit/web/sessions/test_composer_proposals.py`
 
-- [ ] **Step 1: Add failing service tests**
+- [x] **Step 1: Add failing service tests**
 
 Append to `tests/unit/web/sessions/test_composer_proposals.py`:
 
@@ -639,7 +657,9 @@ async def test_reject_composition_proposal_is_forward_only(service) -> None:
     ]
 ```
 
-- [ ] **Step 2: Run service tests to verify they fail**
+- [x] **Step 2: Run service tests to verify they fail**
+
+Task result: after correcting the live `SessionServiceImpl` fixture shape, `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py -q` failed with missing `get_composer_preferences`, `update_composer_preferences`, and `create_composition_proposal` methods.
 
 Run:
 
@@ -649,7 +669,7 @@ Run:
 
 Expected: FAIL with missing service methods.
 
-- [ ] **Step 3: Extend `SessionServiceProtocol`**
+- [x] **Step 3: Extend `SessionServiceProtocol`**
 
 In `src/elspeth/web/sessions/protocol.py`, add these methods to `SessionServiceProtocol`:
 
@@ -704,7 +724,7 @@ In `src/elspeth/web/sessions/protocol.py`, add these methods to `SessionServiceP
     ) -> list[ProposalEventRecord]: ...
 ```
 
-- [ ] **Step 4: Implement service helpers**
+- [x] **Step 4: Implement service helpers**
 
 In `src/elspeth/web/sessions/service.py`, import the new tables and protocol records, then add helper row converters:
 
@@ -807,7 +827,9 @@ Add the service methods to `SessionServiceImpl`:
 
 Implement `create_composition_proposal`, `list_composition_proposals`, `reject_composition_proposal`, and `list_proposal_events` with the same `_run_sync` pattern. In `create_composition_proposal`, insert the `proposal_events` row before the `composition_proposals` row in the same transaction, set `status="pending"`, and store the created event id in `audit_event_id`. In `reject_composition_proposal`, require `status == "pending"`, insert `proposal.rejected` before updating the proposal row to `rejected`, and return the updated record.
 
-- [ ] **Step 5: Run the service tests**
+- [x] **Step 5: Run the service tests**
+
+Task result: `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py -q` passed with `9 passed`; schema follow-up `.venv/bin/pytest tests/unit/web/sessions/test_schema.py tests/unit/web/sessions/test_composer_proposals.py -q` passed with `18 passed`.
 
 Run:
 
@@ -817,7 +839,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/service.py tests/unit/web/sessions/test_composer_proposals.py
@@ -836,7 +858,7 @@ EOF
 - Create: `src/elspeth/web/composer/proposals.py`
 - Test: `tests/unit/web/composer/test_proposals.py`
 
-- [ ] **Step 1: Write failing proposal summary tests**
+- [x] **Step 1: Write failing proposal summary tests**
 
 Create `tests/unit/web/composer/test_proposals.py`:
 
@@ -885,7 +907,9 @@ def test_patch_node_options_summary_names_target_node() -> None:
     assert summary.affects == ("graph", "validation", "yaml")
 ```
 
-- [ ] **Step 2: Run proposal tests to verify they fail**
+- [x] **Step 2: Run proposal tests to verify they fail**
+
+Task result: `.venv/bin/pytest tests/unit/web/composer/test_proposals.py -q` failed during collection with `ModuleNotFoundError: No module named 'elspeth.web.composer.proposals'`, the expected missing-module failure.
 
 Run:
 
@@ -895,7 +919,7 @@ Run:
 
 Expected: FAIL with missing module or function.
 
-- [ ] **Step 3: Export mutation classification from the tool registry**
+- [x] **Step 3: Export mutation classification from the tool registry**
 
 In `src/elspeth/web/composer/tools.py`, add near `is_discovery_tool`:
 
@@ -905,7 +929,7 @@ def is_mutation_tool(name: str) -> bool:
     return name in _MUTATION_TOOLS or name in _BLOB_MUTATION_TOOLS or name in _SECRET_MUTATION_TOOLS
 ```
 
-- [ ] **Step 4: Add the proposal summary module**
+- [x] **Step 4: Add the proposal summary module**
 
 Create `src/elspeth/web/composer/proposals.py`:
 
@@ -1009,7 +1033,9 @@ def build_tool_proposal_summary(
     )
 ```
 
-- [ ] **Step 5: Run proposal tests**
+- [x] **Step 5: Run proposal tests**
+
+Task result: `.venv/bin/pytest tests/unit/web/composer/test_proposals.py -q` passed with `3 passed`; ruff and tier-model checks also passed for the touched composer surfaces.
 
 Run:
 
@@ -1019,7 +1045,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/composer/tools.py src/elspeth/web/composer/proposals.py tests/unit/web/composer/test_proposals.py
@@ -1038,7 +1064,7 @@ EOF
 - Modify: `src/elspeth/web/sessions/routes.py`
 - Test: `tests/unit/web/sessions/test_routes.py`
 
-- [ ] **Step 1: Add failing route tests**
+- [x] **Step 1: Add failing route tests**
 
 Append to `tests/unit/web/sessions/test_routes.py`:
 
@@ -1092,7 +1118,9 @@ def test_send_message_response_includes_empty_proposals_array(tmp_path) -> None:
     assert response.json()["proposals"] == []
 ```
 
-- [ ] **Step 2: Run route tests to verify they fail**
+- [x] **Step 2: Run route tests to verify they fail**
+
+Task result: focused route tests failed with 404 responses for the new preferences/proposals endpoints and `KeyError: 'proposals'` for the send-message response, matching the missing API/contract shape.
 
 Run:
 
@@ -1102,7 +1130,7 @@ Run:
 
 Expected: FAIL with 404 route responses or missing schemas.
 
-- [ ] **Step 3: Add Pydantic schemas**
+- [x] **Step 3: Add Pydantic schemas**
 
 In `src/elspeth/web/sessions/schemas.py`, add:
 
@@ -1161,7 +1189,7 @@ class MessageWithStateResponse(_StrictResponse):
 
 Import `ProposalLifecycleStatus` into `routes.py` from `elspeth.web.sessions.protocol` when adding the `status` query parameter above. The route boundary must reject unknown status values with FastAPI's Literal validation instead of silently returning an empty list for `?status=garbage`.
 
-- [ ] **Step 4: Add route converters and endpoints**
+- [x] **Step 4: Add route converters and endpoints**
 
 In `src/elspeth/web/sessions/routes.py`, import the new schemas and add converters near `_session_response`:
 
@@ -1264,7 +1292,7 @@ Add endpoints inside `create_session_router()`:
         return _composition_proposal_response(proposal)
 ```
 
-- [ ] **Step 5: Return proposals from compose/recompose responses**
+- [x] **Step 5: Return proposals from compose/recompose responses**
 
 Add a helper near `_composition_proposal_response` so both compose response paths share the same server-side shape:
 
@@ -1290,7 +1318,9 @@ Update both existing `MessageWithStateResponse(...)` construction sites in `send
 
 Do not only update frontend API types. This is a backend contract change: every live `POST /api/sessions/{session_id}/messages` and recompose response must include `proposals`, even when the array is empty. The route test in Step 1 pins the empty-array shape before Task 5 creates real proposal rows.
 
-- [ ] **Step 6: Run route tests**
+- [x] **Step 6: Run route tests**
+
+Task result: focused route contract command passed with `4 passed`; `ruff check`, `mypy` for `schemas.py`/`routes.py`, and tier-model check passed after refreshing stale route allowlist fingerprints caused by line shifts.
 
 Run:
 
@@ -1300,7 +1330,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/schemas.py src/elspeth/web/sessions/routes.py tests/unit/web/sessions/test_routes.py
@@ -1321,7 +1351,7 @@ EOF
 - Test: `tests/unit/web/composer/test_service.py`
 - Test: `tests/unit/web/sessions/test_routes.py`
 
-- [ ] **Step 1: Add the set_pipeline fake LLM fixture**
+- [x] **Step 1: Add the set_pipeline fake LLM fixture**
 
 In `tests/unit/web/composer/conftest.py`, add:
 
@@ -1358,7 +1388,7 @@ def fake_llm_one_set_pipeline_tool_call() -> _FakeComposeLLM:
     )
 ```
 
-- [ ] **Step 2: Write the failing compose-loop test**
+- [x] **Step 2: Write the failing compose-loop test**
 
 Add a test in `tests/unit/web/composer/test_service.py` using the existing fake LLM fixtures:
 
@@ -1397,7 +1427,7 @@ async def test_explicit_approve_mutating_tool_creates_pending_proposal_without_s
     assert proposals[0].status == "pending"
 ```
 
-- [ ] **Step 3: Run the compose-loop test to verify it fails**
+- [x] **Step 3: Run the compose-loop test to verify it fails**
 
 Run:
 
@@ -1407,7 +1437,7 @@ Run:
 
 Expected: FAIL because mutating tools still execute immediately.
 
-- [ ] **Step 4: Add proposal creation to the composer service path**
+- [x] **Step 4: Add proposal creation to the composer service path**
 
 In the compose loop section that iterates `assistant_message.tool_calls`, get the wired session service once with `sessions_service = self._require_sessions_service()`, initialize `proposals_this_turn = 0` at the turn scope, and after decoding/required-path validation but before `execute_tool`, add this branch:
 
@@ -1462,7 +1492,7 @@ Make sure `is_mutation_tool` is imported from `elspeth.web.composer.tools`, `bui
 
 Use the actor convention from `ProposalEventRecord`: proposals created from the composer loop use `actor=f"composer-web:user:{user_id}"`; direct human actions use `actor=f"user:{user_id}"`; background repairs use `actor="system:<component>"`.
 
-- [ ] **Step 5: Preserve auto-commit behavior**
+- [x] **Step 5: Preserve auto-commit behavior**
 
 Add a second test beside the first:
 
@@ -1498,7 +1528,7 @@ async def test_auto_commit_mutating_tool_preserves_existing_state_mutation_path(
     assert proposals == []
 ```
 
-- [ ] **Step 6: Run compose-loop tests**
+- [x] **Step 6: Run compose-loop tests**
 
 Run:
 
@@ -1508,7 +1538,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 7: Add route regression for atomic proposal response**
+- [x] **Step 7: Add route regression for atomic proposal response**
 
 Add to `tests/unit/web/sessions/test_routes.py`:
 
@@ -1552,7 +1582,7 @@ def test_send_message_response_includes_pending_proposals_created_during_compose
 
 If `UUID` is not already imported in `test_routes.py`, add `from uuid import UUID`. This test is deliberately route-level: it proves the live backend response includes proposals created during the compose request, so Task 7's mocked frontend test cannot drift away from the server contract.
 
-- [ ] **Step 8: Run route regression**
+- [x] **Step 8: Run route regression**
 
 Run:
 
@@ -1562,7 +1592,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/elspeth/web/composer/service.py tests/unit/web/composer/conftest.py tests/unit/web/composer/test_service.py tests/unit/web/sessions/test_routes.py
@@ -1582,7 +1612,7 @@ EOF
 - Test: `tests/unit/web/sessions/test_composer_proposals.py`
 - Test: `tests/unit/web/sessions/test_routes.py`
 
-- [ ] **Step 1: Write failing accept tests**
+- [x] **Step 1: Write failing accept tests**
 
 Add to `tests/unit/web/sessions/test_composer_proposals.py`:
 
@@ -1629,7 +1659,7 @@ def test_accept_unknown_proposal_returns_404(test_client) -> None:
     assert response.status_code == 404
 ```
 
-- [ ] **Step 2: Run accept tests to verify they fail**
+- [x] **Step 2: Run accept tests to verify they fail**
 
 Run:
 
@@ -1639,7 +1669,7 @@ Run:
 
 Expected: FAIL with missing `mark_composition_proposal_committed` or missing route.
 
-- [ ] **Step 3: Add committed-state marker method**
+- [x] **Step 3: Add committed-state marker method**
 
 In `SessionServiceProtocol`, add:
 
@@ -1709,7 +1739,7 @@ In `SessionServiceImpl`, implement:
         return await self._run_sync(_sync)
 ```
 
-- [ ] **Step 4: Add accept route skeleton**
+- [x] **Step 4: Add accept route skeleton**
 
 Add the route:
 
@@ -1736,7 +1766,7 @@ Add the route:
         )
 ```
 
-- [ ] **Step 5: Wire execution through existing composer tool handler**
+- [x] **Step 5: Wire execution through existing composer tool handler**
 
 Replace the 501 branch with execution code that:
 
@@ -1797,7 +1827,7 @@ The route code shape:
         return _composition_proposal_response(committed)
 ```
 
-- [ ] **Step 6: Run accept tests**
+- [x] **Step 6: Run accept tests**
 
 Run:
 
@@ -1807,7 +1837,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/service.py src/elspeth/web/sessions/routes.py tests/unit/web/sessions/test_composer_proposals.py tests/unit/web/sessions/test_routes.py
@@ -1827,7 +1857,7 @@ EOF
 - Modify: `src/elspeth/web/frontend/src/stores/sessionStore.ts`
 - Test: `src/elspeth/web/frontend/src/stores/sessionStore.test.ts`
 
-- [ ] **Step 1: Add failing store tests**
+- [x] **Step 1: Add failing store tests**
 
 Add to `src/elspeth/web/frontend/src/stores/sessionStore.test.ts`:
 
@@ -1921,7 +1951,7 @@ it("marks stale proposals after accept returns a stale-state conflict", async ()
 });
 ```
 
-- [ ] **Step 2: Run the store test to verify it fails**
+- [x] **Step 2: Run the store test to verify it fails**
 
 Run:
 
@@ -1932,7 +1962,9 @@ npm run test -- src/stores/sessionStore.test.ts
 
 Expected: FAIL with missing API/store fields.
 
-- [ ] **Step 3: Add frontend types**
+Observed: FAIL with `compositionProposals` undefined and missing `acceptProposal`; initial run was blocked by missing frontend `node_modules`, then `npm ci` installed the lockfile dependencies.
+
+- [x] **Step 3: Add frontend types**
 
 In `src/elspeth/web/frontend/src/types/index.ts`, add:
 
@@ -1974,7 +2006,7 @@ export interface MessageWithStateResponse {
 
 Re-export them from `src/elspeth/web/frontend/src/types/api.ts`.
 
-- [ ] **Step 4: Add API client methods**
+- [x] **Step 4: Add API client methods**
 
 In `src/elspeth/web/frontend/src/api/client.ts`, add:
 
@@ -2044,7 +2076,7 @@ export async function recomposeMessage(...): Promise<MessageWithStateResponse> {
 }
 ```
 
-- [ ] **Step 5: Add store state and actions**
+- [x] **Step 5: Add store state and actions**
 
 In `src/elspeth/web/frontend/src/stores/sessionStore.ts`, add fields:
 
@@ -2160,7 +2192,7 @@ Add actions:
 
 Use the repository's existing API-error shape when implementing `isHttpConflict(error)`; if no helper exists, add one in the API/store test seam and pin it with the stale-state regression above. The UX contract is: 409 from accept does not become an unhandled fetch error; the store refreshes proposals and records the clicked proposal ID as stale for rendering.
 
-- [ ] **Step 6: Run store tests**
+- [x] **Step 6: Run store tests**
 
 Run:
 
@@ -2171,7 +2203,9 @@ npm run test -- src/stores/sessionStore.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+Observed: PASS (`21 passed`). Additional verification: `npm run typecheck` PASS after updating the App-level compose mock to include `proposals: []`; `npm run lint` PASS with five pre-existing warnings in unrelated components.
+
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/types/index.ts src/elspeth/web/frontend/src/types/api.ts src/elspeth/web/frontend/src/api/client.ts src/elspeth/web/frontend/src/stores/sessionStore.ts src/elspeth/web/frontend/src/stores/sessionStore.test.ts
@@ -2192,7 +2226,7 @@ EOF
 - Modify: `src/elspeth/web/frontend/src/components/chat/MessageBubble.test.tsx`
 - Modify: `src/elspeth/web/frontend/src/App.css`
 
-- [ ] **Step 1: Write failing ToolCallCard tests**
+- [x] **Step 1: Write failing ToolCallCard tests**
 
 Create `src/elspeth/web/frontend/src/components/chat/ToolCallCard.test.tsx`:
 
@@ -2304,7 +2338,7 @@ describe("ToolCallCard", () => {
 });
 ```
 
-- [ ] **Step 2: Run ToolCallCard tests to verify they fail**
+- [x] **Step 2: Run ToolCallCard tests to verify they fail**
 
 Run:
 
@@ -2315,7 +2349,9 @@ npm run test -- src/components/chat/ToolCallCard.test.tsx
 
 Expected: FAIL because `ToolCallCard.tsx` does not exist.
 
-- [ ] **Step 3: Implement ToolCallCard**
+Observed: FAIL because `ToolCallCard.tsx` did not exist; MessageBubble integration test also failed because raw tool-call rendering did not surface proposals.
+
+- [x] **Step 3: Implement ToolCallCard**
 
 Create `src/elspeth/web/frontend/src/components/chat/ToolCallCard.tsx`:
 
@@ -2407,7 +2443,7 @@ export function ToolCallCard({
 }
 ```
 
-- [ ] **Step 4: Wire MessageBubble to proposal records**
+- [x] **Step 4: Wire MessageBubble to proposal records**
 
 Change `MessageBubbleProps`:
 
@@ -2445,7 +2481,7 @@ Replace the existing raw tool call `<ul className="message-tools-list">` renderi
               </div>
 ```
 
-- [ ] **Step 5: Add CSS**
+- [x] **Step 5: Add CSS**
 
 In `src/elspeth/web/frontend/src/App.css`, add:
 
@@ -2505,7 +2541,7 @@ In `src/elspeth/web/frontend/src/App.css`, add:
 }
 ```
 
-- [ ] **Step 6: Run frontend tests**
+- [x] **Step 6: Run frontend tests**
 
 Run:
 
@@ -2516,7 +2552,9 @@ npm run test -- src/components/chat/ToolCallCard.test.tsx src/components/chat/Me
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+Observed: PASS (`ToolCallCard.test.tsx` and `MessageBubble.test.tsx`: `14 passed`; `ChatPanel.test.tsx`: `21 passed`). Additional verification: `npm run typecheck` PASS; `npm run lint` PASS with five pre-existing warnings in unrelated components.
+
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/chat/ToolCallCard.tsx src/elspeth/web/frontend/src/components/chat/ToolCallCard.test.tsx src/elspeth/web/frontend/src/components/chat/MessageBubble.tsx src/elspeth/web/frontend/src/components/chat/MessageBubble.test.tsx src/elspeth/web/frontend/src/App.css
@@ -2541,7 +2579,7 @@ EOF
 - Test: `src/elspeth/web/frontend/src/components/inspector/YamlView.test.tsx`
 - Test: `src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx`
 
-- [ ] **Step 1: Add failing overlay tests**
+- [x] **Step 1: Add failing overlay tests**
 
 Add to `GraphView.test.tsx`:
 
@@ -2581,7 +2619,7 @@ Add equivalent assertions in `SpecView.test.tsx` for `Pending proposal` and `Yam
 
 Add a `ChatPanel.test.tsx` assertion that a message with `tool_calls[0].id === "call-1"` renders the matching proposal from `compositionProposals[0].tool_call_id === "call-1"` through `MessageBubble`/`ToolCallCard`, and that a stale proposal ID in `staleProposalIds` renders the stale badge. This locks the wiring path instead of only testing `MessageBubble` in isolation.
 
-- [ ] **Step 2: Run overlay tests to verify they fail**
+- [x] **Step 2: Run overlay tests to verify they fail**
 
 Run:
 
@@ -2592,7 +2630,9 @@ npm run test -- src/components/inspector/GraphView.test.tsx src/components/inspe
 
 Expected: FAIL because pending proposal overlays do not render.
 
-- [ ] **Step 3: Pass proposals into freeform message bubbles**
+Observed: FAIL in GraphView, SpecView, and YamlView overlay assertions; ChatPanel pass-through already passed because Task 8 wired the message bubble props.
+
+- [x] **Step 3: Pass proposals into freeform message bubbles**
 
 In `ChatPanel.tsx`, select proposals and actions:
 
@@ -2618,7 +2658,7 @@ Pass these props to `MessageBubble`:
               onRejectProposal={(proposalId) => void rejectProposal(proposalId)}
 ```
 
-- [ ] **Step 4: Add GraphView pending pill**
+- [x] **Step 4: Add GraphView pending pill**
 
 In `GraphView.tsx`, read pending proposals:
 
@@ -2642,7 +2682,7 @@ Inside the graph container above `<ReactFlow>`, render:
       )}
 ```
 
-- [ ] **Step 5: Add SpecView pending rows**
+- [x] **Step 5: Add SpecView pending rows**
 
 In `SpecView.tsx`, read pending proposals:
 
@@ -2663,7 +2703,7 @@ Render after validation banners:
       ))}
 ```
 
-- [ ] **Step 6: Add YamlView pending summary**
+- [x] **Step 6: Add YamlView pending summary**
 
 In `YamlView.tsx`, read pending proposals:
 
@@ -2683,7 +2723,7 @@ Render above the toolbar:
       )}
 ```
 
-- [ ] **Step 7: Add overlay CSS**
+- [x] **Step 7: Add overlay CSS**
 
 In `App.css`, add:
 
@@ -2712,7 +2752,7 @@ In `App.css`, add:
 }
 ```
 
-- [ ] **Step 8: Run overlay tests**
+- [x] **Step 8: Run overlay tests**
 
 Run:
 
@@ -2723,7 +2763,9 @@ npm run test -- src/components/inspector/GraphView.test.tsx src/components/inspe
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+Observed: PASS (`GraphView.test.tsx`, `SpecView.test.tsx`, `YamlView.test.tsx`, and `ChatPanel.test.tsx`: `49 passed`). Additional verification: `npm run typecheck` PASS; `npm run lint` PASS with five pre-existing warnings.
+
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx src/elspeth/web/frontend/src/components/inspector/GraphView.tsx src/elspeth/web/frontend/src/components/inspector/SpecView.tsx src/elspeth/web/frontend/src/components/inspector/YamlView.tsx src/elspeth/web/frontend/src/App.css src/elspeth/web/frontend/src/components/inspector/GraphView.test.tsx src/elspeth/web/frontend/src/components/inspector/SpecView.test.tsx src/elspeth/web/frontend/src/components/inspector/YamlView.test.tsx
@@ -2741,7 +2783,7 @@ EOF
 - Create: `src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts`
 - Modify: `src/elspeth/web/frontend/tests/e2e/page-objects/composer-page.ts`
 
-- [ ] **Step 1: Add the Playwright workflow test**
+- [x] **Step 1: Add the Playwright workflow test**
 
 Create `src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts`:
 
@@ -2769,7 +2811,9 @@ test("explicit approve tool call is visible before commit", async ({ page }) => 
 
 This E2E must run against a deterministic composer provider, not a live non-deterministic LLM. Use the existing ChaosLLM/test-provider seam in the E2E harness if present; otherwise extend `tests/e2e/page-objects/composer-page.ts` in this task so the test input deterministically emits a `set_pipeline` tool call. Do not merge this as a real-provider Playwright test.
 
-- [ ] **Step 2: Run focused backend and frontend tests**
+Observed: implemented a deterministic route-fixture Playwright workflow that exercises session creation, chat send, pending proposal display, Graph pending overlay, accept, committed proposal display, and audit ID display without calling a live LLM. First E2E run failed because proposal cards were hidden behind the collapsed tool-call disclosure; `MessageBubble` now auto-expands proposal-bearing tool calls, and the regression is covered by `MessageBubble.test.tsx`.
+
+- [x] **Step 2: Run focused backend and frontend tests**
 
 Run:
 
@@ -2781,7 +2825,14 @@ npm run test -- src/components/chat/ToolCallCard.test.tsx src/components/chat/Me
 
 Expected: PASS.
 
-- [ ] **Step 3: Run frontend build**
+Observed: PASS.
+
+- Backend focused batch: `291 passed`.
+- Frontend focused batch: `84 passed`.
+- Additional frontend focused smoke: `ToolCallCard.test.tsx` and `MessageBubble.test.tsx`, `14 passed`.
+- `npm run typecheck` PASS.
+
+- [x] **Step 3: Run frontend build**
 
 Run:
 
@@ -2792,7 +2843,9 @@ npm run build
 
 Expected: PASS and refreshed `src/elspeth/web/frontend/dist/index.html`.
 
-- [ ] **Step 4: Run E2E proposal test**
+Observed: PASS. `npm run build` refreshed ignored `dist/` assets; per Task 0, build artifacts remain uncommitted.
+
+- [x] **Step 4: Run E2E proposal test**
 
 Run:
 
@@ -2803,23 +2856,29 @@ npm run test:e2e -- tests/e2e/composer-proposals.spec.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Run policy gates**
+Observed: PASS after the proposal-card auto-expansion fix. The Playwright web server emitted the known virtualenv path warning from the frontend harness, but the test passed.
+
+- [x] **Step 5: Run policy gates**
 
 Run:
 
 ```bash
 .venv/bin/python -m scripts.check_contracts
-.venv/bin/python scripts/cicd/enforce_tier_model.py check
+.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
 ```
 
 Expected: PASS. If `enforce_tier_model.py` reports new intentional imports, add a narrowly scoped entry to the correct file under `config/cicd/enforce_tier_model/` and rerun the command.
 
-- [ ] **Step 6: Commit**
+Observed: PASS.
+
+- `scripts.check_contracts`: all contract checks passed.
+- `enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model`: no bug-hiding patterns detected.
+- `npm run lint`: PASS with the same five pre-existing React Hook warnings in `CatalogDrawer.tsx`, `ChatInput.tsx`, and `GraphView.tsx`.
+
+- [x] **Step 6: Commit**
 
 ```bash
-git add src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts src/elspeth/web/frontend/tests/e2e/page-objects/composer-page.ts src/elspeth/web/frontend/package-lock.json config/cicd/enforce_tier_model
-# Only add dist artifacts if Task 0 proved they are tracked in this checkout.
-git add src/elspeth/web/frontend/dist || true
+git add docs/superpowers/plans/2026-05-14-composer-ux-tool-proposal-lifecycle.md src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts src/elspeth/web/frontend/tests/e2e/page-objects/composer-page.ts src/elspeth/web/frontend/src/components/chat/MessageBubble.tsx src/elspeth/web/frontend/src/components/chat/MessageBubble.test.tsx tests/unit/web/composer/test_service.py tests/unit/web/sessions/test_routes.py
 git commit -m "$(cat <<'EOF'
 test: cover composer proposal workflow
 
@@ -2827,6 +2886,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
+
+Observed: committed with the required co-author trailer.
 
 ## Final Verification
 

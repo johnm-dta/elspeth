@@ -943,7 +943,8 @@ class PluginRetryableError(Exception):
         self.status_code = status_code
 
 
-class RuntimePreflightFailedError(Exception):
+# TIER-2: Runtime provider readiness failed before row processing; the failure is auditable plugin/runtime evidence, not Tier-1 framework corruption.
+class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
     """Provider/runtime readiness check failed before row processing."""
 
     error_class = "pre_flight_failed"

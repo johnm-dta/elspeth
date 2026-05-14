@@ -12,6 +12,8 @@ import type {
   AuthConfig,
   BlobMetadata,
   ChatMessage,
+  ComposerPreferences,
+  CompositionProposal,
   CompositionState,
   CompositionStateVersion,
   ComposerProgressSnapshot,
@@ -30,6 +32,7 @@ import type {
   UserProfile,
   ValidationResult,
   SystemStatus,
+  MessageWithStateResponse,
 } from "@/types/index";
 import type {
   GetGuidedResponse,
@@ -351,6 +354,79 @@ export async function fetchComposerProgress(
   return parseResponse<ComposerProgressSnapshot>(response);
 }
 
+/** Get composer trust and display preferences for a session. */
+export async function fetchComposerPreferences(
+  sessionId: string,
+): Promise<ComposerPreferences> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/composer/preferences`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  return parseResponse<ComposerPreferences>(response);
+}
+
+/** Update composer trust and display preferences for a session. */
+export async function updateComposerPreferences(
+  sessionId: string,
+  body: Pick<ComposerPreferences, "trust_mode" | "density_default">,
+): Promise<ComposerPreferences> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/composer/preferences`,
+    {
+      method: "PATCH",
+      headers: authHeaders("application/json"),
+      body: JSON.stringify(body),
+    },
+  );
+  return parseResponse<ComposerPreferences>(response);
+}
+
+/** List composition proposals for a session. */
+export async function fetchCompositionProposals(
+  sessionId: string,
+): Promise<CompositionProposal[]> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/proposals?status=pending`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  return parseResponse<CompositionProposal[]>(response);
+}
+
+/** Accept a pending composition proposal and commit its resulting state. */
+export async function acceptCompositionProposal(
+  sessionId: string,
+  proposalId: string,
+): Promise<CompositionProposal> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/proposals/${proposalId}/accept`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+    },
+  );
+  return parseResponse<CompositionProposal>(response);
+}
+
+/** Reject a pending composition proposal. */
+export async function rejectCompositionProposal(
+  sessionId: string,
+  proposalId: string,
+): Promise<CompositionProposal> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/proposals/${proposalId}/reject`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+      body: JSON.stringify({ reason: null }),
+    },
+  );
+  return parseResponse<CompositionProposal>(response);
+}
+
 /**
  * Send a user message. The backend runs the composer tool-use loop
  * and returns the assistant response with updated composition state.
@@ -363,7 +439,7 @@ export async function sendMessage(
   content: string,
   stateId?: string,
   signal?: AbortSignal,
-): Promise<{ message: ChatMessage; state: CompositionState | null }> {
+): Promise<MessageWithStateResponse> {
   const body: { content: string; state_id?: string } = { content };
   if (stateId) {
     body.state_id = stateId;
@@ -374,9 +450,7 @@ export async function sendMessage(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<{ message: ChatMessage; state: CompositionState | null }>(
-    response,
-  );
+  return parseResponse<MessageWithStateResponse>(response);
 }
 
 /** Re-run the composer without inserting a new user message.
@@ -384,15 +458,13 @@ export async function sendMessage(
 export async function recompose(
   sessionId: string,
   signal?: AbortSignal,
-): Promise<{ message: ChatMessage; state: CompositionState | null }> {
+): Promise<MessageWithStateResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/recompose`, {
     method: "POST",
     headers: authHeaders("application/json"),
     signal,
   });
-  return parseResponse<{ message: ChatMessage; state: CompositionState | null }>(
-    response,
-  );
+  return parseResponse<MessageWithStateResponse>(response);
 }
 
 /**

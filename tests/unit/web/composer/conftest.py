@@ -512,6 +512,8 @@ def result_session_id(composer_service_with_real_sessions: ComposerServiceImpl) 
                 user_id="phase3-test-user",
                 auth_provider_type="local",
                 title="Phase 3 test session",
+                trust_mode="auto_commit",
+                density_default="high",
                 created_at=now,
                 updated_at=now,
             )
@@ -589,6 +591,70 @@ def fake_llm_two_tool_calls(fake_llm_emitting_n_tool_calls: Any) -> _FakeCompose
     """Fake LLM for exactly two successful tool calls."""
 
     return fake_llm_emitting_n_tool_calls(2)
+
+
+@pytest.fixture
+def fake_llm_one_set_pipeline_tool_call(tmp_path: Path) -> _FakeComposeLLM:
+    """Fake LLM that proposes one valid full-pipeline replacement."""
+
+    input_path = tmp_path / "blobs" / "input.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("value\n1\n", encoding="utf-8")
+
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {
+                        "id": "call_set_pipeline",
+                        "name": "set_pipeline",
+                        "arguments": {
+                            "source": {
+                                "plugin": "csv",
+                                "on_success": "source_out",
+                                "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+                                "on_validation_failure": "quarantine",
+                            },
+                            "nodes": [
+                                {
+                                    "id": "t1",
+                                    "node_type": "transform",
+                                    "plugin": "passthrough",
+                                    "input": "source_out",
+                                    "on_success": "main",
+                                    "on_error": "discard",
+                                    "options": {"schema": {"mode": "observed"}},
+                                }
+                            ],
+                            "edges": [
+                                {
+                                    "id": "e1",
+                                    "from_node": "source",
+                                    "to_node": "t1",
+                                    "edge_type": "on_success",
+                                    "label": None,
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "sink_name": "main",
+                                    "plugin": "csv",
+                                    "options": {
+                                        "path": str(tmp_path / "outputs" / "output.csv"),
+                                        "schema": {"mode": "observed"},
+                                        "collision_policy": "auto_increment",
+                                    },
+                                    "on_write_failure": "discard",
+                                }
+                            ],
+                            "metadata": {"name": "proposal-test"},
+                        },
+                    },
+                )
+            ),
+            _fake_llm_response(content="Done."),
+        )
+    )
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ import type {
   ComposerRecoveryError,
   ComposerProgressSnapshot,
   CompositionState,
+  CompositionProposal,
 } from "@/types/api";
 
 const clearValidationMock = vi.hoisted(() => vi.fn());
@@ -16,9 +17,13 @@ vi.mock("@/api/client", () => ({
   createSession: vi.fn(),
   fetchMessages: vi.fn(),
   fetchCompositionState: vi.fn(),
+  fetchCompositionProposals: vi.fn(),
+  fetchComposerPreferences: vi.fn(),
   fetchComposerProgress: vi.fn(),
   sendMessage: vi.fn(),
   recompose: vi.fn(),
+  acceptCompositionProposal: vi.fn(),
+  rejectCompositionProposal: vi.fn(),
   forkFromMessage: vi.fn(),
   revertToVersion: vi.fn(),
   fetchStateVersions: vi.fn(),
@@ -67,6 +72,28 @@ function makeRecoveryError(
       tool_responses_persisted: 1,
       transcript_url: null,
     },
+  };
+}
+
+function makeCompositionProposal(
+  overrides: Partial<CompositionProposal> = {},
+): CompositionProposal {
+  return {
+    id: "proposal-1",
+    session_id: "session-1",
+    tool_call_id: "tool-call-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "Replace the current pipeline.",
+    rationale: "The user asked for a new pipeline.",
+    affects: ["source", "transforms", "outputs"],
+    arguments_redacted_json: { source: { plugin: "csv" } },
+    base_state_id: "state-1",
+    committed_state_id: null,
+    audit_event_id: null,
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
+    ...overrides,
   };
 }
 
@@ -311,6 +338,81 @@ describe("sessionStore", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe("composer proposals", () => {
+    it("loads proposals when selecting a session", async () => {
+      const apiClient = await import("@/api/client");
+      const proposal = makeCompositionProposal();
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(
+        null,
+      );
+      (
+        apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([proposal]);
+      (
+        apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>
+      ).mockResolvedValue({
+        session_id: "session-1",
+        trust_mode: "explicit_approve",
+        density_default: "high",
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("guided unavailable"),
+      );
+
+      await useSessionStore.getState().selectSession("session-1");
+
+      expect(useSessionStore.getState().compositionProposals).toEqual([
+        proposal,
+      ]);
+      expect(useSessionStore.getState().composerPreferences?.trust_mode).toBe(
+        "explicit_approve",
+      );
+    });
+
+    it("appends proposals returned by sendMessage without waiting for a session reload", async () => {
+      const apiClient = await import("@/api/client");
+      const proposal = makeCompositionProposal();
+      (apiClient.sendMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+        message: {
+          id: "asst-1",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Review this proposed change.",
+          tool_calls: null,
+          created_at: "2026-05-14T00:00:01Z",
+        },
+        state: null,
+        proposals: [proposal],
+      });
+
+      useSessionStore.setState({ activeSessionId: "session-1", messages: [] });
+      await useSessionStore.getState().sendMessage("build it");
+
+      expect(useSessionStore.getState().compositionProposals).toEqual([
+        proposal,
+      ]);
+    });
+
+    it("marks stale proposals after accept returns a stale-state conflict", async () => {
+      const apiClient = await import("@/api/client");
+      (
+        apiClient.acceptCompositionProposal as ReturnType<typeof vi.fn>
+      ).mockRejectedValue(Object.assign(new Error("stale"), { status: 409 }));
+      (
+        apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().acceptProposal("proposal-1");
+
+      expect(useSessionStore.getState().staleProposalIds).toContain(
+        "proposal-1",
+      );
     });
   });
 

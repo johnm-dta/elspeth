@@ -5949,6 +5949,11 @@ def is_discovery_tool(name: str) -> bool:
     return name in _DISCOVERY_TOOLS or name in _BLOB_DISCOVERY_TOOLS or name in _SECRET_DISCOVERY_TOOLS
 
 
+def is_mutation_tool(name: str) -> bool:
+    """Return True when a composer tool can mutate session state or owned artifacts."""
+    return name in _MUTATION_TOOLS or name in _BLOB_MUTATION_TOOLS or name in _SECRET_MUTATION_TOOLS
+
+
 def is_cacheable_discovery_tool(name: str) -> bool:
     """Return True if the tool's results can be cached within a compose() call."""
     return name in _CACHEABLE_DISCOVERY_TOOLS

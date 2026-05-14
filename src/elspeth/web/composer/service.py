@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, TypedDict, cast
+from uuid import UUID
 
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
@@ -68,6 +69,7 @@ from elspeth.web.composer.progress import (
     convergence_progress_event,
 )
 from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages, build_system_prompt
+from elspeth.web.composer.proposals import build_tool_proposal_summary
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
@@ -92,6 +94,7 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
     is_cacheable_discovery_tool,
     is_discovery_tool,
+    is_mutation_tool,
 )
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.runtime_preflight import (
@@ -1087,6 +1090,7 @@ _RuntimePreflightCache = dict[RuntimePreflightKey, RuntimePreflightEntry]
 # termination path runs — preventing indefinite spin against a model that
 # refuses to apply the suggested repair.
 _MAX_REPAIR_TURNS: Final[int] = 2
+_MAX_PENDING_PROPOSALS_PER_TURN: Final[int] = 10
 
 
 def _proof_repair_is_applicable(state: CompositionState) -> bool:
@@ -1231,6 +1235,8 @@ class ComposerServiceImpl:
     ) -> str:
         """Serialize one Step 1 outcome through the Phase 2 response walker."""
 
+        # Keep redaction imports local to the redaction paths; service.py is
+        # already load-order sensitive and these walkers are cold-path helpers.
         from elspeth.core.canonical import canonical_json
         from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_response
 
@@ -2134,6 +2140,14 @@ class ComposerServiceImpl:
             pre_state_id: str | None = current_state_id
             self._phase3_last_expected_current_state_id = pre_state_id
             decoded_args_by_call_id: dict[str, dict[str, Any]] = {}
+            turn_sessions_service = self._require_sessions_service() if session_id is not None else None
+            turn_session_uuid = UUID(session_id) if session_id is not None else None
+            turn_preferences = (
+                await turn_sessions_service.get_composer_preferences(turn_session_uuid)
+                if turn_sessions_service is not None and turn_session_uuid is not None
+                else None
+            )
+            proposals_this_turn = 0
 
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
@@ -2406,6 +2420,85 @@ class ComposerServiceImpl:
                             "content": json.dumps(error_payload),
                         }
                     )
+                    continue
+
+                if (
+                    turn_sessions_service is not None
+                    and turn_session_uuid is not None
+                    and turn_preferences is not None
+                    and turn_preferences.trust_mode == "explicit_approve"
+                    and is_mutation_tool(tool_name)
+                ):
+                    if proposals_this_turn >= _MAX_PENDING_PROPOSALS_PER_TURN:
+                        raise ComposerServiceError(
+                            f"Composer produced too many pending tool proposals in one turn ({_MAX_PENDING_PROPOSALS_PER_TURN} maximum)."
+                        )
+
+                    from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
+
+                    if tool_name in MANIFEST:
+                        redacted_arguments: Mapping[str, Any] = redact_tool_call_arguments(
+                            tool_name,
+                            arguments,
+                            telemetry=self._redaction_telemetry,
+                        )
+                    else:
+                        redacted_arguments = arguments
+                    proposal_summary = build_tool_proposal_summary(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        redacted_arguments=redacted_arguments,
+                    )
+                    proposal = await turn_sessions_service.create_composition_proposal(
+                        session_id=turn_session_uuid,
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_name,
+                        summary=proposal_summary.summary,
+                        rationale=proposal_summary.rationale,
+                        affects=proposal_summary.affects,
+                        arguments_json=arguments,
+                        arguments_redacted_json=proposal_summary.arguments_redacted_json,
+                        base_state_id=UUID(current_state_id) if current_state_id is not None else None,
+                        actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
+                    )
+                    proposals_this_turn += 1
+                    proposal_payload = {
+                        "success": True,
+                        "status": "APPROVAL_REQUIRED",
+                        "proposal_id": str(proposal.id),
+                        "tool_name": tool_name,
+                        "summary": proposal.summary,
+                        "message": "The requested pipeline change is pending human approval and has not been applied.",
+                    }
+                    proposal_result = ToolResult(
+                        success=True,
+                        updated_state=state,
+                        validation=last_validation if last_validation is not None else state.validate(),
+                        affected_nodes=(),
+                        data=proposal_payload,
+                    )
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=proposal_result.to_dict(),
+                            version_after=state.version,
+                        )
+                    )
+                    _append_tool_outcome(
+                        response=proposal_result,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
+                    )
+                    anti_anchor.record_success()
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": _serialize_tool_result(proposal_result),
+                        }
+                    )
+                    turn_has_mutation = True
                     continue
 
                 await _emit_progress(progress, _tool_started_progress_event(tool_name))

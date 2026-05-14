@@ -1,7 +1,7 @@
 # Direction-aware redaction-policy label gate (spec §4.4.5, Task 18).
 #
 # When a PR modifies any redaction-touching file, this workflow:
-#   1. computes a snapshot diff vs origin/main;
+#   1. computes a snapshot diff vs the pull request base branch;
 #   2. classifies the diff as 'weaken' (sensitive_path_count decreased)
 #      or 'strengthen' (otherwise); and
 #   3. asserts the PR carries the correct direction label, with a
@@ -36,20 +36,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute snapshot diff vs main
+      - name: Compute snapshot diff vs base branch
         id: diff
         run: |
           set -euo pipefail
-          git fetch origin main
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          BASE_REMOTE="origin/${BASE_REF}"
+          git fetch origin "$BASE_REF"
           SNAPSHOT_PATH="tests/unit/web/composer/redaction_policy_snapshot.json"
-          if git diff --quiet origin/main HEAD -- "$SNAPSHOT_PATH"; then
+          if git diff --quiet "$BASE_REMOTE" HEAD -- "$SNAPSHOT_PATH"; then
             echo "snapshot_changed=false" >> "$GITHUB_OUTPUT"
             echo "direction=none" >> "$GITHUB_OUTPUT"
           else
             echo "snapshot_changed=true" >> "$GITHUB_OUTPUT"
             BASE_TMP="$(mktemp)"
             HEAD_TMP="$(mktemp)"
-            git show "origin/main:${SNAPSHOT_PATH}" > "$BASE_TMP"
+            git show "${BASE_REMOTE}:${SNAPSHOT_PATH}" > "$BASE_TMP"
             cp "$SNAPSHOT_PATH" "$HEAD_TMP"
             python3 scripts/cicd/check_redaction_direction.py \
               --base-snapshot "$BASE_TMP" \

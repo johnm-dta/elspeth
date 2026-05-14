@@ -14,7 +14,7 @@
 // Empty state when no composition state exists.
 // ============================================================================
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Highlight, themes } from "prism-react-renderer";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useTheme } from "@/hooks/useTheme";
@@ -49,6 +49,15 @@ function describeYamlFetchError(error: unknown): YamlFetchError {
 export function YamlView() {
   const compositionState = useSessionStore((s) => s.compositionState);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const compositionProposals = useSessionStore((s) => s.compositionProposals);
+  const pendingYamlProposals = useMemo(
+    () =>
+      compositionProposals.filter(
+        (proposal) =>
+          proposal.status === "pending" && proposal.affects.includes("yaml"),
+      ),
+    [compositionProposals],
+  );
   const [yaml, setYaml] = useState<string | null>(null);
   const [yamlError, setYamlError] = useState<YamlFetchError | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -165,6 +174,12 @@ export function YamlView() {
 
   return (
     <div className="yaml-view">
+      {pendingYamlProposals.length > 0 && (
+        <div className="yaml-pending-summary" role="note">
+          Pending YAML change: {pendingYamlProposals[0].summary}
+        </div>
+      )}
+
       {/* Toolbar: Copy + Download buttons */}
       <div className="yaml-view-toolbar">
         <button

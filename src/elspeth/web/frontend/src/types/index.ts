@@ -181,6 +181,42 @@ export interface CompositionStateVersion {
   node_count: number;
 }
 
+// ── Composer Proposal Lifecycle ────────────────────────────────────────────
+
+export type ComposerTrustMode = "explicit_approve" | "auto_commit";
+export type ComposerDensityDefault = "high" | "medium" | "low";
+export type ProposalLifecycleStatus = "pending" | "committed" | "rejected";
+
+export interface ComposerPreferences {
+  session_id: string;
+  trust_mode: ComposerTrustMode;
+  density_default: ComposerDensityDefault;
+  updated_at: string;
+}
+
+export interface CompositionProposal {
+  id: string;
+  session_id: string;
+  tool_call_id: string;
+  tool_name: string;
+  status: ProposalLifecycleStatus;
+  summary: string;
+  rationale: string;
+  affects: string[];
+  arguments_redacted_json: Record<string, unknown>;
+  base_state_id: string | null;
+  committed_state_id: string | null;
+  audit_event_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageWithStateResponse {
+  message: ChatMessage;
+  state: CompositionState | null;
+  proposals: CompositionProposal[];
+}
+
 // ── Composer Progress ──────────────────────────────────────────────────────
 
 export type ComposerProgressPhase =

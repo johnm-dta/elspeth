@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SpecView } from "./SpecView";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { CompositionState } from "@/types/index";
+import type { CompositionProposal, CompositionState } from "@/types/index";
 
 const DUMMY_NODE = {
   id: "t1",
@@ -29,10 +29,33 @@ function makeState(
   };
 }
 
+function makeProposal(
+  overrides: Partial<CompositionProposal> = {},
+): CompositionProposal {
+  return {
+    id: "proposal-1",
+    session_id: "session-1",
+    tool_call_id: "call-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "Replace the pipeline.",
+    rationale: "Requested by the current composer turn.",
+    affects: ["graph", "validation", "yaml"],
+    arguments_redacted_json: {},
+    base_state_id: null,
+    committed_state_id: null,
+    audit_event_id: "event-1",
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("SpecView validation banners", () => {
   beforeEach(() => {
     useSessionStore.setState({
       compositionState: null,
+      compositionProposals: [],
     });
   });
 
@@ -96,5 +119,17 @@ describe("SpecView validation banners", () => {
     expect(screen.queryByText("Errors")).not.toBeInTheDocument();
     expect(screen.queryByText("Warnings")).not.toBeInTheDocument();
     expect(screen.queryByText(/Suggestions/)).not.toBeInTheDocument();
+  });
+
+  it("renders pending proposal rows when proposals affect graph", () => {
+    useSessionStore.setState({
+      compositionState: makeState(),
+      compositionProposals: [makeProposal()],
+    });
+
+    render(<SpecView />);
+
+    expect(screen.getByText("Pending proposal #1")).toBeInTheDocument();
+    expect(screen.getByText("Replace the pipeline.")).toBeInTheDocument();
   });
 });

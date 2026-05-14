@@ -328,3 +328,64 @@ def lower_discriminated_to_knob_schema(
             inner_field["visible_when"] = {"field": discriminator, "equals": variant_value}
             fields.append(inner_field)
     return {"fields": fields}
+
+
+_PREDICATE_KEYS: frozenset[str] = frozenset({"field", "equals"})
+
+
+def validate_knob_schema(
+    schema: KnobSchema,
+    *,
+    plugin_kind: str,
+    plugin_name: str,
+) -> None:
+    """Validate KnobSchema invariants enforced at catalog load."""
+    all_names = [field["name"] for field in schema["fields"]]
+    seen_so_far: set[str] = set()
+    visibility_gated: set[str] = set()
+
+    for field in schema["fields"]:
+        if "visible_when" not in field:
+            seen_so_far.add(field["name"])
+            continue
+
+        pred = field["visible_when"]
+        keys = frozenset(pred)
+        if keys != _PREDICATE_KEYS:
+            raise KnobSchemaLoweringError(
+                plugin_kind=plugin_kind,
+                plugin_name=plugin_name,
+                field_path=field["name"],
+                constraint=f"visible_when has keys {sorted(keys)}; only 'field' and 'equals' permitted",
+                remediation="Remove extra keys; AND/OR predicates are out of scope",
+            )
+
+        target = pred["field"]
+        if target not in seen_so_far:
+            if target in all_names:
+                raise KnobSchemaLoweringError(
+                    plugin_kind=plugin_kind,
+                    plugin_name=plugin_name,
+                    field_path=field["name"],
+                    constraint=f"visible_when references forward field {target!r}",
+                    remediation="Re-order fields so the discriminator is declared first",
+                )
+            raise KnobSchemaLoweringError(
+                plugin_kind=plugin_kind,
+                plugin_name=plugin_name,
+                field_path=field["name"],
+                constraint=f"visible_when references unknown field {target!r}",
+                remediation="Check the field name; only earlier-declared KnobFields are valid targets",
+            )
+
+        if target in visibility_gated:
+            raise KnobSchemaLoweringError(
+                plugin_kind=plugin_kind,
+                plugin_name=plugin_name,
+                field_path=field["name"],
+                constraint=f"visible_when targets {target!r} which is itself visible_when-gated (nested visibility chain)",
+                remediation="Flatten the predicate chain; visibility nesting is out of scope",
+            )
+
+        visibility_gated.add(field["name"])
+        seen_so_far.add(field["name"])

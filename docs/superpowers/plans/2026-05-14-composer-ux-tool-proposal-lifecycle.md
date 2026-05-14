@@ -858,7 +858,7 @@ EOF
 - Create: `src/elspeth/web/composer/proposals.py`
 - Test: `tests/unit/web/composer/test_proposals.py`
 
-- [ ] **Step 1: Write failing proposal summary tests**
+- [x] **Step 1: Write failing proposal summary tests**
 
 Create `tests/unit/web/composer/test_proposals.py`:
 
@@ -907,7 +907,9 @@ def test_patch_node_options_summary_names_target_node() -> None:
     assert summary.affects == ("graph", "validation", "yaml")
 ```
 
-- [ ] **Step 2: Run proposal tests to verify they fail**
+- [x] **Step 2: Run proposal tests to verify they fail**
+
+Task result: `.venv/bin/pytest tests/unit/web/composer/test_proposals.py -q` failed during collection with `ModuleNotFoundError: No module named 'elspeth.web.composer.proposals'`, the expected missing-module failure.
 
 Run:
 
@@ -917,7 +919,7 @@ Run:
 
 Expected: FAIL with missing module or function.
 
-- [ ] **Step 3: Export mutation classification from the tool registry**
+- [x] **Step 3: Export mutation classification from the tool registry**
 
 In `src/elspeth/web/composer/tools.py`, add near `is_discovery_tool`:
 
@@ -927,7 +929,7 @@ def is_mutation_tool(name: str) -> bool:
     return name in _MUTATION_TOOLS or name in _BLOB_MUTATION_TOOLS or name in _SECRET_MUTATION_TOOLS
 ```
 
-- [ ] **Step 4: Add the proposal summary module**
+- [x] **Step 4: Add the proposal summary module**
 
 Create `src/elspeth/web/composer/proposals.py`:
 
@@ -1031,7 +1033,9 @@ def build_tool_proposal_summary(
     )
 ```
 
-- [ ] **Step 5: Run proposal tests**
+- [x] **Step 5: Run proposal tests**
+
+Task result: `.venv/bin/pytest tests/unit/web/composer/test_proposals.py -q` passed with `3 passed`; ruff and tier-model checks also passed for the touched composer surfaces.
 
 Run:
 
@@ -1041,7 +1045,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/composer/tools.py src/elspeth/web/composer/proposals.py tests/unit/web/composer/test_proposals.py

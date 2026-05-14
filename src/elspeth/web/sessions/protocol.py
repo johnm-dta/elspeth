@@ -668,6 +668,15 @@ class SessionServiceProtocol(Protocol):
         actor: str,
     ) -> CompositionProposalRecord: ...
 
+    async def mark_composition_proposal_committed(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        committed_state_id: UUID,
+        actor: str,
+    ) -> CompositionProposalRecord: ...
+
     async def list_proposal_events(
         self,
         session_id: UUID,

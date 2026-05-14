@@ -104,7 +104,7 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
-from elspeth.web.composer.tools import _DATA_ERROR_KEY
+from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
 from elspeth.web.composer.yaml_generator import generate_yaml
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
@@ -3281,6 +3281,83 @@ def create_session_router() -> APIRouter:
         service: SessionServiceProtocol = request.app.state.session_service
         events = await service.list_proposal_events(session.id)
         return [_proposal_event_response(event) for event in events]
+
+    @router.post(
+        "/{session_id}/proposals/{proposal_id}/accept",
+        response_model=CompositionProposalResponse,
+    )
+    async def accept_composition_proposal(
+        session_id: UUID,
+        proposal_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> CompositionProposalResponse:
+        session = await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        proposals = await service.list_composition_proposals(session.id)
+        proposal = next((item for item in proposals if item.id == proposal_id), None)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        if proposal.status != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail="Only pending proposals can be accepted.",
+            )
+
+        current_record = await service.get_current_state(session.id)
+        if proposal.base_state_id is not None and (current_record is None or current_record.id != proposal.base_state_id):
+            raise HTTPException(
+                status_code=409,
+                detail="The session state changed after this proposal was created. Ask ELSPETH to rebase the proposal.",
+            )
+        current_state = (
+            _state_from_record(current_record) if current_record is not None else _initial_composition_state_with_guided_session()
+        )
+        result = await run_sync_in_worker(
+            execute_tool,
+            proposal.tool_name,
+            cast(dict[str, Any], deep_thaw(proposal.arguments_json)),
+            current_state,
+            request.app.state.catalog_service,
+            data_dir=str(request.app.state.settings.data_dir),
+            session_engine=request.app.state.session_engine,
+            session_id=str(session.id),
+            secret_service=request.app.state.scoped_secret_resolver,
+            user_id=str(user.user_id),
+        )
+        if result.updated_state.version == current_state.version:
+            raise HTTPException(
+                status_code=409,
+                detail="Accepted proposal did not change composition state.",
+            )
+
+        state_data, _validation = await _state_data_from_composer_state(
+            result.updated_state,
+            settings=request.app.state.settings,
+            secret_service=request.app.state.scoped_secret_resolver,
+            user_id=str(user.user_id),
+            runtime_preflight=result.runtime_preflight,
+            preflight_exception_policy="raise",
+            initial_version=current_state.version,
+            telemetry_source="compose",
+        )
+        state_record = await service.save_composition_state(
+            session.id,
+            state_data,
+            provenance="tool_call",
+        )
+        try:
+            committed = await service.mark_composition_proposal_committed(
+                session_id=session.id,
+                proposal_id=proposal.id,
+                committed_state_id=state_record.id,
+                actor=f"user:{user.user_id}",
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Proposal not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _composition_proposal_response(committed)
 
     @router.post(
         "/{session_id}/proposals/{proposal_id}/reject",

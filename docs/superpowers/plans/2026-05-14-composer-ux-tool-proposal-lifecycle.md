@@ -1612,7 +1612,7 @@ EOF
 - Test: `tests/unit/web/sessions/test_composer_proposals.py`
 - Test: `tests/unit/web/sessions/test_routes.py`
 
-- [ ] **Step 1: Write failing accept tests**
+- [x] **Step 1: Write failing accept tests**
 
 Add to `tests/unit/web/sessions/test_composer_proposals.py`:
 
@@ -1659,7 +1659,7 @@ def test_accept_unknown_proposal_returns_404(test_client) -> None:
     assert response.status_code == 404
 ```
 
-- [ ] **Step 2: Run accept tests to verify they fail**
+- [x] **Step 2: Run accept tests to verify they fail**
 
 Run:
 
@@ -1669,7 +1669,7 @@ Run:
 
 Expected: FAIL with missing `mark_composition_proposal_committed` or missing route.
 
-- [ ] **Step 3: Add committed-state marker method**
+- [x] **Step 3: Add committed-state marker method**
 
 In `SessionServiceProtocol`, add:
 
@@ -1739,7 +1739,7 @@ In `SessionServiceImpl`, implement:
         return await self._run_sync(_sync)
 ```
 
-- [ ] **Step 4: Add accept route skeleton**
+- [x] **Step 4: Add accept route skeleton**
 
 Add the route:
 
@@ -1766,7 +1766,7 @@ Add the route:
         )
 ```
 
-- [ ] **Step 5: Wire execution through existing composer tool handler**
+- [x] **Step 5: Wire execution through existing composer tool handler**
 
 Replace the 501 branch with execution code that:
 
@@ -1827,7 +1827,7 @@ The route code shape:
         return _composition_proposal_response(committed)
 ```
 
-- [ ] **Step 6: Run accept tests**
+- [x] **Step 6: Run accept tests**
 
 Run:
 
@@ -1837,7 +1837,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/service.py src/elspeth/web/sessions/routes.py tests/unit/web/sessions/test_composer_proposals.py tests/unit/web/sessions/test_routes.py

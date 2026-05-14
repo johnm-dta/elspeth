@@ -1435,6 +1435,60 @@ class SessionServiceImpl:
 
         return cast(CompositionProposalRecord, await self._run_sync(_sync))
 
+    async def mark_composition_proposal_committed(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        committed_state_id: UUID,
+        actor: str,
+    ) -> CompositionProposalRecord:
+        """Commit a pending proposal by appending an event, then updating status."""
+        now = self._now()
+        sid = str(session_id)
+        pid = str(proposal_id)
+        state_id = str(committed_state_id)
+
+        def _sync() -> CompositionProposalRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.id == pid)
+                    .where(composition_proposals_table.c.session_id == sid)
+                ).one_or_none()
+                if row is None:
+                    raise KeyError(pid)
+                if row.status != "pending":
+                    raise ValueError(f"Proposal {pid} must be pending to commit; got {row.status!r}")
+
+                event_id = str(uuid.uuid4())
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        proposal_id=pid,
+                        event_type="proposal.accepted",
+                        actor=actor,
+                        payload={"committed_state_id": state_id},
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    update(composition_proposals_table)
+                    .where(composition_proposals_table.c.id == pid)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .values(
+                        status="committed",
+                        committed_state_id=state_id,
+                        audit_event_id=event_id,
+                        updated_at=now,
+                    )
+                )
+                updated_row = conn.execute(select(composition_proposals_table).where(composition_proposals_table.c.id == pid)).one()
+                return _proposal_record_from_row(updated_row)
+
+        return cast(CompositionProposalRecord, await self._run_sync(_sync))
+
     async def list_proposal_events(
         self,
         session_id: UUID,

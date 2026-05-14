@@ -15,6 +15,7 @@ from elspeth.web.sessions.models import (
     proposal_events_table,
     sessions_table,
 )
+from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -226,3 +227,75 @@ async def test_reject_composition_proposal_is_forward_only(service) -> None:
         "proposal.created",
         "proposal.rejected",
     ]
+
+
+@pytest.mark.asyncio
+async def test_accept_composition_proposal_requires_pending_status(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    proposal = await service.create_composition_proposal(
+        session_id=session_id,
+        tool_call_id="call_set_pipeline",
+        tool_name="set_pipeline",
+        summary="Replace the pipeline.",
+        rationale="Requested by the user.",
+        affects=("graph",),
+        arguments_json={"source": {"plugin": "csv", "options": {}}},
+        arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+        base_state_id=None,
+        actor="composer-web:user-alice",
+    )
+    await service.reject_composition_proposal(
+        session_id=session_id,
+        proposal_id=proposal.id,
+        actor="user:alice",
+    )
+
+    with pytest.raises(ValueError, match="pending"):
+        await service.mark_composition_proposal_committed(
+            session_id=session_id,
+            proposal_id=proposal.id,
+            committed_state_id=uuid4(),
+            actor="user:alice",
+        )
+
+
+@pytest.mark.asyncio
+async def test_mark_composition_proposal_committed_writes_forward_event(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    state_record = await service.save_composition_state(
+        session_id,
+        CompositionStateData(is_valid=True),
+        provenance="tool_call",
+    )
+    proposal = await service.create_composition_proposal(
+        session_id=session_id,
+        tool_call_id="call_set_pipeline",
+        tool_name="set_pipeline",
+        summary="Replace the pipeline.",
+        rationale="Requested by the user.",
+        affects=("graph",),
+        arguments_json={"source": {"plugin": "csv", "options": {}}},
+        arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+        base_state_id=None,
+        actor="composer-web:user-alice",
+    )
+
+    committed = await service.mark_composition_proposal_committed(
+        session_id=session_id,
+        proposal_id=proposal.id,
+        committed_state_id=state_record.id,
+        actor="user:alice",
+    )
+
+    assert committed.status == "committed"
+    assert committed.committed_state_id == state_record.id
+    events = await service.list_proposal_events(session_id)
+    assert [event.event_type for event in events] == [
+        "proposal.created",
+        "proposal.accepted",
+    ]
+    assert events[-1].payload == {"committed_state_id": str(state_record.id)}

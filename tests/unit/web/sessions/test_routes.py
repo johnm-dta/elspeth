@@ -533,6 +533,120 @@ def test_send_message_response_includes_pending_proposals_created_during_compose
     assert body["proposals"][0]["status"] == "pending"
 
 
+def test_accept_unknown_proposal_returns_404(test_client) -> None:
+    session = test_client.post("/api/sessions", json={"title": "Accept"}).json()
+
+    response = test_client.post(f"/api/sessions/{session['id']}/proposals/00000000-0000-0000-0000-000000000000/accept")
+
+    assert response.status_code == 404
+
+
+def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) -> None:
+    from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+
+    app, service = _make_app(tmp_path)
+    app.state.session_engine = service._engine
+    catalog = MagicMock()
+    catalog.list_sources.return_value = [
+        PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+    ]
+    catalog.list_transforms.return_value = [
+        PluginSummary(name="passthrough", description="Passthrough", plugin_type="transform", config_fields=[]),
+    ]
+    catalog.list_sinks.return_value = [
+        PluginSummary(name="csv", description="CSV sink", plugin_type="sink", config_fields=[]),
+    ]
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="csv",
+        plugin_type="source",
+        description="CSV source",
+        json_schema={"title": "Config", "properties": {}},
+    )
+    app.state.catalog_service = catalog
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    input_path = tmp_path / "blobs" / "input.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("value\n1\n", encoding="utf-8")
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Accept"}).json()
+    session_id = uuid.UUID(session["id"])
+    proposal = asyncio.run(
+        service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline.",
+            rationale="Requested by the current composer turn.",
+            affects=("graph", "validation", "yaml"),
+            arguments_json={
+                "source": {
+                    "plugin": "csv",
+                    "on_success": "source_out",
+                    "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+                    "on_validation_failure": "quarantine",
+                },
+                "nodes": [
+                    {
+                        "id": "t1",
+                        "node_type": "transform",
+                        "plugin": "passthrough",
+                        "input": "source_out",
+                        "on_success": "main",
+                        "on_error": "discard",
+                        "options": {"schema": {"mode": "observed"}},
+                    }
+                ],
+                "edges": [
+                    {
+                        "id": "e1",
+                        "from_node": "source",
+                        "to_node": "t1",
+                        "edge_type": "on_success",
+                        "label": None,
+                    }
+                ],
+                "outputs": [
+                    {
+                        "sink_name": "main",
+                        "plugin": "csv",
+                        "options": {
+                            "path": str(tmp_path / "outputs" / "output.csv"),
+                            "schema": {"mode": "observed"},
+                            "collision_policy": "auto_increment",
+                        },
+                        "on_write_failure": "discard",
+                    }
+                ],
+                "metadata": {"name": "accepted-proposal"},
+            },
+            arguments_redacted_json={"summary": "redacted"},
+            base_state_id=None,
+            actor="composer-web:user:alice",
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session['id']}/proposals/{proposal.id}/accept")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "committed"
+    assert body["committed_state_id"] is not None
+    persisted = asyncio.run(service.get_current_state(session_id))
+    assert persisted is not None
+    from sqlalchemy import select
+
+    from elspeth.web.sessions.models import composition_states_table
+
+    with service._engine.begin() as conn:
+        provenance = conn.execute(
+            select(composition_states_table.c.provenance).where(composition_states_table.c.id == str(persisted.id))
+        ).scalar_one()
+    assert provenance == "tool_call"
+
+
 def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
     """Create audit records that route three rows to the virtual discard sink."""
     (settings.data_dir / "runs").mkdir(parents=True, exist_ok=True)

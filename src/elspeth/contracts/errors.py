@@ -943,7 +943,7 @@ class PluginRetryableError(Exception):
         self.status_code = status_code
 
 
-class RuntimePreflightFailedError(Exception):
+class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
     """Provider/runtime readiness check failed before row processing."""
 
     error_class = "pre_flight_failed"

@@ -63,6 +63,9 @@ jobs:
       - name: Type check (mypy)
         run: uv run mypy src/
 
+      - name: Enforce plugin options metadata
+        run: uv run python scripts/cicd/enforce_options_metadata.py
+
   # ===========================================================================
   # Stage 2a: Tier Model Enforcement
   # ===========================================================================

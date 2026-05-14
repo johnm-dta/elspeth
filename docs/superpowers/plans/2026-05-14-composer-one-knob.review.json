@@ -1,0 +1,303 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "plan_path": "docs/superpowers/plans/2026-05-14-composer-one-knob.md",
+  "review_date": "2026-05-14",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "summary": "The plan's structural spine is sound — server-side Pydantic-to-KnobSchema lowering, eager startup catalog lowering, atomic Phase D wire-contract commit, CI metadata-floor lint — and addresses the investigation report's named root cause (information discarded at the layer boundary). Defects are concentrated in two zones: (1) Task 9 (inspection-facts persistence) is structurally unsound — three of four reviewers independently flagged the same cluster of issues (defensive .get() on Tier-1, missing GUIDED_SESSION_SCHEMA_VERSION bump, hallucinated to_dict/from_dict and GuidedSession.new APIs, missing fixture fields); (2) eight tasks reference APIs that don't exist in the codebase (CatalogService vs CatalogServiceImpl, build_plugin_manager vs get_shared_plugin_manager, pm.list_sources vs pm.get_sources, etc.) and will fail at first import. Plus Task 10 omits protocol.py _REQUIRED_KEYS/_NESTED_SHAPES updates — a fresh instance of the exact wire-contract drift the investigation named as root cause. Verdict: revise the seven affected tasks (9, 5, 8, 10, 12, 15, 16, 17), do not replan; the spine survives.",
+  "blocking_findings": [
+    {
+      "id": "BLOCK-1",
+      "title": "Task 9 (inspection-facts persistence) is structurally unsound",
+      "severity": "critical",
+      "tasks_affected": [9],
+      "raised_by": ["reality", "architecture", "quality", "systems"],
+      "convergence_count": 4,
+      "evidence": "Architecture B-1/B-2/B-3, Reality B-4/B-5/B-6/W-4, Systems Blocking 1/2 + Warning 1, Quality WARN-1/WARN-7. Five concrete sub-defects: (a) plan instructs `.get()` on Tier-1 deserialization path (CLAUDE.md violation); (b) adds `step_1_inspection_facts` field without bumping GUIDED_SESSION_SCHEMA_VERSION (currently 3) — existing sessions become unrestorable post-deploy and plan omits operator DB-wipe instruction; (c) cited APIs `SourceInspectionFacts.to_dict()/from_dict()` don't exist (only module-level `facts_to_dict`); (d) cited factory `GuidedSession.new(...)` doesn't exist (actual is `initial()`); (e) test fixture for SourceInspectionFacts omits 5 required dataclass fields (`source_kind`, `redacted_identity`, `byte_range_inspected`, `inferred_types`, `url_candidates`) — TypeError on construction; (f) test path `test_guided_session_state.py` doesn't exist (correct home is `test_state_machine.py`); (g) freeze_fields discipline for new field not addressed.",
+      "fix": "Rewrite Task 9 end-to-end: (1) add `facts_from_dict()` module function in source_inspection.py with offensive-programming write-side validation (direct subscript + InvariantError, never .get()); (2) bump GUIDED_SESSION_SCHEMA_VERSION 3→4 and add explicit operator instruction `DELETE sessions DB before deploy` per project policy; (3) replace `GuidedSession.new(...)` with `GuidedSession.initial(...)`; (4) write fixture against the real dataclass (all 5 missing fields included); (5) call `freeze_fields(self, 'step_1_inspection_facts')` in `__post_init__` if field is not None; (6) place new test in `test_state_machine.py` (or justify new file); (7) round-trip property test using existing Hypothesis harness pattern. Confidence: HIGH (4-of-4 convergence). Risk if unaddressed: data-loss on first production deploy + Tier-1 audit-integrity violation."
+    },
+    {
+      "id": "BLOCK-2",
+      "title": "Task 10 omits protocol.py _REQUIRED_KEYS/_NESTED_SHAPES updates — wire-contract drift recurs",
+      "severity": "critical",
+      "tasks_affected": [10, 14, 15],
+      "raised_by": ["systems"],
+      "convergence_count": 1,
+      "evidence": "Systems Blocking 3. Task 10 changes SCHEMA_FORM payload shape and Task 15 changes RECIPE_OFFER to a SchemaFormPayload, but neither task lists `web/composer/guided/protocol.py` modifications. Existing tests in `test_protocol.py` and `test_emitters.py` validate the current `_REQUIRED_KEYS`/`_NESTED_SHAPES` constants and will fail. Phase D Task 14 Step 6 (full test suite) will catch this — but only after a 4-task multi-file commit. **This is a fresh instance of the exact \"information discarded at the layer boundary / wire-contract drift\" pattern the investigation report named as the root cause.** Single-reviewer raise but high architectural significance.",
+      "fix": "Add explicit step to Task 10 and Task 15: \"Update `protocol.py` _REQUIRED_KEYS / _NESTED_SHAPES to match new payload shape; verify via `test_protocol.py` BEFORE proceeding.\" Make this part of the same atomic commit as the payload change. Confidence: HIGH (verifiable by reading protocol.py + tests). Risk if unaddressed: Phase D atomic-commit verification fails; bisection becomes painful."
+    },
+    {
+      "id": "BLOCK-3",
+      "title": "Hallucinated APIs across 8 tasks will fail at first import",
+      "severity": "high",
+      "tasks_affected": [5, 8, 10, 12, 15, 16, 17],
+      "raised_by": ["reality", "architecture"],
+      "convergence_count": 2,
+      "evidence": "Reality B-1, B-2, B-3, B-7, B-8, B-9, B-10, B-11, B-12 + Architecture W-3. Concrete misses: (1) `CatalogService` concrete class — actual is `CatalogServiceImpl` (Tasks 8, 10); (2) `build_plugin_manager` — actual is `get_shared_plugin_manager()` in `plugins/infrastructure/manager.py:297` (Tasks 8, 16, 17); (3) `pm.list_sources/transforms/sinks()` — actual is `pm.get_sources()` etc (Tasks 16, 17); (4) `match.recipe_description` doesn't exist on `RecipeMatch` — must call `get_recipe(match.recipe_name).description` (Task 15); (5) `routes.py:5215` cited as second call site for `build_step_1_schema_form_turn` — actual rebuild path calls `build_initial_step_1_turn`, so threading inspection_facts at the cited call site leaves the GET rebuild emitting un-prefilled forms (Task 12 — semantically wrong, not just stale path); (6) `CatalogServiceImpl._options_model_for / _classes_for / _plugin_name` don't exist — pseudocode presented as ready-to-paste (Task 8); (7) `tests/unit/cicd/` doesn't exist — actual is `tests/unit/scripts/cicd/` (Task 17); (8) `tests/unit/web/composer/test_recipe_offer.py` doesn't exist — tests are in `guided/test_emitters.py` and `test_protocol.py` (Task 15); (9) `dict(cls._PROVIDERS)` returns `tuple[type[LLMConfig], type]` not `BaseModel` — discriminated lowering will fail (Task 5).",
+      "fix": "Pre-execution audit: in each affected task, replace symbol references with verified live names (grep + read at the cited file:line). Critical case is B-8 (Task 12): the plan's two-call-site premise is wrong — the GET rebuild path calls `build_initial_step_1_turn`, so threading inspection_facts only at the WS `build_step_1_schema_form_turn` site leaves rebuilds un-prefilled. This is a Finding-3 regression, not a stale path. Confidence: HIGH (verified by Reality reviewer's primary-source grep). Risk if unaddressed: ImportError / AttributeError / TypeError at first execution; one semantic gap (B-8) silently breaks Finding-3 delivery on the rebuild path."
+    },
+    {
+      "id": "BLOCK-4",
+      "title": "Spec §10 property tests + golden snapshots claimed but absent",
+      "severity": "high",
+      "tasks_affected": [3, 4, 5, 6],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality BLK-1. Spec §10 mandates Hypothesis property tests for `BaseModel → KnobSchema` lowering and golden snapshots for every plugin Options model. Plan's self-review at line 2382 explicitly claims Tasks 3-6 cover §10 — they don't. Existing Hypothesis harness exists in repo (`test_redaction_completeness_property.py` and similar). Single-reviewer raise but spec-mandated; the false self-review claim elevates this above a routine warning.",
+      "fix": "Add explicit task (call it Task 6.5) in Phase B: `@given`/`@settings` property test exercising round-trip on synthesized BaseModel definitions + golden snapshots committed for all currently-registered plugin Options models. Use existing Hypothesis harness pattern. Verification gate: snapshot diff must be human-reviewed in PR. Confidence: HIGH (spec citation + existing harness). Risk if unaddressed: future plugin additions silently produce malformed KnobSchemas; metadata regressions invisible until manual UI test."
+    },
+    {
+      "id": "BLOCK-5",
+      "title": "Spec §7 nullable round-trip cases 1-4 not tested",
+      "severity": "high",
+      "tasks_affected": [3, 13],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality BLK-2. Plan claims Task 3 covers spec §7 nullable cases 1-8; actual Task 3 only tests the forward path (BaseModel → KnobSchema lowering) and never invokes `SetSourceArgumentsModel.model_validate` on the return path. Case 3 specifically (Optional[int]=None, operator clears widget → submits null, validator accepts as None) has no test. Single-reviewer raise but spec-explicit.",
+      "fix": "Extend Task 3 (or add to Task 13's hidden-field-rejection test file) explicit return-path tests: for each of the 4 nullable cases, construct the websocket payload as the operator's submit would produce it, call `SetSourceArgumentsModel.model_validate(payload)`, assert the resulting `arguments` dict matches expected. Confidence: HIGH. Risk if unaddressed: operator-cleared optional fields silently coerce to wrong values."
+    },
+    {
+      "id": "BLOCK-6",
+      "title": "Hidden-field rejection lacks audit-emission decision",
+      "severity": "high",
+      "tasks_affected": [13],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality BLK-3. Task 13 implements `_reject_hidden_field_submissions` but the test asserts only the rejection error — no assertion about audit row emission. CLAUDE.md audit primacy: rejection IS a decision and should appear in the Landscape. Plan implicitly takes the \"no audit row\" position by omission, which contradicts the audit-primacy principle. Architecture W-1 also flags the related defensive `.get()` in this function.",
+      "fix": "(1) Decide explicitly: does hidden-field-rejection emit an audit row? Default per CLAUDE.md is YES — it's a security-relevant decide point. (2) Test must assert presence (or documented absence with rationale) of audit emission. (3) Replace `.get()` with direct subscript + explicit KeyError handling per offensive-programming mandate. Confidence: HIGH on (3), MEDIUM on (1) pending operator policy call. Risk if unaddressed: audit gap on a security-relevant rejection path."
+    },
+    {
+      "id": "BLOCK-7",
+      "title": "Tier-model + freeze-guard CI gates never invoked in plan",
+      "severity": "high",
+      "tasks_affected": ["Phase D"],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality BLK-6. mypy appears once on narrow scope (Task 10 Step 3). ruff, `enforce_tier_model.py`, `enforce_freeze_guards.py` absent from all 17 task verifications. Plan adds new dataclass field (Task 9), new web→catalog cross-module dependency (Task 8), new frontend types (Tasks 11, 14) — exactly the change shape these gates exist to catch.",
+      "fix": "Add a Phase D verification gate: run `ruff check src/`, `mypy src/`, `python scripts/cicd/enforce_tier_model.py check ...`, `python scripts/cicd/enforce_freeze_guards.py` and require all four green BEFORE the atomic commit. Confidence: HIGH. Risk if unaddressed: tier-model violation (BLOCK-1 sub-defect a) ships unnoticed; freeze guard gap silently allows mutable Tier-1 contents."
+    },
+    {
+      "id": "BLOCK-8",
+      "title": "Task 12 prefill test is tautological — Finding-3 UX win not delivered",
+      "severity": "high",
+      "tasks_affected": [12],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality BLK-5. Task 12 integration test asserts `prefilled[\"schema\"][\"mode\"] == \"observed\"` — but `\"observed\"` is the existing constant and is present in the schema before this work. `_merge_inspection_into_prefill` is documented in the plan as \"hook rather than full implementation.\" Combined with Reality B-8 (wrong call site cited), the headline UX win from Investigation Finding 3 (prefill from inspection facts) is NOT delivered.",
+      "fix": "(1) Implement `_merge_inspection_into_prefill` for real, not as a hook. (2) Test must construct GuidedSession with non-trivial inspection_facts, render via the (corrected) call sites, and assert specific prefilled values reflect the inspection (e.g., column names from `inferred_types` populate the form). (3) Cover BOTH call sites identified in Reality B-8. Confidence: HIGH. Risk if unaddressed: spec-claimed feature ships as a no-op; investigation finding 3 unresolved."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "WARN-1",
+      "title": "Task 4 lazy-import is Shifting-the-Burden anti-pattern",
+      "severity": "medium",
+      "tasks_affected": [4],
+      "raised_by": ["architecture", "quality"],
+      "convergence_count": 2,
+      "evidence": "Architecture W-1 + Quality BLK-4. CLAUDE.md explicitly prohibits lazy-import-with-apologetic-comment as a layer-boundary workaround.",
+      "fix": "Extract `SlotType` / `SlotSpec` to `contracts/` (L0). Both reviewers cite this as the structural fix."
+    },
+    {
+      "id": "WARN-2",
+      "title": "Phase F (metadata fill) lands AFTER Phase D (renderer goes live) — operator-visible UX regression window",
+      "severity": "medium",
+      "tasks_affected": [16, "Phase D", "Phase F"],
+      "raised_by": ["systems"],
+      "convergence_count": 1,
+      "evidence": "Systems Warning 3. Renderer goes live in Phase D but `Field(title=...)` annotations land in Phase F. During the window, fields without titles render as raw Python attribute names — recreating the exact symptom Investigation Finding 2 named (hardcoded label dictionary).",
+      "fix": "Reorder: execute Task 16 (metadata audit + fill) BEFORE Phase D, OR gate Phase D commit on a metadata-coverage assertion (every loaded plugin field has a title)."
+    },
+    {
+      "id": "WARN-3",
+      "title": "Task 8 introduces L3↔L3 lateral coupling at wrong end",
+      "severity": "medium",
+      "tasks_affected": [8],
+      "raised_by": ["architecture"],
+      "convergence_count": 1,
+      "evidence": "Architecture W-2. Today `web/catalog/` has zero composer imports; Task 8 introduces `web/catalog/service.py → web/composer/guided/knob_schema.py`. There's already an emitter→catalog dep in the reverse direction; this creates bidirectional coupling.",
+      "fix": "Move `knob_schema.py` to `web/catalog/knob_schema.py` or `web/knob_schema.py`. One-time move, no ongoing cost."
+    },
+    {
+      "id": "WARN-4",
+      "title": "Tasks 10-14 multi-file uncommitted-tree hazard",
+      "severity": "medium",
+      "tasks_affected": [10, 11, 12, 13, 14],
+      "raised_by": ["systems"],
+      "convergence_count": 1,
+      "evidence": "Systems Warning 2. 4 tasks of mixed backend+frontend changes accumulate before single Phase D atomic commit. Project memory (`feedback_no_git_stash.md`) records prior data loss via this slip pattern.",
+      "fix": "Execute Phase D in a worktree with WIP commits per task (squash-merge at end). Per project default, ask operator before starting Phase D."
+    },
+    {
+      "id": "WARN-5",
+      "title": "Frontend TypeScript exhaustiveness not enforced on KnobFieldRenderer",
+      "severity": "medium",
+      "tasks_affected": [11, 14],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality WARN-2. Spec promises `default: const _exhaustive: never = field.kind` exhaustiveness check; renderer code in plan lacks it. Future SlotType additions silently un-rendered.",
+      "fix": "Add the never-check; add a test that asserts compile failure when a SlotType variant is added without a renderer arm."
+    },
+    {
+      "id": "WARN-6",
+      "title": "A11y assertions absent from SchemaFormTurn rewrite",
+      "severity": "medium",
+      "tasks_affected": [11, 14],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality WARN-3. Phase 8 established structural a11y discipline (obs-0a1002de6d). New SchemaFormTurn rewrite has no aria-describedby, Clear-button label, heading-hierarchy, or string-list textarea keyboard tests.",
+      "fix": "Add a11y assertions matching Phase 8 patterns to Task 11 / 14 vitest suites."
+    },
+    {
+      "id": "WARN-7",
+      "title": "Task 17 second test is empty stub; self-review claims no TBD patterns exist",
+      "severity": "low",
+      "tasks_affected": [17],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality WARN-10. Task 17's second test body is `# ... fixture that registers a broken plugin and runs the lint ...`. Plan self-review explicitly claims no TBD patterns — direct contradiction.",
+      "fix": "Either write the test or remove the stub and update self-review."
+    },
+    {
+      "id": "WARN-8",
+      "title": "Task 8 cache-identity assertion is brittle",
+      "severity": "low",
+      "tasks_affected": [8],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality WARN-6. `assert first is second` may fail if Pydantic copies serialization output.",
+      "fix": "Replace with call-count spy on the lowering function."
+    },
+    {
+      "id": "WARN-9",
+      "title": "Task 8 smoke test is one-off shell command",
+      "severity": "low",
+      "tasks_affected": [8],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality WARN-5. Asserts nothing about loaded plugins; not in test suite.",
+      "fix": "Convert to `tests/integration/web/catalog/test_startup_lowering.py` with assertions on count and shape."
+    },
+    {
+      "id": "WARN-10",
+      "title": "isinstance check on Protocol structural-types false-positives",
+      "severity": "low",
+      "tasks_affected": [5],
+      "raised_by": ["systems"],
+      "convergence_count": 1,
+      "evidence": "Systems Warning 4. `isinstance(plugin_cls, DiscriminatedPlugin)` against a Protocol structurally matches any class with `discriminated_variants` method.",
+      "fix": "Use `hasattr`-equivalent explicit attribute check (NOT hasattr — banned per CLAUDE.md; use `callable(getattr(plugin_cls, 'discriminated_variants', None))` with explicit None check) OR a registered marker class."
+    },
+    {
+      "id": "WARN-11",
+      "title": "composer_tier wire field added with no consumer (YAGNI)",
+      "severity": "low",
+      "tasks_affected": [10],
+      "raised_by": ["architecture"],
+      "convergence_count": 1,
+      "evidence": "Architecture W-6. Spec acknowledges; plan adds anyway.",
+      "fix": "Defer until a consumer needs it, OR document the consumer in the plan."
+    },
+    {
+      "id": "WARN-12",
+      "title": "from_slot_specs labelled 'transitional' but has no retirement work",
+      "severity": "low",
+      "tasks_affected": [4],
+      "raised_by": ["architecture"],
+      "convergence_count": 1,
+      "evidence": "Architecture W-4. Misleading label.",
+      "fix": "Rename to 'permanent adapter for non-plugin recipes' or schedule retirement work."
+    },
+    {
+      "id": "WARN-13",
+      "title": "TurnType.RECIPE_OFFER will have two discriminators after Task 15",
+      "severity": "low",
+      "tasks_affected": [15],
+      "raised_by": ["architecture"],
+      "convergence_count": 1,
+      "evidence": "Architecture W-5. After Task 15, `turn.type` AND `payload.mode` both discriminate RECIPE_OFFER. `protocol.py` documentation will be stale.",
+      "fix": "Add doc-update step to Task 15."
+    },
+    {
+      "id": "WARN-14",
+      "title": "blob-ref input lacks UUID validation at Tier-3 boundary",
+      "severity": "low",
+      "tasks_affected": [11, 13],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality WARN-8.",
+      "fix": "Validate as UUID at the boundary; quarantine on failure per Tier-3 discipline."
+    },
+    {
+      "id": "WARN-15",
+      "title": "Task 16 likely 15-20 files (not 'a handful')",
+      "severity": "low",
+      "tasks_affected": [16],
+      "raised_by": ["architecture"],
+      "convergence_count": 1,
+      "evidence": "Architecture W-7. `config_base.py` inheritance pattern with no `Field(title=...)` annotations; full sweep is broader than plan estimates.",
+      "fix": "Reset estimate; relevant for Phase F sequencing decision (see WARN-2)."
+    },
+    {
+      "id": "WARN-16",
+      "title": "Task 15 violates TDD — implementation step opens",
+      "severity": "low",
+      "tasks_affected": [15],
+      "raised_by": ["quality"],
+      "convergence_count": 1,
+      "evidence": "Quality WARN-9. Task 15 opens with implementation step, no failing test first; only test repair. Phase E lacks pre-commit verification.",
+      "fix": "Reorder Task 15 to RED→GREEN→REFACTOR; add Phase E pre-commit verification."
+    },
+    {
+      "id": "WARN-17",
+      "title": "Hidden-field rejection test misclassified as unit",
+      "severity": "low",
+      "tasks_affected": [13],
+      "raised_by": ["quality", "reality"],
+      "convergence_count": 2,
+      "evidence": "Quality WARN-4 + Reality W-3. Uses live HTTP TestClient + undefined `session_at_step_3_llm` fixture.",
+      "fix": "Move to integration tests; define fixture explicitly."
+    },
+    {
+      "id": "WARN-18",
+      "title": "Finding 7 partial coverage — number-int / number-float branch omitted",
+      "severity": "low",
+      "tasks_affected": [11],
+      "raised_by": ["systems"],
+      "convergence_count": 1,
+      "evidence": "Systems coverage map. Plan covers `text` branch; `number-int` / `number-float` branch from Investigation Finding 7 omitted.",
+      "fix": "Extend Task 11 renderer to cover number-int / number-float SlotType variants."
+    },
+    {
+      "id": "WARN-19",
+      "title": "Spec line ref off-by-2",
+      "severity": "low",
+      "tasks_affected": [],
+      "raised_by": ["reality"],
+      "convergence_count": 1,
+      "evidence": "Reality W-2. `tools.py:2567` cited; actual is 2569.",
+      "fix": "Cosmetic; correct in revision pass."
+    }
+  ],
+  "strengths": [
+    "Phase D atomic-commit discipline correctly identified for wire-contract changes (per project convention 14).",
+    "Eager catalog lowering at startup (correct per spec; avoids per-request Pydantic introspection).",
+    "Hidden-field rejection — audit-integrity stance is correct in principle (audit-emission gap is fixable, BLOCK-6).",
+    "Discriminator-switch state discard (correct UX behavior).",
+    "Forward-ref / nesting guards in `validate_knob_schema`.",
+    "Parametrised totality test over `typing.get_args(SlotType)` (forces future SlotType additions to extend tests).",
+    "CI metadata-floor lint (Task 17) — addresses Finding 2 root cause structurally.",
+    "Explicit deletion of `RecipeOfferTurn.tsx` (No Legacy Code policy).",
+    "Genuine RED→GREEN→REFACTOR cadence in Tasks 1-6.",
+    "`KnobSchemaLoweringError` carries structured diagnostic context.",
+    "Thorough negative test corpus for `visible_when` (5 rejection cases).",
+    "Investigation Findings 1, 4, 5, 6, 8 addressed correctly.",
+    "Tier-trust annotation in spec correctly applied."
+  ],
+  "execution_recommendations": [
+    "Do not replan. Structural spine is sound; defects are concentrated in implementation-detail accuracy and one task (9) being structurally unsound.",
+    "Required revisions before execution can begin (in priority order): (1) Rewrite Task 9 end-to-end per BLOCK-1 fix; (2) Add explicit protocol.py update steps to Tasks 10 and 15 per BLOCK-2; (3) Pre-execution symbol audit across Tasks 5, 8, 10, 12, 15, 16, 17 per BLOCK-3 (grep + read at each cited file:line); (4) Add Phase B Task 6.5 (Hypothesis property + golden snapshots) per BLOCK-4; (5) Extend Task 3 with §7 nullable return-path tests per BLOCK-5; (6) Decide Task 13 audit-emission policy and replace .get() per BLOCK-6; (7) Add Phase D CI verification gate (ruff + mypy + tier-model + freeze-guards) per BLOCK-7; (8) Implement `_merge_inspection_into_prefill` for real and fix Task 12 test per BLOCK-8.",
+    "Recommended order-of-attack tweaks: (a) Move Task 16 (metadata audit) to Phase A or gate Phase D on metadata coverage to close WARN-2 regression window; (b) Extract SlotType/SlotSpec to contracts/ in Task 4 to close WARN-1; (c) Move knob_schema.py to web/catalog/ in Task 8 to close WARN-3; (d) Default to a worktree for Phase D per WARN-4 + project policy.",
+    "Defer-acceptable warnings: WARN-7 (empty stub — write or delete), WARN-8/9 (Task 8 test brittleness), WARN-11 (YAGNI composer_tier), WARN-12 (rename label), WARN-13 (doc-update for double-discriminator), WARN-19 (cosmetic line ref). These can be batched into the revision pass without slowing execution.",
+    "Confidence on the consolidated verdict is HIGH. The 4-of-4 convergence on Task 9 and the 2-of-4 convergence on hallucinated APIs are independent corroboration, not echo. Risk profile: BLOCK-1 (data loss + Tier-1 violation), BLOCK-2 (root-cause pattern recurrence), and BLOCK-3 (semantic gap on Finding-3 delivery via wrong call site) are the three findings that cannot ship in any form. The remaining 5 blockers are revisable in-place without restructuring."
+  ]
+}

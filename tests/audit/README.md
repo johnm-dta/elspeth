@@ -23,16 +23,18 @@ The suite is partitioned into 27 cohesive **audit chunks** across 4 tiers
 | U-CONTRACTS-1 (Plugin & registry contracts) | 25 | Done | [findings](u-contracts-1-findings.md) | [raw](u-contracts-1-raw-reports.md) |
 | U-CORE-1 (Landscape audit-DB recording) | 32 | Done | [findings](u-core-1-findings.md) | [raw](u-core-1-raw-reports.md) |
 | I-1 (Audit integration tests) | 32 | Done | [findings](i-1-findings.md) | [raw](i-1-raw-reports.md) |
+| U-ENGINE-1 (Declaration/processor/executor tests) | partial | Partial | [findings](u-engine-1-findings.md) | [raw](u-engine-1-raw-reports.md) |
+| U-ENGINE-2 (Coalesce/orchestrator/runtime boundary tests) | partial | Partial | [findings](u-engine-2-findings.md) | [raw](u-engine-2-raw-reports.md) |
 
 ## Cross-chunk patterns (suite-wide)
 
 These appear in multiple chunks and should be addressed once with a CI rule rather than per-chunk:
 
-- **`hasattr()` in tests violates CLAUDE.md** — found in U-CONTRACTS-1 (~15 sites) and U-CORE-1 (5 sites). Recommend extending `scripts/cicd/enforce_tier_model.py` to detect `hasattr(...)` in test files.
-- **Spec-less `Mock()`/`MagicMock()`** — found in U-CONTRACTS-1 (4 transform_contracts files) and U-CORE-1 (~6 files, 13+ `journal._payload_store = Mock()` sites). Recommend a CI grep/lint to flag `Mock()` and `MagicMock()` without `spec=` in `tests/`.
-- **Hash-without-binding theatre** — found in U-CORE-1 across 5 sites. Recommend a shared fixture asserting `(actual_hash) == stable_hash(input)` for retrofit; check if pattern recurs in other chunks.
-- **Dataclass-machinery tautology cluster** — found in both chunks. Tests construct a `@dataclass`, set fields, read them back. Should be deleted on sight in subsequent chunks.
-- **Production-code-path bypass in integration tests** — found in I-1: 26 of 32 files in `tests/integration/audit/` never use `ExecutionGraph.from_plugin_instances()` / `Orchestrator.run()`, despite CLAUDE.md mandating that integration tests do. A structural problem rather than a per-test bug. Filed as `elspeth-bd99b9d8b6` (epic).
+- **`hasattr()` in tests violates CLAUDE.md** — found in U-CONTRACTS-1 (~15 sites), U-CORE-1 (5 sites), and the U-ENGINE-1 partial pass. Filed shared infrastructure item `elspeth-2f4978ffbc`; `scripts/cicd/enforce_tier_model.py` already detects banned R3 `hasattr`, but current CI/pre-commit invocations scan `src/elspeth`, not `tests/`.
+- **Spec-less `Mock()`/`MagicMock()`** — found in U-CONTRACTS-1 (4 transform_contracts files), U-CORE-1 (~6 files, 13+ `journal._payload_store = Mock()` sites), I-1, and the U-ENGINE-1 partial pass. Filed shared infrastructure item `elspeth-e984600f90`; recommend a CI grep/lint to flag behavioral `Mock()` and `MagicMock()` without `spec=` or a real fake in `tests/`.
+- **Hash-without-binding theatre** — found in U-CORE-1, I-1, and the U-ENGINE-1 partial pass. Filed shared infrastructure item `elspeth-e0afd080cc`; recommend a shared fixture asserting `(actual_hash) == stable_hash(input)` for retrofit.
+- **Dataclass-machinery tautology cluster** — found in U-CONTRACTS-1, U-CORE-1, and the U-ENGINE-1 partial pass. Tests construct a `@dataclass`, set fields, read them back. Should be deleted on sight in subsequent chunks.
+- **Production-code-path bypass in integration tests** — found in I-1: 26 of 32 files in `tests/integration/audit/` never use `ExecutionGraph.from_plugin_instances()` / `Orchestrator.run()`, despite CLAUDE.md mandating that integration tests do. A structural problem rather than a per-test bug. Filed as `elspeth-ae9f541775` (epic).
 - **Regression-dump test files** — `tests/integration/audit/test_fixes.py` flagged unanimously by all 5 reviewers as a sprint-task dumping ground that should be dispersed and deleted. Likely pattern: any file named after a sprint, ticket, or "fixes" warrants scrutiny in subsequent chunks.
 
 ## Cross-wave verification: revising prior findings

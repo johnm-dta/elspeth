@@ -22,7 +22,9 @@
 | 1 | U-CONTRACTS-1 (Plugin & registry contracts) | 25 | ✅ Done | [findings](u-contracts-1-findings.md), [raw](u-contracts-1-raw-reports.md) | `f92ba560ad`, `8d5558dc25`, `7b7fe68836` |
 | 2 | U-CORE-1 (Landscape audit-DB recording) | 32 | ✅ Done | [findings](u-core-1-findings.md), [raw](u-core-1-raw-reports.md) | `297dafdf47`, `499100db05`, `82c7c028a8`, `f6f50e9394` |
 | 3 | I-1 (Audit integration tests) | 32 | ✅ Done | [findings](i-1-findings.md), [raw](i-1-raw-reports.md) | `ae9f541775`, `4a013f9833`; `f6f50e9394` scope-revised |
-| 4 | _next wave_ | — | ⏳ Pending | — | — |
+| 4 | U-ENGINE-1 partial continuation | partial | 🔎 Partial | [findings](u-engine-1-findings.md), [raw](u-engine-1-raw-reports.md) | `8bf288792a`, `bd49237412`, `e4281a36d8`, `e0afd080cc`, `462f50680f`, `f295b77e76`, `9a1262dbc7`, `ff85897f8f`, `314eb3552e`, `2744d69903`, `0c1c7d5cec`, `eb12769648`, `975f45dfcb` |
+| 5 | U-ENGINE-2 partial continuation | partial | 🔎 Partial | [findings](u-engine-2-findings.md), [raw](u-engine-2-raw-reports.md) | `958f307f29`, `68cd1876d0`, `aa7781f802`, `c5add729fa`, `786291485f` |
+| 6 | _next full wave_ | — | ⏳ Pending | — | — |
 
 ---
 
@@ -50,8 +52,8 @@
 
 | ID | Files | Scope |
 |---|---|---|
-| U-ENGINE-1 | ~25 | Declaration/dispatch/processor: `test_declaration_*`, `test_declared_*_fields_contract`, `test_pass_through_*`, `test_processor*`, `test_dependency_resolver`, `test_executors`, `test_flush_dispatcher_routing`, `test_sink_*`, `test_failsink_validation`, `test_can_drop_rows_contract`, `test_boundary_dispatch_inputs`, `test_record_flush_violation_failure`, `test_state_guard_audit_evidence_discriminator` |
-| U-ENGINE-2 | ~35 | Engine root part 2 + orchestrator: `test_batch_*`, `test_coalesce_*`, `test_cross_check_flush_output`, `test_dag_navigator`, `test_retry*`, `test_clock`, `test_commencement`, `test_expression_parser`, `test_plugin_*`, `test_routing_enums`, `test_row_outcome`, `test_schema_config_mode_contract`, `test_source_guaranteed_fields_contract`, `test_spans`, `test_token_manager_pipeline_row`, `test_tokens`, `test_transform_success_reason`, `test_triggers`, `test_audit_wrapper_scope`, `test_bootstrap_preflight`, `test_adr019_phase2_producer_pairs`, `test_orchestrator_registry_bootstrap`, `unit/engine/orchestrator/` |
+| U-ENGINE-1 🔎 partial | ~25 | Declaration/dispatch/processor: `test_declaration_*`, `test_declared_*_fields_contract`, `test_pass_through_*`, `test_processor*`, `test_dependency_resolver`, `test_executors`, `test_flush_dispatcher_routing`, `test_sink_*`, `test_failsink_validation`, `test_can_drop_rows_contract`, `test_boundary_dispatch_inputs`, `test_record_flush_violation_failure`, `test_state_guard_audit_evidence_discriminator` |
+| U-ENGINE-2 🔎 partial | ~35 | Engine root part 2 + orchestrator: `test_batch_*`, `test_coalesce_*`, `test_cross_check_flush_output`, `test_dag_navigator`, `test_retry*`, `test_clock`, `test_commencement`, `test_expression_parser`, `test_plugin_*`, `test_routing_enums`, `test_row_outcome`, `test_schema_config_mode_contract`, `test_source_guaranteed_fields_contract`, `test_spans`, `test_token_manager_pipeline_row`, `test_tokens`, `test_transform_success_reason`, `test_triggers`, `test_audit_wrapper_scope`, `test_bootstrap_preflight`, `test_adr019_phase2_producer_pairs`, `test_orchestrator_registry_bootstrap`, `unit/engine/orchestrator/` |
 
 ### Set U-PLUGINS — L3 plugins (166 files → 5 subsets)
 
@@ -152,10 +154,10 @@ To continue this audit in a new session:
 
 These appear in multiple chunks; they should be addressed once with a CI rule or sweep PR rather than per-chunk. (Authoritative list lives in `tests/audit/README.md`; copied here for convenience.)
 
-- **`hasattr()` in tests violates CLAUDE.md** (U-CONTRACTS-1: ~15 sites; U-CORE-1: 5 sites). Recommend extending `scripts/cicd/enforce_tier_model.py` to detect `hasattr(...)` in test files.
-- **Spec-less `Mock()`/`MagicMock()`** (U-CONTRACTS-1, U-CORE-1, I-1). Recommend a CI grep/lint to flag in `tests/`.
-- **Hash-without-binding theatre** (U-CORE-1, I-1). Recommend a shared fixture asserting `(actual_hash) == stable_hash(input)`.
-- **Dataclass-machinery tautology cluster** (all chunks). Tests construct a `@dataclass`, set fields, read them back. Delete on sight.
+- **`hasattr()` in tests violates CLAUDE.md** (U-CONTRACTS-1: ~15 sites; U-CORE-1: 5 sites; U-ENGINE-1 partial: at least one weak assertion). Filed `elspeth-2f4978ffbc`; the R3 detector exists, but current gates scan `src/elspeth`, not `tests/`.
+- **Spec-less `Mock()`/`MagicMock()`** (U-CONTRACTS-1, U-CORE-1, I-1, U-ENGINE-1 partial). Filed `elspeth-e984600f90`; recommend a CI grep/lint to flag behavioral mocks without `spec=` or a real fake in `tests/`.
+- **Hash-without-binding theatre** (U-CORE-1, I-1, U-ENGINE-1 partial). Filed `elspeth-e0afd080cc`; recommend a shared fixture asserting `(actual_hash) == stable_hash(input)`.
+- **Dataclass-machinery tautology cluster** (all chunks, including U-ENGINE-1 partial). Tests construct a `@dataclass`, set fields, read them back. Delete on sight.
 - **Production-code-path bypass in integration tests** (I-1: 26 of 32 files). Filed as `elspeth-ae9f541775`.
 - **Regression-dump test files** (I-1: `test_fixes.py`). Any file named after a sprint, ticket, or "fixes" warrants scrutiny.
 

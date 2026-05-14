@@ -32,6 +32,15 @@ if TYPE_CHECKING:
     from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
 
 ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
+ComposerTrustMode = Literal["explicit_approve", "auto_commit"]
+ComposerDensityDefault = Literal["high", "medium", "low"]
+ProposalLifecycleStatus = Literal["pending", "committed", "rejected"]
+ProposalEventType = Literal[
+    "proposal.created",
+    "proposal.accepted",
+    "proposal.rejected",
+    "trust_mode.changed",
+]
 # ``audit`` is an internal-only role for breadcrumb rows that have no real
 # OpenAI tool-response or assistant parent (LLM-call audit envelopes,
 # pre-flight redaction failures, etc.). They MUST be filtered out of any
@@ -93,6 +102,10 @@ AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 CHAT_MESSAGE_ROLE_VALUES: frozenset[str] = frozenset(get_args(ChatMessageRole))
+COMPOSER_TRUST_MODE_VALUES: frozenset[str] = frozenset(get_args(ComposerTrustMode))
+COMPOSER_DENSITY_DEFAULT_VALUES: frozenset[str] = frozenset(get_args(ComposerDensityDefault))
+PROPOSAL_LIFECYCLE_STATUS_VALUES: frozenset[str] = frozenset(get_args(ProposalLifecycleStatus))
+PROPOSAL_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(ProposalEventType))
 CHAT_MESSAGE_WRITER_PRINCIPAL_VALUES: frozenset[str] = frozenset(get_args(ChatMessageWriterPrincipal))
 COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(CompositionStateProvenance))
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
@@ -167,6 +180,76 @@ class SessionRecord:
     updated_at: datetime
     forked_from_session_id: UUID | None = None
     forked_from_message_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComposerSessionPreferencesRecord:
+    """Represents composer preferences stored on the sessions row."""
+
+    session_id: UUID
+    trust_mode: ComposerTrustMode
+    density_default: ComposerDensityDefault
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.trust_mode not in COMPOSER_TRUST_MODE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: sessions.trust_mode is {self.trust_mode!r}, expected one of {sorted(COMPOSER_TRUST_MODE_VALUES)}"
+            )
+        if self.density_default not in COMPOSER_DENSITY_DEFAULT_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: sessions.density_default is {self.density_default!r}, expected one of {sorted(COMPOSER_DENSITY_DEFAULT_VALUES)}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CompositionProposalRecord:
+    """Represents a durable pending/committed/rejected composer proposal."""
+
+    id: UUID
+    session_id: UUID
+    tool_call_id: str
+    tool_name: str
+    status: ProposalLifecycleStatus
+    summary: str
+    rationale: str
+    affects: Sequence[str]
+    arguments_json: Mapping[str, Any]
+    arguments_redacted_json: Mapping[str, Any]
+    base_state_id: UUID | None
+    committed_state_id: UUID | None
+    audit_event_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.status not in PROPOSAL_LIFECYCLE_STATUS_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: composition_proposals.status is {self.status!r}, expected one of {sorted(PROPOSAL_LIFECYCLE_STATUS_VALUES)}"
+            )
+        freeze_fields(self, "affects", "arguments_json", "arguments_redacted_json")
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalEventRecord:
+    """Represents an immutable composer proposal lifecycle event."""
+
+    id: UUID
+    session_id: UUID
+    proposal_id: UUID | None
+    event_type: ProposalEventType
+    # Actor format is canonicalized by class: composer-web:user:{user_id},
+    # user:{user_id}, or system:{component}.
+    actor: str
+    payload: Mapping[str, Any]
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.event_type not in PROPOSAL_EVENT_TYPE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: proposal_events.event_type is {self.event_type!r}, expected one of {sorted(PROPOSAL_EVENT_TYPE_VALUES)}"
+            )
+        freeze_fields(self, "payload")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

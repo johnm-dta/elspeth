@@ -210,7 +210,7 @@ EOF
 - Modify: `src/elspeth/web/sessions/protocol.py`
 - Test: `tests/unit/web/sessions/test_composer_proposals.py`
 
-- [ ] **Step 1: Write the failing schema tests**
+- [x] **Step 1: Write the failing schema tests**
 
 Create `tests/unit/web/sessions/test_composer_proposals.py` with:
 
@@ -330,7 +330,9 @@ def test_default_session_preferences_are_inserted_by_database(engine) -> None:
 
 This default test intentionally uses raw `insert(sessions_table)` while `_insert_session()` passes explicit values. After implementing the columns, also inspect `SessionServiceImpl.create_session()` and add/update a focused assertion if the production session-creation path explicitly sets preferences instead of relying on server defaults. Both paths must remain valid.
 
-- [ ] **Step 2: Run the schema tests to verify they fail**
+- [x] **Step 2: Run the schema tests to verify they fail**
+
+Task result: `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py -q` failed during collection with `ImportError: cannot import name 'composition_proposals_table'`, the expected missing-schema failure.
 
 Run:
 
@@ -340,7 +342,7 @@ Run:
 
 Expected: FAIL with missing `composition_proposals_table`, missing `proposal_events_table`, or missing session preference columns.
 
-- [ ] **Step 3: Add closed protocol types and records**
+- [x] **Step 3: Add closed protocol types and records**
 
 In `src/elspeth/web/sessions/protocol.py`, add these imports and definitions near the existing chat/session closed domains:
 
@@ -410,7 +412,7 @@ class ProposalEventRecord:
         freeze_fields(self, "payload")
 ```
 
-- [ ] **Step 4: Add the SQLAlchemy tables and constraints**
+- [x] **Step 4: Add the SQLAlchemy tables and constraints**
 
 In `src/elspeth/web/sessions/models.py`, no new import is required; `server_default` is a keyword argument on `Column`.
 
@@ -521,7 +523,9 @@ Index(
 )
 ```
 
-- [ ] **Step 5: Run the schema tests to verify they pass**
+- [x] **Step 5: Run the schema tests to verify they pass**
+
+Task result: `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py tests/unit/web/sessions/test_schema.py -q` passed with `14 passed`.
 
 Run:
 
@@ -531,7 +535,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/models.py src/elspeth/web/sessions/protocol.py tests/unit/web/sessions/test_composer_proposals.py

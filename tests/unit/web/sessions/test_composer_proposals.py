@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import insert, inspect, select
+from sqlalchemy.exc import IntegrityError
+
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import (
+    composition_proposals_table,
+    proposal_events_table,
+    sessions_table,
+)
+from elspeth.web.sessions.schema import initialize_session_schema
+
+
+@pytest.fixture
+def engine():
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    return eng
+
+
+def _insert_session(conn, session_id: str) -> None:
+    conn.execute(
+        insert(sessions_table).values(
+            id=session_id,
+            user_id="alice",
+            auth_provider_type="local",
+            title="Composer UX",
+            trust_mode="explicit_approve",
+            density_default="high",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+
+
+def test_session_preferences_columns_exist(engine) -> None:
+    columns = {column["name"] for column in inspect(engine).get_columns("sessions")}
+    assert {"trust_mode", "density_default"} <= columns
+
+
+def test_proposal_tables_exist(engine) -> None:
+    table_names = set(inspect(engine).get_table_names())
+    assert "composition_proposals" in table_names
+    assert "proposal_events" in table_names
+
+
+def test_composition_proposal_status_is_closed(engine) -> None:
+    session_id = str(uuid4())
+    with engine.begin() as conn:
+        _insert_session(conn, session_id)
+        with pytest.raises(IntegrityError, match="ck_composition_proposals_status"):
+            conn.execute(
+                insert(composition_proposals_table).values(
+                    id=str(uuid4()),
+                    session_id=session_id,
+                    tool_call_id="call_1",
+                    tool_name="set_pipeline",
+                    status="half_done",
+                    summary="Add a pipeline",
+                    rationale="Requested by the user",
+                    affects=["graph", "validation"],
+                    arguments_json={"source": {"plugin": "csv", "options": {}}},
+                    arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+                    base_state_id=None,
+                    committed_state_id=None,
+                    audit_event_id=None,
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+
+def test_proposal_event_type_is_closed(engine) -> None:
+    session_id = str(uuid4())
+    with engine.begin() as conn:
+        _insert_session(conn, session_id)
+        with pytest.raises(IntegrityError, match="ck_proposal_events_type"):
+            conn.execute(
+                insert(proposal_events_table).values(
+                    id=str(uuid4()),
+                    session_id=session_id,
+                    proposal_id=None,
+                    event_type="proposal.maybe",
+                    actor="user:alice",
+                    payload={"status": "unknown"},
+                    created_at=datetime.now(UTC),
+                )
+            )
+
+
+def test_default_session_preferences_are_inserted_by_database(engine) -> None:
+    session_id = str(uuid4())
+    with engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=session_id,
+                user_id="alice",
+                auth_provider_type="local",
+                title="Defaults",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        row = conn.execute(
+            select(
+                sessions_table.c.trust_mode,
+                sessions_table.c.density_default,
+            ).where(sessions_table.c.id == session_id)
+        ).one()
+
+    assert row.trust_mode == "explicit_approve"
+    assert row.density_default == "high"

@@ -40,6 +40,8 @@ sessions_table = Table(
     Column("user_id", String, nullable=False, index=True),
     Column("auth_provider_type", String, nullable=False, default="local"),
     Column("title", String, nullable=False),
+    Column("trust_mode", String, nullable=False, server_default="explicit_approve"),
+    Column("density_default", String, nullable=False, server_default="high"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column(
@@ -49,6 +51,14 @@ sessions_table = Table(
         nullable=True,
     ),
     Column("forked_from_message_id", String, nullable=True),
+    CheckConstraint(
+        "trust_mode IN ('explicit_approve', 'auto_commit')",
+        name="ck_sessions_trust_mode",
+    ),
+    CheckConstraint(
+        "density_default IN ('high', 'medium', 'low')",
+        name="ck_sessions_density_default",
+    ),
 )
 
 chat_messages_table = Table(
@@ -242,6 +252,89 @@ composition_states_table = Table(
         "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'session_seed', 'session_fork')",
         name="ck_composition_states_provenance",
     ),
+)
+
+composition_proposals_table = Table(
+    "composition_proposals",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("tool_call_id", String, nullable=False),
+    Column("tool_name", String, nullable=False),
+    Column("status", String, nullable=False),
+    Column("summary", Text, nullable=False),
+    Column("rationale", Text, nullable=False),
+    Column("affects", JSON, nullable=False),
+    # Raw arguments are retained only for replay/execution. Normal
+    # API/UI surfaces must expose ``arguments_redacted_json`` instead.
+    Column("arguments_json", JSON, nullable=False),
+    Column("arguments_redacted_json", JSON, nullable=False),
+    Column("base_state_id", String, nullable=True),
+    Column("committed_state_id", String, nullable=True),
+    Column("audit_event_id", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ["base_state_id", "session_id"],
+        ["composition_states.id", "composition_states.session_id"],
+        name="fk_composition_proposals_base_state_session",
+    ),
+    ForeignKeyConstraint(
+        ["committed_state_id", "session_id"],
+        ["composition_states.id", "composition_states.session_id"],
+        name="fk_composition_proposals_committed_state_session",
+    ),
+    UniqueConstraint(
+        "session_id",
+        "tool_call_id",
+        name="uq_composition_proposals_session_tool_call",
+    ),
+    CheckConstraint(
+        "status IN ('pending', 'committed', 'rejected')",
+        name="ck_composition_proposals_status",
+    ),
+    CheckConstraint(
+        "(status = 'committed') = (committed_state_id IS NOT NULL)",
+        name="ck_composition_proposals_committed_state",
+    ),
+)
+
+proposal_events_table = Table(
+    "proposal_events",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "proposal_id",
+        String,
+        ForeignKey("composition_proposals.id", ondelete="CASCADE"),
+        nullable=True,
+    ),
+    Column("event_type", String, nullable=False),
+    Column("actor", String, nullable=False),
+    Column("payload", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "event_type IN ('proposal.created', 'proposal.accepted', 'proposal.rejected', 'trust_mode.changed')",
+        name="ck_proposal_events_type",
+    ),
+)
+Index(
+    "ix_proposal_events_session_created",
+    proposal_events_table.c.session_id,
+    proposal_events_table.c.created_at,
 )
 
 runs_table = Table(

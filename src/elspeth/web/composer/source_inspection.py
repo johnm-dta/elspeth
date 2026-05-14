@@ -26,11 +26,12 @@ import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.web.composer.guided.errors import InvariantError
 
 _MAX_BYTES: Final[int] = 8 * 1024
 _MAX_ROWS: Final[int] = 100
@@ -599,6 +600,80 @@ def facts_to_dict(facts: SourceInspectionFacts) -> dict[str, Any]:
         "url_candidates": list(facts.url_candidates),
         "warnings": list(facts.warnings),
     }
+
+
+_SOURCE_KINDS: Final[frozenset[str]] = frozenset({"csv", "jsonl", "json", "text", "unknown"})
+_INFERRED_TYPES: Final[frozenset[str]] = frozenset({"int", "float", "bool", "str", "null"})
+
+
+def _strict_str_dict(value: Any, *, field_name: str) -> dict[str, str]:
+    if type(value) is not dict:
+        raise TypeError(f"{field_name} must be dict[str, str]")
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if type(key) is not str or type(item) is not str:
+            raise TypeError(f"{field_name} must be dict[str, str]")
+        result[key] = item
+    return result
+
+
+def _strict_str_tuple(value: Any, *, field_name: str) -> tuple[str, ...]:
+    if type(value) is not list:
+        raise TypeError(f"{field_name} must be list[str]")
+    items: list[str] = []
+    for item in value:
+        if type(item) is not str:
+            raise TypeError(f"{field_name} must be list[str]")
+        items.append(item)
+    return tuple(items)
+
+
+def _strict_byte_range(value: Any) -> tuple[int, int]:
+    if type(value) is not list or len(value) != 2:
+        raise TypeError("byte_range_inspected must be a two-item list[int, int]")
+    start = value[0]
+    end = value[1]
+    if type(start) is not int or type(end) is not int:
+        raise TypeError("byte_range_inspected must be a two-item list[int, int]")
+    return (start, end)
+
+
+def _strict_inferred_types(value: Any) -> dict[str, InferredType] | None:
+    if value is None:
+        return None
+    raw = _strict_str_dict(value, field_name="inferred_types")
+    result: dict[str, InferredType] = {}
+    for key, item in raw.items():
+        if item not in _INFERRED_TYPES:
+            raise ValueError(f"inferred_types contains unsupported type {item!r}")
+        result[key] = cast(InferredType, item)
+    return result
+
+
+def facts_from_dict(d: Mapping[str, Any]) -> SourceInspectionFacts:
+    """Reconstruct persisted inspection facts. Tier 1 strict, no fabrication."""
+    try:
+        source_kind_raw = d["source_kind"]
+        if source_kind_raw not in _SOURCE_KINDS:
+            raise ValueError(f"unsupported source_kind {source_kind_raw!r}")
+        sample_row_count = d["sample_row_count"]
+        if type(sample_row_count) is not int:
+            raise TypeError("sample_row_count must be int")
+        observed_headers_raw = d["observed_headers"]
+        return SourceInspectionFacts(
+            source_kind=cast(SourceKind, source_kind_raw),
+            redacted_identity=_strict_str_dict(d["redacted_identity"], field_name="redacted_identity"),
+            byte_range_inspected=_strict_byte_range(d["byte_range_inspected"]),
+            sample_row_count=sample_row_count,
+            observed_headers=(
+                None if observed_headers_raw is None else _strict_str_tuple(observed_headers_raw, field_name="observed_headers")
+            ),
+            inferred_types=_strict_inferred_types(d["inferred_types"]),
+            url_candidates=_strict_str_tuple(d["url_candidates"], field_name="url_candidates"),
+            warnings=_strict_str_tuple(d["warnings"], field_name="warnings"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InvariantError(f"facts_from_dict: malformed record {d!r}") from exc
 
 
 def derive_extra_column_risk(

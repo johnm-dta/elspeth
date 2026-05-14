@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -10,6 +12,7 @@ from hypothesis import strategies as st
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
+    GUIDED_SESSION_SCHEMA_VERSION,
     ChainProposal,
     GuidedSession,
     SinkIntent,
@@ -25,6 +28,7 @@ from elspeth.web.composer.guided.state_machine import (
     mark_solver_exhausted,
     step_advance,
 )
+from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict
 
 
 class TestTerminalState:
@@ -315,9 +319,52 @@ class TestGuidedSession:
         assert restored == sess
         assert restored.step_2_chosen_plugin is None
 
+    def test_guided_session_round_trips_inspection_facts(self) -> None:
+        facts = SourceInspectionFacts(
+            source_kind="csv",
+            redacted_identity={"filename": "input.csv"},
+            byte_range_inspected=(0, 128),
+            observed_headers=("name", "age"),
+            inferred_types={"name": "str", "age": "int"},
+            url_candidates=(),
+            sample_row_count=10,
+            warnings=(),
+        )
+        sess = dataclasses.replace(GuidedSession.initial(), step_1_inspection_facts=facts)
+        d = sess.to_dict()
+
+        restored = GuidedSession.from_dict(d)
+
+        assert restored.step_1_inspection_facts == facts
+
+    def test_guided_session_inspection_facts_default_none(self) -> None:
+        sess = GuidedSession.initial()
+        assert sess.step_1_inspection_facts is None
+
+    def test_guided_session_rejects_mutable_inspection_facts(self) -> None:
+        with pytest.raises(TypeError, match="step_1_inspection_facts must be SourceInspectionFacts or None"):
+            dataclasses.replace(GuidedSession.initial(), step_1_inspection_facts={})
+
+    def test_source_inspection_facts_from_dict_is_tier1_strict(self) -> None:
+        d = {
+            "source_kind": "csv",
+            "redacted_identity": {"filename": "input.csv"},
+            "byte_range_inspected": [0, 128],
+            "sample_row_count": 10,
+            "observed_headers": ["name", "age"],
+            "inferred_types": {"name": "str", "age": "int"},
+            "url_candidates": [],
+            "warnings": [],
+        }
+        restored = facts_from_dict(d)
+        assert restored.observed_headers == ("name", "age")
+
+    def test_guided_session_schema_version_bumped_for_inspection_facts(self) -> None:
+        assert GUIDED_SESSION_SCHEMA_VERSION == 4
+
     def test_guided_session_to_dict_includes_schema_version(self) -> None:
         sess = GuidedSession.initial()
-        assert sess.to_dict()["schema_version"] == 3
+        assert sess.to_dict()["schema_version"] == 4
 
     def test_guided_session_requires_schema_version(self) -> None:
         current = GuidedSession.initial().to_dict()
@@ -328,9 +375,9 @@ class TestGuidedSession:
 
     def test_guided_session_rejects_old_schema_version(self) -> None:
         old = GuidedSession.initial().to_dict()
-        old["schema_version"] = 2
+        old["schema_version"] = 3
 
-        with pytest.raises(InvariantError, match="unsupported schema_version 2"):
+        with pytest.raises(InvariantError, match="unsupported schema_version 3"):
             GuidedSession.from_dict(old)
 
     def test_guided_session_current_history_requires_summary(self) -> None:

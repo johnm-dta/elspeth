@@ -25,8 +25,11 @@ from typing import TYPE_CHECKING, Any
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
+from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-GUIDED_SESSION_SCHEMA_VERSION = 3
+# Schema v3 persisted sessions are intentionally incompatible with v4: the
+# operator must delete the guided sessions DB before deploying this change.
+GUIDED_SESSION_SCHEMA_VERSION = 4
 
 if TYPE_CHECKING:
     # Imported for type annotations only — avoids a circular dependency.
@@ -395,7 +398,8 @@ class GuidedSession:
     step_1_result: SourceResolved | None
     step_2_result: SinkResolved | None
     step_3_proposal: ChainProposal | None
-    terminal: TerminalState | None
+    step_1_inspection_facts: SourceInspectionFacts | None = None
+    terminal: TerminalState | None = None
     transition_consumed: bool = False
     step_1_source_intent: SourceIntent | None = None
     step_2_sink_intent: SinkIntent | None = None
@@ -411,6 +415,12 @@ class GuidedSession:
     # (user + assistant share the counter); incremented on every append.
     chat_history: tuple[ChatTurn, ...] = ()
     chat_turn_seq: int = 0
+
+    def __post_init__(self) -> None:
+        if self.step_1_inspection_facts is not None and type(self.step_1_inspection_facts) is not SourceInspectionFacts:
+            raise TypeError(
+                f"step_1_inspection_facts must be SourceInspectionFacts or None, got {type(self.step_1_inspection_facts).__name__}"
+            )
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -441,6 +451,7 @@ class GuidedSession:
             "step_1_result": self.step_1_result.to_dict() if self.step_1_result is not None else None,
             "step_2_result": self.step_2_result.to_dict() if self.step_2_result is not None else None,
             "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
+            "step_1_inspection_facts": facts_to_dict(self.step_1_inspection_facts) if self.step_1_inspection_facts is not None else None,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
             "transition_consumed": self.transition_consumed,
             "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
@@ -476,6 +487,7 @@ class GuidedSession:
             step_1_raw = d["step_1_result"]
             step_2_raw = d["step_2_result"]
             step_3_raw = d["step_3_proposal"]
+            inspection_facts_raw = d["step_1_inspection_facts"]
             terminal_raw = d["terminal"]
             source_intent_raw = d["step_1_source_intent"]
             sink_intent_raw = d["step_2_sink_intent"]
@@ -511,6 +523,7 @@ class GuidedSession:
                 step_1_result=SourceResolved.from_dict(step_1_raw) if step_1_raw is not None else None,
                 step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
+                step_1_inspection_facts=facts_from_dict(inspection_facts_raw) if inspection_facts_raw is not None else None,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
                 transition_consumed=d["transition_consumed"],
                 step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,

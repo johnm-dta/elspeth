@@ -79,6 +79,18 @@ class TestSessionCRUD:
         assert fetched.title == "Test"
 
     @pytest.mark.asyncio
+    async def test_update_session_title_persists_and_refreshes_timestamp(self, service) -> None:
+        created = await service.create_session("alice", "Test", "local")
+
+        updated = await service.update_session_title(created.id, "Renamed pipeline")
+
+        assert updated.id == created.id
+        assert updated.title == "Renamed pipeline"
+        assert updated.updated_at >= created.updated_at
+        fetched = await service.get_session(created.id)
+        assert fetched.title == "Renamed pipeline"
+
+    @pytest.mark.asyncio
     async def test_get_session_not_found_raises(self, service) -> None:
         with pytest.raises(ValueError, match="not found"):
             await service.get_session(uuid.uuid4())

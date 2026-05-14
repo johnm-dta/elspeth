@@ -158,7 +158,7 @@ These standards interact in non-obvious ways. The tier model's fabrication rule 
 
 ---
 
-<!-- filigree:instructions:v2.0.0:8160de89 -->
+<!-- filigree:instructions:v2.0.0:62c3b0c5 -->
 ## Filigree Issue Tracker
 
 Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
@@ -181,7 +181,7 @@ faster and return structured data. Key tools:
 - `get_ready` / `get_blocked` — find available work
 - `get_issue` / `list_issues` / `search_issues` — read issues
 - `create_issue` / `update_issue` / `close_issue` — manage issues
-- `start_work` / `start_next_work` — atomically claim and transition to the issue type's WIP status (the usual way to pick up work in 2.0)
+- `start_work` / `start_next_work` — atomically claim and transition to in-progress (the usual way to pick up work in 2.0)
 - `claim_issue` / `claim_next` — atomic claim only, no transition (niche; prefer `start_work`)
 - `add_comment` / `add_label` — metadata
 - `list_labels` / `get_label_taxonomy` — discover labels and reserved namespaces
@@ -190,7 +190,7 @@ faster and return structured data. Key tools:
 - `get_mcp_status` — read-only connector/schema compatibility diagnostic
 - `get_valid_transitions` — workflow navigation
 - `observe` / `list_observations` / `dismiss_observation` / `promote_observation` — agent scratchpad
-- `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` — automated code scanning
+- `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` / `list_available_scanners` / `enable_scanner` / `disable_scanner` / `list_prompt_packs` — automated code scanning
 - `get_finding` / `list_findings` / `update_finding` / `batch_update_findings` — scan finding triage
 - `promote_finding` / `dismiss_finding` — finding lifecycle (promote to issue or dismiss)
 
@@ -245,7 +245,7 @@ filigree show <id> --with-files             # Include file associations (off by 
 
 # Creating & updating
 filigree create "Title" --type=task --priority=2          # New issue
-filigree update <id> --status=<status>                   # Update status (free-form; prefer `start-work` for open→WIP)
+filigree update <id> --status=<status>                   # Update status (free-form; prefer `start-work` for open→in_progress)
 filigree close <id>                                      # Mark complete
 filigree close <id> --reason="explanation"               # Close with reason
 
@@ -275,9 +275,9 @@ filigree guide <pack>                       # Display workflow guide for a pack
 
 # Atomic claiming
 filigree claim <id> --assignee <name>            # Claim issue (optimistic lock)
-filigree claim-next --assignee <name>            # Claim only; no status transition
-filigree start-work <id> --assignee <name>       # Claim + transition to the type's WIP status
-filigree start-next-work --assignee <name> --type=bug   # Claim + start the highest-priority ready bug
+filigree claim-next --assignee <name>            # Claim highest-priority ready issue
+filigree start-work <id> --assignee <name>       # Claim + transition to in_progress
+filigree start-next-work --assignee <name>       # Claim-next + transition to in_progress
 
 # Batch operations
 filigree batch-update <ids...> --priority=0      # Update multiple issues
@@ -313,12 +313,25 @@ filigree dismiss-finding <id>                            # Dismiss finding
 filigree batch-update-findings <ids...> --status=...     # Update many at once
 
 # Scanners
+filigree scanner available                               # Bundled scanners that can be enabled
+filigree scanner prompts                                 # Bundled scanner prompt packs
+filigree scanner prompts --language python               # Packs applicable to a scanner language focus
+filigree scanner enable codex                            # Enable bundled Codex scanner in this project
+filigree scanner disable codex                           # Disable a scanner registration
+filigree list-available-scanners                         # Alias for scanner available
+filigree list-prompt-packs                               # Alias for scanner prompts
+filigree scanner list                                    # Registered scanners (grouped alias)
+filigree scanner preview <scanner> <file>                 # Dry-run a scanner (grouped alias)
+filigree scanner trigger <scanner> <file> --prompt security # Run a scanner (grouped alias)
 filigree list-scanners                                   # Registered scanners
-filigree trigger-scan <scanner> <file_path>              # Run a scanner for one file
-filigree trigger-scan-batch <scanner> <file_paths...>    # Run one scanner for several files
-filigree preview-scan <scanner> <file_path>              # Dry-run a scanner command
+filigree trigger-scan <scanner> <file> --prompt security  # Run a scanner with a review focus
+filigree trigger-scan-batch <scanners...>                # Run several scanners
+filigree preview-scan <scanner>                          # Dry-run a scanner
 filigree get-scan-status <scan_id>                       # Scan progress / results
 filigree report-finding ...                              # Report a finding from a scanner
+
+Prompt packs are advisory review-focus hints; they do not restrict what the scanner process can read or report.
+Use a scanner's `applicable_prompts` or `list_prompt_packs language=<focus>` when choosing language-specific packs.
 
 # Most data commands support --json; --actor is global on every command.
 # (`install`, `doctor`, `session-context` etc. are human-output only.)
@@ -354,28 +367,17 @@ Key endpoints:
 - `GET /api/loom/files/{file_id}` — File detail with associations and findings summary
 - `GET /api/loom/files/{file_id}/findings` — Findings for a specific file
 
-Scanner findings are first-class triage objects. Use `list-findings` /
-`get-finding`, then `promote-finding` or `dismiss-finding`; do not convert
-scanner findings into ad hoc observations unless they are truly incidental to
-the current task.
-
 ### Workflow
 1. `filigree ready` to find available work
 2. `filigree show <id>` to review details
 3. `filigree transitions <id>` to see valid status transitions
-4. `filigree start-work <issue-id> --assignee <name>` to atomically claim and transition to the issue type's WIP status
+4. `filigree start-work <issue-id> --assignee <name>` to atomically claim and transition to in-progress (or `filigree start-next-work --assignee <name>` to skip steps 1–3 and grab the highest-priority ready issue)
 5. Do the work, commit code
 6. `filigree close <id>` when done
 
-Prefer `filigree ready --json --include-context` before selecting work so parent
-scope is visible. In this repo, the ready queue includes high-level epics and
-features; do not use raw `start-next-work` unless the operator asked for that
-queue. For autonomous pickup, filter to the intended leaf type, e.g.
-`filigree start-next-work --assignee <name> --type=bug` or `--type=task`.
-
 ### Session Start
 When beginning a new session, run `filigree session-context` to load the project
-snapshot (ready work, WIP items, critical path). This provides the
+snapshot (ready work, in-progress items, critical path). This provides the
 context needed to pick up where the previous session left off.
 
 ### Priority Scale

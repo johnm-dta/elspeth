@@ -329,6 +329,39 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeInTheDocument();
   });
 
+  it("scrolls the guided log into view when the active step advances", () => {
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { rerender } = render(<ChatPanel />);
+    scrollSpy.mockClear();
+    useSessionStore.setState({
+      guidedSession: { ...activeGuidedSession(), step: "step_2_sink" },
+      guidedNextTurn: {
+        type: "single_select",
+        step_index: 1,
+        payload: {
+          question: "Which output plugin should we use?",
+          options: [{ id: "json", label: "JSON", hint: null }],
+          allow_custom: false,
+        },
+      },
+    });
+    rerender(<ChatPanel />);
+
+    expect(scrollSpy).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  });
+
   it("visually separates guided sidecar chat as ask about this step", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",

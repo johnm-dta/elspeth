@@ -8,11 +8,9 @@
 //   2. Click invokes useSessionStore.exitToFreeform -- the button delegates
 //      entirely to the store action; it does NOT construct a GuidedRespondRequest
 //      body itself.  The mock asserts the delegation.
-//   3. No-confirmation path -- ExitToFreeformButton fires immediately on click
-//      (no intermediate confirm dialog).  This is intentionally simple for the
-//      demo path; the plan notes an operator may add confirmation later.
-//      This contract pins the *current* behaviour so a future "add confirmation"
-//      refactor must first update these tests rather than silently changing UX.
+//   3. Confirming path -- ExitToFreeformButton requires a deliberate second
+//      click before it calls exitToFreeform.  A stray click must not terminate
+//      the guided wizard.
 //   4. Distinctness / independence -- two simultaneous ExitToFreeformButton
 //      instances each fire their *own* exitToFreeform call independently; there
 //      is no shared singleton or de-duplication across instances.
@@ -53,46 +51,48 @@ describe("ExitToFreeformButton -- button identity", () => {
 // ── Contract 2: click invokes exitToFreeform ─────────────────────────────────
 
 describe("ExitToFreeformButton -- store action delegation", () => {
-  it("clicking the button calls useSessionStore.exitToFreeform once", async () => {
+  it("first click asks for confirmation and does not call exitToFreeform", async () => {
     const user = userEvent.setup();
     const mockExitToFreeform = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({ exitToFreeform: mockExitToFreeform });
 
     render(<ExitToFreeformButton />);
     await user.click(screen.getByRole("button", { name: /exit to freeform/i }));
+
+    expect(mockExitToFreeform).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: /confirm exit to freeform/i }),
+    ).toBeTruthy();
+  });
+
+  it("confirmation click calls useSessionStore.exitToFreeform once", async () => {
+    const user = userEvent.setup();
+    const mockExitToFreeform = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ exitToFreeform: mockExitToFreeform });
+
+    render(<ExitToFreeformButton />);
+    await user.click(screen.getByRole("button", { name: /exit to freeform/i }));
+    await user.click(
+      screen.getByRole("button", { name: /confirm exit to freeform/i }),
+    );
 
     expect(mockExitToFreeform).toHaveBeenCalledTimes(1);
     expect(mockExitToFreeform).toHaveBeenCalledWith();
   });
-
-  it("clicking the button a second time calls exitToFreeform a second time", async () => {
-    const user = userEvent.setup();
-    const mockExitToFreeform = vi.fn().mockResolvedValue(undefined);
-    useSessionStore.setState({ exitToFreeform: mockExitToFreeform });
-
-    render(<ExitToFreeformButton />);
-    const btn = screen.getByRole("button", { name: /exit to freeform/i });
-    await user.click(btn);
-    await user.click(btn);
-
-    expect(mockExitToFreeform).toHaveBeenCalledTimes(2);
-  });
 });
 
-// ── Contract 3: no-confirmation (fires immediately) ──────────────────────────
+// ── Contract 3: confirmation prompt ──────────────────────────────────────────
 
-describe("ExitToFreeformButton -- no intermediate confirmation dialog", () => {
-  it("does NOT render any confirmation dialog on initial render", () => {
+describe("ExitToFreeformButton -- intermediate confirmation prompt", () => {
+  it("does not render confirmation controls on initial render", () => {
     render(<ExitToFreeformButton />);
-    // Common confirmation patterns: role="alertdialog", role="dialog", or text
-    // containing "are you sure"/"confirm"/"cancel".
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.queryByText(/are you sure/i)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /confirm exit to freeform/i }),
+    ).toBeNull();
     expect(screen.queryByText(/cancel/i)).toBeNull();
   });
 
-  it("does NOT render a confirmation dialog after clicking the button", async () => {
+  it("renders a confirmation and cancel affordance after the first click", async () => {
     const user = userEvent.setup();
     const mockExitToFreeform = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({ exitToFreeform: mockExitToFreeform });
@@ -100,8 +100,27 @@ describe("ExitToFreeformButton -- no intermediate confirmation dialog", () => {
     render(<ExitToFreeformButton />);
     await user.click(screen.getByRole("button", { name: /exit to freeform/i }));
 
-    expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /confirm exit to freeform/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: /cancel exit/i })).toBeTruthy();
+    expect(mockExitToFreeform).not.toHaveBeenCalled();
+  });
+
+  it("cancel returns the control to its initial state", async () => {
+    const user = userEvent.setup();
+    const mockExitToFreeform = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ exitToFreeform: mockExitToFreeform });
+
+    render(<ExitToFreeformButton />);
+    await user.click(screen.getByRole("button", { name: /exit to freeform/i }));
+    await user.click(screen.getByRole("button", { name: /cancel exit/i }));
+
+    expect(screen.getByRole("button", { name: /exit to freeform/i })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /confirm exit to freeform/i }),
+    ).toBeNull();
+    expect(mockExitToFreeform).not.toHaveBeenCalled();
   });
 });
 
@@ -124,10 +143,18 @@ describe("ExitToFreeformButton -- two simultaneous instances fire independently"
     expect(btns).toHaveLength(2);
 
     await user.click(btns[0]);
-    expect(mockExitToFreeform).toHaveBeenCalledTimes(1);
+    expect(mockExitToFreeform).toHaveBeenCalledTimes(0);
 
     await user.click(btns[1]);
-    expect(mockExitToFreeform).toHaveBeenCalledTimes(2);
+    expect(mockExitToFreeform).toHaveBeenCalledTimes(0);
+
+    const confirmButtons = screen.getAllByRole("button", {
+      name: /confirm exit to freeform/i,
+    });
+    expect(confirmButtons).toHaveLength(2);
+
+    await user.click(confirmButtons[0]);
+    expect(mockExitToFreeform).toHaveBeenCalledTimes(1);
   });
 });
 

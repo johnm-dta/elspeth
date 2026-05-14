@@ -25,6 +25,7 @@ vi.mock("@/api/client", () => ({
   archiveSession: vi.fn(),
   getGuided: vi.fn(),
   respondGuided: vi.fn(),
+  reenterGuided: vi.fn(),
   chatGuided: vi.fn(),
 }));
 
@@ -110,6 +111,36 @@ const sampleChatResponse: GuidedChatResponse = {
       },
     ],
     chat_turn_seq: 2,
+  },
+  next_turn: null,
+  terminal: null,
+  composition_state: null,
+};
+
+const sampleSourceResolvingChatResponse: GuidedChatResponse = {
+  assistant_message: "I set this up as a CSV source.",
+  guided_session: { ...sampleGuidedSession, step: "step_2_sink" },
+  next_turn: { type: "single_select", step_index: 1, payload: {} },
+  terminal: null,
+  composition_state: {
+    ...sampleCompositionState,
+    version: 2,
+    source: {
+      plugin: "csv",
+      options: {
+        path: "/tmp/teal_colours.csv",
+        schema: { mode: "observed" },
+      },
+    },
+  },
+};
+
+const sampleExitedGuidedSession: GuidedSession = {
+  ...sampleGuidedSession,
+  terminal: {
+    kind: "exited_to_freeform",
+    reason: "user_pressed_exit",
+    pipeline_yaml: null,
   },
 };
 
@@ -239,6 +270,36 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(respondGuided).toHaveBeenCalledWith(
       "sess-1",
       expect.objectContaining({ control_signal: "exit_to_freeform" }),
+    );
+  });
+
+  it("reenterGuided: calls backend and atomically restores active guided fields", async () => {
+    const { reenterGuided } = await import("@/api/client");
+    (reenterGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleGetGuidedResponse,
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: sampleExitedGuidedSession,
+      guidedNextTurn: null,
+      guidedTerminal: sampleExitedGuidedSession.terminal,
+      compositionState: sampleCompositionState,
+    });
+
+    await useSessionStore.getState().reenterGuided();
+
+    expect(reenterGuided).toHaveBeenCalledWith("sess-1");
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+    expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
+    expect(state.guidedTerminal).toEqual(sampleGetGuidedResponse.terminal);
+    expect(state.compositionState).toEqual(sampleGetGuidedResponse.composition_state);
+  });
+
+  it("reenterGuided: throws when activeSessionId is null", async () => {
+    await expect(useSessionStore.getState().reenterGuided()).rejects.toThrow(
+      "reenterGuided called without active session",
     );
   });
 
@@ -475,6 +536,36 @@ describe("sessionStore — guided-mode fields and actions", () => {
       const state = useSessionStore.getState();
       expect(state.guidedChatPending).toBe(false);
       expect(state.guidedSession).toEqual(sampleChatResponse.guided_session);
+    });
+
+    it("applies step-advancing chat response fields when source is resolved", async () => {
+      const { chatGuided } = await import("@/api/client");
+      (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleSourceResolvingChatResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+        guidedNextTurn: sampleNextTurn,
+        compositionState: sampleCompositionState,
+      });
+
+      await useSessionStore.getState().chatGuided("make ten teal colour rows");
+
+      const state = useSessionStore.getState();
+      expect(state.guidedSession).toEqual(
+        sampleSourceResolvingChatResponse.guided_session,
+      );
+      expect(state.guidedNextTurn).toEqual(
+        sampleSourceResolvingChatResponse.next_turn,
+      );
+      expect(state.guidedTerminal).toEqual(
+        sampleSourceResolvingChatResponse.terminal,
+      );
+      expect(state.compositionState).toEqual(
+        sampleSourceResolvingChatResponse.composition_state,
+      );
+      expect(state.guidedChatPending).toBe(false);
     });
 
     it("drops response when active session changes before resolution", async () => {

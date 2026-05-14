@@ -1143,6 +1143,30 @@ class SessionServiceImpl:
             forked_from_message_id=UUID(row.forked_from_message_id) if row.forked_from_message_id else None,
         )
 
+    async def update_session_title(self, session_id: UUID, title: str) -> SessionRecord:
+        """Update a session title and return the refreshed record."""
+        sid = str(session_id)
+        now = self._now()
+
+        def _sync() -> Any:
+            with self._engine.begin() as conn:
+                result = conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(title=title, updated_at=now))
+                if result.rowcount == 0:
+                    raise ValueError(f"Session not found: {session_id}")
+                return conn.execute(select(sessions_table).where(sessions_table.c.id == sid)).one()
+
+        row = await self._run_sync(_sync)
+        return SessionRecord(
+            id=UUID(row.id),
+            user_id=row.user_id,
+            auth_provider_type=row.auth_provider_type,
+            title=row.title,
+            created_at=self._ensure_utc(row.created_at),
+            updated_at=self._ensure_utc(row.updated_at),
+            forked_from_session_id=UUID(row.forked_from_session_id) if row.forked_from_session_id else None,
+            forked_from_message_id=UUID(row.forked_from_message_id) if row.forked_from_message_id else None,
+        )
+
     async def list_sessions(
         self,
         user_id: str,

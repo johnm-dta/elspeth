@@ -615,6 +615,8 @@ class SessionServiceProtocol(Protocol):
 
     async def get_session(self, session_id: UUID) -> SessionRecord: ...
 
+    async def update_session_title(self, session_id: UUID, title: str) -> SessionRecord: ...
+
     async def list_sessions(
         self,
         user_id: str,

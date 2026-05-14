@@ -1,38 +1,61 @@
 // ============================================================================
 // ExitToFreeformButton -- persistent guided-mode exit control.
 //
-// A single `<button type="button">` that delegates to `exitToFreeform()` in
-// useSessionStore.  The store action posts `{control_signal: "exit_to_freeform"}`
-// to the backend; this component owns no wire-body construction.
+// Delegates to `exitToFreeform()` in useSessionStore.  The store action posts
+// `{control_signal: "exit_to_freeform"}` to the backend; this component owns
+// no wire-body construction.
 //
-// Design decisions:
-//   NO confirmation dialog -- the button fires immediately on click.  The demo
-//   path prioritises minimal friction; a confirming-mode variant can be added
-//   later by wrapping this component rather than modifying it.
-//
-//   NO props -- the component is self-contained.  It reads exitToFreeform from
-//   the store directly.  There is nothing to parameterise for the demo.
+// Design decision:
+//   Exit is a two-click confirmation.  The first click exposes explicit
+//   Confirm/Cancel controls; only Confirm calls the store action.
 //
 // Placement: rendered alongside every guided turn by ChatPanel (Phase 8).
-// The component has no local state and mounts without stealing focus.
+// The component mounts without stealing focus.
 // ============================================================================
 
+import { useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function ExitToFreeformButton() {
+  const [confirming, setConfirming] = useState(false);
   const exitToFreeform = useSessionStore((s) => s.exitToFreeform);
 
-  function handleClick(): void {
+  function handleConfirm(): void {
     void exitToFreeform();
+  }
+
+  if (confirming) {
+    return (
+      <div
+        className="guided-exit-confirmation"
+        role="group"
+        aria-label="Confirm exit to freeform"
+      >
+        <button
+          type="button"
+          className="guided-exit-button guided-exit-button--danger"
+          onClick={handleConfirm}
+        >
+          Confirm exit to freeform
+        </button>
+        <button
+          type="button"
+          className="guided-exit-button"
+          onClick={() => setConfirming(false)}
+        >
+          Cancel exit
+        </button>
+      </div>
+    );
   }
 
   return (
     <button
       type="button"
       className="guided-exit-button"
-      onClick={handleClick}
+      onClick={() => setConfirming(true)}
     >
       Exit to freeform
     </button>

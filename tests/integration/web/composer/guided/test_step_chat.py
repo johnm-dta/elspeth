@@ -55,6 +55,17 @@ def _fake_llm_reply(text: str) -> SimpleNamespace:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
 
 
+def _fake_source_resolution_tool_call(arguments: dict) -> SimpleNamespace:
+    """LiteLLM-shaped response carrying a Step-1 source-resolution tool call."""
+    tool_call = SimpleNamespace(
+        function=SimpleNamespace(
+            name="resolve_source",
+            arguments=json.dumps(arguments),
+        )
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[tool_call]))])
+
+
 def _post_chat(client: TestClient, session_id: str, **kwargs) -> tuple[int, dict]:
     resp = client.post(f"/api/sessions/{session_id}/guided/chat", json=kwargs)
     return resp.status_code, resp.json()
@@ -289,6 +300,81 @@ class TestStepChatSuccess:
         assert [entry["seq"] for entry in chat_history] == [0, 1, 2, 3]
         assert [entry["content"] for entry in chat_history] == ["first", "first reply", "second", "second reply"]
         assert body["guided_session"]["chat_turn_seq"] == 4
+
+
+class TestStep1SourceResolution:
+    def _drive_to_step_1_schema_form(self, client: TestClient, session_id: str) -> None:
+        _seed_guided_session(client, session_id)
+        resp = client.post(f"/api/sessions/{session_id}/guided/respond", json={"chosen": ["csv"]})
+        assert resp.status_code == 200, resp.json()
+        assert resp.json()["next_turn"]["type"] == "schema_form"
+
+    def test_step_1_chat_can_commit_generated_csv_source_and_emit_step_2(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        """A complete Step-1 source request must not be answered as prose-only chat.
+
+        Regression for staging session 221110b7-e709-48cf-99cd-b22e2c9e1f5e:
+        after the operator selected ``csv``, a specific data request in the
+        guided chat box received a generic color-list answer and left
+        ``CompositionState.source`` null.  The Step-1 chat path should instead
+        resolve the source, persist it through the normal Step-1 handler, and
+        return the Step-2 turn so the UI can advance.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_1_schema_form(composer_test_client, session_id)
+
+        source_content = (
+            "colour,teal_fit\n"
+            "White,good\n"
+            "Navy blue,good\n"
+            "Coral,good\n"
+            "Gold,good\n"
+            "Soft gray,good\n"
+            "Neon green,bad\n"
+            "Bright orange,bad\n"
+            "Cherry red,bad\n"
+            "Mud brown,bad\n"
+            "Fluorescent yellow,bad\n"
+        )
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(
+                return_value=_fake_source_resolution_tool_call(
+                    {
+                        "resolution": "source",
+                        "plugin": "csv",
+                        "filename": "teal_colours.csv",
+                        "mime_type": "text/csv",
+                        "content": source_content,
+                        "options": {"schema": {"mode": "observed"}},
+                        "observed_columns": ["colour", "teal_fit"],
+                        "sample_rows": [
+                            {"colour": "White", "teal_fit": "good"},
+                            {"colour": "Neon green", "teal_fit": "bad"},
+                        ],
+                        "assistant_message": "I set this up as a CSV source.",
+                    }
+                )
+            ),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="can we make it just a list of ten random colours, 5 that go well with teal and 5 that go badly with teal",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message"] == "I set this up as a CSV source."
+        assert body["guided_session"]["step"] == "step_2_sink"
+        assert body["next_turn"]["type"] == "single_select"
+        assert body["next_turn"]["step_index"] == 1
+        assert body["composition_state"]["source"]["plugin"] == "csv"
+        source_options = body["composition_state"]["source"]["options"]
+        assert source_options["schema"]["mode"] == "observed"
+        assert source_options["path"].endswith("_teal_colours.csv")
 
 
 class TestStepChatRejections:

@@ -56,6 +56,8 @@ export function CommandPalette({
   const createSession = useSessionStore((s) => s.createSession);
   const selectSession = useSessionStore((s) => s.selectSession);
   const compositionState = useSessionStore((s) => s.compositionState);
+  const guidedSession = useSessionStore((s) => s.guidedSession);
+  const reenterGuided = useSessionStore((s) => s.reenterGuided);
 
   const validate = useExecutionStore((s) => s.validate);
   const execute = useExecutionStore((s) => s.execute);
@@ -118,6 +120,22 @@ export function CommandPalette({
         onClose();
       },
     });
+
+    if (
+      activeSessionId &&
+      guidedSession?.terminal?.kind === "exited_to_freeform" &&
+      guidedSession.terminal.reason === "user_pressed_exit"
+    ) {
+      cmds.push({
+        id: "reenter-guided",
+        title: "Re-enter Guided Mode",
+        category: "action",
+        action: () => {
+          void reenterGuided();
+          onClose();
+        },
+      });
+    }
 
     // Navigation (inspector tabs) — dispatched via custom DOM event so
     // InspectorPanel can listen without prop threading through Layout.
@@ -182,9 +200,11 @@ export function CommandPalette({
     sessions,
     activeSessionId,
     compositionState,
+    guidedSession,
     validationResult,
     createSession,
     selectSession,
+    reenterGuided,
     validate,
     execute,
     onClose,

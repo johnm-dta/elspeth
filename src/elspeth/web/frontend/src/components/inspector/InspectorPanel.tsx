@@ -182,6 +182,10 @@ function VersionSelector({
     if ((e.key === "Enter" || e.key === " ") && focusedIndex >= 0) {
       e.preventDefault();
       setSelectedIndex(focusedIndex);
+      const focusedVersion = sortedVersions[focusedIndex];
+      if (focusedVersion && focusedVersion.version !== currentVersion) {
+        handleRevert(focusedVersion);
+      }
     }
   }
 

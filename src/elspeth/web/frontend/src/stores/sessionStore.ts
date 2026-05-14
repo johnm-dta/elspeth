@@ -170,6 +170,7 @@ interface SessionState {
   loadSessions: () => Promise<void>;
   createSession: () => Promise<void>;
   selectSession: (id: string) => Promise<void>;
+  renameSession: (id: string, title: string) => Promise<void>;
   archiveSession: (id: string) => Promise<void>;
   sendMessage: (content: string, signal?: AbortSignal) => Promise<void>;
   loadCompositionProposals: (sessionId?: string) => Promise<void>;
@@ -208,6 +209,7 @@ interface SessionState {
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  reenterGuided: () => Promise<void>;
   chatGuided: (message: string) => Promise<void>;
   exitToFreeform: () => Promise<void>;
   clearError: () => void;
@@ -312,6 +314,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
+  async renameSession(id: string, title: string) {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    try {
+      const session = await api.updateSessionTitle(id, trimmed);
+      set((state) => ({
+        sessions: state.sessions.map((existing) =>
+          existing.id === id ? session : existing,
+        ),
+        error: null,
+      }));
+    } catch {
+      set({ error: "Failed to rename session. Please try again." });
+    }
+  },
+
   async selectSession(id: string) {
     // R4-H3: Clear validation when switching sessions to prevent
     // stale validation from a previous session being visible
@@ -371,8 +389,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
       // Fire-and-forget: refresh blob list for the newly selected session
       useBlobStore.getState().loadBlobs(id);
-    } catch {
-      set({ error: "Failed to load session. Please refresh the page." });
+    } catch (err) {
+      if ((err as ApiError).status === 404 && get().activeSessionId === id) {
+        set({
+          activeSessionId: null,
+          messages: [],
+          compositionState: null,
+          compositionProposals: [],
+          composerPreferences: null,
+          staleProposalIds: [],
+          proposalActionPendingIds: [],
+          composerProgress: null,
+          stateVersions: [],
+          isComposing: false,
+          error: null,
+          selectedNodeId: null,
+          ...clearedGuidedState(),
+          ...clearedRecoveryState(),
+        });
+        return;
+      }
+      if (get().activeSessionId === id) {
+        set({ error: "Failed to load session. Please refresh the page." });
+      }
     }
   },
 
@@ -957,6 +996,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
+  async reenterGuided() {
+    const { activeSessionId } = get();
+    if (activeSessionId === null) {
+      throw new Error("reenterGuided called without active session");
+    }
+    const requestedSessionId = activeSessionId;
+    try {
+      const response = await api.reenterGuided(activeSessionId);
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      set({
+        guidedSession: response.guided_session,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        compositionState: response.composition_state,
+        error: null,
+      });
+    } catch {
+      set({ error: "Failed to re-enter guided mode. Please try again." });
+    }
+  },
+
   async chatGuided(message: string) {
     const { activeSessionId, guidedSession } = get();
     // Offensive guards: caller must not invoke without an active session
@@ -995,6 +1057,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       set({
         guidedSession: response.guided_session,
+        guidedNextTurn: response.next_turn ?? get().guidedNextTurn,
+        guidedTerminal: response.terminal ?? get().guidedTerminal,
+        compositionState: response.composition_state ?? get().compositionState,
         guidedChatPending: false,
       });
     } catch {

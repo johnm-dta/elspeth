@@ -70,6 +70,17 @@ class CreateSessionRequest(_RequestModel):
         return _require_visible_content(value, field_label="Session title")
 
 
+class UpdateSessionRequest(_RequestModel):
+    """Request body for PATCH /api/sessions/{id}."""
+
+    title: str = pydantic.Field(min_length=1)
+
+    @field_validator("title")
+    @classmethod
+    def _validate_title(cls, value: str) -> str:
+        return _require_visible_content(value, field_label="Session title")
+
+
 class SessionResponse(_StrictResponse):
     """Response for session CRUD operations."""
 
@@ -411,15 +422,18 @@ class GuidedChatResponse(_StrictResponse):
     distinguish the two on the wire; slice 5's ``ComposerChatTurn`` audit
     record adds that discriminator).
 
-    ``guided_session`` is echoed verbatim in Phase A — chat does not
-    mutate session state, but the frontend store keeps a single object
-    so we return it to keep the client/server contract symmetric with
-    ``/respond``. Slice 5 makes ``chat_history`` an additive field that
-    will carry incremental turns.
+    ``guided_session`` always carries the updated chat history. Most chat
+    remains advisory, but Step 1 schema-form chat may resolve a complete
+    source/data request; in that case ``next_turn`` and
+    ``composition_state`` mirror ``/respond`` so the frontend can advance
+    atomically.
     """
 
     assistant_message: str
     guided_session: GuidedSessionResponse
+    next_turn: TurnPayloadResponse | None
+    terminal: TerminalStateResponse | None
+    composition_state: CompositionStateResponse | None
 
 
 # Forward reference resolution

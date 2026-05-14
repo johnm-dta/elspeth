@@ -143,6 +143,10 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   // original defect and the chosen Option (c) implementation.
   useEffect(() => {
     if (!guidedLogRef.current) return;
+    guidedLogRef.current.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
     const first = guidedLogRef.current.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
     first?.focus();
   }, [guidedNextTurn?.step_index]);

@@ -91,6 +91,19 @@ describe("MultiSelectWithCustomTurn — initial render", () => {
     ).toBeTruthy();
   });
 
+  it("explains that multiple selections require Continue", () => {
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_THREE_OPTIONS_TWO_DEFAULT}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("Select all that apply, then press Continue."),
+    ).toBeInTheDocument();
+  });
+
   it("renders one toggle button per option", () => {
     render(
       <MultiSelectWithCustomTurn

@@ -55,6 +55,7 @@ from elspeth.web.composer.guided.audit import (
     emit_turn_answered,
     emit_turn_emitted,
 )
+from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_1_source_chat
 from elspeth.web.composer.guided.emitters import (
     build_initial_step_1_turn,
     build_step_1_inspect_and_confirm_turn_from_intent,
@@ -155,6 +156,7 @@ from elspeth.web.sessions.schemas import (
     TurnPayloadResponse,
     TurnRecordResponse,
     UpdateComposerPreferencesRequest,
+    UpdateSessionRequest,
     ValidationEntryResponse,
 )
 
@@ -3205,6 +3207,19 @@ def create_session_router() -> APIRouter:
         session = await _verify_session_ownership(session_id, user, request)
         return _session_response(session)
 
+    @router.patch("/{session_id}", response_model=SessionResponse)
+    async def update_session(
+        session_id: UUID,
+        body: UpdateSessionRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> SessionResponse:
+        """Update a session's user-visible metadata. IDOR-protected."""
+        session = await _verify_session_ownership(session_id, user, request)
+        service = request.app.state.session_service
+        updated = await service.update_session_title(session.id, body.title)
+        return _session_response(updated)
+
     @router.get(
         "/{session_id}/composer-progress",
         response_model=ComposerProgressSnapshot,
@@ -5571,6 +5586,130 @@ def create_session_router() -> APIRouter:
                                 frames=_safe_frame_strings(persist_exc),
                             )
 
+    @router.post("/{session_id}/guided/reenter", response_model=GetGuidedResponse)
+    async def post_guided_reenter(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> GetGuidedResponse:
+        """Re-enter guided mode after a deliberate user exit.
+
+        This is a mode transition, not a turn answer. It is intentionally
+        narrower than clearing any terminal state: solver-exhausted and
+        protocol-violation terminals represent failed guided runs, while
+        ``exited_to_freeform/user_pressed_exit`` records a reversible operator
+        mode switch.
+        """
+        await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        catalog: CatalogServiceProtocol = request.app.state.catalog_service
+
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+        async with compose_lock:
+            state_record = await service.get_current_state(session_id)
+            if state_record is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session has no guided state to re-enter.",
+                )
+
+            state = _state_from_record(state_record)
+            if state.guided_session is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Session is not in guided mode. Use /api/sessions/{id}/messages.",
+                )
+
+            guided = state.guided_session
+            terminal = guided.terminal
+            if terminal is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Guided session is already active.",
+                )
+            if terminal.kind is not TerminalKind.EXITED_TO_FREEFORM or terminal.reason is not TerminalReason.USER_PRESSED_EXIT:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Only a guided session ended by a user exit can be re-entered.",
+                )
+
+            current_record = next(
+                (r for r in reversed(guided.history) if r.step == guided.step),
+                None,
+            )
+            if current_record is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Guided session cannot be re-entered because no current turn record exists.",
+                )
+            reopened_record = _replace(current_record, response_hash=None, summary=None)
+            reopened_history = tuple(reopened_record if r is current_record else r for r in guided.history)
+            new_guided = _replace(guided, history=reopened_history, terminal=None)
+            new_state = _replace(state, guided_session=new_guided)
+            turn = _build_get_guided_turn(new_state, new_guided, catalog=catalog)
+            if turn is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Guided session cannot be re-entered because the current turn cannot be rebuilt.",
+                )
+
+            existing_meta: dict[str, Any] = {}
+            if state_record.composer_meta is not None:
+                existing_meta = dict(deep_thaw(state_record.composer_meta))
+            new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
+            state_d = new_state.to_dict()
+            state_data = CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=False,
+                validation_errors=None,
+                composer_meta=new_composer_meta,
+            )
+            state_record_out = await service.save_composition_state(
+                session_id,
+                state_data,
+                provenance="convergence_persist",
+            )
+
+            return GetGuidedResponse(
+                guided_session=GuidedSessionResponse(
+                    step=new_guided.step.value,
+                    history=[
+                        TurnRecordResponse(
+                            step=r.step.value,
+                            turn_type=r.turn_type.value,
+                            payload_hash=r.payload_hash,
+                            response_hash=r.response_hash,
+                            summary=r.summary,
+                            emitter=r.emitter,
+                        )
+                        for r in new_guided.history
+                    ],
+                    terminal=None,
+                    chat_history=[
+                        ChatTurnResponse(
+                            role=t.role.value,
+                            content=t.content,
+                            seq=t.seq,
+                            step=t.step.value,
+                            ts_iso=t.ts_iso,
+                        )
+                        for t in new_guided.chat_history
+                    ],
+                    chat_turn_seq=new_guided.chat_turn_seq,
+                ),
+                next_turn=TurnPayloadResponse(
+                    type=turn["type"],
+                    step_index=turn["step_index"],
+                    payload=dict(turn["payload"]),
+                ),
+                terminal=None,
+                composition_state=_state_response(state_record_out),
+            )
+
     @router.post("/{session_id}/guided/respond", response_model=GuidedRespondResponse)
     async def post_guided_respond(
         session_id: UUID,
@@ -6202,6 +6341,7 @@ def create_session_router() -> APIRouter:
         """
         await _verify_session_ownership(session_id, user, request)
         service: SessionServiceProtocol = request.app.state.session_service
+        catalog: CatalogServiceProtocol = request.app.state.catalog_service
 
         # Tier-3 → Tier-2 coercion at the step_index boundary. A stale
         # client sending an unknown value gets a 400 with a clear message
@@ -6271,6 +6411,241 @@ def create_session_router() -> APIRouter:
                 from time import perf_counter as _perf_counter
 
                 started_perf = _perf_counter()
+                existing_record_for_chat: TurnRecord | None = next(
+                    (r for r in reversed(guided.history) if r.step == guided.step),
+                    None,
+                )
+                current_turn_type = existing_record_for_chat.turn_type if existing_record_for_chat is not None else None
+
+                if (
+                    existing_record_for_chat is not None
+                    and guided.step is GuidedStep.STEP_1_SOURCE
+                    and current_turn_type is TurnType.SCHEMA_FORM
+                ):
+                    plugin_hint: str | None = None
+                    selected_record = next(
+                        (
+                            r
+                            for r in reversed(guided.history)
+                            if r.step is GuidedStep.STEP_1_SOURCE
+                            and r.turn_type is TurnType.SINGLE_SELECT
+                            and r.summary is not None
+                            and r.summary.startswith("Selected: ")
+                        ),
+                        None,
+                    )
+                    if selected_record is not None and selected_record.summary is not None:
+                        plugin_hint = selected_record.summary.removeprefix("Selected: ").split(", ", 1)[0]
+
+                    source_resolution = await maybe_resolve_step_1_source_chat(
+                        model=settings.composer_model,
+                        user_message=body.message,
+                        plugin_hint=plugin_hint,
+                    )
+                    if source_resolution is not None:
+                        finished_at = datetime.now(UTC)
+                        latency_ms = int((_perf_counter() - started_perf) * 1000)
+
+                        blob_service: BlobServiceProtocol = request.app.state.blob_service
+                        try:
+                            source_blob = await blob_service.create_blob(
+                                session_id,
+                                source_resolution.filename,
+                                source_resolution.content.encode("utf-8"),
+                                source_resolution.mime_type,
+                                created_by="assistant",
+                                source_description="Generated from guided Step 1 chat",
+                            )
+                        except BlobQuotaExceededError as exc:
+                            raise HTTPException(
+                                status_code=413,
+                                detail="Blob storage quota exceeded for this session.",
+                            ) from exc
+
+                        resolved = SourceResolved(
+                            plugin=source_resolution.plugin,
+                            options={**dict(source_resolution.options), "path": source_blob.storage_path},
+                            observed_columns=source_resolution.observed_columns,
+                            sample_rows=source_resolution.sample_rows,
+                        )
+                        data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
+                        handler_result = handle_step_1_source(
+                            state=state,
+                            session=guided,
+                            resolved=resolved,
+                            catalog=catalog,
+                            data_dir=data_dir,
+                            session_engine=request.app.state.session_engine,
+                            session_id=str(session_id),
+                        )
+                        if not handler_result.tool_result.success:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                            )
+
+                        turn_response: TurnResponse = {
+                            "chosen": None,
+                            "edited_values": {
+                                "plugin": source_resolution.plugin,
+                                "options": dict(source_resolution.options),
+                                "observed_columns": list(source_resolution.observed_columns),
+                                "sample_rows": [dict(row) for row in source_resolution.sample_rows],
+                            },
+                            "custom_inputs": None,
+                            "accepted_step_index": None,
+                            "edit_step_index": None,
+                            "control_signal": None,
+                        }
+                        response_hash = stable_hash(turn_response)
+                        answered_record = _replace(
+                            existing_record_for_chat,
+                            response_hash=response_hash,
+                            summary=_summarize_guided_response(TurnType.SCHEMA_FORM, turn_response),
+                        )
+                        answered_history = tuple(answered_record if r is existing_record_for_chat else r for r in guided.history)
+                        guided = _replace(handler_result.session, history=answered_history)
+                        state = handler_result.state
+
+                        emit_turn_answered(
+                            recorder,
+                            step=GuidedStep.STEP_1_SOURCE,
+                            turn_type=TurnType.SCHEMA_FORM,
+                            response_hash=response_hash,
+                            response_payload_id="",
+                            control_signal=None,
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+
+                        guided = _replace(guided, step=GuidedStep.STEP_2_SINK)
+                        next_turn = build_step_2_single_select_turn(catalog)
+                        next_turn_type = TurnType(next_turn["type"])
+                        next_payload_hash = stable_hash(next_turn["payload"])
+                        new_record = TurnRecord(
+                            step=GuidedStep.STEP_2_SINK,
+                            turn_type=next_turn_type,
+                            payload_hash=next_payload_hash,
+                            response_hash=None,
+                            emitter="server",
+                        )
+                        emit_step_advanced(
+                            recorder,
+                            prev=GuidedStep.STEP_1_SOURCE,
+                            next_=GuidedStep.STEP_2_SINK,
+                            reason="user_advanced",
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+                        emit_turn_emitted(
+                            recorder,
+                            step=GuidedStep.STEP_2_SINK,
+                            turn_type=next_turn_type,
+                            payload_hash=next_payload_hash,
+                            payload_payload_id="",
+                            emitter="server",
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+
+                        ts_iso = finished_at.isoformat()
+                        user_turn = ChatTurn(
+                            role=ChatRole.USER,
+                            content=body.message,
+                            seq=guided.chat_turn_seq,
+                            step=GuidedStep.STEP_1_SOURCE,
+                            ts_iso=ts_iso,
+                        )
+                        assistant_turn = ChatTurn(
+                            role=ChatRole.ASSISTANT,
+                            content=source_resolution.assistant_message,
+                            seq=guided.chat_turn_seq + 1,
+                            step=GuidedStep.STEP_1_SOURCE,
+                            ts_iso=ts_iso,
+                        )
+                        guided = _replace(
+                            guided,
+                            history=(*guided.history, new_record),
+                            chat_history=(*guided.chat_history, user_turn, assistant_turn),
+                            chat_turn_seq=guided.chat_turn_seq + 2,
+                        )
+
+                        recorder.record_chat_turn(
+                            ComposerChatTurn(
+                                step=GuidedStep.STEP_1_SOURCE.value,
+                                initiator=ComposerChatInitiator.USER,
+                                chat_turn_seq=user_turn.seq,
+                                user_message_hash=stable_hash(body.message),
+                                assistant_message_hash=stable_hash(source_resolution.assistant_message),
+                                latency_ms=latency_ms,
+                                model=settings.composer_model,
+                                status=ComposerChatTurnStatus.SUCCESS,
+                                started_at=started_at,
+                                finished_at=finished_at,
+                                error_class=None,
+                            )
+                        )
+
+                        new_state = _replace(state, guided_session=guided)
+                        source_existing_meta: dict[str, Any] = {}
+                        if state_record is not None and state_record.composer_meta is not None:
+                            source_existing_meta = dict(deep_thaw(state_record.composer_meta))
+                        new_composer_meta = {**source_existing_meta, "guided_session": guided.to_dict()}
+
+                        state_d = new_state.to_dict()
+                        state_data = CompositionStateData(
+                            source=state_d["source"],
+                            nodes=state_d["nodes"],
+                            edges=state_d["edges"],
+                            outputs=state_d["outputs"],
+                            metadata_=state_d["metadata"],
+                            is_valid=False,
+                            validation_errors=None,
+                            composer_meta=new_composer_meta,
+                        )
+                        state_record_out = await service.save_composition_state(
+                            session_id,
+                            state_data,
+                            provenance="convergence_persist",
+                        )
+
+                        return GuidedChatResponse(
+                            assistant_message=source_resolution.assistant_message,
+                            guided_session=GuidedSessionResponse(
+                                step=guided.step.value,
+                                history=[
+                                    TurnRecordResponse(
+                                        step=r.step.value,
+                                        turn_type=r.turn_type.value,
+                                        payload_hash=r.payload_hash,
+                                        response_hash=r.response_hash,
+                                        summary=r.summary,
+                                        emitter=r.emitter,
+                                    )
+                                    for r in guided.history
+                                ],
+                                terminal=None,
+                                chat_history=[
+                                    ChatTurnResponse(
+                                        role=t.role.value,
+                                        content=t.content,
+                                        seq=t.seq,
+                                        step=t.step.value,
+                                        ts_iso=t.ts_iso,
+                                    )
+                                    for t in guided.chat_history
+                                ],
+                                chat_turn_seq=guided.chat_turn_seq,
+                            ),
+                            next_turn=TurnPayloadResponse(
+                                type=next_turn["type"],
+                                step_index=next_turn["step_index"],
+                                payload=dict(next_turn["payload"]),
+                            ),
+                            terminal=None,
+                            composition_state=_state_response(state_record_out),
+                        )
+
                 # InvariantError from solve_step_chat (empty / whitespace LLM
                 # content) indicates a defective model response we cannot
                 # recover from.  Mirror of the post_guided_respond pattern at
@@ -6441,6 +6816,9 @@ def create_session_router() -> APIRouter:
                         ],
                         chat_turn_seq=new_guided.chat_turn_seq,
                     ),
+                    next_turn=None,
+                    terminal=None,
+                    composition_state=_state_response(state_record_out),
                 )
             finally:
                 # Drain the recorder unconditionally — same B3 pattern as
@@ -6455,6 +6833,13 @@ def create_session_router() -> APIRouter:
                 # last resort only when no safer audit channel remains.
                 primary_exc = sys.exception()
                 if primary_exc is None:
+                    await _persist_tool_invocations(
+                        service,
+                        session_id,
+                        recorder.invocations,
+                        state_record_out.id if state_record_out is not None else None,
+                        plugin_crash_pending=False,
+                    )
                     await _persist_chat_turns(
                         service,
                         session_id,
@@ -6463,6 +6848,25 @@ def create_session_router() -> APIRouter:
                         request_unwinding=False,
                     )
                 else:
+                    try:
+                        await _persist_tool_invocations(
+                            service,
+                            session_id,
+                            recorder.invocations,
+                            state_record_out.id if state_record_out is not None else None,
+                            plugin_crash_pending=False,
+                        )
+                    except Exception as persist_exc:
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.audit_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="post_guided_chat",
+                                channel="tool_invocations",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
                     try:
                         await _persist_chat_turns(
                             service,

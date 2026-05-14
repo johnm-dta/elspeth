@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SessionSidebar } from "./SessionSidebar";
@@ -7,6 +8,7 @@ import { TERMINAL_RUN_STATUS_VALUES, type RunStatus } from "@/types/index";
 const selectSession = vi.fn();
 const createSession = vi.fn();
 const archiveSession = vi.fn();
+const renameSession = vi.fn();
 const logout = vi.fn();
 
 const executionState: {
@@ -31,6 +33,7 @@ vi.mock("@/hooks/useSession", () => ({
     createSession,
     selectSession,
     archiveSession,
+    renameSession,
   }),
 }));
 
@@ -64,8 +67,41 @@ describe("SessionSidebar active run indicator", () => {
       executionState.progress = { status };
       const { unmount } = render(<SessionSidebar />);
 
-      expect(screen.queryByLabelText("Pipeline running")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Pipeline running")).not.toBeInTheDocument();
       unmount();
     }
+  });
+});
+
+describe("SessionSidebar rename", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    executionState.activeRunId = null;
+    executionState.progress = null;
+  });
+
+  it("opens inline rename on double-click and saves the trimmed title", async () => {
+    const user = userEvent.setup();
+    renameSession.mockResolvedValue(undefined);
+    render(<SessionSidebar />);
+
+    await user.dblClick(screen.getByText("Current session"));
+    const input = screen.getByRole("textbox", { name: "Rename session" });
+    await user.clear(input);
+    await user.type(input, "  Demo pipeline  ");
+    await user.click(screen.getByRole("button", { name: "Save session name" }));
+
+    expect(renameSession).toHaveBeenCalledWith("session-1", "Demo pipeline");
+  });
+
+  it("cancels inline rename with Escape", async () => {
+    const user = userEvent.setup();
+    render(<SessionSidebar />);
+
+    await user.dblClick(screen.getByText("Current session"));
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("textbox", { name: "Rename session" })).not.toBeInTheDocument();
+    expect(renameSession).not.toHaveBeenCalled();
   });
 });

@@ -2,7 +2,7 @@
 //
 // Session list sidebar. Always renders at full width -- collapse/expand
 // is controlled by Layout.tsx via CSS grid column sizing.
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useSession } from "@/hooks/useSession";
 import { useAuth } from "@/hooks/useAuth";
 import { useExecutionStore } from "@/stores/executionStore";
@@ -11,7 +11,7 @@ import { isTerminalRunStatus, type Session } from "@/types/index";
 import { relativeTime } from "@/utils/time";
 
 export function SessionSidebar() {
-  const { sessions, activeSessionId, createSession, selectSession, archiveSession } =
+  const { sessions, activeSessionId, createSession, selectSession, renameSession, archiveSession } =
     useSession();
   const { user, logout } = useAuth();
   const activeRunId = useExecutionStore((s) => s.activeRunId);
@@ -23,6 +23,17 @@ export function SessionSidebar() {
   const [isCreating, setIsCreating] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState<Session | null>(null);
   const [filter, setFilter] = useState("");
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+  const [renamePending, setRenamePending] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (renamingSessionId !== null) {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }
+  }, [renamingSessionId]);
 
   const handleCreateSession = useCallback(async () => {
     if (isCreating) return;
@@ -33,6 +44,31 @@ export function SessionSidebar() {
       setIsCreating(false);
     }
   }, [isCreating, createSession]);
+
+  const startRename = useCallback((session: Session) => {
+    setRenamingSessionId(session.id);
+    setRenameText(session.title);
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    setRenamingSessionId(null);
+    setRenameText("");
+    setRenamePending(false);
+  }, []);
+
+  const saveRename = useCallback(async () => {
+    if (renamingSessionId === null || renamePending) return;
+    const trimmed = renameText.trim();
+    if (!trimmed) return;
+    setRenamePending(true);
+    try {
+      await renameSession(renamingSessionId, trimmed);
+      setRenamingSessionId(null);
+      setRenameText("");
+    } finally {
+      setRenamePending(false);
+    }
+  }, [renamePending, renameSession, renameText, renamingSessionId]);
 
   return (
     <aside
@@ -77,6 +113,59 @@ export function SessionSidebar() {
               )
               .map((session) => {
               const isActive = session.id === activeSessionId;
+              const isRenaming = session.id === renamingSessionId;
+              if (isRenaming) {
+                const trimmedRename = renameText.trim();
+                return (
+                  <li
+                    key={session.id}
+                    className="session-list-item session-list-item--renaming"
+                  >
+                    <form
+                      className="session-rename-form"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void saveRename();
+                      }}
+                    >
+                      <input
+                        ref={renameInputRef}
+                        type="text"
+                        value={renameText}
+                        onChange={(e) => setRenameText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            cancelRename();
+                          }
+                        }}
+                        aria-label="Rename session"
+                        className="session-rename-input"
+                        disabled={renamePending}
+                      />
+                      <button
+                        type="submit"
+                        aria-label="Save session name"
+                        title="Save session name"
+                        className="session-rename-action-btn"
+                        disabled={renamePending || !trimmedRename}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Cancel session rename"
+                        title="Cancel session rename"
+                        className="session-rename-action-btn"
+                        onClick={cancelRename}
+                        disabled={renamePending}
+                      >
+                        Cancel
+                      </button>
+                    </form>
+                  </li>
+                );
+              }
               return (
                 <li
                   key={session.id}
@@ -84,8 +173,10 @@ export function SessionSidebar() {
                 >
                   <button
                     onClick={() => selectSession(session.id)}
+                    onDoubleClick={() => startRename(session)}
                     aria-current={isActive ? "page" : undefined}
                     aria-label={`Session: ${session.title}, ${relativeTime(session.updated_at)}`}
+                    title="Double-click to rename"
                     className={`session-list-btn ${isActive ? "session-list-btn--active" : "session-list-btn--inactive"}`}
                   >
                     <div

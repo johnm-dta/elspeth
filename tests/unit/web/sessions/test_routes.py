@@ -895,6 +895,45 @@ class TestSessionCRUDRoutes:
         assert get_resp.status_code == 200
         assert get_resp.json()["id"] == session_id
 
+    def test_update_session_title(self, tmp_path) -> None:
+        app, _ = _make_app(tmp_path)
+        client = TestClient(app)
+
+        create_resp = client.post(
+            "/api/sessions",
+            json={"title": "Original title"},
+        )
+        session_id = create_resp.json()["id"]
+
+        update_resp = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"title": "Renamed pipeline"},
+        )
+
+        assert update_resp.status_code == 200
+        assert update_resp.json()["title"] == "Renamed pipeline"
+        get_resp = client.get(f"/api/sessions/{session_id}")
+        assert get_resp.json()["title"] == "Renamed pipeline"
+
+    def test_update_session_title_rejects_blank_title(self, tmp_path) -> None:
+        app, _ = _make_app(tmp_path)
+        client = TestClient(app)
+
+        create_resp = client.post(
+            "/api/sessions",
+            json={"title": "Original title"},
+        )
+        session_id = create_resp.json()["id"]
+
+        update_resp = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"title": "   "},
+        )
+
+        assert update_resp.status_code == 422
+        get_resp = client.get(f"/api/sessions/{session_id}")
+        assert get_resp.json()["title"] == "Original title"
+
     def test_get_session_not_found(self, tmp_path) -> None:
         app, _ = _make_app(tmp_path)
         client = TestClient(app)
@@ -1283,6 +1322,7 @@ class TestIDORCoverageDrift:
     EXPECTED_SESSIONS_OWNERSHIP_ENDPOINTS: frozenset[str] = frozenset(
         {
             "get_session",
+            "update_session",
             "delete_session",
             "get_messages",
             "send_message",
@@ -1301,6 +1341,7 @@ class TestIDORCoverageDrift:
             "get_state_yaml",
             "fork_from_message",
             "get_guided",
+            "post_guided_reenter",
             "post_guided_respond",
             "post_guided_chat",
         }
@@ -1446,6 +1487,7 @@ class TestIDORProtection:
     Audited endpoints:
 
     - ``GET  /{session_id}``                 (get_session)
+    - ``PATCH /{session_id}``                (update_session)
     - ``DELETE /{session_id}``               (delete_session)
     - ``GET  /{session_id}/messages``        (get_messages)
     - ``POST /{session_id}/messages``        (send_message)
@@ -1457,6 +1499,7 @@ class TestIDORProtection:
     - ``GET  /{session_id}/state/yaml``      (get_state_yaml)
     - ``POST /{session_id}/fork``            (fork_from_message)
     - ``GET  /{session_id}/guided``          (get_guided)
+    - ``POST /{session_id}/guided/reenter``  (post_guided_reenter)
     - ``POST /{session_id}/guided/respond``  (post_guided_respond)
     - ``POST /{session_id}/guided/chat``     (post_guided_chat)
 
@@ -1521,6 +1564,16 @@ class TestIDORProtection:
 
         # Bob tries to GET it -- should be 404
         resp = bob_client.get(f"/api/sessions/{session_id}")
+        assert resp.status_code == 404
+
+        # Bob tries to PATCH the user-visible session title -- should be
+        # 404. A title update is low-bandwidth but still proves session
+        # existence and mutates Alice's workspace if the ownership check
+        # is missing.
+        resp = bob_client.patch(
+            f"/api/sessions/{session_id}",
+            json={"title": "Bob was here"},
+        )
         assert resp.status_code == 404
 
         # Bob tries to DELETE it -- should be 404
@@ -1596,6 +1649,12 @@ class TestIDORProtection:
         # wizard state without authorization.  The ownership check in
         # ``get_guided`` runs before the compose lock or catalog access.
         resp = bob_client.get(f"/api/sessions/{session_id}/guided")
+        assert resp.status_code == 404
+
+        # Bob tries to POST guided/reenter -- should be 404. Re-entry is
+        # a mode transition that can reveal and mutate Alice's guided
+        # session terminal state if ownership is bypassed.
+        resp = bob_client.post(f"/api/sessions/{session_id}/guided/reenter")
         assert resp.status_code == 404
 
         # Bob tries to POST guided/respond — should be 404.  The respond

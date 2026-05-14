@@ -118,6 +118,7 @@ export function MultiSelectWithCustomTurn({
   // recur across turns.
   const reactId = useId();
   const customInputId = `${reactId}-custom-input`;
+  const instructionId = `${reactId}-instruction`;
   const hintIdFor = (optionId: string) => `${reactId}-hint-${optionId}`;
 
   // Focus-restoration refs for the custom-chip remove path (WCAG 2.4.3).
@@ -262,8 +263,11 @@ export function MultiSelectWithCustomTurn({
 
   return (
     <div className="guided-turn guided-multi-select">
-      <fieldset className="guided-chip-fieldset">
+      <fieldset className="guided-chip-fieldset" aria-describedby={instructionId}>
         <legend className="guided-chip-legend">{payload.question}</legend>
+        <p id={instructionId} className="guided-chip-instruction">
+          Select all that apply, then press Continue.
+        </p>
         {/* No role="group" on the inner div — <fieldset> already provides
             group semantics; duplicating creates two nested groups in the
             accessibility tree. */}

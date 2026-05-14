@@ -145,13 +145,16 @@ export interface GuidedChatRequest {
  * distinguish the two on the wire; slice 5's ComposerChatTurn audit shape
  * adds that discriminator).
  *
- * `guided_session` is echoed verbatim in Phase A — chat does not mutate
- * session state. Slice 5 adds a `chat_history` field that will carry
- * incremental turns once persistence lands.
+ * Most chat is advisory and returns null for the turn/state fields. Step 1
+ * source chat may resolve a complete inline source request; then these fields
+ * mirror `/guided/respond` so the store can advance atomically.
  */
 export interface GuidedChatResponse {
   assistant_message: string;
   guided_session: GuidedSession;
+  next_turn: TurnPayload | null;
+  terminal: TerminalState | null;
+  composition_state: CompositionState | null;
 }
 
 

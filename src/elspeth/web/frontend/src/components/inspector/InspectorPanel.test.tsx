@@ -320,6 +320,28 @@ describe("Version selector and catalog", () => {
     expect(screen.getByRole("alertdialog", { name: "Revert pipeline" })).toBeInTheDocument();
   });
 
+  it("opens the revert confirmation when Enter is pressed on a focused non-current option", async () => {
+    const { fetchStateVersions } = await import("@/api/client");
+    const versions: CompositionStateVersion[] = [
+      { id: "state-2", version: 2, created_at: "2026-03-31T00:00:00Z", node_count: 5 },
+      { id: "state-1", version: 1, created_at: "2026-03-30T00:00:00Z", node_count: 3 },
+    ];
+    (fetchStateVersions as ReturnType<typeof vi.fn>).mockResolvedValue(versions);
+    useSessionStore.setState({
+      compositionState: makeState({ version: 2 }),
+      stateVersions: versions,
+    });
+    render(<InspectorPanel />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: /Version 2/ }));
+    const listbox = screen.getByRole("listbox", { name: "Version history" });
+    await within(listbox).findByRole("option", { name: /Version 1/ });
+    await user.keyboard("{ArrowDown}{Enter}");
+
+    expect(screen.getByRole("alertdialog", { name: "Revert pipeline" })).toBeInTheDocument();
+  });
+
   it("catalog button toggles drawer", async () => {
     useSessionStore.setState({
       compositionState: makeState(),

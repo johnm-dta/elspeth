@@ -13,6 +13,7 @@ export function useSession() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const createSession = useSessionStore((s) => s.createSession);
   const selectSession = useSessionStore((s) => s.selectSession);
+  const renameSession = useSessionStore((s) => s.renameSession);
   const archiveSession = useSessionStore((s) => s.archiveSession);
   const loadRuns = useExecutionStore((s) => s.loadRuns);
 
@@ -30,5 +31,5 @@ export function useSession() {
     }
   }, [activeSessionId, loadRuns]);
 
-  return { sessions, activeSessionId, createSession, selectSession, archiveSession };
+  return { sessions, activeSessionId, createSession, selectSession, renameSession, archiveSession };
 }

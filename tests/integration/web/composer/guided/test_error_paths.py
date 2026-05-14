@@ -56,6 +56,11 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     return resp.json()
 
 
+def _reenter_raw(client: TestClient, session_id: str) -> object:
+    """POST /guided/reenter and return the raw response (any status)."""
+    return client.post(f"/api/sessions/{session_id}/guided/reenter")
+
+
 # ---------------------------------------------------------------------------
 # exit_to_freeform — §5.3 manual exit
 # ---------------------------------------------------------------------------
@@ -131,6 +136,92 @@ class TestExitToFreeform:
         guided = resp.json()["guided_session"]
         assert guided["terminal"] is not None
         assert guided["terminal"]["kind"] == "exited_to_freeform"
+
+
+class TestReenterGuided:
+    def test_reenter_user_exit_clears_terminal_and_returns_live_turn(self, composer_test_client: TestClient) -> None:
+        """A user-pressed freeform exit can be reversed from the command palette.
+
+        Re-entry is not a normal turn response: it clears the
+        ``exited_to_freeform/user_pressed_exit`` terminal marker and rebuilds
+        the current guided turn from server state, giving the frontend a live
+        ``next_turn`` to render again.
+        """
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        exited = _respond(composer_test_client, session_id, control_signal="exit_to_freeform")
+        assert exited["terminal"]["kind"] == "exited_to_freeform"
+
+        resp = _reenter_raw(composer_test_client, session_id)
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        assert body["terminal"] is None
+        assert body["guided_session"]["terminal"] is None
+        assert body["next_turn"] is not None
+        assert body["next_turn"]["type"] == "single_select"
+        current_step_records = [record for record in body["guided_session"]["history"] if record["step"] == body["guided_session"]["step"]]
+        assert current_step_records[-1]["response_hash"] is None
+        assert current_step_records[-1]["summary"] is None
+
+        persisted = _get_guided(composer_test_client, session_id)
+        assert persisted["guided_session"]["terminal"] is None
+        assert persisted["next_turn"] is not None
+
+    def test_reenter_rejects_auto_drop_terminals(self, composer_test_client: TestClient) -> None:
+        """Only deliberate user exits are reversible.
+
+        Solver exhaustion and protocol-violation terminals represent failed
+        guided runs, not a mode switch, so the re-entry command must not revive
+        them.
+        """
+        import asyncio
+        from dataclasses import replace
+        from uuid import UUID
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.guided.state_machine import (
+            TerminalKind,
+            TerminalReason,
+            TerminalState,
+        )
+        from elspeth.web.sessions.converters import state_from_record
+        from elspeth.web.sessions.protocol import CompositionStateData
+
+        session_id = _create_session(composer_test_client)
+        _get_guided(composer_test_client, session_id)
+        service = composer_test_client.app.state.session_service
+        session_uuid = UUID(session_id)
+        state_record = asyncio.run(service.get_current_state(session_uuid))
+        assert state_record is not None
+        state = state_from_record(state_record)
+        assert state.guided_session is not None
+
+        terminal = TerminalState(
+            kind=TerminalKind.EXITED_TO_FREEFORM,
+            reason=TerminalReason.SOLVER_EXHAUSTED,
+            pipeline_yaml=None,
+        )
+        guided = replace(state.guided_session, terminal=terminal)
+        state = replace(state, guided_session=guided)
+        existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
+        state_d = state.to_dict()
+        state_data = CompositionStateData(
+            source=state_d["source"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=False,
+            validation_errors=None,
+            composer_meta={**existing_meta, "guided_session": guided.to_dict()},
+        )
+        asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
+
+        resp = _reenter_raw(composer_test_client, session_id)
+
+        assert resp.status_code == 409
+        assert "user exit" in resp.json()["detail"].lower()
 
 
 # ---------------------------------------------------------------------------

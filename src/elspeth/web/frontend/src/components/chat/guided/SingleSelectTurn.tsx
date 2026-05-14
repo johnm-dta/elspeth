@@ -40,6 +40,7 @@ export function SingleSelectTurn({
   // produce id collisions when option IDs ("csv", "api") recur across turns.
   const reactId = useId();
   const customInputId = `${reactId}-custom-input`;
+  const instructionId = `${reactId}-instruction`;
   const hintIdFor = (optionId: string) => `${reactId}-hint-${optionId}`;
 
   function handleOptionClick(optionId: string) {
@@ -68,8 +69,11 @@ export function SingleSelectTurn({
 
   return (
     <div className="guided-turn guided-single-select">
-      <fieldset className="guided-chip-fieldset">
+      <fieldset className="guided-chip-fieldset" aria-describedby={instructionId}>
         <legend className="guided-chip-legend">{payload.question}</legend>
+        <p id={instructionId} className="guided-chip-instruction">
+          Select one. Choosing an option continues to the next step.
+        </p>
         {/* No role="group" on the inner div — <fieldset> already provides
             group semantics; duplicating creates two nested groups in the
             accessibility tree. */}

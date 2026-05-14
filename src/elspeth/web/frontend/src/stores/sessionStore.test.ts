@@ -28,6 +28,7 @@ vi.mock("@/api/client", () => ({
   revertToVersion: vi.fn(),
   fetchStateVersions: vi.fn(),
   archiveSession: vi.fn(),
+  updateSessionTitle: vi.fn(),
   getGuided: vi.fn(),
 }));
 
@@ -341,6 +342,60 @@ describe("sessionStore", () => {
     });
   });
 
+  describe("renameSession", () => {
+    it("persists a trimmed title and updates the matching session", async () => {
+      const apiClient = await import("@/api/client");
+      const renamed = {
+        id: "session-1",
+        title: "Renamed pipeline",
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:01:00Z",
+      };
+      (
+        apiClient.updateSessionTitle as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(renamed);
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        sessions: [
+          {
+            id: "session-1",
+            title: "Current session",
+            created_at: "2026-05-14T00:00:00Z",
+            updated_at: "2026-05-14T00:00:00Z",
+          },
+        ],
+      });
+
+      await useSessionStore.getState().renameSession("session-1", "  Renamed pipeline  ");
+
+      expect(apiClient.updateSessionTitle).toHaveBeenCalledWith(
+        "session-1",
+        "Renamed pipeline",
+      );
+      expect(useSessionStore.getState().sessions[0]).toBe(renamed);
+      expect(useSessionStore.getState().error).toBeNull();
+    });
+
+    it("does not call the API for a blank title", async () => {
+      const apiClient = await import("@/api/client");
+      useSessionStore.setState({
+        sessions: [
+          {
+            id: "session-1",
+            title: "Current session",
+            created_at: "2026-05-14T00:00:00Z",
+            updated_at: "2026-05-14T00:00:00Z",
+          },
+        ],
+      });
+
+      await useSessionStore.getState().renameSession("session-1", "   ");
+
+      expect(apiClient.updateSessionTitle).not.toHaveBeenCalled();
+      expect(useSessionStore.getState().sessions[0].title).toBe("Current session");
+    });
+  });
+
   describe("composer proposals", () => {
     it("loads proposals when selecting a session", async () => {
       const apiClient = await import("@/api/client");
@@ -584,6 +639,59 @@ describe("sessionStore", () => {
       useSessionStore.getState().reset();
       expect(useSessionStore.getState().recoveryError).toBeNull();
       expect(useSessionStore.getState().recoveryStartedCompositionVersion).toBeNull();
+    });
+  });
+
+  describe("selectSession stale session handling", () => {
+    it("clears stale active session when selected session no longer exists", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+        status: 404,
+        detail: "Session not found",
+      });
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+        status: 404,
+        detail: "Session not found",
+      });
+      (
+        apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockRejectedValueOnce({
+        status: 404,
+        detail: "Session not found",
+      });
+      (
+        apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>
+      ).mockRejectedValueOnce({
+        status: 404,
+        detail: "Session not found",
+      });
+
+      useSessionStore.setState({
+        sessions: [],
+        activeSessionId: null,
+        messages: [
+          {
+            id: "old-message",
+            session_id: "old-session",
+            role: "user",
+            content: "stale",
+            tool_calls: null,
+            created_at: "2026-05-14T00:00:00Z",
+          },
+        ],
+        compositionState: makeCompositionState(7),
+        error: null,
+      });
+
+      await useSessionStore.getState().selectSession("missing-session");
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBeNull();
+      expect(state.messages).toEqual([]);
+      expect(state.compositionState).toBeNull();
+      expect(state.compositionProposals).toEqual([]);
+      expect(state.composerPreferences).toBeNull();
+      expect(state.error).toBeNull();
     });
   });
 

@@ -301,6 +301,19 @@ export async function getSession(sessionId: string): Promise<Session> {
   return parseResponse<Session>(response);
 }
 
+/** Update the user-visible title for a session. */
+export async function updateSessionTitle(
+  sessionId: string,
+  title: string,
+): Promise<Session> {
+  const response = await fetch(`/api/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ title }),
+  });
+  return parseResponse<Session>(response);
+}
+
 /** Archive (soft-delete) a session. Backend returns 204 No Content. */
 export async function archiveSession(sessionId: string): Promise<void> {
   const response = await fetch(`/api/sessions/${sessionId}`, {
@@ -510,14 +523,33 @@ export async function respondGuided(
 }
 
 /**
+ * Re-enter guided mode after a deliberate user exit to freeform.
+ *
+ * Server clears the reversible exited_to_freeform/user_pressed_exit terminal
+ * and returns the same envelope shape as GET /guided.
+ */
+export async function reenterGuided(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/reenter`, {
+    method: "POST",
+    headers: authHeaders(),
+    signal,
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
  * Post a free-text chat message scoped to the user's current wizard step.
  *
- * Phase A is advisory-only: the server invokes the per-step chat solver
- * with the step-scoped skill briefing and returns the LLM's reply.  Chat
- * does not advance step state — `guided_session` is echoed unchanged in
- * the response.  Server-side: see _guided_step_chat.solve_step_chat_with_auto_drop;
- * on transient LLM failure the server returns 200 with a synthetic
- * "I'm unavailable" message rather than failing the request.
+ * Most chat is advisory: the server invokes the per-step chat solver with
+ * the step-scoped skill briefing and returns the LLM's reply. Step 1 source
+ * chat can also resolve a complete inline source request and return updated
+ * `next_turn` / `composition_state` fields. Server-side: see
+ * _guided_step_chat.solve_step_chat_with_auto_drop; on transient LLM failure
+ * the server returns 200 with a synthetic "I'm unavailable" message rather
+ * than failing the request.
  *
  * The `step_index` carried in the body lets the server detect that the
  * wizard has advanced under the client (returns 409) so a stale chat

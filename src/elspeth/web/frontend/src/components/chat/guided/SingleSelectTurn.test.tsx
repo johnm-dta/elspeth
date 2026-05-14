@@ -50,6 +50,14 @@ describe("SingleSelectTurn — option click", () => {
     expect(screen.getByRole("button", { name: "REST API" })).toBeTruthy();
   });
 
+  it("explains that choosing one option advances immediately", () => {
+    render(<SingleSelectTurn payload={PAYLOAD_NO_CUSTOM} onSubmit={vi.fn()} />);
+
+    expect(
+      screen.getByText("Select one. Choosing an option continues to the next step."),
+    ).toBeInTheDocument();
+  });
+
   it("clicking an option fires onSubmit with chosen=[id] and all other fields null", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();

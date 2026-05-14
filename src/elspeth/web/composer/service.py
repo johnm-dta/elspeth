@@ -1235,6 +1235,8 @@ class ComposerServiceImpl:
     ) -> str:
         """Serialize one Step 1 outcome through the Phase 2 response walker."""
 
+        # Keep redaction imports local to the redaction paths; service.py is
+        # already load-order sensitive and these walkers are cold-path helpers.
         from elspeth.core.canonical import canonical_json
         from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_response
 

@@ -238,8 +238,9 @@ class ProposalEventRecord:
     session_id: UUID
     proposal_id: UUID | None
     event_type: ProposalEventType
-    # Actor format is canonicalized by class: composer-web:user:{user_id},
-    # user:{user_id}, or system:{component}.
+    # Actor format is originator:role:id for request-scoped actors
+    # (composer-web:user:{user_id}, user:{user_id}); system actors use
+    # system:{component}.
     actor: str
     payload: Mapping[str, Any]
     created_at: datetime

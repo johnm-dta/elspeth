@@ -2196,7 +2196,7 @@ allow_hits:
     \ step_1_result is stored unchanged. The enrichment is opportunistic \u2014 absence of path leaves recipe match in the\
     \ correct no-blob_ref state."
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_classify_slot_resolver:fp=2a5edca2f4ee838a
+- key: web/composer/guided/recipe_match.py:R1:_classify_slot_resolver:fp=6726fb5580a0cb92
   owner: composer-guided
   reason: "Tier-3 boundary coercion in slot resolver \u2014 sink.outputs[0].options is user/LLM-supplied external data (Tier\
     \ 3). .get(\"path\", default) is the documented coercion at this boundary; default path propagates to the recipe_offer\
@@ -2204,7 +2204,7 @@ allow_hits:
   safety: Default path value matches the registered SlotSpec default in _RECIPE1_SLOTS["output_path"]; operator confirms or
     overrides via recipe_offer turn.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=6e09c6850f7ca4d5
+- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=e71b13ac68a94bb6
   owner: composer-guided
   reason: "Tier-3 boundary coercion in slot resolver \u2014 sink.outputs[0].options is user/LLM-supplied external data (Tier\
     \ 3). .get(\"path\", default) is the documented coercion at this boundary; default path propagates to the recipe_offer\
@@ -2212,7 +2212,7 @@ allow_hits:
   safety: Default path value matches the registered SlotSpec default in _RECIPE2_SLOTS["above_output_path"]; operator confirms
     or overrides via recipe_offer turn.
   expires: null
-- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=fb34ad1dde480eb4
+- key: web/composer/guided/recipe_match.py:R1:_split_threshold_slot_resolver:fp=fd8beb31159c31ca
   owner: composer-guided
   reason: "Tier-3 boundary coercion in slot resolver \u2014 sink.outputs[1].options is user/LLM-supplied external data (Tier\
     \ 3). .get(\"path\", default) is the documented coercion at this boundary; default path propagates to the recipe_offer\

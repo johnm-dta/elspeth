@@ -66,10 +66,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+from elspeth.contracts.composer_slots import SlotSpec, SlotType
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import SinkResolved, SourceResolved
-from elspeth.web.composer.recipes import SlotSpec, SlotType, get_recipe
+from elspeth.web.composer.recipes import get_recipe
 
 # ---------------------------------------------------------------------------
 # Type aliases for the predicate registry

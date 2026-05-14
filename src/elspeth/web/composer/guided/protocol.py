@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypedDict
 
-from elspeth.web.composer.recipes import SlotType
+from elspeth.contracts.composer_slots import SlotType
 
 
 class TurnType(StrEnum):

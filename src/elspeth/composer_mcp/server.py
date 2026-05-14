@@ -699,11 +699,14 @@ def create_server(
                 _capture_plugin_crash(exc)
                 raise
 
-            # Success path: handle state update + redaction. Wrap in its
-            # own try/except per Solution-architect review H2: a Tier-1
-            # invariant breach reading back our own dispatch output (e.g.
-            # CompositionState.from_dict KeyError on a malformed result)
-            # MUST be audited as PLUGIN_CRASH, not laundered as SUCCESS.
+            # Success path: handle state update, redaction, and MCP-visible
+            # response serialization. Wrap in its own try/except per
+            # Solution-architect review H2: a Tier-1 invariant breach reading
+            # back our own dispatch output (e.g. CompositionState.from_dict
+            # KeyError on a malformed result) MUST be audited as PLUGIN_CRASH,
+            # not laundered as SUCCESS. JSON serialization is included because
+            # a response that cannot be sent to the client is not a successful
+            # dispatch.
             try:
                 if "state" in result_dict:
                     new_state = CompositionState.from_dict(result_dict["state"])
@@ -728,6 +731,7 @@ def create_server(
                         session_id_ref[0] = None
                     # B4: Redact storage paths from the response sent to the agent.
                     result_dict["state"] = redact_source_storage_path(result_dict["state"])
+                response_text = json.dumps(result_dict, indent=2)
             except (KeyError, TypeError, ValueError) as readback_exc:
                 # Tier-1 read-back failure on our own dispatch output.
                 # Reclassify as PLUGIN_CRASH and re-raise — the original
@@ -738,7 +742,7 @@ def create_server(
                 result_dict = None
                 raise
 
-            return [TextContent(type="text", text=json.dumps(result_dict, indent=2))]
+            return [TextContent(type="text", text=response_text)]
         finally:
             finished_at = datetime.now(UTC)
             latency_ms = (time.monotonic_ns() - started_ns) // 1_000_000

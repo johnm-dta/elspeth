@@ -21,6 +21,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.composer_mcp.server import create_server
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
 
 
@@ -41,6 +42,17 @@ class _StrictPreflightProbe(BaseModel):
     model_config = ConfigDict(strict=True)
 
     enabled: bool
+
+
+def _empty_state_dict() -> dict[str, object]:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    ).to_dict()
 
 
 def _preflight_validation_error() -> PydanticValidationError:
@@ -286,6 +298,44 @@ async def test_bare_dispatch_value_error_is_plugin_crash_not_arg_error() -> None
     assert inv.tool_name == "new_session"
     assert inv.error_class == "ValueError"
     assert inv.error_message == "ValueError"
+    assert inv.version_after is None
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
+
+
+@pytest.mark.asyncio
+async def test_response_json_serialization_failure_is_plugin_crash_not_success() -> None:
+    """Failure while producing the MCP-visible response must not audit SUCCESS."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+
+        bad_result = {
+            "success": True,
+            "data": object(),
+            "state": _empty_state_dict(),
+        }
+        with patch(
+            "elspeth.composer_mcp.server._dispatch_tool",
+            return_value=bad_result,
+        ):
+            response = await _call_handler(
+                server.request_handlers,
+                "list_sessions",
+                {},
+            )
+
+    call_result = response.root
+    assert call_result.isError is True
+
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "list_sessions"
+    assert inv.error_class == "TypeError"
+    assert inv.error_message == "TypeError"
     assert inv.version_after is None
     assert inv.result_canonical is None
     assert inv.result_hash is None

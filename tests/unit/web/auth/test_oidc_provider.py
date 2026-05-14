@@ -636,6 +636,68 @@ class TestOIDCJWKSShapeValidation:
             await provider.authenticate("some-token")
 
     @pytest.mark.asyncio
+    async def test_discovery_jwks_uri_cross_host_raises_before_jwks_fetch(self) -> None:
+        """Discovery jwks_uri must not redirect key fetches away from the issuer origin."""
+        provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
+        requested_urls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            requested_urls.append(str(url))
+            response = MagicMock()
+            response.raise_for_status = lambda: None
+            if ".well-known/openid-configuration" in str(url):
+                response.json.return_value = {
+                    "jwks_uri": "https://metadata.google.internal/computeMetadata/v1/keys",
+                    "issuer": ISSUER,
+                }
+                return response
+            raise AssertionError(f"unexpected JWKS fetch to {url}")
+
+        client_mock = AsyncMock()
+        client_mock.get = mock_get
+        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
+        client_mock.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock),
+            pytest.raises(AuthenticationError, match="same origin as issuer"),
+        ):
+            await provider.authenticate("some-token")
+
+        assert requested_urls == [f"{ISSUER}/.well-known/openid-configuration"]
+
+    @pytest.mark.asyncio
+    async def test_discovery_jwks_uri_http_scheme_raises_before_jwks_fetch(self) -> None:
+        """Discovery jwks_uri must be HTTPS even when the host matches the issuer."""
+        provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
+        requested_urls: list[str] = []
+
+        async def mock_get(url, **kwargs):
+            requested_urls.append(str(url))
+            response = MagicMock()
+            response.raise_for_status = lambda: None
+            if ".well-known/openid-configuration" in str(url):
+                response.json.return_value = {
+                    "jwks_uri": "http://login.example.com/keys",
+                    "issuer": ISSUER,
+                }
+                return response
+            raise AssertionError(f"unexpected JWKS fetch to {url}")
+
+        client_mock = AsyncMock()
+        client_mock.get = mock_get
+        client_mock.__aenter__ = AsyncMock(return_value=client_mock)
+        client_mock.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=client_mock),
+            pytest.raises(AuthenticationError, match="HTTPS URL"),
+        ):
+            await provider.authenticate("some-token")
+
+        assert requested_urls == [f"{ISSUER}/.well-known/openid-configuration"]
+
+    @pytest.mark.asyncio
     async def test_jwks_json_array_raises_auth_error_and_does_not_poison_cache(self) -> None:
         """JWKS returning a JSON array must raise AuthenticationError and leave cache untouched."""
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)

@@ -1256,6 +1256,35 @@ class TestStage1Validation:
         assert not result.is_valid
         assert any("plugin" in e.message for e in result.errors)
 
+    def test_unknown_node_type_is_invalid(self) -> None:
+        """Stage 1 must reject node types outside the closed runtime set."""
+        node = NodeSpec.from_dict(
+            {
+                "id": "mystery",
+                "node_type": "bogus",
+                "plugin": "passthrough",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {},
+                "condition": None,
+                "routes": None,
+                "fork_to": None,
+                "branches": None,
+                "policy": None,
+                "merge": None,
+            }
+        )
+        state = self._empty_state().with_source(self._make_source(on_success="source_out"))
+        state = state.with_output(self._make_output())
+        state = state.with_node(node)
+        state = state.with_edge(self._make_edge("e1", "source", "mystery"))
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any("unknown node_type 'bogus'" in e.message for e in result.errors)
+
     def test_unreachable_node(self) -> None:
         """Node exists but no edge points to it and source.on_success doesn't match."""
         state = self._empty_state()

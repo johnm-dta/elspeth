@@ -527,6 +527,7 @@ allowed_dict_patterns:
   # checks; PyJWKSet.from_dict consumes the raw IdP structure so the return
   # type must stay dict[str, Any].
   - "src/elspeth/web/auth/oidc.py:JWKSTokenValidator._validate_jwks_document:return"
+  - "src/elspeth/web/auth/oidc.py:optional_profile_claim:payload"
   - "src/elspeth/web/auth/oidc.py:OIDCAuthProvider._optional_profile_claim:payload"
   - "src/elspeth/web/auth/entra.py:EntraAuthProvider._validate_tenant:payload"
   - "src/elspeth/web/auth/entra.py:EntraAuthProvider._extract_groups:payload"
@@ -583,6 +584,7 @@ allowed_dict_patterns:
 
   # YAML generator — strips web-specific metadata from plugin options dicts
   # Options are dynamic (vary by plugin) so dict[str, Any] is the correct type
+  - "src/elspeth/web/composer/yaml_generator.py:generate_pipeline_dict:return"
   - "src/elspeth/web/composer/yaml_generator.py:_strip_web_metadata:options"
   - "src/elspeth/web/composer/yaml_generator.py:_strip_web_metadata:return"
 
@@ -618,6 +620,8 @@ allowed_dict_patterns:
   # ═══════════════════════════════════════════════════════════════════════════
   - "src/elspeth/web/composer/tools.py:ToolResult.to_dict:return"
   - "src/elspeth/web/composer/tools.py:_authoring_validation_payload:return"
+  - "src/elspeth/web/composer/tools.py:_secret_ref_placement_error:options"
+  - "src/elspeth/web/composer/tools.py:_numeric_aggregation_diagnostics_for_observed_csv:return (list)"
   - "src/elspeth/web/composer/tools.py:get_tool_definitions:return (list)"
   - "src/elspeth/web/composer/tools.py:execute_tool:arguments"
   - "src/elspeth/web/composer/tools.py:_execute_set_source:args"
@@ -678,6 +682,7 @@ allowed_dict_patterns:
   # OpenAI-format chat completion list. Each entry is the documented chat
   # message shape ({role, content, ...}) which is inherently dynamic.
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_proof_repair:llm_messages (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_empty_state_uploaded_blob_repair:llm_messages (list)"
   # Blob sync helpers — return dicts for tool response payloads
   - "src/elspeth/web/composer/tools.py:_sync_list_blobs:return (list)"
   # Secret tool handlers — same pattern as above, LLM-provided arguments
@@ -780,3 +785,10 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:_apply_anthropic_cache_markers:messages (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:chat_history (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:return (list)"
+
+  # WEB BLOB/SESSION PIPELINE ADAPTERS — canonical runtime/YAML dict shape.
+  # These helpers bridge SQL composition rows to the existing YAML/runtime
+  # serializer surface, whose canonical representation is intentionally a
+  # dynamic pipeline dict keyed by plugin graph sections.
+  - "src/elspeth/web/blobs/service.py:_active_run_pipeline_dict:return"
+  - "src/elspeth/web/sessions/converters.py:pipeline_dict_from_record:return"

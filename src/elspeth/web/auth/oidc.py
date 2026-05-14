@@ -22,6 +22,17 @@ from elspeth.web.validation import has_visible_content
 slog = structlog.get_logger()
 
 
+def optional_profile_claim(payload: dict[str, Any], claim_name: str) -> str | None:
+    """Return optional cosmetic IdP claims as visible strings or None."""
+    value = payload.get(claim_name)
+    if value is None or not isinstance(value, str):
+        return None
+    claim_value = cast(str, value)
+    if not has_visible_content(claim_value):
+        return None
+    return claim_value
+
+
 class JWKSTokenValidator:
     """JWKS discovery, caching, and JWT decode -- shared by OIDC and Entra."""
 
@@ -50,8 +61,7 @@ class JWKSTokenValidator:
         self._next_refresh_at: float = 0.0
         self._jwks_lock = asyncio.Lock()
 
-    @staticmethod
-    def _validate_discovery_document(discovery: Any) -> str:
+    def _validate_discovery_document(self, discovery: Any) -> str:
         """Shape-validate the OIDC discovery document and return jwks_uri.
 
         Tier 3 boundary: an IdP (or a misbehaving proxy in front of one)
@@ -64,6 +74,26 @@ class JWKSTokenValidator:
         jwks_uri = discovery.get("jwks_uri")
         if not isinstance(jwks_uri, str) or not jwks_uri.strip():
             raise AuthenticationError("OIDC discovery document missing non-empty string 'jwks_uri'")
+        return self._validate_jwks_uri_policy(jwks_uri)
+
+    def _validate_jwks_uri_policy(self, jwks_uri: str) -> str:
+        """Validate discovery-provided JWKS URL before fetching it."""
+        try:
+            issuer_url = httpx.URL(self._issuer)
+            jwks_url = httpx.URL(jwks_uri)
+        except httpx.InvalidURL as exc:
+            raise AuthenticationError("OIDC discovery document 'jwks_uri' must be a valid URL") from exc
+
+        if jwks_url.scheme != "https":
+            raise AuthenticationError("OIDC discovery document 'jwks_uri' must be an HTTPS URL")
+        if jwks_url.userinfo:
+            raise AuthenticationError("OIDC discovery document 'jwks_uri' must not include embedded credentials")
+
+        issuer_origin = (issuer_url.scheme, issuer_url.host, issuer_url.port)
+        jwks_origin = (jwks_url.scheme, jwks_url.host, jwks_url.port)
+        if jwks_origin != issuer_origin:
+            raise AuthenticationError("OIDC discovery document 'jwks_uri' must use the same origin as issuer")
+
         return jwks_uri
 
     @staticmethod
@@ -385,13 +415,7 @@ class OIDCAuthProvider:
     @staticmethod
     def _optional_profile_claim(payload: dict[str, Any], claim_name: str) -> str | None:
         """Return optional cosmetic claims as visible strings or None."""
-        value = payload.get(claim_name)
-        if value is None or not isinstance(value, str):
-            return None
-        claim_value = cast(str, value)
-        if not has_visible_content(claim_value):
-            return None
-        return claim_value
+        return optional_profile_claim(payload, claim_name)
 
     async def get_user_info(self, token: str) -> UserProfile:
         """Decode the OIDC token and extract profile claims."""

@@ -27,6 +27,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from elspeth.contracts.freeze import freeze_fields
@@ -43,6 +44,7 @@ _URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"\bhttps?://[^\s<>\"']+")
 _INT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^-?\d+$")
 _FLOAT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^-?\d+\.\d+([eE][+-]?\d+)?$|^-?\d+[eE][+-]?\d+$")
 _BOOL_LITERALS: Final[frozenset[str]] = frozenset({"true", "false", "yes", "no"})
+_REDACTED_URL_PART: Final[str] = "<redacted>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +131,7 @@ def inspect_blob_content(
         sample_row_count=0,
         observed_headers=None,
         inferred_types=None,
-        url_candidates=tuple(_URL_PATTERN.findall(_safe_decode(inspected))),
+        url_candidates=_url_candidates_from_text(_safe_decode(inspected)),
         warnings=(f"unrecognised mime_type {mime_type!r} and filename {filename!r}",),
     )
 
@@ -157,6 +159,22 @@ def _detect_kind(filename: str, mime_type: str, sample: bytes) -> SourceKind:
 def _safe_decode(content: bytes) -> str:
     """Decode bytes as utf-8 with replacement; never raises."""
     return content.decode("utf-8", errors="replace")
+
+
+def _redact_url_candidate(raw_url: str) -> str:
+    """Keep URL routing structure while removing query/fragment values."""
+    parts = urlsplit(raw_url)
+    if not parts.scheme or not parts.netloc:
+        return _REDACTED_URL_PART
+    query = _REDACTED_URL_PART if parts.query else ""
+    fragment = _REDACTED_URL_PART if parts.fragment else ""
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
+
+
+def _url_candidates_from_text(text: str) -> tuple[str, ...]:
+    """Return deduplicated URL hints safe for tool/proof-diagnostic surfaces."""
+    candidates = [_redact_url_candidate(raw_url) for raw_url in _URL_PATTERN.findall(text)]
+    return tuple(dict.fromkeys(candidates))
 
 
 def _count_replacement_chars(decoded: str) -> int:
@@ -318,7 +336,7 @@ def _inspect_csv(
     url_candidates: list[str] = []
     for row in data_rows:
         for cell in row:
-            url_candidates.extend(_URL_PATTERN.findall(cell))
+            url_candidates.extend(_url_candidates_from_text(cell))
     # Deduplicate while preserving order.
     url_candidates = list(dict.fromkeys(url_candidates))
 
@@ -459,7 +477,7 @@ def _facts_from_objects(
             sample_row_count=0,
             observed_headers=None,
             inferred_types=None,
-            url_candidates=tuple(_URL_PATTERN.findall(sample_text)),
+            url_candidates=_url_candidates_from_text(sample_text),
             warnings=tuple(warnings) if warnings else ("no parseable rows in sample",),
         )
 
@@ -510,7 +528,7 @@ def _facts_from_objects(
     for obj in objects:
         for v in obj.values():
             if isinstance(v, str):
-                url_candidates.extend(_URL_PATTERN.findall(v))
+                url_candidates.extend(_url_candidates_from_text(v))
     url_candidates = list(dict.fromkeys(url_candidates))
 
     return SourceInspectionFacts(
@@ -535,7 +553,7 @@ def _inspect_text(
     non_blank_lines = [line for line in raw_lines if line.strip()]
     blank_dropped = len(raw_lines) - len(non_blank_lines)
     lines = non_blank_lines[:_MAX_ROWS]
-    url_candidates = list(dict.fromkeys(_URL_PATTERN.findall(text)))
+    url_candidates = list(_url_candidates_from_text(text))
     warnings: list[str] = []
 
     if blank_dropped:

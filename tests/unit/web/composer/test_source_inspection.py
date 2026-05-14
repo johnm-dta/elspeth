@@ -148,6 +148,17 @@ class TestCsvInspection:
         assert "https://example.com" in f.url_candidates
         assert "https://example.org" in f.url_candidates
 
+    def test_url_candidates_redact_query_values(self) -> None:
+        f = inspect_blob_content(
+            content=b"name,site\nA,https://example.com/download?sig=SECRET_TOKEN&x=1\n",
+            filename="x.csv",
+            mime_type="text/csv",
+        )
+        serialized = facts_to_dict(f)
+
+        assert serialized["url_candidates"] == ["https://example.com/download?<redacted>"]
+        assert "SECRET_TOKEN" not in repr(serialized)
+
     def test_headerless_warning(self) -> None:
         f = inspect_blob_content(
             content=b"1,2,3\n4,5,6\n",

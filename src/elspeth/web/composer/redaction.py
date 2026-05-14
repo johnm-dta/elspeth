@@ -1206,7 +1206,7 @@ class _PipelineNodeModel(BaseModel):
     condition: str | None = None
     routes: dict[str, str] | None = None
     fork_to: list[str] | None = None
-    branches: list[str] | None = None
+    branches: list[str] | dict[str, str] | None = None
     policy: str | None = None
     merge: str | None = None
     trigger: _NodeTriggerModel | None = None

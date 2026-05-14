@@ -426,6 +426,25 @@ class TestEntraGetUserInfoTenantValidation:
             profile = await provider.get_user_info(token)
         assert profile.username == "entra-user-456"
 
+    @pytest.mark.asyncio
+    async def test_non_string_optional_profile_claims_are_dropped(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Cosmetic Entra metadata must not crash profile construction when it has the wrong type."""
+        private_key, _ = rsa_keypair
+        provider = EntraAuthProvider(tenant_id=TENANT_ID, audience=AUDIENCE)
+        token = make_rs256_token(private_key, _valid_entra_claims({"name": 42, "email": 123}))
+
+        with mock_httpx_discovery:
+            profile = await provider.get_user_info(token)
+
+        assert profile.user_id == "entra-user-456"
+        assert profile.username == "alice@contoso.com"
+        assert profile.display_name == "alice@contoso.com"
+        assert profile.email is None
+
 
 class TestEntraProtocolConformance:
     """Verify EntraAuthProvider satisfies the AuthProvider protocol."""

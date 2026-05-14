@@ -3308,7 +3308,15 @@ class TestDeleteBlobActiveRunGuard:
         if source is None:
             source = {
                 "plugin": "csv",
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
                 "options": {"blob_ref": self.blob_id, "path": str(self.storage_path)},
+            }
+        else:
+            source = {
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
+                **source,
             }
 
         now = datetime.now(UTC)
@@ -3320,10 +3328,10 @@ class TestDeleteBlobActiveRunGuard:
                     session_id=self.session_id,
                     version=1,
                     source=source,
-                    nodes=None,
-                    edges=None,
-                    outputs=None,
-                    metadata_=None,
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=False,
                     validation_errors=None,
                     # Plan §2294: composer-tools test fixture; provenance
@@ -4499,6 +4507,125 @@ class TestSecretTools:
         assert opts["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
         # Original options preserved
         assert opts["path"] == "/data/in.csv"
+
+    def test_wire_secret_ref_rejects_source_non_credential_field(self) -> None:
+        """wire_secret_ref must enforce the same placement policy as set_source."""
+        catalog = _mock_catalog()
+        svc = self._mock_secret_service()
+        state = _empty_state()
+        r1 = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            state,
+            catalog,
+        )
+        assert r1.success is True
+
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "source",
+                "option_key": "path",
+            },
+            r1.updated_state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert result.updated_state is r1.updated_state
+        assert "csv" in result.data["error"]
+        assert "path" in result.data["error"]
+        assert "OPENROUTER_API_KEY" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
+
+    def test_wire_secret_ref_rejects_node_non_credential_field(self) -> None:
+        """wire_secret_ref must enforce placement policy for node options."""
+        catalog = _mock_catalog()
+        svc = self._mock_secret_service()
+        state = _empty_state()
+        r1 = execute_tool(
+            "upsert_node",
+            {
+                "id": "classify",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert r1.success is True
+
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "node",
+                "target_id": "classify",
+                "option_key": "template",
+            },
+            r1.updated_state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert result.updated_state is r1.updated_state
+        assert "llm" in result.data["error"]
+        assert "template" in result.data["error"]
+        assert "OPENROUTER_API_KEY" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
+
+    def test_wire_secret_ref_rejects_output_non_credential_field(self) -> None:
+        """wire_secret_ref must enforce placement policy for output options."""
+        catalog = _mock_catalog()
+        svc = self._mock_secret_service()
+        state = _empty_state()
+        r1 = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        assert r1.success is True
+
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "output",
+                "target_id": "main",
+                "option_key": "path",
+            },
+            r1.updated_state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert result.updated_state is r1.updated_state
+        assert "csv" in result.data["error"]
+        assert "path" in result.data["error"]
+        assert "OPENROUTER_API_KEY" in result.data["error"]
+        assert "only credential-bearing fields" in result.data["error"]
 
     def test_wire_secret_ref_without_service_returns_failure(self) -> None:
         state = _empty_state()
@@ -6029,6 +6156,20 @@ class TestSetPipeline:
         # The orphan node has no reachable input — validation should flag it
         assert result.validation.is_valid is False
         assert len(result.validation.errors) > 0
+
+    def test_set_pipeline_unknown_node_type_invalidates_state(self) -> None:
+        """set_pipeline keeps enum parsing recoverable but Stage 1 must reject unknown node types."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0]["node_type"] = "bogus"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert result.validation is not None
+        assert result.validation.is_valid is False
+        assert any("unknown node_type 'bogus'" in error.message for error in result.validation.errors)
 
     def test_set_pipeline_gate_injection_rejected(self) -> None:
         """set_pipeline rejects gate nodes with injection in condition."""
@@ -8291,7 +8432,15 @@ class TestUpdateBlobActiveRunGuard:
         if source is None:
             source = {
                 "plugin": "csv",
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
                 "options": {"blob_ref": self.blob_id, "path": str(self.storage_path)},
+            }
+        else:
+            source = {
+                "on_success": "output",
+                "on_validation_failure": "quarantine",
+                **source,
             }
 
         now = datetime.now(UTC)
@@ -8303,10 +8452,10 @@ class TestUpdateBlobActiveRunGuard:
                     session_id=self.session_id,
                     version=1,
                     source=source,
-                    nodes=None,
-                    edges=None,
-                    outputs=None,
-                    metadata_=None,
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=False,
                     validation_errors=None,
                     # Plan §2294: composer-tools test fixture; provenance
@@ -9359,6 +9508,171 @@ class TestPreviewProofStep:
         assert mismatch[0]["evidence_locator"]["node_id"] == "price_gate"
         assert mismatch[0]["evidence_locator"]["field"] == "price"
         assert result.data["is_valid"] is False
+
+    def test_observed_csv_batch_stats_string_value_field_blocks_through_transform(self) -> None:
+        """Observed CSV strings must not reach numeric batch_stats at runtime.
+
+        This mirrors the hard-mode p2_t2_edge failure: a string-ish field
+        survives an observed-schema value_transform and batch_stats rejects it
+        only when the aggregation executes.
+        """
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        csv_content = b"respondent_id,community,financial_barrier\nR-1,Community-A,yes\nR-2,Community-B,no\n"
+        self.csv_storage_path.write_bytes(csv_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                )
+            )
+
+        state = (
+            self._state_with_csv_source(schema_mode="observed")
+            .with_node(
+                NodeSpec(
+                    id="classify",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="rows",
+                    on_success="classified_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "financial_only", "expression": "row['financial_barrier']"}],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="summarize",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="classified_rows",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "value_field": "financial_barrier",
+                        "group_by": "community",
+                        "compute_mean": True,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        mismatch = [d for d in diagnostics if d["code"] == "aggregation_numeric_value_field_type_mismatch_against_source_schema"]
+        assert mismatch, diagnostics
+        assert mismatch[0]["severity"] == "blocking"
+        assert mismatch[0]["evidence_locator"]["node_id"] == "summarize"
+        assert mismatch[0]["evidence_locator"]["field"] == "financial_barrier"
+        assert mismatch[0]["evidence_locator"]["observed_type"] == "str"
+        assert result.data["is_valid"] is False
+
+    def test_observed_csv_numeric_aggregation_does_not_block_after_field_overwrite(self) -> None:
+        """The proof step abstains once an upstream transform overwrites the field."""
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        csv_content = b"respondent_id,community,financial_barrier\nR-1,Community-A,yes\nR-2,Community-B,no\n"
+        self.csv_storage_path.write_bytes(csv_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                )
+            )
+
+        state = (
+            self._state_with_csv_source(schema_mode="observed")
+            .with_node(
+                NodeSpec(
+                    id="coerce_flag",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="rows",
+                    on_success="coerced_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "financial_barrier", "expression": "1"}],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="summarize",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="coerced_rows",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "value_field": "financial_barrier",
+                        "group_by": "community",
+                        "compute_mean": True,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "aggregation_numeric_value_field_type_mismatch_against_source_schema" not in codes
 
     def test_csv_duplicate_headers_registered_as_blocking_code(self) -> None:
         """Registry membership ripples — the constructor would crash if the

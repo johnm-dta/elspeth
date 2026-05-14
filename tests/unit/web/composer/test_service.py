@@ -5436,6 +5436,92 @@ class TestComposeLoopForcedRepair:
             },
         ]
 
+    def _wire_uploaded_blob_to_output_tool_calls(self) -> list[dict[str, Any]]:
+        """Tool calls for the uploaded-CSV happy path after an empty-state stall."""
+        return [
+            {
+                "id": "call_source",
+                "name": "set_source_from_blob",
+                "arguments": {
+                    "blob_id": self.blob_id,
+                    "on_success": "out",
+                    "on_validation_failure": "discard",
+                    "options": {"schema": {"mode": "observed"}},
+                },
+            },
+            {
+                "id": "call_output",
+                "name": "set_output",
+                "arguments": {
+                    "sink_name": "out",
+                    "plugin": "json",
+                    "options": {
+                        "path": "outputs/out.json",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                },
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_state_uploaded_blob_stall_forces_repair_turn(self) -> None:
+        """A no-tool prose reply must not end the turn when ready uploaded blobs exist.
+
+        Regression for elspeth-b493ddf810: the hard-mode uploaded-CSV happy
+        path produced repeated prose replies, no tool calls, and an empty
+        CompositionState even though a ready uploaded CSV blob was present.
+        The service should feed the model a concrete repair instruction naming
+        the ready blob and continue the loop, instead of finalizing the
+        empty-state response.
+        """
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        turn1_stall = _make_llm_response(
+            content="The uploaded CSV appears to contain only the header row, so I cannot build yet.",
+            tool_calls=None,
+        )
+        turn2_build = _make_llm_response(content=None, tool_calls=self._wire_uploaded_blob_to_output_tool_calls())
+        turn3_done = _make_llm_response(content="Ready.", tool_calls=None)
+
+        empty = _empty_state()
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1_stall, turn2_build, turn3_done]
+            result = await self.service.compose(
+                "Build from my uploaded CSV",
+                [],
+                empty,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        assert mock_llm.call_count == 3
+        assert result.repair_turns_used == 1
+        assert result.state.source is not None
+        assert result.state.source.options["blob_ref"] == self.blob_id
+        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.outputs[0].name == "out"
+        assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
+
+        turn2_messages = mock_llm.call_args_list[1].args[0]
+        repair_msgs = [
+            m
+            for m in turn2_messages
+            if isinstance(m, dict)
+            and m.get("role") == "user"
+            and "[composer-system]" in str(m.get("content", ""))
+            and self.blob_id in str(m.get("content", ""))
+        ]
+        assert len(repair_msgs) == 1
+        repair_text = str(repair_msgs[0]["content"])
+        assert "ready uploaded blob" in repair_text
+        assert "inspect_source" in repair_text
+        assert "source.blob_id" in repair_text
+        assert "Do not infer that a CSV is header-only" in repair_text
+
     def _futile_repair_tool_call(self, call_id: str, name_value: str) -> list[dict[str, Any]]:
         """Tool call that mutates state but does NOT clear the proof blocker.
 
@@ -5788,3 +5874,54 @@ class TestComposeLoopForcedRepair:
         # Gate skipped — only one LLM call, no repair turns.
         assert mock_llm.call_count == 1
         assert result.repair_turns_used == 0
+
+
+class TestComposeLoopFreeformRecipeIntentRouting:
+    @pytest.mark.asyncio
+    async def test_fork_coalesce_truncate_intent_applies_recipe_before_llm(self, tmp_path: Path) -> None:
+        engine, session_id = _session_engine_with_session()
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(data_dir=tmp_path),
+            sessions_service=_test_sessions_service(engine, tmp_path),
+            session_engine=engine,
+        )
+        prompt = (
+            "Please create a pipeline that processes the following customer rows. "
+            "Each row should be processed two ways in parallel and combined into "
+            "a single merged output row at outputs/merged.jsonl: path A keeps the "
+            "original row unchanged, path B truncates the description field to 30 "
+            "characters with suffix '...'. Combine both branches under separate "
+            "keys `path_a` and `path_b` in each merged output row -- one input row "
+            "produces one output row containing both branches side-by-side. "
+            "Customer rows (CSV):\n"
+            "name,description\n"
+            "alice,this is a moderately long description for testing the truncation behaviour\n"
+            "bob,short note\n"
+            "charlie,another lengthy customer description that exceeds thirty characters comfortably"
+        )
+
+        with patch.object(
+            service,
+            "_call_llm_before_deadline",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("intent routing should bypass the cheap model"),
+        ) as mock_llm:
+            result = await service.compose(
+                prompt,
+                [],
+                _empty_state(),
+                session_id=session_id,
+                user_id="test-user",
+            )
+
+        assert mock_llm.call_count == 0
+        assert result.state.validate().is_valid is True
+        assert result.state.source is not None
+        assert result.state.source.plugin == "csv"
+        assert result.state.source.options["blob_ref"]
+        assert {node.node_type for node in result.state.nodes} >= {"gate", "coalesce"}
+        assert any(node.plugin == "truncate" for node in result.state.nodes)
+        assert result.state.outputs[0].name == "merged_rows"
+        assert result.state.outputs[0].options["path"] == "outputs/merged.jsonl"
+        assert "fork-coalesce-truncate-jsonl" in result.message

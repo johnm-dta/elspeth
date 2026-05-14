@@ -446,8 +446,14 @@ class TestDeleteBlob:
                     # about to link it once link_blob_to_run() fires.
                     source={
                         "plugin": "csv",
+                        "on_success": "output",
+                        "on_validation_failure": "quarantine",
                         "options": {"blob_ref": str(record.id), "path": str(record.storage_path)},
                     },
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=True,
                     # Plan §2294: every test-side direct composition_states
                     # insert must supply provenance after Task 3's CHECK
@@ -510,8 +516,14 @@ class TestDeleteBlob:
                     # to the blob being deleted.
                     source={
                         "plugin": "csv",
+                        "on_success": "output",
+                        "on_validation_failure": "quarantine",
                         "options": {"path": "/data/external/other.csv"},
                     },
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=True,
                     # Plan §2294: every test-side direct composition_states
                     # insert must supply provenance after Task 3's CHECK
@@ -539,6 +551,78 @@ class TestDeleteBlob:
 
         with pytest.raises(BlobNotFoundError):
             await blob_service.get_blob(record.id)
+
+    @pytest.mark.asyncio
+    async def test_delete_blob_rejects_when_transform_option_references_blob(self, blob_service, session_id, db_engine) -> None:
+        """Pre-link guard walks canonical pipeline sections beyond source.options."""
+        from elspeth.web.sessions.models import (
+            composition_states_table,
+            runs_table,
+        )
+
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="prompt.txt",
+            content=b"Classify the row.",
+            mime_type="text/plain",
+            created_by="user",
+        )
+
+        state_id = str(uuid4())
+        session_id_str = str(session_id)
+        run_id = str(uuid4())
+
+        with db_engine.begin() as conn:
+            conn.execute(
+                composition_states_table.insert().values(
+                    id=state_id,
+                    session_id=session_id_str,
+                    version=1,
+                    source={
+                        "plugin": "csv",
+                        "on_success": "classify",
+                        "on_validation_failure": "quarantine",
+                        "options": {"path": "/data/external/other.csv"},
+                    },
+                    nodes=[
+                        {
+                            "id": "classify",
+                            "node_type": "transform",
+                            "plugin": "llm",
+                            "input": "source_out",
+                            "on_success": "output",
+                            "on_error": "discard",
+                            "options": {
+                                "system_prompt": {
+                                    "blob_ref": str(record.id),
+                                    "mode": "inline_content",
+                                    "sha256": record.content_hash,
+                                }
+                            },
+                        }
+                    ],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
+                    is_valid=True,
+                    provenance="session_seed",
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            )
+            conn.execute(
+                runs_table.insert().values(
+                    id=run_id,
+                    session_id=session_id_str,
+                    state_id=state_id,
+                    status="pending",
+                    started_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    rows_processed=0,
+                    rows_failed=0,
+                )
+            )
+
+        with pytest.raises(BlobActiveRunError):
+            await blob_service.delete_blob(record.id)
 
     @pytest.mark.asyncio
     async def test_delete_blob_rejects_when_active_run_path_matches_storage(self, blob_service, session_id, db_engine) -> None:
@@ -574,8 +658,14 @@ class TestDeleteBlob:
                     # Source references this blob via path, NOT blob_ref.
                     source={
                         "plugin": "csv",
+                        "on_success": "output",
+                        "on_validation_failure": "quarantine",
                         "options": {"path": record.storage_path},
                     },
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=True,
                     # Plan §2294: every test-side direct composition_states
                     # insert must supply provenance after Task 3's CHECK
@@ -659,6 +749,21 @@ class TestDeleteBlob:
 # ---------------------------------------------------------------------------
 # finalize_blob — pending lifecycle transitions
 # ---------------------------------------------------------------------------
+
+
+class TestCreatePendingBlob:
+    """Pending blob reservation must enforce the same literal guards as ready writes."""
+
+    @pytest.mark.asyncio
+    async def test_create_pending_blob_rejects_disallowed_mime_type(self, blob_service, session_id) -> None:
+        """Pending rows must not persist MIME values that read guards classify as corruption."""
+        with pytest.raises(RuntimeError, match="Invalid mime_type"):
+            await blob_service.create_pending_blob(
+                session_id=session_id,
+                filename="output.png",
+                mime_type="image/png",  # type: ignore[arg-type]
+                created_by="pipeline",
+            )
 
 
 class TestFinalizeBlob:
@@ -915,6 +1020,32 @@ class TestBlobQuota:
             created_by="user",
         )
         assert record.status == "ready"
+
+    @pytest.mark.asyncio
+    async def test_finalize_blob_rejects_ready_size_that_exceeds_quota(self, db_engine, session_id, tmp_path) -> None:
+        """Public finalize_blob must enforce quota when pending output size becomes known."""
+        from elspeth.web.blobs.protocol import BlobQuotaExceededError
+
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=10)
+        pending = await service.create_pending_blob(
+            session_id=session_id,
+            filename="oversized-output.csv",
+            mime_type="text/csv",
+            created_by="pipeline",
+        )
+
+        with pytest.raises(BlobQuotaExceededError):
+            await service.finalize_blob(
+                blob_id=pending.id,
+                status="ready",
+                size_bytes=100,
+                content_hash=content_hash(b"oversized-output"),
+            )
+
+        record = await service.get_blob(pending.id)
+        assert record.status == "pending"
+        assert record.size_bytes == 0
+        assert record.content_hash is None
 
 
 # ---------------------------------------------------------------------------

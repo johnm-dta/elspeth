@@ -38,6 +38,9 @@ from elspeth.web.composer.guided.state_machine import GuidedSession
 
 NodeType = Literal["transform", "gate", "aggregation", "coalesce"]
 EdgeType = Literal["on_success", "on_error", "route_true", "route_false", "fork"]
+CoalesceBranches = tuple[str, ...] | Mapping[str, str]
+
+COMPOSER_NODE_TYPES: frozenset[str] = frozenset(("aggregation", "coalesce", "gate", "transform"))
 
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 _MISSING_DECLARED_INPUT_FIELDS = object()
@@ -133,7 +136,7 @@ class NodeSpec:
     condition: str | None
     routes: Mapping[str, str] | None
     fork_to: tuple[str, ...] | None
-    branches: tuple[str, ...] | None
+    branches: CoalesceBranches | None
     policy: str | None
     merge: str | None
     trigger: Mapping[str, Any] | None = None
@@ -142,10 +145,12 @@ class NodeSpec:
 
     def __post_init__(self) -> None:
         # Mapping fields must be deep-frozen. Scalar, enum, and tuple fields
-        # (fork_to, branches) are already immutable and need no guard.
+        # are already immutable and need no guard.
         freeze_fields(self, "options")
         if self.routes is not None:
             freeze_fields(self, "routes")
+        if isinstance(self.branches, Mapping):
+            freeze_fields(self, "branches")
         if self.trigger is not None:
             freeze_fields(self, "trigger")
 
@@ -155,8 +160,9 @@ class NodeSpec:
 
         Optional fields (condition, routes, fork_to, branches, policy, merge,
         trigger, output_mode, expected_output_count) default to None when
-        absent from the dict. fork_to and branches are converted from list to
-        tuple since to_dict() serialises tuples as lists.
+        absent from the dict. fork_to is converted from list to tuple since
+        to_dict() serialises tuples as lists. branches preserves mapping form
+        for transformed coalesce branches and converts list form to tuple.
         """
         fork_to = d["fork_to"] if "fork_to" in d else None
         branches = d["branches"] if "branches" in d else None
@@ -171,13 +177,38 @@ class NodeSpec:
             condition=d["condition"] if "condition" in d else None,
             routes=d["routes"] if "routes" in d else None,
             fork_to=tuple(fork_to) if fork_to is not None else None,
-            branches=tuple(branches) if branches is not None else None,
+            branches=dict(branches) if isinstance(branches, Mapping) else tuple(branches) if branches is not None else None,
             policy=d["policy"] if "policy" in d else None,
             merge=d["merge"] if "merge" in d else None,
             trigger=d["trigger"] if "trigger" in d else None,
             output_mode=d["output_mode"] if "output_mode" in d else None,
             expected_output_count=d["expected_output_count"] if "expected_output_count" in d else None,
         )
+
+
+def _coalesce_branch_names(branches: CoalesceBranches | None) -> tuple[str, ...]:
+    """Return branch identities declared by a coalesce node."""
+    if branches is None:
+        return ()
+    if isinstance(branches, Mapping):
+        return tuple(branches.keys())
+    return branches
+
+
+def _coalesce_branch_connections(branches: CoalesceBranches | None) -> tuple[str, ...]:
+    """Return input connections consumed by a coalesce node."""
+    if branches is None:
+        return ()
+    if isinstance(branches, Mapping):
+        return tuple(branches.values())
+    return branches
+
+
+def _serialize_branches(branches: CoalesceBranches) -> list[str] | dict[str, str]:
+    """Serialize coalesce branches preserving list-vs-mapping semantics."""
+    if isinstance(branches, Mapping):
+        return dict(deep_thaw(branches))
+    return list(branches)
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,7 +633,7 @@ def _runtime_consumer_connections(nodes: tuple[NodeSpec, ...]) -> set[str]:
     consumers = {node.input for node in nodes if node.node_type != "coalesce"}
     for node in nodes:
         if node.node_type == "coalesce" and node.branches is not None:
-            consumers.update(node.branches)
+            consumers.update(_coalesce_branch_connections(node.branches))
     return consumers
 
 
@@ -1240,11 +1271,15 @@ def _check_schema_contracts(
                 return False, frozenset()
 
             branch_schemas: dict[str, SchemaConfig] = {}
-            for branch_connection in producer_node.branches:
+            for branch_name, branch_connection in zip(
+                _coalesce_branch_names(producer_node.branches),
+                _coalesce_branch_connections(producer_node.branches),
+                strict=True,
+            ):
                 branch_participates, branch_guarantees = _connection_propagation_vote(branch_connection)
                 if not branch_participates:
                     continue
-                branch_schemas[branch_connection] = SchemaConfig(
+                branch_schemas[branch_name] = SchemaConfig(
                     mode="observed",
                     fields=None,
                     guaranteed_fields=tuple(sorted(branch_guarantees)),
@@ -1774,7 +1809,7 @@ class CompositionState:
             if node.fork_to is not None:
                 node_dict["fork_to"] = list(node.fork_to)
             if node.branches is not None:
-                node_dict["branches"] = list(node.branches)
+                node_dict["branches"] = _serialize_branches(node.branches)
             if node.policy is not None:
                 node_dict["policy"] = node.policy
             if node.merge is not None:
@@ -1882,6 +1917,17 @@ class CompositionState:
 
         # 7. Node type field consistency
         for node in self.nodes:
+            if node.node_type not in COMPOSER_NODE_TYPES:
+                expected = ", ".join(sorted(COMPOSER_NODE_TYPES))
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Node '{node.id}' has unknown node_type '{node.node_type}'. Expected one of: {expected}.",
+                        "high",
+                    )
+                )
+                continue
+
             batch_placement_error = _batch_aware_placement_error(node.id, node.node_type, node.plugin, node.output_mode)
             if batch_placement_error is not None:
                 errors.append(_err(f"node:{node.id}", batch_placement_error, "high"))
@@ -1959,7 +2005,9 @@ class CompositionState:
         runtime_connections = _runtime_connection_targets(self.source, self.nodes)
         for node in self.nodes:
             if node.node_type == "coalesce":
-                missing_branches = sorted(branch for branch in node.branches or () if branch not in runtime_connections)
+                missing_branches = sorted(
+                    branch for branch in _coalesce_branch_connections(node.branches) if branch not in runtime_connections
+                )
                 if missing_branches:
                     errors.append(
                         _err(

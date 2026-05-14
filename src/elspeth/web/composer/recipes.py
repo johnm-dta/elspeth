@@ -411,9 +411,9 @@ def _build_threshold_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Recipe 3: fork-coalesce-truncate-jsonl
 #
-#   csv source (blob)  →  fork gate (routes:{all:fork}, fork_to:[a_in, b_in])
+#   csv source (blob)  →  fork gate (routes:{all:fork}, fork_to:[a, b])
 #                       →  passthrough (path A)        + truncate (path B)
-#                       →  coalesce (merge=nested, keys=key_a/key_b)
+#                       →  coalesce (merge=nested, {key_a:a_out, key_b:b_out})
 #                       →  jsonl sink (one merged output)
 #
 # Wiring discipline (gate.fork_to ↔ path.input/on_success ↔ coalesce.branches)
@@ -478,22 +478,19 @@ def _build_fork_coalesce_truncate_recipe(slots: Mapping[str, Any]) -> dict[str, 
     ``merge: nested``, so the output rows are ``{key_a: <full row>, key_b:
     <truncated row>}``.
 
-    Wiring discipline: ``coalesce.branches`` is list-form (``NodeSpec.branches``
-    is ``tuple[str, ...]``), so branch names ARE the connection names. With
-    ``merge: nested`` those branch names become the top-level keys of the
-    merged output row — meaning the operator-supplied ``key_a`` / ``key_b``
-    drive both (a) the path-transform ``on_success`` connection names and
-    (b) the merged-row output keys. The gate's ``fork_to`` uses an ``_in``
-    suffix on the same names to differentiate the upstream-of-path connection
-    from the downstream-of-path connection.
+    Wiring discipline: ``coalesce.branches`` is mapping-form:
+    ``{branch_name: input_connection}``. The branch names are the operator-
+    supplied ``key_a`` / ``key_b`` values (and become nested output keys);
+    the input connections are the post-transform path outputs. This is the
+    runtime-required representation for transformed fork branches.
     """
     key_a = slots["key_a"]
     key_b = slots["key_b"]
     truncate_field = slots["truncate_field"]
     max_chars = slots["max_chars"]
     suffix = slots["truncation_suffix"]
-    branch_a_input = f"{key_a}_in"
-    branch_b_input = f"{key_b}_in"
+    branch_a_output = f"{key_a}_out"
+    branch_b_output = f"{key_b}_out"
     return {
         "source": {
             "plugin": "csv",
@@ -509,23 +506,24 @@ def _build_fork_coalesce_truncate_recipe(slots: Mapping[str, Any]) -> dict[str, 
                 "id": "fork_gate",
                 "node_type": "gate",
                 "input": "rows",
-                # validate_boolean_routes contract: routes must have at least one
-                # entry; for fork the canonical form is a single entry routing
-                # the literal "all" predicate to the literal "fork" destination.
+                # validate_boolean_routes contract: boolean predicates require
+                # "true"/"false" labels. This recipe intentionally returns the
+                # string literal "all" so the single route label is runtime-valid
+                # while still forking every row.
+                "condition": "'all'",
                 "routes": {"all": "fork"},
-                # fork_to publishes one connection per branch. Path-transforms
-                # consume these as their `input`. Names are recipe-private —
-                # the operator does not see them and the LLM never authors them.
-                "fork_to": [branch_a_input, branch_b_input],
+                # fork_to publishes one connection per branch. The branch names
+                # are the user-visible coalesce output keys; the branch mapping
+                # below points each key at the post-transform connection that the
+                # coalesce node consumes.
+                "fork_to": [key_a, key_b],
             },
             {
                 "id": "path_a_passthrough",
                 "node_type": "transform",
                 "plugin": "passthrough",
-                "input": branch_a_input,
-                # Publishes connection named `key_a`; coalesce.branches lists
-                # this name and `merge: nested` keys the output by it.
-                "on_success": key_a,
+                "input": key_a,
+                "on_success": branch_a_output,
                 "on_error": "discard",
                 "options": {
                     "schema": {"mode": "observed"},
@@ -535,8 +533,8 @@ def _build_fork_coalesce_truncate_recipe(slots: Mapping[str, Any]) -> dict[str, 
                 "id": "path_b_truncate",
                 "node_type": "transform",
                 "plugin": "truncate",
-                "input": branch_b_input,
-                "on_success": key_b,
+                "input": key_b,
+                "on_success": branch_b_output,
                 "on_error": "discard",
                 "options": {
                     "schema": {"mode": "observed"},
@@ -553,11 +551,9 @@ def _build_fork_coalesce_truncate_recipe(slots: Mapping[str, Any]) -> dict[str, 
                 # sentinel ``"branches"`` is the established convention
                 # (see tests/unit/web/composer/test_producer_resolver.py).
                 "input": "branches",
-                # List form: branch names == connection names == output
-                # keys (under ``merge: nested``). NodeSpec.branches is
-                # ``tuple[str, ...]`` so dict form is not representable
-                # at the composer layer.
-                "branches": [key_a, key_b],
+                # Mapping form: branch names are the nested output keys, while
+                # values are the post-transform connections consumed by coalesce.
+                "branches": {key_a: branch_a_output, key_b: branch_b_output},
                 "policy": "require_all",
                 "merge": "nested",
                 "on_success": "merged_rows",

@@ -31,10 +31,18 @@ from sqlalchemy import Engine, delete, func, select, update
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.schema import get_aggregation_contract_options
 from elspeth.core.config import TriggerConfig
 from elspeth.core.secrets import collect_credential_field_violations, collect_disallowed_secret_ref_markers
 from elspeth.web.blobs.protocol import BlobIntegrityError
-from elspeth.web.blobs.service import _guard_blob_row_literals, _source_references_blob, content_hash, sanitize_filename
+from elspeth.web.blobs.service import (
+    _ACTIVE_RUN_COMPOSITION_COLUMNS,
+    _active_run_pipeline_dict,
+    _composition_references_blob,
+    _guard_blob_row_literals,
+    content_hash,
+    sanitize_filename,
+)
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
@@ -72,6 +80,9 @@ from elspeth.web.composer.state import (
     ValidationSummary,
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
+    _coalesce_branch_connections,
+    _coalesce_branch_names,
+    _serialize_branches,
     _source_options_have_schema,
     _validate_gate_expression,
 )
@@ -263,7 +274,8 @@ def _reserved_connection_names(state: CompositionState) -> set[str]:
         if node.fork_to is not None:
             names.update(node.fork_to)
         if node.branches is not None:
-            names.update(node.branches)
+            names.update(_coalesce_branch_names(node.branches))
+            names.update(_coalesce_branch_connections(node.branches))
     return names
 
 
@@ -730,9 +742,14 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                         "description": "Fork destinations — row is copied to all listed paths (gate only, mutually exclusive with routes).",
                     },
                     "branches": {
-                        "type": ["array", "null"],
+                        "type": ["array", "object", "null"],
                         "items": {"type": "string"},
-                        "description": "Input branch names to merge (coalesce only).",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Branches to merge (coalesce only). Use list form when branch identity and input "
+                            "connection are the same, or object form {branch_name: input_connection} when a "
+                            "branch flows through transforms before coalescing."
+                        ),
                     },
                     "policy": {"type": ["string", "null"], "description": "Merge trigger policy (coalesce only)."},
                     "merge": {"type": ["string", "null"], "description": "Field merge strategy (coalesce only)."},
@@ -1059,7 +1076,11 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                                     ),
                                 },
                                 "fork_to": {"type": "array", "items": {"type": "string"}},
-                                "branches": {"type": "array", "items": {"type": "string"}},
+                                "branches": {
+                                    "type": ["array", "object"],
+                                    "items": {"type": "string"},
+                                    "additionalProperties": {"type": "string"},
+                                },
                                 "policy": {"type": "string"},
                                 "merge": {"type": "string"},
                                 "trigger": {"type": "object"},
@@ -2225,18 +2246,9 @@ def _prevalidate_plugin_options(
         get_transform_config_model,
     )
 
-    secret_ref_placement_violations = collect_disallowed_secret_ref_markers(
-        options,
-        additional_allowed_fields=allowed_secret_ref_fields(plugin_type, plugin_name),
-    )
-    if secret_ref_placement_violations:
-        violation_text = ", ".join(f"{v.field_path} -> {v.secret_name}" for v in secret_ref_placement_violations)
-        allowed_text = allowed_secret_ref_fields_text(plugin_type, plugin_name)
-        return (
-            f"Invalid secret_ref placement for {plugin_type} '{plugin_name}': {violation_text}; "
-            "only credential-bearing fields may carry secret_ref markers. "
-            f"Allowed credential-bearing fields: {allowed_text}."
-        )
+    secret_ref_placement_error = _secret_ref_placement_error(plugin_type, plugin_name, options)
+    if secret_ref_placement_error is not None:
+        return secret_ref_placement_error
 
     try:
         if plugin_type == "source":
@@ -2298,6 +2310,28 @@ def _prevalidate_plugin_options(
         # Re-format only the non-secret errors.
         lines = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in remaining)
         return f"Invalid options for {plugin_type} '{plugin_name}': {lines}"
+
+
+def _secret_ref_placement_error(
+    plugin_type: PluginKind,
+    plugin_name: str,
+    options: dict[str, Any],
+) -> str | None:
+    """Return a policy error for secret_ref markers in non-credential fields."""
+    secret_ref_placement_violations = collect_disallowed_secret_ref_markers(
+        options,
+        additional_allowed_fields=allowed_secret_ref_fields(plugin_type, plugin_name),
+    )
+    if not secret_ref_placement_violations:
+        return None
+
+    violation_text = ", ".join(f"{v.field_path} -> {v.secret_name}" for v in secret_ref_placement_violations)
+    allowed_text = allowed_secret_ref_fields_text(plugin_type, plugin_name)
+    return (
+        f"Invalid secret_ref placement for {plugin_type} '{plugin_name}': {violation_text}; "
+        "only credential-bearing fields may carry secret_ref markers. "
+        f"Allowed credential-bearing fields: {allowed_text}."
+    )
 
 
 _WEB_ONLY_SOURCE_KEYS = frozenset({"blob_ref"})
@@ -2566,7 +2600,7 @@ def _execute_upsert_node(
 
     branches = args.get("branches")
     if branches is not None:
-        branches = tuple(branches)
+        branches = dict(branches) if isinstance(branches, Mapping) else tuple(branches)
 
     node = NodeSpec(
         id=args["id"],
@@ -3455,12 +3489,12 @@ def _execute_update_blob(
                     #    the run record before ``link_blob_to_run``
                     #    inserts the link row.  During that gap the
                     #    explicit-link check sees nothing, but the
-                    #    backing file is about to be read.  Scan the
-                    #    active run's composition source for a
-                    #    ``blob_ref`` match OR a ``path``/``file`` that
-                    #    matches ``storage_path``.
+                    #    backing file is about to be read.  Scan the active
+                    #    run's canonical pipeline dict for a ``blob_ref``
+                    #    match OR a ``path``/``file`` that matches
+                    #    ``storage_path``.
                     active_run = conn.execute(
-                        select(runs_table.c.id, composition_states_table.c.source)
+                        select(*_ACTIVE_RUN_COMPOSITION_COLUMNS)
                         .join(
                             composition_states_table,
                             runs_table.c.state_id == composition_states_table.c.id,
@@ -3468,9 +3502,13 @@ def _execute_update_blob(
                         .where(runs_table.c.session_id == session_id)
                         .where(runs_table.c.status.in_(["pending", "running"]))
                     ).first()
-                    if active_run is not None and _source_references_blob(active_run.source, blob_id, str(storage_path)):
+                    if active_run is not None and _composition_references_blob(
+                        _active_run_pipeline_dict(active_run),
+                        blob_id,
+                        str(storage_path),
+                    ):
                         raise _BlobUpdateBlockedByActiveRun(
-                            f"Blob '{blob_id}' cannot be updated while active run '{active_run.id}' references it."
+                            f"Blob '{blob_id}' cannot be updated while active run '{active_run.run_id}' references it."
                         )
 
                     # Atomic quota check.  ``size_bytes`` is re-read
@@ -3648,12 +3686,13 @@ def _execute_delete_blob(
             #    file is about to be needed.
             #
             #    Scoped to THIS blob: join runs → composition_states and check
-            #    whether the active run's source references this blob via
-            #    blob_ref OR via a path/file matching this blob's storage_path.
+            #    whether the active run's canonical pipeline dict references
+            #    this blob via blob_ref OR via a path/file matching this
+            #    blob's storage_path.
             #    Runs whose source doesn't touch this blob must not block
             #    unrelated blob deletions.
             active_run = conn.execute(
-                select(runs_table.c.id, composition_states_table.c.source)
+                select(*_ACTIVE_RUN_COMPOSITION_COLUMNS)
                 .join(
                     composition_states_table,
                     runs_table.c.state_id == composition_states_table.c.id,
@@ -3661,10 +3700,14 @@ def _execute_delete_blob(
                 .where(runs_table.c.session_id == session_id)
                 .where(runs_table.c.status.in_(["pending", "running"]))
             ).first()
-            if active_run is not None and _source_references_blob(active_run.source, blob_id, blob["storage_path"]):
+            if active_run is not None and _composition_references_blob(
+                _active_run_pipeline_dict(active_run),
+                blob_id,
+                blob["storage_path"],
+            ):
                 return _failure_result(
                     state,
-                    f"Blob '{blob_id}' cannot be deleted while active run '{active_run.id}' references it.",
+                    f"Blob '{blob_id}' cannot be deleted while active run '{active_run.run_id}' references it.",
                 )
 
             # Move the file to a tombstone path before the DB delete so a
@@ -4091,6 +4134,9 @@ def _execute_wire_secret_ref(
             return _failure_result(state, "No source configured — set a source first.")
         patched_options = dict(deep_thaw(state.source.options))
         patched_options[option_key] = marker
+        placement_error = _secret_ref_placement_error("source", state.source.plugin, patched_options)
+        if placement_error is not None:
+            return _failure_result(state, placement_error)
         new_source = SourceSpec(
             plugin=state.source.plugin,
             on_success=state.source.on_success,
@@ -4106,8 +4152,16 @@ def _execute_wire_secret_ref(
         node = next((n for n in state.nodes if n.id == target_id), None)
         if node is None:
             return _failure_result(state, f"Node '{target_id}' not found.")
+        if node.node_type not in ("transform", "aggregation") or node.plugin is None:
+            return _failure_result(
+                state,
+                "Secret references can only be wired into source, transform, aggregation, or output plugin options.",
+            )
         patched_options = dict(deep_thaw(node.options))
         patched_options[option_key] = marker
+        placement_error = _secret_ref_placement_error("transform", node.plugin, patched_options)
+        if placement_error is not None:
+            return _failure_result(state, placement_error)
         new_node = NodeSpec(
             id=node.id,
             node_type=node.node_type,
@@ -4137,6 +4191,9 @@ def _execute_wire_secret_ref(
             return _failure_result(state, f"Output '{target_id}' not found.")
         patched_options = dict(deep_thaw(output.options))
         patched_options[option_key] = marker
+        placement_error = _secret_ref_placement_error("sink", output.plugin, patched_options)
+        if placement_error is not None:
+            return _failure_result(state, placement_error)
         new_output = OutputSpec(
             name=output.name,
             plugin=output.plugin,
@@ -4428,7 +4485,7 @@ def _execute_set_pipeline(
     node_specs = []
     for n in validated.nodes:
         fork_to = tuple(n.fork_to) if n.fork_to is not None else None
-        branches = tuple(n.branches) if n.branches is not None else None
+        branches = dict(n.branches) if isinstance(n.branches, Mapping) else tuple(n.branches) if n.branches is not None else None
         nt = n.node_type
         node_specs.append(
             NodeSpec(
@@ -5258,7 +5315,7 @@ def _serialize_node(node: NodeSpec) -> dict[str, Any]:
         "condition": node.condition,
         "routes": deep_thaw(node.routes) if node.routes else None,
         "fork_to": list(node.fork_to) if node.fork_to else None,
-        "branches": list(node.branches) if node.branches else None,
+        "branches": _serialize_branches(node.branches) if node.branches else None,
         "policy": node.policy,
         "merge": node.merge,
         "trigger": deep_thaw(node.trigger) if node.trigger else None,
@@ -5371,6 +5428,7 @@ def _authoring_validation_payload(state: CompositionState, validation: Validatio
 # every blocking dict's ``code`` appears here at construction time.
 _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
     {
+        "aggregation_numeric_value_field_type_mismatch_against_source_schema",
         "csv_duplicate_headers",
         "csv_fixed_schema_omits_observed_columns",
         "gate_expression_type_mismatch_against_source_schema",
@@ -5530,6 +5588,136 @@ def _gate_expression_type_diagnostics_for_observed_csv(
     return diagnostics
 
 
+_NUMERIC_VALUE_FIELD_AGGREGATION_PLUGINS: Final[frozenset[str]] = frozenset(
+    {
+        "batch_distribution_profile",
+        "batch_outlier_annotator",
+        "batch_stats",
+        "batch_threshold_summary",
+    }
+)
+
+
+def _value_transform_preserves_field(node: NodeSpec, field_name: str) -> bool:
+    operations = node.options.get("operations")
+    if not isinstance(operations, (list, tuple)):
+        return False
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            return False
+        target = operation.get("target")
+        if target == field_name:
+            return False
+    return True
+
+
+def _source_field_reaches_connection_without_type_change(
+    state: CompositionState,
+    connection_name: str,
+    *,
+    field_name: str,
+) -> bool:
+    """Return True when a source field flows to a connection unchanged.
+
+    This intentionally recognises only field-preserving nodes. Unknown
+    transforms may coerce, overwrite, delete, or synthesize the field, so the
+    proof step abstains instead of emitting a false positive.
+    """
+    from elspeth.web.composer._producer_resolver import ProducerResolver
+
+    resolver = ProducerResolver.build(
+        source=state.source,
+        nodes=state.nodes,
+        sink_names=frozenset(output.name for output in state.outputs),
+    )
+    current = connection_name
+    visited: set[str] = set()
+    while True:
+        if current in visited:
+            return False
+        visited.add(current)
+
+        producer = resolver.find_producer_for(current)
+        if producer is None:
+            return False
+        if producer.producer_id == "source":
+            return True
+
+        node = resolver.get_node(producer.producer_id)
+        if node is None:
+            return False
+        if node.node_type == "gate":
+            current = node.input
+            continue
+        if node.plugin == "value_transform" and _value_transform_preserves_field(node, field_name):
+            current = node.input
+            continue
+        if node.plugin == "passthrough":
+            current = node.input
+            continue
+        return False
+
+
+def _numeric_aggregation_diagnostics_for_observed_csv(
+    state: CompositionState,
+    source: SourceSpec,
+    *,
+    blob_id: str,
+    inferred_types: Mapping[str, str] | None,
+    observed_headers: tuple[str, ...] | None,
+) -> list[dict[str, Any]]:
+    """Block observed CSV strings before numeric aggregation runtime failures."""
+    if _source_schema_mode(source) != "observed" or observed_headers is None:
+        return []
+
+    observed_header_set = set(observed_headers)
+    diagnostics: list[dict[str, Any]] = []
+    for node in state.nodes:
+        if node.node_type != "aggregation" or node.plugin not in _NUMERIC_VALUE_FIELD_AGGREGATION_PLUGINS:
+            continue
+        options, _owner = get_aggregation_contract_options(node.options, owner=f"node:{node.id}")
+        value_field = options.get("value_field")
+        if type(value_field) is not str or not value_field.strip():
+            continue
+        value_field = value_field.strip()
+        if value_field not in observed_header_set:
+            continue
+        if not _source_field_reaches_connection_without_type_change(state, node.input, field_name=value_field):
+            continue
+
+        inferred_type = inferred_types.get(value_field) if inferred_types is not None else None
+        diagnostics.append(
+            _blocking_diagnostic(
+                code="aggregation_numeric_value_field_type_mismatch_against_source_schema",
+                message=(
+                    f"Aggregation '{node.id}' ({node.plugin}) uses numeric value_field '{value_field}', "
+                    "but it is flowing from an observed CSV source. Observed CSV source values are strings "
+                    "unless the source schema declares explicit field types or an upstream type_coerce node "
+                    "converts the field before aggregation."
+                ),
+                suggested_repair=(
+                    "Patch the source schema to declare the aggregated field with an explicit numeric type "
+                    f"(for example {value_field}: float), or insert a type_coerce node upstream of the aggregation. "
+                    "If the field is categorical and you want counts/frequencies, use batch_top_k instead of a "
+                    "numeric aggregation."
+                ),
+                evidence_locator={
+                    "source": "blob",
+                    "blob_id": str(blob_id),
+                    "node_id": node.id,
+                    "plugin": node.plugin,
+                    "field": value_field,
+                    "observed_type": "str",
+                    "inferred_sample_type": inferred_type or "unknown",
+                    "source_runtime_type": "str",
+                    "source_schema_mode": "observed",
+                },
+            )
+        )
+
+    return diagnostics
+
+
 def compute_proof_diagnostics(
     state: CompositionState,
     *,
@@ -5562,6 +5750,9 @@ def compute_proof_diagnostics(
       * ``gate_expression_type_mismatch_against_source_schema`` — observed
         CSV source values are still strings, and a direct source-fed gate
         condition fails when evaluated against sampled rows before runtime.
+      * ``aggregation_numeric_value_field_type_mismatch_against_source_schema`` —
+        observed CSV strings flow unchanged into a numeric aggregation
+        ``value_field`` before runtime can reject the batch.
       * ``source_inspection_warning`` — every warning surfaced by
         ``inspect_blob_content`` is mirrored here at ``info`` severity
         so the model sees them in the same array as blocking issues.
@@ -5672,6 +5863,15 @@ def compute_proof_diagnostics(
                 blob_id=str(blob_id),
                 filename=blob["filename"],
                 content=content,
+            )
+        )
+        diagnostics.extend(
+            _numeric_aggregation_diagnostics_for_observed_csv(
+                state,
+                source,
+                blob_id=str(blob_id),
+                inferred_types=facts.inferred_types,
+                observed_headers=facts.observed_headers,
             )
         )
 

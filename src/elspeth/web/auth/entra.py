@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from elspeth.web.auth.models import AuthenticationError, UserIdentity, UserProfile
-from elspeth.web.auth.oidc import JWKSTokenValidator
+from elspeth.web.auth.oidc import JWKSTokenValidator, optional_profile_claim
 
 
 class EntraAuthProvider:
@@ -126,10 +126,14 @@ class EntraAuthProvider:
         except KeyError as exc:
             raise AuthenticationError("Missing required 'sub' claim in token") from exc
 
+        display_name = optional_profile_claim(payload, "name")
+        if display_name is None:
+            display_name = optional_profile_claim(payload, "preferred_username")
+
         return UserProfile(
             user_id=sub,
             username=payload.get("preferred_username") or sub,
-            display_name=payload.get("name") or payload.get("preferred_username"),
-            email=payload.get("email"),
+            display_name=display_name,
+            email=optional_profile_claim(payload, "email"),
             groups=self._extract_groups(payload),
         )

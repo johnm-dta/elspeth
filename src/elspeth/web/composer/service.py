@@ -79,6 +79,7 @@ from elspeth.web.composer.protocol import (
     ComposerSettings,
     ToolArgumentError,
 )
+from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
 from elspeth.web.composer.state import CompositionState, ValidationSummary
 from elspeth.web.composer.state_claim_grounding import (
     check_state_claim_grounding,
@@ -89,6 +90,7 @@ from elspeth.web.composer.tools import (
     ADVISOR_TRIGGER_VALUES,
     RuntimePreflight,
     ToolResult,
+    _sync_list_blobs,
     compute_proof_diagnostics,
     execute_tool,
     get_tool_definitions,
@@ -1114,6 +1116,42 @@ def _proof_repair_is_applicable(state: CompositionState) -> bool:
     return "blob_ref" in state.source.options
 
 
+def _empty_state_uploaded_blob_repair_message(ready_blobs: tuple[Mapping[str, Any], ...], *, next_turn: int) -> str:
+    """Build a bounded repair prompt for empty-state stalls with ready uploads.
+
+    The message contains the same metadata exposed by ``list_blobs``: blob id,
+    filename, MIME type, byte size, creator, and status. It never includes raw
+    blob bytes, storage paths, or full content hashes.
+    """
+    rendered_blobs = []
+    for blob in ready_blobs[:5]:
+        rendered_blobs.append(
+            "- "
+            f"id={blob['id']}; "
+            f"filename={blob['filename']}; "
+            f"mime_type={blob['mime_type']}; "
+            f"size_bytes={blob['size_bytes']}; "
+            f"created_by={blob['created_by']}; "
+            f"status={blob['status']}"
+        )
+    remaining = len(ready_blobs) - len(rendered_blobs)
+    if remaining > 0:
+        rendered_blobs.append(f"- ... {remaining} more ready blob(s) omitted from this bounded repair prompt.")
+
+    blob_block = "\n".join(rendered_blobs)
+    return (
+        "[composer-system] No composition-state mutation completed successfully, "
+        "but this session has ready uploaded blob(s). Do not reply with another conceptual plan. "
+        "Continue by calling a build/edit tool: prefer set_pipeline with source.blob_id, "
+        "or set_source_from_blob followed by the needed nodes and outputs. "
+        "Use inspect_source(blob_id) when you need headers, sample_row_count, or inferred types. "
+        "Do not infer that a CSV is header-only from metadata, filename, prior prose, or a failed attempt; "
+        "only inspect_source can establish the observed row count. "
+        f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}.\n\n"
+        f"Ready uploaded blob(s):\n{blob_block}"
+    )
+
+
 class ComposerServiceImpl:
     """LLM-driven pipeline composer with dual-counter budget and discovery caching.
 
@@ -1375,6 +1413,45 @@ class ComposerServiceImpl:
             )
         _RUNTIME_PREFLIGHT_COUNTER.add(1, {"outcome": "success"})
         return entry
+
+    async def _attempt_empty_state_uploaded_blob_repair(
+        self,
+        *,
+        state: CompositionState,
+        llm_messages: list[dict[str, Any]],
+        session_id: str | None,
+        repair_turns_used: int,
+    ) -> bool:
+        """Continue once when the model stalls despite ready uploaded blobs.
+
+        This catches the uploaded-file happy path failure mode: the user has
+        provided data, the session blob inventory has a ready blob, but the
+        LLM emits prose and no build/edit tool calls while CompositionState is
+        still empty. The repair message gives the model concrete blob ids and
+        permitted next tools, then reuses the capped repair-turn budget.
+        """
+        if repair_turns_used >= _MAX_REPAIR_TURNS:
+            return False
+        if not _state_is_structurally_empty(state):
+            return False
+        if self._session_engine is None or session_id is None:
+            return False
+
+        blobs = await run_sync_in_worker(_sync_list_blobs, self._session_engine, session_id)
+        ready_blobs = tuple(blob for blob in blobs if blob["status"] == "ready" and blob["created_by"] == "user")
+        if not ready_blobs:
+            return False
+
+        llm_messages.append(
+            {
+                "role": "user",
+                "content": _empty_state_uploaded_blob_repair_message(
+                    ready_blobs,
+                    next_turn=repair_turns_used + 1,
+                ),
+            }
+        )
+        return True
 
     def _attempt_proof_repair(
         self,
@@ -1792,6 +1869,15 @@ class ComposerServiceImpl:
         from litellm.exceptions import APIError as LiteLLMAPIError
 
         try:
+            routed_result = await self._try_apply_freeform_recipe_intent(
+                message=message,
+                state=state,
+                session_id=session_id,
+                user_id=user_id,
+                progress=progress,
+            )
+            if routed_result is not None:
+                return routed_result
             return await self._compose_loop(
                 message,
                 messages,
@@ -1892,6 +1978,135 @@ class ComposerServiceImpl:
                 ),
             )
             raise
+
+    async def _try_apply_freeform_recipe_intent(
+        self,
+        *,
+        message: str,
+        state: CompositionState,
+        session_id: str | None,
+        user_id: str | None,
+        progress: ComposerProgressSink | None,
+    ) -> ComposerResult | None:
+        """Apply a deterministic registered recipe before invoking the cheap model.
+
+        This is intentionally narrow: it only handles empty-state freeform
+        requests that exactly match a server-known recipe and carry inline
+        content that must first be materialised as a session blob. Existing
+        non-empty pipelines and explicit-approval sessions continue through
+        the normal LLM/tool proposal path.
+        """
+        if not _state_is_structurally_empty(state):
+            return None
+        if self._session_engine is None or session_id is None or self._data_dir is None:
+            return None
+
+        match = match_freeform_recipe_intent(message)
+        if match is None or match.inline_blob is None:
+            return None
+
+        sessions_service = self._sessions_service
+        if sessions_service is not None:
+            preferences = await sessions_service.get_composer_preferences(UUID(session_id))
+            if preferences.trust_mode == "explicit_approve":
+                return None
+
+        await _emit_progress(
+            progress,
+            ComposerProgressEvent(
+                phase="using_tools",
+                headline="I found a registered recipe for this request.",
+                evidence=(f"Recipe: {match.recipe_name}",),
+                likely_next="ELSPETH will apply the recipe with the supplied inline data.",
+            ),
+        )
+
+        actor = f"composer-web:user-{user_id}" if user_id is not None else "composer-web:anonymous"
+        create_args = {
+            "filename": match.inline_blob.filename,
+            "mime_type": match.inline_blob.mime_type,
+            "content": match.inline_blob.content,
+            "description": f"Inline content materialised for recipe {match.recipe_name}",
+        }
+        create_result = await run_sync_in_worker(
+            execute_tool,
+            "create_blob",
+            create_args,
+            state,
+            self._catalog,
+            data_dir=self._data_dir,
+            session_engine=self._session_engine,
+            session_id=session_id,
+            secret_service=self._secret_service,
+            user_id=user_id,
+        )
+        if not create_result.success or not isinstance(create_result.data, Mapping):
+            return None
+        blob_id = create_result.data["blob_id"]
+
+        recipe_args = {
+            "recipe_name": match.recipe_name,
+            "slots": {**match.slots, "source_blob_id": blob_id},
+        }
+        recipe_result = await run_sync_in_worker(
+            execute_tool,
+            "apply_pipeline_recipe",
+            recipe_args,
+            state,
+            self._catalog,
+            data_dir=self._data_dir,
+            session_engine=self._session_engine,
+            session_id=session_id,
+            secret_service=self._secret_service,
+            user_id=user_id,
+        )
+        if not recipe_result.success:
+            return None
+
+        # Record a compact synthetic audit trail for the deterministic server
+        # routing decision. The actual tool handlers above still own state
+        # validation and blob persistence; this trail makes the bypass visible.
+        recorder = BufferingRecorder()
+        create_audit, create_canonicalization_failed = begin_dispatch_or_arg_error(
+            "server_recipe_create_blob",
+            "create_blob",
+            create_args,
+            version_before=state.version,
+            actor=actor,
+        )
+        if create_canonicalization_failed is None:
+            recorder.record(
+                finish_success(
+                    create_audit,
+                    result_payload=create_result.to_dict(),
+                    version_after=create_result.updated_state.version,
+                )
+            )
+        recipe_audit, recipe_canonicalization_failed = begin_dispatch_or_arg_error(
+            "server_recipe_apply_pipeline_recipe",
+            "apply_pipeline_recipe",
+            recipe_args,
+            version_before=state.version,
+            actor=actor,
+        )
+        if recipe_canonicalization_failed is None:
+            recorder.record(
+                finish_success(
+                    recipe_audit,
+                    result_payload=recipe_result.to_dict(),
+                    version_after=recipe_result.updated_state.version,
+                )
+            )
+
+        return ComposerResult(
+            message=(
+                f"I built the `{match.recipe_name}` recipe and materialised the inline CSV as a session blob before wiring the pipeline."
+            ),
+            state=recipe_result.updated_state,
+            runtime_preflight=None,
+            tool_invocations=recorder.invocations,
+            llm_calls=(),
+        )
 
     async def _compose_loop(
         self,
@@ -2032,6 +2247,15 @@ class ComposerServiceImpl:
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
+                if await self._attempt_empty_state_uploaded_blob_repair(
+                    state=state,
+                    llm_messages=llm_messages,
+                    session_id=session_id,
+                    repair_turns_used=repair_turns_used,
+                ):
+                    repair_turns_used += 1
+                    continue
+
                 # Forced-repair gate: when the model claims completion but
                 # the proof step still has blocking diagnostics, inject a
                 # repair message and continue. Capped at _MAX_REPAIR_TURNS so

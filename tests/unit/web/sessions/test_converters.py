@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from elspeth.web.sessions.converters import state_from_record
+from elspeth.web.sessions.converters import pipeline_dict_from_record, state_from_record
 from elspeth.web.sessions.protocol import CompositionStateRecord
 
 
@@ -114,6 +114,41 @@ class TestStateFromRecord:
         # Conversion should still work despite frozen fields
         state = state_from_record(record)
         assert state.metadata.name == "Test Pipeline"
+
+    def test_pipeline_dict_from_record_uses_yaml_shape(self) -> None:
+        """DB flat nodes/outputs are converted through the canonical YAML shape."""
+        record = _make_record(
+            nodes=[
+                {
+                    "id": "classify",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "source_out",
+                    "on_success": "output",
+                    "on_error": "discard",
+                    "options": {"system_prompt": "Classify the row."},
+                },
+                {
+                    "id": "choose",
+                    "node_type": "gate",
+                    "plugin": None,
+                    "input": "classify",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "condition": "row.score > 0.5",
+                    "routes": {"true": "output", "false": "discard"},
+                },
+            ]
+        )
+
+        pipeline_dict = pipeline_dict_from_record(record)
+
+        assert "nodes" not in pipeline_dict
+        assert "outputs" not in pipeline_dict
+        assert pipeline_dict["transforms"][0]["name"] == "classify"
+        assert pipeline_dict["gates"][0]["name"] == "choose"
+        assert pipeline_dict["sinks"]["output"]["plugin"] == "csv"
 
 
 class TestTier1MetadataCrash:

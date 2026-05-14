@@ -1350,11 +1350,60 @@ class TestSetMetadata:
         assert result.affected_nodes == ()  # metadata doesn't affect nodes
 
     def test_missing_patch_key_raises(self) -> None:
-        """LLM omits required 'patch' key — KeyError propagates to service handler."""
+        """LLM omits required 'patch' key — route as Tier-3 argument error."""
+        from elspeth.web.composer.protocol import ToolArgumentError
+
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(KeyError):
+        with pytest.raises(ToolArgumentError):
             execute_tool("set_metadata", {"name": "Oops"}, state, catalog)
+
+
+class TestLegacyMutationArgumentGuards:
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("upsert_node", {}),
+            ("upsert_edge", {}),
+            ("remove_node", {}),
+            ("remove_edge", {}),
+            ("set_output", {}),
+            ("remove_output", {}),
+        ],
+    )
+    def test_missing_required_fields_raise_tool_argument_error(self, tool_name: str, arguments: dict[str, Any]) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(tool_name, arguments, _empty_state(), _mock_catalog())
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_upsert_node_rejects_unknown_node_type_before_state_mutation(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "upsert_node",
+                {"id": "x", "node_type": "bogus", "input": "in"},
+                _empty_state(),
+                _mock_catalog(),
+            )
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_upsert_gate_rejects_non_string_condition_as_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "upsert_node",
+                {"id": "gate1", "node_type": "gate", "input": "rows", "condition": 42},
+                _empty_state(),
+                _mock_catalog(),
+            )
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
 
 class TestSetOutput:

@@ -26,6 +26,7 @@ from typing import Any, Final, TypedDict, cast
 from uuid import UUID, uuid4
 
 from opentelemetry import metrics
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, delete, func, select, update
 
@@ -68,6 +69,7 @@ from elspeth.web.composer.source_inspection import (
     inspect_blob_content,
 )
 from elspeth.web.composer.state import (
+    CoalesceBranches,
     CompositionState,
     EdgeSpec,
     EdgeType,
@@ -1602,6 +1604,82 @@ ToolHandler = Callable[
 RuntimePreflight = Callable[[CompositionState], ValidationResult]
 
 
+class _UpsertNodeArgumentsModel(BaseModel):
+    id: str
+    node_type: NodeType
+    input: str
+    plugin: str | None = None
+    on_success: str | None = None
+    on_error: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+    condition: str | None = None
+    routes: dict[str, str] | None = None
+    fork_to: list[str] | None = None
+    branches: list[str] | dict[str, str] | None = None
+    policy: str | None = None
+    merge: str | None = None
+    trigger: dict[str, Any] | None = None
+    output_mode: str | None = None
+    expected_output_count: int | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _UpsertEdgeArgumentsModel(BaseModel):
+    id: str
+    from_node: str
+    to_node: str
+    edge_type: EdgeType
+    label: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _RemoveByIdArgumentsModel(BaseModel):
+    id: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SetMetadataPatchModel(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SetMetadataArgumentsModel(BaseModel):
+    patch: _SetMetadataPatchModel
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SetOutputArgumentsModel(BaseModel):
+    sink_name: str
+    plugin: str
+    options: dict[str, Any]
+    on_write_failure: str = "discard"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _RemoveOutputArgumentsModel(BaseModel):
+    sink_name: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def _validate_mutation_arguments(model: type[BaseModel], arguments: object, argument_name: str) -> BaseModel:
+    try:
+        return model.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument=argument_name,
+            expected=f"object conforming to {model.__name__}",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+
 # Discovery tool handlers (normalized signatures)
 
 
@@ -2548,10 +2626,11 @@ def _execute_upsert_node(
     catalog: CatalogService,
 ) -> ToolResult:
     """Add or update a pipeline node."""
-    node_id = args["id"]
-    node_type = args["node_type"]
-    plugin = args.get("plugin")
-    node_options = args.get("options", {})
+    validated = cast(_UpsertNodeArgumentsModel, _validate_mutation_arguments(_UpsertNodeArgumentsModel, args, "upsert_node arguments"))
+    node_id = validated.id
+    node_type = validated.node_type
+    plugin = validated.plugin
+    node_options = validated.options
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=node_id,
@@ -2570,11 +2649,11 @@ def _execute_upsert_node(
         if plugin_error is not None:
             return _failure_result(state, plugin_error)
 
-        batch_placement_error = _batch_aware_placement_error(args["id"], node_type, plugin, args.get("output_mode"))
+        batch_placement_error = _batch_aware_placement_error(node_id, node_type, plugin, validated.output_mode)
         if batch_placement_error is not None:
             return _failure_result(state, batch_placement_error)
 
-        batch_required_error = _batch_aware_required_input_fields_error(args["id"], plugin, node_options)
+        batch_required_error = _batch_aware_required_input_fields_error(node_id, plugin, node_options)
         if batch_required_error is not None:
             return _failure_result(state, batch_required_error)
 
@@ -2584,41 +2663,39 @@ def _execute_upsert_node(
 
     # Validate gate condition expression at composition time.
     # Gives the LLM immediate feedback on syntax/security errors.
-    condition = args.get("condition")
+    condition = validated.condition
     if node_type == "gate" and condition is not None:
         expr_error = _validate_gate_expression(condition)
         if expr_error is not None:
-            return _failure_result(state, f"Node '{args['id']}': {expr_error}")
+            return _failure_result(state, f"Node '{node_id}': {expr_error}")
     if node_type == "aggregation":
-        trigger_error = _validate_aggregation_trigger(args.get("trigger"))
+        trigger_error = _validate_aggregation_trigger(validated.trigger)
         if trigger_error is not None:
-            return _failure_result(state, f"Node '{args['id']}': {trigger_error}")
+            return _failure_result(state, f"Node '{node_id}': {trigger_error}")
 
-    fork_to = args.get("fork_to")
-    if fork_to is not None:
-        fork_to = tuple(fork_to)
+    fork_to: tuple[str, ...] | None = tuple(validated.fork_to) if validated.fork_to is not None else None
 
-    branches = args.get("branches")
-    if branches is not None:
-        branches = dict(branches) if isinstance(branches, Mapping) else tuple(branches)
+    branches: CoalesceBranches | None = None
+    if validated.branches is not None:
+        branches = dict(validated.branches) if isinstance(validated.branches, Mapping) else tuple(validated.branches)
 
     node = NodeSpec(
-        id=args["id"],
+        id=node_id,
         node_type=node_type,
         plugin=plugin,
-        input=args["input"],
-        on_success=args.get("on_success"),
-        on_error=args.get("on_error") or ("discard" if node_type in ("transform", "aggregation") else None),
+        input=validated.input,
+        on_success=validated.on_success,
+        on_error=validated.on_error or ("discard" if node_type in ("transform", "aggregation") else None),
         options=node_options,
-        condition=args.get("condition"),
-        routes=args.get("routes"),
+        condition=validated.condition,
+        routes=validated.routes,
         fork_to=fork_to,
         branches=branches,
-        policy=args.get("policy"),
-        merge=args.get("merge"),
-        trigger=args.get("trigger"),
-        output_mode=args.get("output_mode"),
-        expected_output_count=args.get("expected_output_count"),
+        policy=validated.policy,
+        merge=validated.merge,
+        trigger=validated.trigger,
+        output_mode=validated.output_mode,
+        expected_output_count=validated.expected_output_count,
     )
 
     new_state = state.with_node(node)
@@ -2643,16 +2720,17 @@ def _execute_upsert_edge(
     node's connection field so that generate_yaml() produces a
     working pipeline.  Edges to non-output nodes are visual only.
     """
-    from_node = args["from_node"]
-    to_node = args["to_node"]
-    edge_type = args["edge_type"]
+    validated = cast(_UpsertEdgeArgumentsModel, _validate_mutation_arguments(_UpsertEdgeArgumentsModel, args, "upsert_edge arguments"))
+    from_node = validated.from_node
+    to_node = validated.to_node
+    edge_type = validated.edge_type
 
     edge = EdgeSpec(
-        id=args["id"],
+        id=validated.id,
         from_node=from_node,
         to_node=to_node,
         edge_type=edge_type,
-        label=args.get("label"),
+        label=validated.label,
     )
     new_state = state.with_edge(edge)
 
@@ -2704,7 +2782,8 @@ def _execute_remove_node(
     state: CompositionState,
 ) -> ToolResult:
     """Remove a node and its edges."""
-    node_id = args["id"]
+    validated = cast(_RemoveByIdArgumentsModel, _validate_mutation_arguments(_RemoveByIdArgumentsModel, args, "remove_node arguments"))
+    node_id = validated.id
 
     # Collect affected nodes before removal (edges that reference this node)
     affected = {node_id}
@@ -2725,7 +2804,8 @@ def _execute_remove_edge(
     state: CompositionState,
 ) -> ToolResult:
     """Remove an edge."""
-    edge_id = args["id"]
+    validated = cast(_RemoveByIdArgumentsModel, _validate_mutation_arguments(_RemoveByIdArgumentsModel, args, "remove_edge arguments"))
+    edge_id = validated.id
 
     # Find the edge to get affected nodes
     edge = next((e for e in state.edges if e.id == edge_id), None)
@@ -2745,7 +2825,8 @@ def _execute_set_metadata(
     state: CompositionState,
 ) -> ToolResult:
     """Update pipeline metadata."""
-    patch = args["patch"]
+    validated = cast(_SetMetadataArgumentsModel, _validate_mutation_arguments(_SetMetadataArgumentsModel, args, "set_metadata arguments"))
+    patch = validated.patch.model_dump(exclude_none=True)
 
     new_state = state.with_metadata(patch)
     return _mutation_result(new_state, ())
@@ -2758,17 +2839,18 @@ def _execute_set_output(
     data_dir: str | None = None,
 ) -> ToolResult:
     """Add or replace a pipeline output (sink)."""
-    plugin = args["plugin"]
+    validated = cast(_SetOutputArgumentsModel, _validate_mutation_arguments(_SetOutputArgumentsModel, args, "set_output arguments"))
+    plugin = validated.plugin
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(catalog, "sink", plugin)
     if plugin_error is not None:
         return _failure_result(state, plugin_error)
 
     # S2: Validate sink path allowlist (mirrors source path check)
-    sink_options = args.get("options", {})
+    sink_options = validated.options
     credential_error = _credential_wiring_contract_failure(
         state,
-        component_id=args["sink_name"],
+        component_id=validated.sink_name,
         component_type="output",
         options=sink_options,
     )
@@ -2790,13 +2872,13 @@ def _execute_set_output(
         return _failure_result(state, collision_error)
 
     output = OutputSpec(
-        name=args["sink_name"],
+        name=validated.sink_name,
         plugin=plugin,
         options=sink_options,
-        on_write_failure=args.get("on_write_failure", "discard"),
+        on_write_failure=validated.on_write_failure,
     )
     new_state = state.with_output(output)
-    return _mutation_result(new_state, (args["sink_name"],))
+    return _mutation_result(new_state, (validated.sink_name,))
 
 
 def _execute_remove_output(
@@ -2804,7 +2886,10 @@ def _execute_remove_output(
     state: CompositionState,
 ) -> ToolResult:
     """Remove a pipeline output (sink) by name."""
-    sink_name = args["sink_name"]
+    validated = cast(
+        _RemoveOutputArgumentsModel, _validate_mutation_arguments(_RemoveOutputArgumentsModel, args, "remove_output arguments")
+    )
+    sink_name = validated.sink_name
     new_state = state.without_output(sink_name)
     if new_state is None:
         return _failure_result(state, f"Output '{sink_name}' not found.")

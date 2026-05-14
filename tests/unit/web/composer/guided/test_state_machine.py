@@ -319,6 +319,28 @@ class TestGuidedSession:
         assert restored == sess
         assert restored.step_2_chosen_plugin is None
 
+    def test_guided_session_roundtrip_with_step_1_chosen_plugin(self) -> None:
+        from dataclasses import replace
+
+        sess = replace(GuidedSession.initial(), step_1_chosen_plugin="csv")
+        d = sess.to_dict()
+        assert d["step_1_chosen_plugin"] == "csv"
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_1_chosen_plugin == "csv"
+
+    def test_guided_session_roundtrip_with_step_1_chosen_plugin_none(self) -> None:
+        sess = GuidedSession.initial()
+        d = sess.to_dict()
+        assert d["step_1_chosen_plugin"] is None
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.step_1_chosen_plugin is None
+
+    def test_guided_session_rejects_mutable_step_1_chosen_plugin(self) -> None:
+        with pytest.raises(TypeError, match="step_1_chosen_plugin must be str or None"):
+            dataclasses.replace(GuidedSession.initial(), step_1_chosen_plugin=[])
+
     def test_guided_session_round_trips_inspection_facts(self) -> None:
         facts = SourceInspectionFacts(
             source_kind="csv",
@@ -360,11 +382,11 @@ class TestGuidedSession:
         assert restored.observed_headers == ("name", "age")
 
     def test_guided_session_schema_version_bumped_for_inspection_facts(self) -> None:
-        assert GUIDED_SESSION_SCHEMA_VERSION == 4
+        assert GUIDED_SESSION_SCHEMA_VERSION == 5
 
     def test_guided_session_to_dict_includes_schema_version(self) -> None:
         sess = GuidedSession.initial()
-        assert sess.to_dict()["schema_version"] == 4
+        assert sess.to_dict()["schema_version"] == 5
 
     def test_guided_session_requires_schema_version(self) -> None:
         current = GuidedSession.initial().to_dict()
@@ -375,9 +397,9 @@ class TestGuidedSession:
 
     def test_guided_session_rejects_old_schema_version(self) -> None:
         old = GuidedSession.initial().to_dict()
-        old["schema_version"] = 3
+        old["schema_version"] = 4
 
-        with pytest.raises(InvariantError, match="unsupported schema_version 3"):
+        with pytest.raises(InvariantError, match="unsupported schema_version 4"):
             GuidedSession.from_dict(old)
 
     def test_guided_session_current_history_requires_summary(self) -> None:

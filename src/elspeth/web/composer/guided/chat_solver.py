@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import load_step_chat_skill
@@ -51,6 +52,9 @@ class Step1SourceChatResolution:
     options: Mapping[str, Any]
     observed_columns: tuple[str, ...]
     sample_rows: tuple[Mapping[str, Any], ...]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options", "sample_rows")
 
 
 _STEP_1_SOURCE_TOOL: dict[str, Any] = {

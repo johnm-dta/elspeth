@@ -41,6 +41,7 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobQuotaExceededError, BlobServiceProtocol
+from elspeth.web.catalog.knob_schema import KnobField, KnobSchema
 from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
 from elspeth.web.composer import yaml_generator
 from elspeth.web.composer.audit import (
@@ -51,6 +52,7 @@ from elspeth.web.composer.audit import (
 )
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
+    emit_hidden_field_rejected,
     emit_step_advanced,
     emit_turn_answered,
     emit_turn_emitted,
@@ -104,6 +106,7 @@ from elspeth.web.composer.protocol import (
     ComposerServiceError,
 )
 from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
 from elspeth.web.composer.yaml_generator import generate_yaml
@@ -2086,6 +2089,155 @@ def _summarize_guided_response(
     raise InvariantError(f"_summarize_guided_response: unhandled turn_type {turn_type!r}")
 
 
+async def _inspect_latest_ready_session_blob(
+    blob_service: BlobServiceProtocol,
+    session_id: UUID,
+) -> SourceInspectionFacts | None:
+    """Inspect the newest ready blob for Step-1 schema prefill.
+
+    Blob bytes are Tier 3 and ``inspect_blob_content`` is the source-boundary
+    validation/coercion point. If the session has no ready blob, the caller
+    falls back to the existing observed-schema prefill.
+    """
+    records = await blob_service.list_blobs(session_id, limit=None)
+    for record in records:
+        if record.status != "ready":
+            continue
+        content = await blob_service.read_blob_content(record.id)
+        return inspect_blob_content(
+            content=content,
+            filename=record.filename,
+            mime_type=record.mime_type,
+            blob_id=record.id,
+            content_hash=record.content_hash,
+        )
+    return None
+
+
+def _reject_hidden_field_submissions(
+    knobs: KnobSchema,
+    submitted_options: Mapping[str, Any],
+    *,
+    recorder: BufferingRecorder,
+    composition_version: int,
+    actor: str,
+    session_id: str,
+    plugin_kind: str,
+    plugin_name: str,
+) -> None:
+    """Reject submitted values for fields hidden by ``visible_when``.
+
+    A field name may appear more than once in a discriminated KnobSchema when
+    provider variants share a logical field. The submission is accepted if any
+    matching field definition is currently visible; it is rejected only when
+    every matching definition is hidden under the submitted discriminator state.
+    """
+    fields_by_name: dict[str, list[KnobField]] = {}
+    for field in knobs["fields"]:
+        field_name = field["name"]
+        if field_name not in fields_by_name:
+            fields_by_name[field_name] = []
+        fields_by_name[field_name].append(field)
+
+    for opt_name, opt_value in submitted_options.items():
+        if opt_name not in fields_by_name:
+            continue
+        candidates = fields_by_name[opt_name]
+        visible_candidates = [field for field in candidates if "visible_when" not in field]
+        if visible_candidates:
+            _validate_blob_ref_submission(visible_candidates, opt_name, opt_value)
+            continue
+
+        matched = False
+        missing_predicate: Mapping[str, Any] | None = None
+        hidden_predicate: Mapping[str, Any] | None = None
+        hidden_actual_state: dict[str, Any] = {}
+        for field in candidates:
+            pred = field["visible_when"]
+            discriminator = pred["field"]
+            if discriminator not in submitted_options:
+                missing_predicate = pred
+                continue
+            target_val = submitted_options[discriminator]
+            if target_val == pred["equals"]:
+                matched = True
+                _validate_blob_ref_submission((field,), opt_name, opt_value)
+                break
+            hidden_predicate = pred
+            hidden_actual_state = {discriminator: target_val}
+        if matched:
+            continue
+
+        predicate = hidden_predicate if hidden_predicate is not None else missing_predicate
+        if predicate is None:
+            raise InvariantError(f"hidden-field rejection found no predicate for {plugin_kind}/{plugin_name}:{opt_name}")
+        actual_state = hidden_actual_state
+        if not actual_state:
+            actual_state = {}
+        emit_hidden_field_rejected(
+            recorder,
+            session_id=session_id,
+            plugin_kind=plugin_kind,
+            plugin_name=plugin_name,
+            field=opt_name,
+            predicate=predicate,
+            actual_state=actual_state,
+            composition_version=composition_version,
+            actor=actor,
+        )
+        if not actual_state:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "hidden_field_submitted",
+                    "field": opt_name,
+                    "predicate": dict(predicate),
+                    "message": f"Visibility discriminator {predicate['field']!r} is missing from submitted options.",
+                },
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "hidden_field_submitted",
+                "field": opt_name,
+                "predicate": dict(predicate),
+                "actual_state": actual_state,
+                "message": (
+                    f"Field {opt_name!r} is hidden under current form state "
+                    f"({predicate['field']}={actual_state[predicate['field']]!r}, predicate expects "
+                    f"{predicate['field']}={predicate['equals']!r}). Hidden fields must not appear in edited_values.options."
+                ),
+            },
+        )
+
+
+def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, value: Any) -> None:
+    if not any(field["kind"] == "blob-ref" for field in fields):
+        return
+    if value is None:
+        return
+    if type(value) is not str:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_blob_ref",
+                "field": field_name,
+                "message": f"Field {field_name!r} must be a UUID string when provided.",
+            },
+        )
+    try:
+        UUID(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_blob_ref",
+                "field": field_name,
+                "message": f"Field {field_name!r} must be a UUID string when provided.",
+            },
+        ) from exc
+
+
 async def _dispatch_guided_respond(
     *,
     state: CompositionState,
@@ -2099,6 +2251,7 @@ async def _dispatch_guided_respond(
     data_dir: str | None,
     session_engine: Any,
     session_id: str,
+    blob_service: BlobServiceProtocol,
     model: str,
 ) -> tuple[CompositionState, GuidedSession, Any | None]:
     """Dispatch a guided respond to the correct step handler and next-turn emitter.
@@ -2177,7 +2330,10 @@ async def _dispatch_guided_respond(
                     detail="single_select response at step 1 must include chosen plugin name.",
                 )
             plugin_name = str(chosen[0])
-            next_turn = build_step_1_schema_form_turn(plugin_name, catalog)
+            inspection_facts = guided.step_1_inspection_facts
+            if inspection_facts is None:
+                inspection_facts = await _inspect_latest_ready_session_blob(blob_service, UUID(session_id))
+            next_turn = build_step_1_schema_form_turn(plugin_name, catalog, inspection_facts=inspection_facts)
             new_record = TurnRecord(
                 step=current_step,
                 turn_type=TurnType(next_turn["type"]),
@@ -2195,7 +2351,12 @@ async def _dispatch_guided_respond(
                 composition_version=state.version,
                 actor=user_id,
             )
-            guided = _replace(guided, history=(*guided.history, new_record))
+            guided = _replace(
+                guided,
+                history=(*guided.history, new_record),
+                step_1_chosen_plugin=plugin_name,
+                step_1_inspection_facts=inspection_facts,
+            )
             return state, guided, next_turn
 
         if current_turn_type is TurnType.SCHEMA_FORM:
@@ -2236,6 +2397,18 @@ async def _dispatch_guided_respond(
                     status_code=400,
                     detail=(f"schema_form response at step 1 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
                 )
+            options_dict = dict(options_raw)
+            schema_info = catalog.get_schema("source", plugin_name)
+            _reject_hidden_field_submissions(
+                cast(KnobSchema, schema_info.knob_schema),
+                options_dict,
+                recorder=recorder,
+                composition_version=state.version,
+                actor=user_id,
+                session_id=session_id,
+                plugin_kind="source",
+                plugin_name=plugin_name,
+            )
             observed_columns_raw = edited["observed_columns"]
             if not isinstance(observed_columns_raw, list):
                 raise HTTPException(
@@ -2268,7 +2441,7 @@ async def _dispatch_guided_respond(
                     )
             resolved = SourceResolved(
                 plugin=plugin_name,
-                options=dict(options_raw),
+                options=options_dict,
                 observed_columns=tuple(observed_columns_raw),
                 sample_rows=tuple(dict(r) for r in sample_rows_raw),
             )
@@ -2291,6 +2464,7 @@ async def _dispatch_guided_respond(
             guided = _replace(
                 handler_result.session,
                 step=GuidedStep.STEP_2_SINK,
+                step_1_chosen_plugin=None,
             )
             # Emit Step 2 initial turn.
             next_turn = build_step_2_single_select_turn(catalog)
@@ -2507,9 +2681,21 @@ async def _dispatch_guided_respond(
                     status_code=400,
                     detail=(f"schema_form response at step 2 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
                 )
+            options_dict = dict(options_raw)
+            schema_info = catalog.get_schema("sink", plugin_name)
+            _reject_hidden_field_submissions(
+                cast(KnobSchema, schema_info.knob_schema),
+                options_dict,
+                recorder=recorder,
+                composition_version=state.version,
+                actor=user_id,
+                session_id=session_id,
+                plugin_kind="sink",
+                plugin_name=plugin_name,
+            )
             sink_intent = SinkIntent(
                 plugin=plugin_name,
-                options=dict(options_raw),
+                options=options_dict,
             )
             # Set step_2_sink_intent and clear step_2_chosen_plugin atomically.
             # Once step_2_sink_intent is set, the full plugin+options tuple is
@@ -3072,6 +3258,17 @@ async def _dispatch_guided_respond(
                     status_code=400,
                     detail=(f"schema_form response at step 3 edited_values['options'] must be an object; got {type(options_raw).__name__}"),
                 )
+            schema_info = catalog.get_schema("transform", plugin_name)
+            _reject_hidden_field_submissions(
+                cast(KnobSchema, schema_info.knob_schema),
+                options_raw,
+                recorder=recorder,
+                composition_version=state.version,
+                actor=user_id,
+                session_id=session_id,
+                plugin_kind="transform",
+                plugin_name=plugin_name,
+            )
             existing_step = dict(guided.step_3_proposal.steps[edit_index])
             if plugin_name != existing_step["plugin"]:
                 raise HTTPException(
@@ -5146,13 +5343,12 @@ def create_session_router() -> APIRouter:
              confirmation.  Emit ``inspect_and_confirm`` from the intent's
              observed columns (warnings are not stored on SourceIntent;
              the rebuild emits an empty warnings list).
-          2. ``step_1_source_intent`` is None → initial state or SINGLE_SELECT
-             window.  Fall through to ``build_initial_step_1_turn``.
-             Note: the window between SINGLE_SELECT and SCHEMA_FORM does not
-             persist the chosen source plugin name; a GET /guided in that
-             window will re-emit the SINGLE_SELECT.  This is an observation-
-             not-fix gap (parallel to Finding 2, addressed by
-             step_2_chosen_plugin) and is tracked as obs-STEP1-chosen-plugin.
+          2. ``step_1_chosen_plugin`` is set → the SINGLE_SELECT response was
+             submitted; the session is waiting for SCHEMA_FORM submission.
+             Emit ``schema_form`` for the chosen plugin with persisted
+             inspection-fact prefill.
+          3. Neither staging field is set → initial state. Fall through to
+             ``build_initial_step_1_turn``.
 
         - STEP_2_SINK: three sub-cases in priority order:
           1. ``step_2_sink_intent`` is set → the SCHEMA_FORM response was
@@ -5187,6 +5383,12 @@ def create_session_router() -> APIRouter:
             # as they are not stored on SourceIntent).
             if guided.step_1_source_intent is not None:
                 return build_step_1_inspect_and_confirm_turn_from_intent(guided.step_1_source_intent)
+            if guided.step_1_chosen_plugin is not None:
+                return build_step_1_schema_form_turn(
+                    guided.step_1_chosen_plugin,
+                    catalog,
+                    inspection_facts=guided.step_1_inspection_facts,
+                )
             return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
         if step is GuidedStep.STEP_2_SINK:
             # Finding 2 (Codex #10): determine intra-step position and rebuild
@@ -6099,6 +6301,7 @@ def create_session_router() -> APIRouter:
                             data_dir=data_dir,
                             session_engine=session_engine,
                             session_id=str(session_id),
+                            blob_service=request.app.state.blob_service,
                             model=settings.composer_model,
                         )
                     except InvariantError as exc:

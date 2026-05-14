@@ -205,23 +205,62 @@ export interface InspectAndConfirmPayload {
   observed: Observed;
 }
 
-/**
- * Wire: SchemaFormPayload (protocol.py:53-56).
- *
- * schema_block is the output of Pydantic ConfigModel.model_json_schema().
- * The TS type uses Record<string, unknown> because the full JSON Schema spec
- * is not reflected here -- only the subset handled by SchemaFormTurn is consumed
- * (see SchemaFormTurn.tsx SCOPE NOTE for the supported field types).
- *
- * prefilled contains initial field values keyed by property name.
- * Top-level keys in prefilled always correspond to top-level keys in
- * schema_block.properties.
- */
-export interface SchemaFormPayload {
-  plugin: string;
-  schema_block: Record<string, unknown>;
-  prefilled: Record<string, unknown>;
+export type FieldKind =
+  | "text"
+  | "number-int"
+  | "number-float"
+  | "checkbox"
+  | "enum"
+  | "string-list"
+  | "blob-ref"
+  | "json-object"
+  | "json-array"
+  | "json-value";
+
+export type FieldTier = "essential" | "common" | "advanced";
+
+export interface VisibilityPredicate {
+  field: string;
+  equals: unknown;
 }
+
+export interface KnobField {
+  name: string;
+  label: string;
+  description?: string;
+  kind: FieldKind;
+  tier?: FieldTier;
+  required: boolean;
+  default?: unknown;
+  nullable: boolean;
+  enum?: string[];
+  item_kind?: "text" | "number-int" | "number-float";
+  visible_when?: VisibilityPredicate;
+}
+
+export interface KnobSchema {
+  fields: KnobField[];
+}
+
+export interface RecipeContext {
+  recipe_name: string;
+  description: string;
+  alternatives: string[];
+}
+
+export type SchemaFormPayload =
+  | {
+      mode: "plugin_options";
+      plugin: string;
+      knobs: KnobSchema;
+      prefilled: Record<string, unknown>;
+    }
+  | {
+      mode: "recipe_decision";
+      knobs: KnobSchema;
+      prefilled: Record<string, unknown>;
+      recipe_context: RecipeContext;
+    };
 
 /**
  * Wire: _ProposedStep (protocol.py:59-62). One step in a proposed chain.

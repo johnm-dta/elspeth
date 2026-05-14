@@ -149,7 +149,7 @@ class NodeSpec:
         freeze_fields(self, "options")
         if self.routes is not None:
             freeze_fields(self, "routes")
-        if isinstance(self.branches, Mapping):
+        if self.branches is not None:
             freeze_fields(self, "branches")
         if self.trigger is not None:
             freeze_fields(self, "trigger")

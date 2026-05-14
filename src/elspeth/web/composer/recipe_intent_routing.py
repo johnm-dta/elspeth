@@ -6,6 +6,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from elspeth.contracts.freeze import freeze_fields
+
 _FORK_COALESCE_RECIPE = "fork-coalesce-truncate-jsonl"
 _CSV_MARKER_RE = re.compile(r"(?:customer\s+rows\s*)?\(csv\):\s*\n(?P<csv>.+)\Z", re.IGNORECASE | re.DOTALL)
 _OUTPUT_PATH_RE = re.compile(r"\bat\s+(?P<path>[^\s:]+\.jsonl)\b", re.IGNORECASE)
@@ -32,6 +34,9 @@ class FreeformRecipeIntentMatch:
     recipe_name: str
     slots: Mapping[str, object]
     inline_blob: InlineRecipeBlob | None = None
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "slots")
 
 
 def match_freeform_recipe_intent(message: str) -> FreeformRecipeIntentMatch | None:

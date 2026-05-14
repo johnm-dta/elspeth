@@ -27,9 +27,9 @@ from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-# Schema v3 persisted sessions are intentionally incompatible with v4: the
+# Pre-v5 persisted sessions are intentionally incompatible with v5: the
 # operator must delete the guided sessions DB before deploying this change.
-GUIDED_SESSION_SCHEMA_VERSION = 4
+GUIDED_SESSION_SCHEMA_VERSION = 5
 
 if TYPE_CHECKING:
     # Imported for type annotations only — avoids a circular dependency.
@@ -364,6 +364,12 @@ class GuidedSession:
     it to reconstruct the full SourceResolved and clears it in the same atomic
     replace(); it is always None after Step 1 completes.
 
+    ``step_1_chosen_plugin`` is a mid-Step-1 staging field. The Step-1
+    SINGLE_SELECT dispatcher writes the selected source plugin name before
+    emitting the SCHEMA_FORM turn. GET /guided uses it with
+    ``step_1_inspection_facts`` to rebuild the same prefilled schema form after
+    refresh. It is cleared when the SCHEMA_FORM response commits Step 1.
+
     ``step_2_sink_intent`` is a mid-Step-2 staging field.  The SCHEMA_FORM
     dispatcher writes the chosen sink plugin + options into it before emitting
     the MULTI_SELECT_WITH_CUSTOM turn.  ``_advance_step_2`` reads it to
@@ -399,6 +405,7 @@ class GuidedSession:
     step_2_result: SinkResolved | None
     step_3_proposal: ChainProposal | None
     step_1_inspection_facts: SourceInspectionFacts | None = None
+    step_1_chosen_plugin: str | None = None
     terminal: TerminalState | None = None
     transition_consumed: bool = False
     step_1_source_intent: SourceIntent | None = None
@@ -421,6 +428,8 @@ class GuidedSession:
             raise TypeError(
                 f"step_1_inspection_facts must be SourceInspectionFacts or None, got {type(self.step_1_inspection_facts).__name__}"
             )
+        if self.step_1_chosen_plugin is not None and type(self.step_1_chosen_plugin) is not str:
+            raise TypeError(f"step_1_chosen_plugin must be str or None, got {type(self.step_1_chosen_plugin).__name__}")
 
     @classmethod
     def initial(cls) -> GuidedSession:
@@ -452,6 +461,7 @@ class GuidedSession:
             "step_2_result": self.step_2_result.to_dict() if self.step_2_result is not None else None,
             "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
             "step_1_inspection_facts": facts_to_dict(self.step_1_inspection_facts) if self.step_1_inspection_facts is not None else None,
+            "step_1_chosen_plugin": self.step_1_chosen_plugin,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
             "transition_consumed": self.transition_consumed,
             "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
@@ -488,6 +498,7 @@ class GuidedSession:
             step_2_raw = d["step_2_result"]
             step_3_raw = d["step_3_proposal"]
             inspection_facts_raw = d["step_1_inspection_facts"]
+            step_1_chosen_plugin_raw = d["step_1_chosen_plugin"]
             terminal_raw = d["terminal"]
             source_intent_raw = d["step_1_source_intent"]
             sink_intent_raw = d["step_2_sink_intent"]
@@ -524,6 +535,7 @@ class GuidedSession:
                 step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
                 step_1_inspection_facts=facts_from_dict(inspection_facts_raw) if inspection_facts_raw is not None else None,
+                step_1_chosen_plugin=str(step_1_chosen_plugin_raw) if step_1_chosen_plugin_raw is not None else None,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
                 transition_consumed=d["transition_consumed"],
                 step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
@@ -698,6 +710,7 @@ def _advance_step_1(
         step=GuidedStep.STEP_2_SINK,
         step_1_result=source,
         step_1_source_intent=None,  # consumed; clear to prevent misread by later steps
+        step_1_chosen_plugin=None,
     )
     return (new_sess, None, None, directives)
 

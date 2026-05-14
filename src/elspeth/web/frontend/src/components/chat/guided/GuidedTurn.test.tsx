@@ -66,13 +66,18 @@ const MULTI_SELECT_PAYLOAD: MultiSelectWithCustomPayload = {
 // SchemaFormTurn renders a "Continue" button (enabled when canSubmit=true).
 // A required string field with a non-empty prefilled value satisfies canSubmit.
 const SCHEMA_FORM_PAYLOAD: SchemaFormPayload = {
+  mode: "plugin_options",
   plugin: "csv",
-  schema_block: {
-    type: "object",
-    properties: {
-      path: { type: "string", title: "Path" },
-    },
-    required: ["path"],
+  knobs: {
+    fields: [
+      {
+        name: "path",
+        label: "Path",
+        kind: "text",
+        required: true,
+        nullable: false,
+      },
+    ],
   },
   prefilled: { path: "/data/file.csv" },
 };

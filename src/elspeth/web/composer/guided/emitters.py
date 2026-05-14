@@ -24,8 +24,9 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     InspectAndConfirmPayload,
@@ -115,25 +116,30 @@ def build_step_1_inspect_and_confirm_turn_from_intent(
 def build_step_1_schema_form_turn(
     plugin: str,
     catalog: CatalogServiceProtocol,
+    *,
+    inspection_facts: SourceInspectionFacts | None = None,
 ) -> Turn:
     """Build a ``schema_form`` Turn for the chosen source plugin.
 
-    Emitted after the user picks a source plugin in Step 1's ``single_select``
-    turn.  The schema block is the plugin's full JSON schema (from the catalog);
-    ``prefilled`` seeds ``schema.mode: "observed"`` per spec §3.1 rule 0.
+    ``inspection_facts`` (when present) is merged into ``prefilled`` using only
+    facts carried by the current SourceInspectionFacts model. When absent,
+    ``prefilled`` falls back to ``{"schema": {"mode": "observed"}}``.
 
     Args:
         plugin: The plugin name chosen by the user (e.g. ``"csv"``).
-        catalog: Plugin catalog for retrieving the plugin's JSON schema.
+        catalog: Plugin catalog for retrieving the plugin's knob schema.
 
     Returns:
         A ``Turn`` TypedDict ready for serialisation and hash.
     """
     schema_info = catalog.get_schema("source", plugin)
-    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}}
+    prefilled: dict[str, object] = {"schema": {"mode": "observed"}}
+    if inspection_facts is not None:
+        _merge_inspection_into_prefill(prefilled, inspection_facts)
     payload: SchemaFormPayload = {
+        "mode": "plugin_options",
         "plugin": plugin,
-        "schema_block": dict(schema_info.json_schema),
+        "knobs": cast(KnobSchema, schema_info.knob_schema),
         "prefilled": prefilled,
     }
     return Turn(
@@ -141,6 +147,24 @@ def build_step_1_schema_form_turn(
         step_index=_step_index(GuidedStep.STEP_1_SOURCE),
         payload=payload,
     )
+
+
+def _merge_inspection_into_prefill(
+    prefilled: dict[str, object],
+    facts: SourceInspectionFacts,
+) -> None:
+    """Conservatively prefill source schema from inspection facts."""
+    if facts.observed_headers and facts.inferred_types:
+        fields: list[str] = []
+        for header in facts.observed_headers:
+            inferred = facts.inferred_types[header]
+            field_type = "any" if inferred == "null" else inferred
+            fields.append(f"{header}: {field_type}")
+        prefilled["schema"] = {"mode": "flexible", "fields": fields}
+    elif facts.observed_headers:
+        prefilled["schema"] = {"mode": "observed"}
+    # Delimiter and encoding are deliberately not prefilled here: the live
+    # SourceInspectionFacts model does not carry those fields yet.
 
 
 def build_step_2_single_select_turn(
@@ -198,8 +222,9 @@ def build_step_2_schema_form_turn(
     schema_info = catalog.get_schema("sink", plugin)
     prefilled: dict[str, Any] = {"schema": {"mode": "observed"}}
     payload: SchemaFormPayload = {
+        "mode": "plugin_options",
         "plugin": plugin,
-        "schema_block": dict(schema_info.json_schema),
+        "knobs": cast(KnobSchema, schema_info.knob_schema),
         "prefilled": prefilled,
     }
     return Turn(
@@ -332,8 +357,9 @@ def build_step_3_schema_form_turn(
     """Build a ``schema_form`` Turn for editing a proposed transform step."""
     schema_info = catalog.get_schema("transform", plugin)
     payload: SchemaFormPayload = {
+        "mode": "plugin_options",
         "plugin": plugin,
-        "schema_block": dict(schema_info.json_schema),
+        "knobs": cast(KnobSchema, schema_info.knob_schema),
         "prefilled": dict(options),
     }
     return Turn(

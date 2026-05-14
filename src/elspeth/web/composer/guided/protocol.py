@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Any, TypedDict
 
 from elspeth.contracts.composer_slots import SlotType
+from elspeth.web.catalog.knob_schema import SchemaFormPayload as SchemaFormPayload
 
 
 class TurnType(StrEnum):
@@ -51,12 +52,6 @@ class MultiSelectWithCustomPayload(TypedDict):
     options: Sequence[_Option]
     default_chosen: Sequence[str]
     escape_label: str | None
-
-
-class SchemaFormPayload(TypedDict):
-    plugin: str
-    schema_block: Mapping[str, Any]
-    prefilled: Mapping[str, Any]
 
 
 class _ProposedStep(TypedDict):
@@ -244,7 +239,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
             "escape_label",
         }
     ),
-    TurnType.SCHEMA_FORM: frozenset({"plugin", "schema_block", "prefilled"}),
+    TurnType.SCHEMA_FORM: frozenset({"mode", "knobs", "prefilled"}),
     TurnType.PROPOSE_CHAIN: frozenset({"steps", "why", "blockers"}),
     TurnType.RECIPE_OFFER: frozenset({"recipe_name", "slots", "alternatives", "unsatisfied_slots"}),
 }
@@ -270,6 +265,7 @@ _NESTED_SHAPES: Mapping[TurnType, tuple[_NestedSpec, ...]] = {
         # "observed" must be a Mapping with these keys
         ("observed", "mapping", frozenset({"columns", "samples", "warnings"})),
     ),
+    TurnType.SCHEMA_FORM: (("knobs", "mapping", frozenset({"fields"})),),
     TurnType.RECIPE_OFFER: (
         # "unsatisfied_slots" must be a Sequence; each element is a Mapping
         # with these keys.  "required" is intentionally absent — the
@@ -316,5 +312,22 @@ def validate_payload(turn_type: TurnType, payload: Mapping[str, Any]) -> str | N
                 item_missing = nested_required - item.keys()
                 if item_missing:
                     return f"{prefix}[{idx}] missing required keys: {sorted(item_missing)}"
+
+    if turn_type is TurnType.SCHEMA_FORM:
+        mode = payload["mode"]
+        if mode == "plugin_options":
+            if "plugin" not in payload:
+                return "payload for schema_form mode=plugin_options missing required keys: ['plugin']"
+        elif mode == "recipe_decision":
+            if "recipe_context" not in payload:
+                return "payload for schema_form mode=recipe_decision missing required keys: ['recipe_context']"
+            recipe_context = payload["recipe_context"]
+            if not isinstance(recipe_context, Mapping):
+                return f"payload.recipe_context must be a mapping (got {type(recipe_context).__name__})"
+            recipe_context_missing = {"recipe_name", "description", "alternatives"} - recipe_context.keys()
+            if recipe_context_missing:
+                return f"payload.recipe_context missing required keys: {sorted(recipe_context_missing)}"
+        else:
+            return f"payload.mode must be 'plugin_options' or 'recipe_decision' (got {mode!r})"
 
     return None

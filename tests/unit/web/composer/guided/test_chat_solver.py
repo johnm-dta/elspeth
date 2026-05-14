@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from elspeth.web.composer.guided import chat_solver
-from elspeth.web.composer.guided.chat_solver import solve_step_chat
+from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution, solve_step_chat
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep
 
@@ -39,6 +39,26 @@ class _FakeLLMResponse:
 
 def _ok_response(text: str) -> _FakeLLMResponse:
     return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=text))])
+
+
+def test_step_1_source_chat_resolution_deep_freezes_container_fields() -> None:
+    resolution = Step1SourceChatResolution(
+        assistant_message="Created a CSV source.",
+        plugin="csv",
+        filename="rows.csv",
+        mime_type="text/csv",
+        content="name\nalice\n",
+        options={"schema": {"fields": ["name"]}},
+        observed_columns=("name",),
+        sample_rows=({"name": "alice"},),
+    )
+
+    with pytest.raises(TypeError):
+        resolution.options["delimiter"] = ","  # type: ignore[index]
+    with pytest.raises(TypeError):
+        resolution.options["schema"]["fields"] = ["other"]  # type: ignore[index,call-overload]
+    with pytest.raises(TypeError):
+        resolution.sample_rows[0]["name"] = "bob"  # type: ignore[index]
 
 
 @pytest.mark.asyncio

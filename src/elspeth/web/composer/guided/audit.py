@@ -256,3 +256,39 @@ def emit_dropped_to_freeform(
         now=now,
     )
     recorder.record(invocation)
+
+
+def emit_hidden_field_rejected(
+    recorder: ComposerToolRecorder,
+    *,
+    session_id: str,
+    plugin_kind: str,
+    plugin_name: str,
+    field: str,
+    predicate: Mapping[str, Any],
+    actual_state: Mapping[str, Any],
+    composition_version: int,
+    actor: str,
+) -> None:
+    """Record a ``guided_hidden_field_rejected`` audit event.
+
+    Fires before returning HTTP 400 when a schema-form submission includes a
+    field hidden by its ``visible_when`` predicate.
+    """
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "plugin_kind": plugin_kind,
+        "plugin_name": plugin_name,
+        "field": field,
+        "predicate": dict(predicate),
+        "actual_state": dict(actual_state),
+    }
+    now = datetime.now(UTC)
+    invocation = _build_invocation(
+        tool_name="guided_hidden_field_rejected",
+        payload=payload,
+        composition_version=composition_version,
+        actor=actor,
+        now=now,
+    )
+    recorder.record(invocation)

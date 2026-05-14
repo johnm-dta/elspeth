@@ -9,10 +9,88 @@ Existing emitter coverage lives alongside protocol tests (test_protocol.py's
 
 from __future__ import annotations
 
-from elspeth.web.composer.guided.emitters import build_step_2_5_recipe_offer_turn
+from types import SimpleNamespace
+
+from elspeth.web.composer.guided.emitters import (
+    build_step_1_schema_form_turn,
+    build_step_2_5_recipe_offer_turn,
+    build_step_2_schema_form_turn,
+    build_step_3_schema_form_turn,
+)
 from elspeth.web.composer.guided.protocol import TurnType, validate_payload
 from elspeth.web.composer.guided.recipe_match import RecipeMatch
 from elspeth.web.composer.recipes import SlotSpec
+from elspeth.web.composer.source_inspection import SourceInspectionFacts
+
+
+class _Catalog:
+    def get_schema(self, plugin_type: str, plugin_name: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            json_schema={"properties": {"path": {"type": "string"}}},
+            knob_schema={
+                "fields": [
+                    {
+                        "name": "path",
+                        "label": "Path",
+                        "kind": "text",
+                        "required": True,
+                        "nullable": False,
+                    }
+                ]
+            },
+        )
+
+
+class TestBuildSchemaFormTurns:
+    def test_step_1_schema_form_uses_knob_schema_payload(self) -> None:
+        turn = build_step_1_schema_form_turn("csv", _Catalog())
+
+        assert turn["type"] == TurnType.SCHEMA_FORM.value
+        payload = turn["payload"]
+        assert payload["mode"] == "plugin_options"
+        assert payload["plugin"] == "csv"
+        assert payload["knobs"]["fields"][0]["name"] == "path"
+        assert "schema_block" not in payload
+        assert validate_payload(TurnType.SCHEMA_FORM, payload) is None
+
+    def test_step_1_schema_form_prefills_from_inspection_facts(self) -> None:
+        facts = SourceInspectionFacts(
+            source_kind="csv",
+            redacted_identity={"filename": "input.csv"},
+            byte_range_inspected=(0, 32),
+            sample_row_count=1,
+            observed_headers=("name", "age"),
+            inferred_types={"name": "str", "age": "int"},
+            url_candidates=(),
+            warnings=(),
+        )
+
+        turn = build_step_1_schema_form_turn("csv", _Catalog(), inspection_facts=facts)
+
+        schema_prefill = turn["payload"]["prefilled"]["schema"]
+        assert schema_prefill == {"mode": "flexible", "fields": ["name: str", "age: int"]}
+
+    def test_step_2_schema_form_uses_sink_knobs(self) -> None:
+        turn = build_step_2_schema_form_turn("json", _Catalog())
+
+        payload = turn["payload"]
+        assert payload["mode"] == "plugin_options"
+        assert payload["plugin"] == "json"
+        assert payload["knobs"]["fields"][0]["label"] == "Path"
+        assert payload["prefilled"] == {"schema": {"mode": "observed"}}
+
+    def test_step_3_schema_form_uses_transform_knobs_and_options_prefill(self) -> None:
+        turn = build_step_3_schema_form_turn(
+            plugin="type_coerce",
+            options={"conversions": {"age": "int"}},
+            catalog=_Catalog(),
+        )
+
+        payload = turn["payload"]
+        assert payload["mode"] == "plugin_options"
+        assert payload["plugin"] == "type_coerce"
+        assert payload["knobs"]["fields"][0]["name"] == "path"
+        assert payload["prefilled"] == {"conversions": {"age": "int"}}
 
 
 class TestBuildStep25RecipeOfferTurn:

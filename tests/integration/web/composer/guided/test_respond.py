@@ -123,8 +123,10 @@ class TestStep1IntraStep:
         assert body["next_turn"] is not None
         assert body["next_turn"]["type"] == "schema_form"
         payload = body["next_turn"]["payload"]
+        assert payload["mode"] == "plugin_options"
         assert payload["plugin"] == "csv"
-        assert "schema_block" in payload
+        assert "knobs" in payload
+        assert "schema_block" not in payload
         assert "prefilled" in payload
         # schema.mode defaults to "observed"
         assert payload["prefilled"].get("schema", {}).get("mode") == "observed"

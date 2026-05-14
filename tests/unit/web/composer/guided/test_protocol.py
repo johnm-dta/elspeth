@@ -61,10 +61,12 @@ class TestPayloadShapes:
 
     def test_schema_form_payload(self) -> None:
         payload: SchemaFormPayload = {
+            "mode": "plugin_options",
             "plugin": "csv",
-            "schema_block": {"path": {"type": "string"}},
+            "knobs": {"fields": []},
             "prefilled": {},
         }
+        assert payload["mode"] == "plugin_options"
         assert payload["plugin"] == "csv"
 
     def test_propose_chain_payload(self) -> None:
@@ -235,6 +237,64 @@ class TestPayloadValidation:
 
         with pytest.raises(ValueError):
             validate_payload("not_a_turn_type", {})  # type: ignore[arg-type]
+
+    def test_schema_form_plugin_options_golden_validates(self) -> None:
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.SCHEMA_FORM,
+            {
+                "mode": "plugin_options",
+                "plugin": "csv",
+                "knobs": {"fields": []},
+                "prefilled": {},
+            },
+        )
+        assert err is None
+
+    def test_schema_form_requires_knobs_fields(self) -> None:
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.SCHEMA_FORM,
+            {
+                "mode": "plugin_options",
+                "plugin": "csv",
+                "knobs": {},
+                "prefilled": {},
+            },
+        )
+        assert err is not None
+        assert "payload.knobs" in err
+        assert "fields" in err
+
+    def test_schema_form_plugin_options_requires_plugin(self) -> None:
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.SCHEMA_FORM,
+            {
+                "mode": "plugin_options",
+                "knobs": {"fields": []},
+                "prefilled": {},
+            },
+        )
+        assert err is not None
+        assert "plugin" in err
+
+    def test_schema_form_recipe_decision_requires_recipe_context(self) -> None:
+        from elspeth.web.composer.guided.protocol import validate_payload
+
+        err = validate_payload(
+            TurnType.SCHEMA_FORM,
+            {
+                "mode": "recipe_decision",
+                "knobs": {"fields": []},
+                "prefilled": {},
+            },
+        )
+        assert err is not None
+        assert "recipe_context" in err
 
     # ---------------------------------------------------------------------------
     # Recursive nested-shape validation (S4 uplift)

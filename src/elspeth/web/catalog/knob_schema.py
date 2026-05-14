@@ -11,7 +11,28 @@ them from plugin models we control. Prefilled values from
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+import types
+from collections.abc import Mapping
+from inspect import isclass
+from typing import Annotated, Any, Literal, NotRequired, TypedDict, Union, cast, get_args, get_origin
+
+from pydantic import BaseModel
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
+
+FieldKind = Literal[
+    "text",
+    "number-int",
+    "number-float",
+    "checkbox",
+    "enum",
+    "string-list",
+    "blob-ref",
+    "json-object",
+    "json-array",
+    "json-value",
+]
+FieldTier = Literal["essential", "common", "advanced"]
 
 
 class VisibilityPredicate(TypedDict):
@@ -31,19 +52,8 @@ class KnobField(TypedDict):
     name: str
     label: str
     description: NotRequired[str]
-    kind: Literal[
-        "text",
-        "number-int",
-        "number-float",
-        "checkbox",
-        "enum",
-        "string-list",
-        "blob-ref",
-        "json-object",
-        "json-array",
-        "json-value",
-    ]
-    tier: NotRequired[Literal["essential", "common", "advanced"]]
+    kind: FieldKind
+    tier: NotRequired[FieldTier]
     required: bool
     default: NotRequired[object]
     nullable: bool
@@ -102,3 +112,132 @@ class KnobSchemaLoweringError(Exception):
         self.field_path = field_path
         self.constraint = constraint
         self.remediation = remediation
+
+
+_TYPE_TO_KIND: dict[type, Literal["text", "number-int", "number-float", "checkbox"]] = {
+    str: "text",
+    int: "number-int",
+    float: "number-float",
+    bool: "checkbox",
+}
+
+
+def _unwrap_annotated(annotation: Any) -> Any:
+    while get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return annotation
+
+
+def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
+    """Return ``(inner_type, nullable)`` for ``T | None`` and ``Optional[T]``."""
+    annotation = _unwrap_annotated(annotation)
+    origin = get_origin(annotation)
+    if origin in (types.UnionType, Union):
+        args = get_args(annotation)
+        non_none = [arg for arg in args if arg is not type(None)]
+        if len(non_none) == 1 and len(non_none) != len(args):
+            return _unwrap_annotated(non_none[0]), True
+    return annotation, False
+
+
+def _kind_for_scalar(
+    inner: Any,
+) -> tuple[Literal["text", "number-int", "number-float", "checkbox", "enum", "json-value"], list[str] | None]:
+    """Map a Python scalar or Literal type to a field kind and enum values."""
+    if get_origin(inner) is Literal:
+        values = [str(value) for value in get_args(inner)]
+        return "enum", values
+    if inner in _TYPE_TO_KIND:
+        return _TYPE_TO_KIND[inner], None
+    return "json-value", None
+
+
+def _base_field(
+    *,
+    name: str,
+    info: FieldInfo,
+    kind: FieldKind,
+    nullable: bool,
+) -> KnobField:
+    field: KnobField = {
+        "name": name,
+        "label": info.title or name,
+        "kind": kind,
+        "required": info.is_required(),
+        "nullable": nullable,
+    }
+    if info.description:
+        field["description"] = info.description
+    _attach_default(field, info)
+    _attach_tier(field, info)
+    return field
+
+
+def _lower_field(
+    name: str,
+    info: FieldInfo,
+    *,
+    plugin_kind: str,
+    plugin_name: str,
+    composer_tier_default: str,
+) -> KnobField:
+    del plugin_kind, plugin_name, composer_tier_default
+    inner, nullable = _unwrap_optional(info.annotation)
+    origin = get_origin(inner)
+
+    if origin is list:
+        list_args = get_args(inner)
+        if len(list_args) == 1 and _unwrap_annotated(list_args[0]) is str:
+            field = _base_field(name=name, info=info, kind="string-list", nullable=nullable)
+            field["item_kind"] = "text"
+            return field
+        return _base_field(name=name, info=info, kind="json-array", nullable=nullable)
+
+    is_model_cls = isclass(inner) and issubclass(inner, BaseModel)
+    if origin in (dict, Mapping) or is_model_cls:
+        return _base_field(name=name, info=info, kind="json-object", nullable=nullable)
+
+    kind, enum_values = _kind_for_scalar(inner)
+    field = _base_field(name=name, info=info, kind=kind, nullable=nullable)
+    if enum_values is not None:
+        field["enum"] = enum_values
+    return field
+
+
+def _attach_default(field: KnobField, info: FieldInfo) -> None:
+    if info.is_required() or info.default is PydanticUndefined:
+        return
+    field["default"] = info.default
+
+
+def _attach_tier(field: KnobField, info: FieldInfo) -> None:
+    extra = info.json_schema_extra
+    if type(extra) is not dict:
+        return
+    if "composer_tier" not in extra:
+        return
+    tier = extra["composer_tier"]
+    if tier in ("essential", "common", "advanced"):
+        field["tier"] = cast(FieldTier, tier)
+
+
+def lower_model_to_knob_schema(
+    model_cls: type[BaseModel],
+    *,
+    plugin_kind: str,
+    plugin_name: str,
+    composer_tier_default: str = "common",
+) -> KnobSchema:
+    """Lower a single-model Pydantic config class to ``KnobSchema``."""
+    fields: list[KnobField] = []
+    for name, info in model_cls.model_fields.items():
+        fields.append(
+            _lower_field(
+                name,
+                info,
+                plugin_kind=plugin_kind,
+                plugin_name=plugin_name,
+                composer_tier_default=composer_tier_default,
+            )
+        )
+    return {"fields": fields}

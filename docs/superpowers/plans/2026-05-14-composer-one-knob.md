@@ -1,10 +1,16 @@
 # Composer One-Knob Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Collapse the three parallel typing systems for composer knobs (plugin Pydantic JSON Schema, recipe `SlotSpec`, frontend `FieldType`) into one canonical wire shape (`KnobSchema`), lowered server-side at catalog load, rendered by a single frontend widget.
 
 **Tracking epic:** `elspeth-a5fbc1ed4a` — "Composer one-knob configuration — single guided knob schema across plugin options and recipes"
+
+**Implementation closeout:** Completed on 2026-05-14 and merged into `RC5.2` at `2135908f6`. The tracking epic `elspeth-a5fbc1ed4a` is closed. All task checkboxes below are marked complete to make this plan usable as an execution record, not just a pre-implementation handoff.
+
+**Verification closeout:** Final verification from `/home/john/elspeth` passed: `ruff check src tests`, `mypy src`, tier-model, freeze-guards, plugin options metadata lint, metadata lint tests, guided/composer backend sweep (`235 passed`), frontend vitest (`478 passed`), frontend typecheck, and frontend build. The frontend build retained the existing Vite dynamic-import/chunk-size warnings.
+
+**Deployment shoe-in:** Before deploying this change, the operator must delete/recreate the guided sessions DB because the guided session schema version intentionally rejects older persisted sessions.
 
 **Architecture:** Backend lowers Pydantic-emitted JSON Schema into a fallback-capable `KnobSchema` at `CatalogServiceImpl.__init__` (startup-time, not per-request). Discriminated-union plugins (LLMTransform) flatten via `visible_when` predicates. Valid rich live schemas lower to explicit `json-object`, `json-array`, or `json-value` fallback knobs rather than failing startup. Frontend `SchemaFormTurn` dispatches on `kind`; recipe rendering folds into the same turn type via a tagged-union `SchemaFormPayload` with `mode` discriminator. Step 1 schema-form is prefilled from persisted `SourceInspectionFacts`. Hidden-field submissions are rejected by the backend with FastAPI's `{"detail": {"code": ...}}` envelope, not silently dropped.
 
@@ -52,7 +58,7 @@
 
 ### Frontend — new files
 - `src/elspeth/web/frontend/src/components/chat/guided/RecipeContextHeader.tsx` — small peer component for recipe metadata banner
-- `src/elspeth/web/frontend/src/components/chat/guided/RecipeContextHeader.test.tsx`
+- Covered by `src/elspeth/web/frontend/src/components/chat/guided/SchemaFormTurn.test.tsx`; no standalone `RecipeContextHeader.test.tsx` was landed.
 
 ### Frontend — deleted files (after step 4 lands)
 - `src/elspeth/web/frontend/src/components/chat/guided/RecipeOfferTurn.tsx`
@@ -65,7 +71,7 @@
 - `tests/unit/web/catalog/test_knob_schema_properties.py`
 - `tests/golden/web/catalog/knob_schema/*.json`
 - `tests/unit/web/catalog/test_eager_lowering.py`
-- `tests/integration/web/composer/test_hidden_field_rejection.py`
+- `tests/integration/web/composer/guided/test_hidden_field_rejection.py`
 - `tests/unit/scripts/cicd/test_enforce_options_metadata.py`
 
 ### Plugin configuration models — bulk metadata fill (Task 16)
@@ -81,7 +87,7 @@
 - Create: `src/elspeth/contracts/discriminated.py`
 - Test: `tests/unit/contracts/test_discriminated.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/unit/contracts/test_discriminated.py
@@ -112,12 +118,12 @@ def test_plugin_without_method_is_not_discriminated():
     assert not isinstance(MyPlugin, DiscriminatedPlugin)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/contracts/test_discriminated.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'elspeth.contracts.discriminated'`
 
-- [ ] **Step 3: Implement the protocol**
+- [x] **Step 3: Implement the protocol**
 
 ```python
 # src/elspeth/contracts/discriminated.py
@@ -150,12 +156,12 @@ class DiscriminatedPlugin(Protocol):
     def discriminated_variants(cls) -> tuple[str, dict[str, type[BaseModel]]]: ...
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/unit/contracts/test_discriminated.py -v`
 Expected: PASS — 2 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/elspeth/contracts/discriminated.py tests/unit/contracts/test_discriminated.py
@@ -175,7 +181,7 @@ in the upcoming knob_schema.py — see spec §5.
 - Create: `src/elspeth/web/catalog/knob_schema.py` (initial — types only)
 - Test: `tests/unit/web/composer/test_knob_schema.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/unit/web/composer/test_knob_schema.py
@@ -214,12 +220,12 @@ def test_recipe_decision_payload_carries_recipe_context():
     assert payload["mode"] == "recipe_decision"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema.py -v`
 Expected: FAIL — `ImportError: cannot import name 'KnobField' from ...`
 
-- [ ] **Step 3: Implement the types module**
+- [x] **Step 3: Implement the types module**
 
 ```python
 # src/elspeth/web/catalog/knob_schema.py
@@ -331,12 +337,12 @@ class KnobSchemaLoweringError(Exception):
         self.remediation = remediation
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema.py -v`
 Expected: PASS — 2 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/elspeth/web/catalog/knob_schema.py tests/unit/web/composer/test_knob_schema.py
@@ -356,7 +362,7 @@ tasks. See spec §4 + §4.1.
 - Modify: `src/elspeth/web/catalog/knob_schema.py` (add `from_model` classmethod and helpers)
 - Test: `tests/unit/web/composer/test_knob_schema_from_model.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/unit/web/composer/test_knob_schema_from_model.py
@@ -518,12 +524,12 @@ def test_optional_str_clear_round_trips_through_set_source_validator():
     assert validated.options["encoding"] is None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_from_model.py -v`
 Expected: FAIL — `ImportError: cannot import name 'lower_model_to_knob_schema'`
 
-- [ ] **Step 3: Implement `lower_model_to_knob_schema`**
+- [x] **Step 3: Implement `lower_model_to_knob_schema`**
 
 Append to `src/elspeth/web/catalog/knob_schema.py`:
 
@@ -690,12 +696,12 @@ def lower_model_to_knob_schema(
     return {"fields": fields}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_from_model.py -v`
 Expected: PASS — includes forward-lowering tests plus nullable return-path validator coverage.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/elspeth/web/catalog/knob_schema.py tests/unit/web/composer/test_knob_schema_from_model.py
@@ -717,14 +723,14 @@ Tier annotation honoured when set; absent when unset per spec §4.
 - Modify: `src/elspeth/web/catalog/knob_schema.py`
 - Test: `tests/unit/web/composer/test_knob_schema_recipe_adapter.py`
 
-- [ ] **Step 1: Extract SlotType and SlotSpec to contracts**
+- [x] **Step 1: Extract SlotType and SlotSpec to contracts**
 
 Move the existing `SlotType` and `SlotSpec` definitions from `src/elspeth/web/composer/recipes.py` to `src/elspeth/contracts/composer_slots.py`, then re-export/import them in `recipes.py`. This avoids a `web/catalog -> web/composer` dependency and removes the lazy-import anti-pattern from the adapter.
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_recipes.py tests/unit/web/composer/guided/test_recipe_match.py -v`
 Expected: PASS; recipe registry and matching behavior unchanged.
 
-- [ ] **Step 2: Write the failing test (parametrised over SlotType)**
+- [x] **Step 2: Write the failing test (parametrised over SlotType)**
 
 ```python
 # tests/unit/web/composer/test_knob_schema_recipe_adapter.py
@@ -762,12 +768,12 @@ def test_every_slot_type_has_a_mapping(slot_type):
     assert "kind" in ks["fields"][0]
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_recipe_adapter.py -v`
 Expected: FAIL — `ImportError: cannot import name 'lower_slot_specs_to_knob_schema'`
 
-- [ ] **Step 4: Implement `lower_slot_specs_to_knob_schema`**
+- [x] **Step 4: Implement `lower_slot_specs_to_knob_schema`**
 
 Append to `src/elspeth/web/catalog/knob_schema.py`:
 
@@ -810,12 +816,12 @@ def lower_slot_specs_to_knob_schema(slots: Mapping[str, Any]) -> KnobSchema:
     return {"fields": fields}
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_recipe_adapter.py -v`
 Expected: PASS — at least 3 + N (N = number of SlotType members) tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/contracts/composer_slots.py src/elspeth/web/composer/recipes.py src/elspeth/web/catalog/knob_schema.py tests/unit/web/composer/test_knob_schema_recipe_adapter.py
@@ -837,7 +843,7 @@ for non-plugin-backed recipes; see spec §5 + §12.
 - Modify: `src/elspeth/plugins/transforms/llm/transform.py` (add classmethod)
 - Test: `tests/unit/web/composer/test_knob_schema_discriminated.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/unit/web/composer/test_knob_schema_discriminated.py
@@ -891,12 +897,12 @@ def test_non_discriminated_plugin_raises():
     assert "discriminated_variants" in exc.value.constraint
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_discriminated.py -v`
 Expected: FAIL — `ImportError: cannot import name 'lower_discriminated_to_knob_schema'`
 
-- [ ] **Step 3: Implement `lower_discriminated_to_knob_schema`**
+- [x] **Step 3: Implement `lower_discriminated_to_knob_schema`**
 
 Append to `src/elspeth/web/catalog/knob_schema.py`:
 
@@ -956,12 +962,12 @@ def lower_discriminated_to_knob_schema(
     return {"fields": fields}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_discriminated.py -v`
 Expected: PASS — 3 passed
 
-- [ ] **Step 5: Add `discriminated_variants()` to LLMTransform**
+- [x] **Step 5: Add `discriminated_variants()` to LLMTransform**
 
 Read the current shape:
 
@@ -978,7 +984,7 @@ Add after the existing `get_config_schema` classmethod (location: same file, loc
         return ("provider", {provider: config_cls for provider, (config_cls, _) in _PROVIDERS.items()})
 ```
 
-- [ ] **Step 6: Write LLMTransform integration test**
+- [x] **Step 6: Write LLMTransform integration test**
 
 ```python
 # Append to tests/unit/web/composer/test_knob_schema_discriminated.py
@@ -996,12 +1002,12 @@ def test_llm_transform_real_lowering():
         assert f["visible_when"]["field"] == "provider"
 ```
 
-- [ ] **Step 7: Run all knob-schema tests**
+- [x] **Step 7: Run all knob-schema tests**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema*.py tests/unit/contracts/test_discriminated.py -v`
 Expected: all passed
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/elspeth/web/catalog/knob_schema.py src/elspeth/plugins/transforms/llm/transform.py tests/unit/web/composer/test_knob_schema_discriminated.py
@@ -1022,7 +1028,7 @@ fields receive visible_when={field, equals} predicates. See spec §4.1.
 - Modify: `src/elspeth/web/catalog/knob_schema.py` — add validator
 - Test: `tests/unit/web/composer/test_knob_schema_visible_when.py`
 
-- [ ] **Step 1: Write the failing test (negative cases)**
+- [x] **Step 1: Write the failing test (negative cases)**
 
 ```python
 # tests/unit/web/composer/test_knob_schema_visible_when.py
@@ -1104,12 +1110,12 @@ def test_nested_visibility_rejected():
     assert "nest" in exc.value.constraint.lower()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_visible_when.py -v`
 Expected: FAIL — `ImportError: cannot import name 'validate_knob_schema'`
 
-- [ ] **Step 3: Implement `validate_knob_schema`**
+- [x] **Step 3: Implement `validate_knob_schema`**
 
 Append to `src/elspeth/web/catalog/knob_schema.py`:
 
@@ -1177,12 +1183,12 @@ def validate_knob_schema(
         seen_so_far.append(f["name"])
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/test_knob_schema_visible_when.py -v`
 Expected: PASS — 6 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/elspeth/web/catalog/knob_schema.py tests/unit/web/composer/test_knob_schema_visible_when.py
@@ -1202,7 +1208,7 @@ signal' policy into a build gate per systems-thinking second-pass review.
 - Test: `tests/unit/web/catalog/test_knob_schema_properties.py`
 - Test: `tests/golden/web/catalog/knob_schema/*.json`
 
-- [ ] **Step 1: Add Hypothesis property coverage**
+- [x] **Step 1: Add Hypothesis property coverage**
 
 Use the repo's existing Hypothesis style (`rg -n "@given|hypothesis" tests/`) and add generated `BaseModel` cases for scalar, nullable, list, map, and complex-union fields. The property is:
 
@@ -1214,14 +1220,14 @@ Use the repo's existing Hypothesis style (`rg -n "@given|hypothesis" tests/`) an
 Run: `.venv/bin/python -m pytest tests/unit/web/catalog/test_knob_schema_properties.py -v`
 Expected: FAIL first because the property test does not exist; PASS after implementation.
 
-- [ ] **Step 2: Add golden snapshots for the live plugin catalog**
+- [x] **Step 2: Add golden snapshots for the live plugin catalog**
 
 Create a snapshot test that constructs `CatalogServiceImpl(get_shared_plugin_manager())`, walks `get_sources()`, `get_transforms()`, and `get_sinks()`, and writes/compares stable JSON snapshots of each plugin's lowered `knob_schema`. Snapshot keys must use plugin `kind/name`, not class names, so plugin renames are visible.
 
 Run: `.venv/bin/python -m pytest tests/unit/web/catalog/test_knob_schema_properties.py -v -k golden`
 Expected: PASS with committed snapshots. Any future snapshot diff must be reviewed intentionally in PR.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/unit/web/catalog/test_knob_schema_properties.py tests/golden/web/catalog/knob_schema/
@@ -1242,12 +1248,12 @@ This closes the spec §10 coverage gate before catalog integration."
 - Modify: `src/elspeth/web/catalog/schemas.py:44`
 - Test: `tests/unit/web/catalog/test_schemas.py` (existing test will need adjustment; verify)
 
-- [ ] **Step 1: Read current PluginSchemaInfo shape**
+- [x] **Step 1: Read current PluginSchemaInfo shape**
 
 Run: `sed -n '40,60p' /home/john/elspeth/src/elspeth/web/catalog/schemas.py`
 Note the current fields. The field `json_schema: dict[str, Any]` is present and stays.
 
-- [ ] **Step 2: Add `knob_schema` field**
+- [x] **Step 2: Add `knob_schema` field**
 
 Edit `src/elspeth/web/catalog/schemas.py` — locate the `PluginSchemaInfo` class and add a new field after `json_schema`:
 
@@ -1260,12 +1266,12 @@ Edit `src/elspeth/web/catalog/schemas.py` — locate the `PluginSchemaInfo` clas
 
 (Use `dict[str, Any]` rather than the TypedDict alias to keep `PluginSchemaInfo` simple — the TypedDict is enforced upstream by `validate_knob_schema`.)
 
-- [ ] **Step 3: Run existing catalog tests — they should still pass for the test fixtures, but new ones need adjustment**
+- [x] **Step 3: Run existing catalog tests — they should still pass for the test fixtures, but new ones need adjustment**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/catalog/ -v`
 Expected: any failures are tests that instantiate `PluginSchemaInfo` directly without `knob_schema`. Fix those by passing `knob_schema={"fields": []}`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/elspeth/web/catalog/schemas.py tests/unit/web/catalog/
@@ -1285,7 +1291,7 @@ See spec §3 catalog API extension.
 - Modify: `src/elspeth/web/catalog/service.py:36-83`
 - Test: `tests/unit/web/catalog/test_eager_lowering.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/unit/web/catalog/test_eager_lowering.py
@@ -1364,12 +1370,12 @@ def plugin_manager_with_broken_plugin():
 
 Keep these fixtures local to `test_eager_lowering.py` unless the existing catalog test suite already has equivalent fixtures with the same behavior. Do not rely on undefined shared fixtures.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/catalog/test_eager_lowering.py -v`
 Expected: FAIL — `KeyError` on the `knob_schema` field or attribute access fails.
 
-- [ ] **Step 3: Modify CatalogServiceImpl**
+- [x] **Step 3: Modify CatalogServiceImpl**
 
 Edit `src/elspeth/web/catalog/service.py`. The current pattern is:
 
@@ -1454,12 +1460,12 @@ class CatalogServiceImpl:
 
 (The exact attribute names for source/transform/sink class lists need to match what's in `service.py:36-65` — read it before pasting.)
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/catalog/ tests/unit/web/composer/test_knob_schema*.py -v`
 Expected: all passed
 
-- [ ] **Step 5: Smoke-test against a real catalog at startup**
+- [x] **Step 5: Smoke-test against a real catalog at startup**
 
 Run: `.venv/bin/python -c "from elspeth.web.catalog.service import CatalogServiceImpl; from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager; svc = CatalogServiceImpl(get_shared_plugin_manager()); print(f'Loaded {len(svc._schema_cache)} plugins')"`
 Expected: prints plugin count without raising. If `KnobSchemaLoweringError` raises, it should be for a true malformed schema or invariant violation — not merely a rich-but-valid live shape. The error message names plugin, field, constraint, remediation.
@@ -1469,7 +1475,7 @@ Also add this as a durable integration test, not only a shell smoke:
 Run: `.venv/bin/python -m pytest tests/integration/web/catalog/test_startup_lowering.py -v`
 Expected: constructs `CatalogServiceImpl(get_shared_plugin_manager())`, asserts `_schema_cache` covers every plugin from `get_sources()/get_transforms()/get_sinks()`, and asserts every cached `knob_schema` has a `fields` list.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/catalog/service.py tests/unit/web/catalog/test_eager_lowering.py
@@ -1493,7 +1499,7 @@ python-engineering C-2 from second-pass review.
 - Modify: `src/elspeth/web/composer/source_inspection.py`
 - Test: `tests/unit/web/composer/guided/test_state_machine.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # Append to tests/unit/web/composer/guided/test_state_machine.py
@@ -1544,12 +1550,12 @@ def test_guided_session_schema_version_bumped_for_inspection_facts():
     assert GUIDED_SESSION_SCHEMA_VERSION == 4
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py -v -k inspection_facts`
 Expected: FAIL — `GuidedSession` does not yet persist `step_1_inspection_facts`.
 
-- [ ] **Step 3: Add strict facts deserializer**
+- [x] **Step 3: Add strict facts deserializer**
 
 Edit `source_inspection.py`:
 
@@ -1559,7 +1565,7 @@ Edit `source_inspection.py`:
 - Preserve `None` for `observed_headers` and `inferred_types`; do not fabricate empty structures.
 - Wrap `KeyError`, `TypeError`, and `ValueError` in `InvariantError` with the malformed record.
 
-- [ ] **Step 4: Add the field to GuidedSession**
+- [x] **Step 4: Add the field to GuidedSession**
 
 Edit `state_machine.py`:
 - Add `step_1_inspection_facts: SourceInspectionFacts | None = None` after `step_3_proposal` (line ~397).
@@ -1574,12 +1580,12 @@ Edit `state_machine.py`:
 
 (See the current shape at `state_machine.py:397, 422, 443, 478, 513` for matching the existing patterns.)
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py -v -k "inspection_facts or schema_version or freeze"`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/composer/source_inspection.py src/elspeth/web/composer/guided/state_machine.py tests/unit/web/composer/guided/test_state_machine.py
@@ -1610,11 +1616,11 @@ Task 16 runs here, before Phase D, so the new renderer never ships against missi
 **Files:**
 - Modify: `src/elspeth/web/composer/guided/protocol.py:53-59, 236-286`
 
-- [ ] **Step 1: Locate current SchemaFormPayload**
+- [x] **Step 1: Locate current SchemaFormPayload**
 
 Run: `sed -n '50,80p' /home/john/elspeth/src/elspeth/web/composer/guided/protocol.py`
 
-- [ ] **Step 2: Replace with re-export from knob_schema**
+- [x] **Step 2: Replace with re-export from knob_schema**
 
 Edit `protocol.py`:
 
@@ -1626,7 +1632,7 @@ from elspeth.web.catalog.knob_schema import SchemaFormPayload  # noqa: F401
 # leave a deprecated alias per CLAUDE.md no-legacy policy.
 ```
 
-- [ ] **Step 3: Update protocol validation constants**
+- [x] **Step 3: Update protocol validation constants**
 
 In the same edit, update `_REQUIRED_KEYS` and `_NESTED_SHAPES`:
 
@@ -1637,7 +1643,7 @@ In the same edit, update `_REQUIRED_KEYS` and `_NESTED_SHAPES`:
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_protocol.py -v`
 Expected: failing tests first for the old shape, then PASS after updating the constants and fixtures.
 
-- [ ] **Step 4: Type-check**
+- [x] **Step 4: Type-check**
 
 Run: `.venv/bin/python -m mypy src/elspeth/web/composer/`
 Expected: errors in `emitters.py` (consumers of old shape). These are fixed in Task 11.
@@ -1650,7 +1656,7 @@ Expected: errors in `emitters.py` (consumers of old shape). These are fixed in T
 - Modify: `src/elspeth/web/composer/guided/emitters.py:115-143, 181-209, 326-343`
 - Test: `tests/unit/web/composer/guided/test_emitters.py` (extend existing)
 
-- [ ] **Step 1: Update `build_step_1_schema_form_turn`**
+- [x] **Step 1: Update `build_step_1_schema_form_turn`**
 
 ```python
 def build_step_1_schema_form_turn(
@@ -1701,7 +1707,7 @@ def _merge_inspection_into_prefill(
     # SourceInspectionFacts model does not carry those fields yet.
 ```
 
-- [ ] **Step 2: Update `build_step_2_schema_form_turn` and `build_step_3_schema_form_turn`**
+- [x] **Step 2: Update `build_step_2_schema_form_turn` and `build_step_3_schema_form_turn`**
 
 ```python
 def build_step_2_schema_form_turn(
@@ -1742,7 +1748,7 @@ def build_step_3_schema_form_turn(
     )
 ```
 
-- [ ] **Step 3: Update tests**
+- [x] **Step 3: Update tests**
 
 ```python
 # tests/unit/web/composer/guided/test_emitters.py — find existing schema_form turn tests
@@ -1750,7 +1756,7 @@ def build_step_3_schema_form_turn(
 # and add `assert payload["mode"] == "plugin_options"`
 ```
 
-- [ ] **Step 4: Run emitter tests**
+- [x] **Step 4: Run emitter tests**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_emitters.py -v`
 Expected: PASS (after the assertion swap)
@@ -1763,7 +1769,7 @@ Expected: PASS (after the assertion swap)
 - Modify: `src/elspeth/web/sessions/routes.py:2180, 5189` (dispatch/rebuild sites that emit Step 1 after inspection)
 - Modify: `src/elspeth/web/composer/guided/emitters.py` (if `build_initial_step_1_turn` needs to route through inspection facts)
 
-- [ ] **Step 1: Identify call sites**
+- [x] **Step 1: Identify call sites**
 
 Run:
 
@@ -1773,7 +1779,7 @@ rg -n "build_step_1_schema_form_turn|build_initial_step_1_turn|build_step_1_insp
 
 Reality check from the review: there is only one direct `build_step_1_schema_form_turn` call in `routes.py`. The GET rebuild path does not call it; when `step_1_source_intent` is set it currently rebuilds `INSPECT_AND_CONFIRM` through `build_step_1_inspect_and_confirm_turn_from_intent`, otherwise it calls `build_initial_step_1_turn(...)`. Do not implement the old "two direct call sites" premise.
 
-- [ ] **Step 2: Update the direct schema-form dispatch**
+- [x] **Step 2: Update the direct schema-form dispatch**
 
 Locate each site and change:
 
@@ -1784,7 +1790,7 @@ build_step_1_schema_form_turn(plugin, catalog)
 build_step_1_schema_form_turn(plugin, catalog, inspection_facts=guided.step_1_inspection_facts)
 ```
 
-- [ ] **Step 3: Write the population path**
+- [x] **Step 3: Write the population path**
 
 Find where INSPECT_AND_CONFIRM is emitted (likely calls `_build_inspect_and_confirm_turn`); after that emission, persist the facts on `guided`:
 
@@ -1793,11 +1799,11 @@ Find where INSPECT_AND_CONFIRM is emitted (likely calls `_build_inspect_and_conf
 guided = _replace(guided, step_1_inspection_facts=inspection_facts)
 ```
 
-- [ ] **Step 4: Fix the rebuild path**
+- [x] **Step 4: Fix the rebuild path**
 
 The rebuild path must deliver the same prefilled schema form after refresh. If the session is waiting on the schema form after source selection, the chosen plugin and inspection facts must be persisted in `GuidedSession` and the rebuild branch must call `build_step_1_schema_form_turn(..., inspection_facts=guided.step_1_inspection_facts)`. If that requires a new staging field for the selected source plugin, add it explicitly and include it in the schema-version bump from Task 9. Do not use `build_initial_step_1_turn(...)` for this intra-step rebuild once a plugin has been selected.
 
-- [ ] **Step 5: Integration test for real prefill**
+- [x] **Step 5: Integration test for real prefill**
 
 ```python
 # tests/integration/web/composer/test_guided_step1_prefill.py
@@ -1865,12 +1871,12 @@ Define `single_select_response(...)`, `seed_csv_blob(...)`, and `session_with_st
 
 **Files:**
 - Modify: `src/elspeth/web/sessions/routes.py` — add a helper, apply at all three SCHEMA_FORM dispatchers
-- Test: `tests/integration/web/composer/test_hidden_field_rejection.py`
+- Test: `tests/integration/web/composer/guided/test_hidden_field_rejection.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
-# tests/integration/web/composer/test_hidden_field_rejection.py
+# tests/integration/web/composer/guided/test_hidden_field_rejection.py
 from fastapi.testclient import TestClient
 
 
@@ -2052,7 +2058,7 @@ def _outputs_path(client, filename: str) -> str:
 
 Define `session_at_step_3_llm`, `audit_events_for_session`, and the local route-driving helpers in this integration test module; do not assume they exist. The fixture must construct a real guided session at Step 3 with an LLM schema whose provider discriminator makes `model` hidden for the selected Azure branch. Add the needed local imports (`asyncio`, `json`, `SimpleNamespace`, `AsyncMock`, `patch`, `UUID`, `pytest`) in the same test file.
 
-- [ ] **Step 2: Implement `_reject_hidden_field_submissions`**
+- [x] **Step 2: Implement `_reject_hidden_field_submissions`**
 
 Add to `routes.py`:
 
@@ -2138,7 +2144,7 @@ Audit policy: hidden-field rejection is security-relevant and must emit an audit
 
 Also validate `blob-ref` values as UUID strings at the same Tier-3 boundary before dispatching to plugin validators. Invalid UUIDs should return a structured 400 instead of flowing as arbitrary text.
 
-- [ ] **Step 3: Call the helper at each SCHEMA_FORM dispatcher site**
+- [x] **Step 3: Call the helper at each SCHEMA_FORM dispatcher site**
 
 At each `SCHEMA_FORM` branch in `_dispatch_guided_respond` (Step 1, Step 2, Step 3), after parsing `options_raw` and before applying it:
 
@@ -2156,9 +2162,9 @@ _reject_hidden_field_submissions(
 )
 ```
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
-Run: `.venv/bin/python -m pytest tests/integration/web/composer/test_hidden_field_rejection.py -v`
+Run: `.venv/bin/python -m pytest tests/integration/web/composer/guided/test_hidden_field_rejection.py -v`
 Expected: PASS
 
 ---
@@ -2170,7 +2176,7 @@ Expected: PASS
 - Modify: `src/elspeth/web/frontend/src/components/chat/guided/SchemaFormTurn.tsx` (full rewrite)
 - Modify: `src/elspeth/web/frontend/src/components/chat/guided/SchemaFormTurn.test.tsx`
 
-- [ ] **Step 1: Update TypeScript types**
+- [x] **Step 1: Update TypeScript types**
 
 ```typescript
 // src/elspeth/web/frontend/src/types/guided.ts (replace SchemaFormPayload block)
@@ -2233,7 +2239,7 @@ export type SchemaFormPayload =
     };
 ```
 
-- [ ] **Step 2: Rewrite SchemaFormTurn.tsx**
+- [x] **Step 2: Rewrite SchemaFormTurn.tsx**
 
 Replace the file with a kind-dispatched renderer. Structure:
 
@@ -2477,7 +2483,7 @@ function KnobFieldRenderer({
 }
 ```
 
-- [ ] **Step 3: Add RecipeContextHeader.tsx**
+- [x] **Step 3: Add RecipeContextHeader.tsx**
 
 ```typescript
 // src/elspeth/web/frontend/src/components/chat/guided/RecipeContextHeader.tsx
@@ -2496,7 +2502,7 @@ export function RecipeContextHeader({ context }: { context: RecipeContext }) {
 }
 ```
 
-- [ ] **Step 4: Rewrite SchemaFormTurn.test.tsx**
+- [x] **Step 4: Rewrite SchemaFormTurn.test.tsx**
 
 Replace the existing tests with kind-dispatched cases:
 
@@ -2575,18 +2581,18 @@ Required frontend coverage:
 - Add a11y assertions for `aria-describedby`, clear-button accessible name, heading hierarchy when `RecipeContextHeader` is present, and keyboard editing of `string-list`.
 - Add a `blob-ref` test that submits an invalid UUID and verify the backend boundary rejects it; the frontend may show text, but the server owns validation.
 
-- [ ] **Step 5: Run frontend tests**
+- [x] **Step 5: Run frontend tests**
 
 Run: `cd src/elspeth/web/frontend && npm test -- --run SchemaFormTurn`
 Expected: PASS
 
-- [ ] **Step 6: Run full backend + frontend test suite**
+- [x] **Step 6: Run full backend + frontend test suite**
 
 Run backend: `.venv/bin/python -m pytest tests/unit/web/ tests/integration/web/composer/`
 Run frontend: `cd src/elspeth/web/frontend && npm test -- --run`
 Expected: all passed.
 
-- [ ] **Step 7: Run policy gates before the atomic commit**
+- [x] **Step 7: Run policy gates before the atomic commit**
 
 Run:
 
@@ -2599,7 +2605,7 @@ Run:
 
 Expected: all green. If `enforce_tier_model.py` or `enforce_freeze_guards.py` uses a different CLI shape in the live repo, inspect the script help and run the repo's real check form; do not skip the gate.
 
-- [ ] **Step 8: Commit the atomic wire-contract change**
+- [x] **Step 8: Commit the atomic wire-contract change**
 
 ```bash
 git add \
@@ -2641,7 +2647,7 @@ together via git revert.
 - Delete: `src/elspeth/web/frontend/src/components/chat/guided/RecipeOfferTurn.test.tsx`
 - Modify: `src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx` (remove RECIPE_OFFER case)
 
-- [ ] **Step 1: Write failing protocol/emitter tests**
+- [x] **Step 1: Write failing protocol/emitter tests**
 
 Update `tests/unit/web/composer/guided/test_emitters.py` and `tests/unit/web/composer/guided/test_protocol.py` first:
 
@@ -2654,7 +2660,7 @@ Update `tests/unit/web/composer/guided/test_emitters.py` and `tests/unit/web/com
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_emitters.py tests/unit/web/composer/guided/test_protocol.py -v -k recipe`
 Expected: FAIL on old payload/protocol shape.
 
-- [ ] **Step 2: Update the recipe-offer emitter**
+- [x] **Step 2: Update the recipe-offer emitter**
 
 Replace `build_step_2_5_recipe_offer_turn` to emit a SCHEMA_FORM turn with `mode=recipe_decision`:
 
@@ -2690,14 +2696,14 @@ def build_step_2_5_recipe_offer_turn(match: RecipeMatch) -> Turn:
     )
 ```
 
-- [ ] **Step 3: Update protocol validation and docs**
+- [x] **Step 3: Update protocol validation and docs**
 
 Update `protocol._REQUIRED_KEYS` / `_NESTED_SHAPES` for `TurnType.RECIPE_OFFER` so it validates the tagged `SchemaFormPayload` shape (`mode`, `knobs`, `prefilled`, `recipe_context`) rather than the old `{recipe_name, slots, alternatives, unsatisfied_slots}` shape. Update comments/docstrings to explain the double discriminator: `turn.type == RECIPE_OFFER` routes the state machine, while `payload.mode == "recipe_decision"` routes the shared renderer.
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_protocol.py -v -k recipe`
 Expected: PASS.
 
-- [ ] **Step 4: Update GuidedTurn.tsx dispatcher**
+- [x] **Step 4: Update GuidedTurn.tsx dispatcher**
 
 Replace the case that routes RECIPE_OFFER → RecipeOfferTurn with the SCHEMA_FORM renderer:
 
@@ -2714,7 +2720,7 @@ case "recipe_offer":
 
 If `TurnType.RECIPE_OFFER` remains the turn discriminator, update `protocol._REQUIRED_KEYS` and nested payload validation for the new `mode="recipe_decision"` payload shape.
 
-- [ ] **Step 5: Run dispatch tests**
+- [x] **Step 5: Run dispatch tests**
 
 Run: `.venv/bin/python -m pytest tests/unit/web/composer/guided/test_emitters.py tests/unit/web/composer/guided/test_protocol.py -v -k recipe`
 Expected: tests need updating for the new payload shape; fix until green.
@@ -2722,7 +2728,7 @@ Expected: tests need updating for the new payload shape; fix until green.
 Run: `cd src/elspeth/web/frontend && npm test -- --run`
 Expected: PASS.
 
-- [ ] **Step 6: Delete RecipeOfferTurn.tsx and its test**
+- [x] **Step 6: Delete RecipeOfferTurn.tsx and its test**
 
 ```bash
 rm src/elspeth/web/frontend/src/components/chat/guided/RecipeOfferTurn.tsx
@@ -2734,7 +2740,7 @@ Audit imports:
 Run: `grep -rn "RecipeOfferTurn" src/elspeth/web/frontend/src/`
 Expected: no hits (or only in GuidedTurn.tsx if you forgot to remove an import — fix).
 
-- [ ] **Step 7: Pre-commit verification**
+- [x] **Step 7: Pre-commit verification**
 
 Run:
 
@@ -2745,7 +2751,7 @@ cd src/elspeth/web/frontend && npm test -- --run
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/elspeth/web/composer/guided/emitters.py src/elspeth/web/sessions/routes.py src/elspeth/web/frontend/src/components/chat/guided/
@@ -2770,7 +2776,7 @@ bindings) are unchanged; only the rendering path is unified.
 **Files:**
 - Modify: every metadata-bearing plugin configuration model under `src/elspeth/plugins/` lacking `title` or `description` on any field, including provider-specific discriminated variants returned by `discriminated_variants()`
 
-- [ ] **Step 1: Discover the gap**
+- [x] **Step 1: Discover the gap**
 
 Run a quick audit script:
 
@@ -2810,15 +2816,15 @@ for g in gaps[:50]:
 
 This produces an initial gap list. Adjust the listing iteration to match the live plugin manager API if a specific list method differs, but keep `get_shared_plugin_manager()`. For discriminated plugins such as `LLMTransform`, audit every model returned by `discriminated_variants()` rather than only the base `config_model`, because the variant-only fields are exactly what become variant-specific knobs.
 
-- [ ] **Step 2: Fill the gaps**
+- [x] **Step 2: Fill the gaps**
 
 For each gap, edit the owning plugin configuration model to add `Field(title=..., description=...)` (preferring the canonical `Annotated[T, Field(...)]` form). For discriminated plugins, this includes provider-specific variant models, not only the base `config_model`. Group commits by plugin package to keep commits reviewable.
 
-- [ ] **Step 3: Re-run the audit until empty**
+- [x] **Step 3: Re-run the audit until empty**
 
 Repeat Step 1 until `0 gaps`.
 
-- [ ] **Step 4: Commit (one or more per-plugin-package commits)**
+- [x] **Step 4: Commit (one or more per-plugin-package commits)**
 
 ```bash
 # Example, per plugin package:
@@ -2838,7 +2844,7 @@ composer renderer has authoritative labels. Per spec §11 metadata floor."
 - Create: `config/cicd/enforce_options_metadata/allowlist.yaml` (empty list)
 - Test: `tests/unit/scripts/cicd/test_enforce_options_metadata.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/unit/scripts/cicd/test_enforce_options_metadata.py
@@ -2889,7 +2895,7 @@ def make_plugin_manager_with_missing_metadata():
     return _FakePluginManager()
 ```
 
-- [ ] **Step 2: Implement the script**
+- [x] **Step 2: Implement the script**
 
 ```python
 #!/usr/bin/env python
@@ -2976,7 +2982,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 3: Create the empty allowlist**
+- [x] **Step 3: Create the empty allowlist**
 
 ```yaml
 # config/cicd/enforce_options_metadata/allowlist.yaml
@@ -2985,7 +2991,7 @@ if __name__ == "__main__":
 entries: []
 ```
 
-- [ ] **Step 4: Run the lint and the tests**
+- [x] **Step 4: Run the lint and the tests**
 
 Run: `.venv/bin/python scripts/cicd/enforce_options_metadata.py`
 Expected: exit 0.
@@ -2993,11 +2999,11 @@ Expected: exit 0.
 Run: `.venv/bin/python -m pytest tests/unit/scripts/cicd/test_enforce_options_metadata.py -v`
 Expected: PASS.
 
-- [ ] **Step 5: Wire into CI**
+- [x] **Step 5: Wire into CI**
 
 Locate the CI workflow file (likely `.github/workflows/*.yml` or `pre-commit` config) and add an invocation of the lint as a fail-on-error check. The exact wiring depends on existing CI structure — examine the existing checks before integrating.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/cicd/enforce_options_metadata.py config/cicd/enforce_options_metadata/allowlist.yaml tests/unit/scripts/cicd/test_enforce_options_metadata.py .github/workflows/

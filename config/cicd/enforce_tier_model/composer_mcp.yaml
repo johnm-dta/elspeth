@@ -28,7 +28,7 @@ allow_hits:
     adds bounded, leak-safe metadata (top-level argument keys + rfc8785-allowlisted
     detail) so auditors can fingerprint the failure shape from the sentinel alone."
   expires: null
-- key: composer_mcp/server.py:R6:create_server:call_tool:fp=7bdf391d96072609
+- key: composer_mcp/server.py:R6:create_server:call_tool:fp=98007a473ebfd71b
   owner: composer-audit
   reason: Trust-boundary recovery — canonical_json/stable_hash on the success-path result_dict
     runs in finally to compute the audit row. A non-finite float in our own dispatch output

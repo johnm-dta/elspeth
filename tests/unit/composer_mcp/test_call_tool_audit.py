@@ -456,15 +456,9 @@ async def test_preview_runtime_preflight_missing_settings_hash_is_plugin_crash_n
 
 
 @pytest.mark.asyncio
-async def test_delete_session_does_not_orphan_sidecar() -> None:
-    """C1 fix: delete_session must not recreate an orphan sidecar.
-
-    After delete_session succeeds, session_id_ref is cleared; the
-    deletion record buffers (in process memory) and dies with the
-    process. The previously-active sidecar file is unlinked (by
-    SessionManager.delete) and stays unlinked.
-    """
-    from elspeth.composer_mcp.audit import events_sidecar_path
+async def test_delete_session_persists_deletion_audit_record() -> None:
+    """Successful delete_session must leave a durable audit tombstone."""
+    from elspeth.composer_mcp.audit import events_sidecar_path, verify_events_sidecar_integrity
 
     catalog = create_catalog_service()
     with tempfile.TemporaryDirectory() as td:
@@ -482,6 +476,14 @@ async def test_delete_session_does_not_orphan_sidecar() -> None:
         await _call_handler(server.request_handlers, "save_session", {"session_id": sid})
         assert sidecar.exists()
         await _call_handler(server.request_handlers, "delete_session", {"session_id": sid})
-        # Pre-fix bug: the deletion record would recreate the sidecar.
-        # Post-fix: session_id_ref cleared, delete record buffers, no recreation.
-        assert not sidecar.exists()
+        assert not (scratch / f"{sid}.json").exists()
+        assert sidecar.exists()
+        lines = sidecar.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        deletion_record = _json.loads(lines[0])
+        assert deletion_record["tool_name"] == "delete_session"
+        assert deletion_record["status"] == ComposerToolStatus.SUCCESS.value
+        verify_events_sidecar_integrity(sidecar)
+
+        await _call_handler(server.request_handlers, "list_sessions", {})
+        assert len(sidecar.read_text(encoding="utf-8").splitlines()) == 1

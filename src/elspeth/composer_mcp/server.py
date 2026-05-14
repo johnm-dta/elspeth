@@ -619,6 +619,7 @@ def create_server(
         # made a decision against this payload, audit primacy demands it
         # is recorded).
         error_payload_for_audit: dict[str, Any] | None = None
+        clear_session_after_audit = False
 
         def _argument_error_result(exc: Exception) -> CallToolResult:
             nonlocal status, error_class, error_message, error_payload_for_audit
@@ -721,14 +722,12 @@ def create_server(
                             resolved_sid: str = result_dict["data"]["session_id"]
                             session_id_ref[0] = resolved_sid
                             audit_recorder.resolve_session(resolved_sid)
-                    # Solution-architect review C1: clear session_id_ref on
-                    # successful delete_session so the deletion record does
-                    # NOT recreate the just-unlinked sidecar. The deletion
-                    # itself buffers in the recorder; the next
-                    # new_session/load_session drains it (semantically:
-                    # "the delete that happened before this session began").
+                    # Keep the deleted session id active until the finally
+                    # block records this destructive success. Then clear it
+                    # so subsequent calls use the unsaved scope unless a
+                    # new/load_session resolves a fresh id.
                     if name == "delete_session" and result_dict["success"]:
-                        session_id_ref[0] = None
+                        clear_session_after_audit = True
                     # B4: Redact storage paths from the response sent to the agent.
                     result_dict["state"] = redact_source_storage_path(result_dict["state"])
                 response_text = json.dumps(result_dict, indent=2)
@@ -801,6 +800,8 @@ def create_server(
                 actor="composer-mcp:cli",
             )
             audit_recorder.record(invocation)
+            if clear_session_after_audit:
+                session_id_ref[0] = None
 
     return server
 

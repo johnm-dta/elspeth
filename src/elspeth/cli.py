@@ -1877,8 +1877,19 @@ def resume(
 
                 factory = RecorderFactory(db)
                 field_resolution = factory.run_lifecycle.get_source_field_resolution(run_id)
-                if field_resolution is not None:
+                if field_resolution is None:
+                    typer.echo(
+                        f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
+                        "This sink uses headers: original but the source field-resolution mapping "
+                        "is missing from the audit trail.",
+                        err=True,
+                    )
+                    raise typer.Exit(1)
+                try:
                     sink.set_resume_field_resolution(field_resolution)
+                except (NotImplementedError, ValueError) as e:
+                    typer.echo(f"Error: Cannot resume with sink '{sink_name}': {e}", err=True)
+                    raise typer.Exit(1) from None
 
             # Validate output target schema compatibility
             validation = sink.validate_output_target()

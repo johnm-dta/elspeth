@@ -110,7 +110,7 @@ class CSVSink(BaseSink):
 
     name = "csv"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c94039f2fa46794f"
+    source_file_hash: str | None = "sha256:7f5258e0f96d11e5"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -178,10 +178,11 @@ class CSVSink(BaseSink):
             # Map normalized -> display for comparison against file headers
             expected = [display_map.get(f, f) for f in expected_normalized]
         elif self._headers_mode == HeaderMode.ORIGINAL:
-            # ORIGINAL mode but field_resolution not yet available — comparing
-            # normalized names against display-name file headers would be wrong.
-            # Skip validation; it will be checked once headers are resolved.
-            return OutputValidationResult.success(target_fields=existing)
+            return OutputValidationResult.failure(
+                message="CSV headers: original requires source field resolution before resume validation",
+                target_fields=existing,
+                schema_fields=expected_normalized,
+            )
         else:
             expected = expected_normalized
 

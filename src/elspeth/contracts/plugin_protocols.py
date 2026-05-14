@@ -758,8 +758,9 @@ class SinkProtocol(Protocol):
                 This is the same format returned by Landscape.get_source_field_resolution().
 
         Note:
-            Default is a no-op. Only sinks configured with headers: original need
-            to override this.
+            BaseSink raises NotImplementedError when
+            needs_resume_field_resolution is True. Only sinks configured with
+            headers: original need to override this.
         """
         ...
 

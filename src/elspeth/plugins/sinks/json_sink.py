@@ -17,6 +17,7 @@ from pydantic import model_validator
 
 from elspeth.contracts import ArtifactDescriptor, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.schema import SchemaConfig
 
 if TYPE_CHECKING:
@@ -93,7 +94,7 @@ class JSONSink(BaseSink):
 
     name = "json"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:146022a82e6b347d"
+    source_file_hash: str | None = "sha256:331f354fb3ba30f1"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -188,6 +189,12 @@ class JSONSink(BaseSink):
         if display_map is not None:
             # Map normalized -> display for comparison against file keys
             expected = [display_map.get(f, f) for f in expected_normalized]
+        elif self._headers_mode == HeaderMode.ORIGINAL:
+            return OutputValidationResult.failure(
+                message="JSONL headers: original requires source field resolution before resume validation",
+                target_fields=existing,
+                schema_fields=expected_normalized,
+            )
         else:
             expected = expected_normalized
 

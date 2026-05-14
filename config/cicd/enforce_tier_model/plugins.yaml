@@ -209,7 +209,7 @@ allow_hits:
   reason: Intentional fallback - display mapping may not contain all fields (transform-added)
   safety: Falls back to normalized field name - correct behavior for fields not in
     source
-- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=408917b25fecf17c
+- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=2498b74666fae155
   owner: feature
   reason: Display header mapping - fields not in map keep original name (transform-added
     fields)

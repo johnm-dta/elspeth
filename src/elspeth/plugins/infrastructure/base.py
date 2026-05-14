@@ -825,13 +825,17 @@ class BaseSink(ABC):
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
         """Set field resolution mapping for resume validation.
 
-        Default is a no-op. Only sinks with headers: original mode
+        Default is a no-op unless the sink declares that resume field
+        resolution is required. Sinks with headers: original mode must
         override this to use the mapping for validation.
 
         Args:
             resolution_mapping: Dict mapping original header name -> normalized field name.
         """
-        # Intentional no-op - most sinks don't use headers: original
+        if self.needs_resume_field_resolution:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} requires resume field resolution but does not implement set_resume_field_resolution()."
+            )
         _ = resolution_mapping  # Explicitly consume the argument
 
     # Output contract for schema-aware sinks

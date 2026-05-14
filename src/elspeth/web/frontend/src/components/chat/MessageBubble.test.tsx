@@ -178,7 +178,6 @@ describe("MessageBubble", () => {
           onRejectProposal={onRejectProposal}
         />,
       );
-      await user.click(screen.getByRole("button", { name: "Tool calls (1)" }));
 
       expect(screen.getByText("Proposed: set_pipeline")).toBeInTheDocument();
       await user.click(

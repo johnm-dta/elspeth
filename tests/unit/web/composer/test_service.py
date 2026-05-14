@@ -226,6 +226,8 @@ def _session_engine_with_session() -> tuple[Any, str]:
                 user_id="test-user",
                 auth_provider_type="local",
                 title="Test Session",
+                trust_mode="auto_commit",
+                density_default="high",
                 created_at=now,
                 updated_at=now,
             )
@@ -2979,6 +2981,8 @@ class TestPluginCrashSessionPersistence:
                     user_id="test-user",
                     auth_provider_type="local",
                     title="Test",
+                    trust_mode="auto_commit",
+                    density_default="high",
                     created_at=self.seeded_at,
                     updated_at=self.seeded_at,
                 )
@@ -3732,6 +3736,8 @@ class TestToolArgumentErrorAcrossThreadBoundary:
                     user_id="test-user",
                     auth_provider_type="local",
                     title="Test",
+                    trust_mode="auto_commit",
+                    density_default="high",
                     created_at=now,
                     updated_at=now,
                 )

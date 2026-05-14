@@ -2783,7 +2783,7 @@ EOF
 - Create: `src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts`
 - Modify: `src/elspeth/web/frontend/tests/e2e/page-objects/composer-page.ts`
 
-- [ ] **Step 1: Add the Playwright workflow test**
+- [x] **Step 1: Add the Playwright workflow test**
 
 Create `src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts`:
 
@@ -2811,7 +2811,9 @@ test("explicit approve tool call is visible before commit", async ({ page }) => 
 
 This E2E must run against a deterministic composer provider, not a live non-deterministic LLM. Use the existing ChaosLLM/test-provider seam in the E2E harness if present; otherwise extend `tests/e2e/page-objects/composer-page.ts` in this task so the test input deterministically emits a `set_pipeline` tool call. Do not merge this as a real-provider Playwright test.
 
-- [ ] **Step 2: Run focused backend and frontend tests**
+Observed: implemented a deterministic route-fixture Playwright workflow that exercises session creation, chat send, pending proposal display, Graph pending overlay, accept, committed proposal display, and audit ID display without calling a live LLM. First E2E run failed because proposal cards were hidden behind the collapsed tool-call disclosure; `MessageBubble` now auto-expands proposal-bearing tool calls, and the regression is covered by `MessageBubble.test.tsx`.
+
+- [x] **Step 2: Run focused backend and frontend tests**
 
 Run:
 
@@ -2823,7 +2825,14 @@ npm run test -- src/components/chat/ToolCallCard.test.tsx src/components/chat/Me
 
 Expected: PASS.
 
-- [ ] **Step 3: Run frontend build**
+Observed: PASS.
+
+- Backend focused batch: `291 passed`.
+- Frontend focused batch: `84 passed`.
+- Additional frontend focused smoke: `ToolCallCard.test.tsx` and `MessageBubble.test.tsx`, `14 passed`.
+- `npm run typecheck` PASS.
+
+- [x] **Step 3: Run frontend build**
 
 Run:
 
@@ -2834,7 +2843,9 @@ npm run build
 
 Expected: PASS and refreshed `src/elspeth/web/frontend/dist/index.html`.
 
-- [ ] **Step 4: Run E2E proposal test**
+Observed: PASS. `npm run build` refreshed ignored `dist/` assets; per Task 0, build artifacts remain uncommitted.
+
+- [x] **Step 4: Run E2E proposal test**
 
 Run:
 
@@ -2845,23 +2856,29 @@ npm run test:e2e -- tests/e2e/composer-proposals.spec.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Run policy gates**
+Observed: PASS after the proposal-card auto-expansion fix. The Playwright web server emitted the known virtualenv path warning from the frontend harness, but the test passed.
+
+- [x] **Step 5: Run policy gates**
 
 Run:
 
 ```bash
 .venv/bin/python -m scripts.check_contracts
-.venv/bin/python scripts/cicd/enforce_tier_model.py check
+.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
 ```
 
 Expected: PASS. If `enforce_tier_model.py` reports new intentional imports, add a narrowly scoped entry to the correct file under `config/cicd/enforce_tier_model/` and rerun the command.
 
-- [ ] **Step 6: Commit**
+Observed: PASS.
+
+- `scripts.check_contracts`: all contract checks passed.
+- `enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model`: no bug-hiding patterns detected.
+- `npm run lint`: PASS with the same five pre-existing React Hook warnings in `CatalogDrawer.tsx`, `ChatInput.tsx`, and `GraphView.tsx`.
+
+- [x] **Step 6: Commit**
 
 ```bash
-git add src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts src/elspeth/web/frontend/tests/e2e/page-objects/composer-page.ts src/elspeth/web/frontend/package-lock.json config/cicd/enforce_tier_model
-# Only add dist artifacts if Task 0 proved they are tracked in this checkout.
-git add src/elspeth/web/frontend/dist || true
+git add docs/superpowers/plans/2026-05-14-composer-ux-tool-proposal-lifecycle.md src/elspeth/web/frontend/tests/e2e/composer-proposals.spec.ts src/elspeth/web/frontend/tests/e2e/page-objects/composer-page.ts src/elspeth/web/frontend/src/components/chat/MessageBubble.tsx src/elspeth/web/frontend/src/components/chat/MessageBubble.test.tsx tests/unit/web/composer/test_service.py tests/unit/web/sessions/test_routes.py
 git commit -m "$(cat <<'EOF'
 test: cover composer proposal workflow
 
@@ -2869,6 +2886,8 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
+
+Observed: committed with the required co-author trailer.
 
 ## Final Verification
 

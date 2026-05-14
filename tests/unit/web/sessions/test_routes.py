@@ -357,6 +357,16 @@ class _ProgressRouteSessionService:
         self.current_state = record
         return record
 
+    async def list_composition_proposals(
+        self,
+        session_id: uuid.UUID,
+        status: str | None = None,
+    ) -> list[Any]:
+        if session_id != self.session.id:
+            raise ValueError("Session not found")
+        del status
+        return []
+
 
 def _make_progress_route_app(
     tmp_path: Path,
@@ -1277,7 +1287,13 @@ class TestIDORCoverageDrift:
             "get_messages",
             "send_message",
             "recompose",
+            "get_composer_preferences",
+            "update_composer_preferences",
             "get_composer_progress",
+            "list_composition_proposals",
+            "list_proposal_events",
+            "accept_composition_proposal",
+            "reject_composition_proposal",
             "list_session_runs",
             "get_current_state",
             "get_state_versions",

@@ -34,6 +34,11 @@ export function MessageBubble({
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
   const editRef = useRef<HTMLTextAreaElement>(null);
+  const hasProposalToolCall =
+    message.tool_calls?.some(
+      (tc) => tc.id && proposalsByToolCallId?.has(tc.id),
+    ) ?? false;
+  const showToolCalls = toolsExpanded || hasProposalToolCall;
 
   const handleCopy = useCallback(async () => {
     try {
@@ -185,14 +190,14 @@ export function MessageBubble({
           <div className="message-tools">
             <button
               onClick={() => setToolsExpanded(!toolsExpanded)}
-              aria-expanded={toolsExpanded}
+              aria-expanded={showToolCalls}
               aria-label={`Tool calls (${message.tool_calls.length})`}
               className="message-tools-toggle"
             >
-              {toolsExpanded ? "\u25BC" : "\u25B6"} Tool calls (
+              {showToolCalls ? "\u25BC" : "\u25B6"} Tool calls (
               {message.tool_calls.length})
             </button>
-            {toolsExpanded && (
+            {showToolCalls && (
               <div className="message-tools-list">
                 {message.tool_calls.map((tc, i) => (
                   <ToolCallCard

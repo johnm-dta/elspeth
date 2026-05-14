@@ -53,3 +53,5 @@ class PluginSchemaInfo(_StrictResponse):
     plugin_type: PluginKind
     description: str
     json_schema: dict[str, Any]
+    knob_schema: dict[str, Any]
+    """Lowered composer knob schema, computed once at catalog load."""

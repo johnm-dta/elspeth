@@ -114,6 +114,7 @@ def _mock_catalog() -> MagicMock:
         plugin_type="source",
         description="CSV source",
         json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
     )
     return catalog
 

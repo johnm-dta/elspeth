@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, cast
+
+from pydantic import BaseModel
 
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.plugins.infrastructure.discovery import get_plugin_description
 from elspeth.plugins.infrastructure.manager import PluginManager, PluginNotFoundError
+from elspeth.web.catalog.knob_schema import (
+    KnobSchema,
+    lower_discriminated_to_knob_schema,
+    lower_model_to_knob_schema,
+    validate_knob_schema,
+)
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginKind,
@@ -53,6 +62,10 @@ class CatalogServiceImpl:
         self._source_classes = plugin_manager.get_sources()
         self._transform_classes = plugin_manager.get_transforms()
         self._sink_classes = plugin_manager.get_sinks()
+        self._schema_cache: dict[tuple[PluginKind, str], PluginSchemaInfo] = {}
+        self._populate_schema_cache("source", self._source_classes)
+        self._populate_schema_cache("transform", self._transform_classes)
+        self._populate_schema_cache("sink", self._sink_classes)
 
     def list_sources(self) -> list[PluginSummary]:
         return [self._to_summary(cls, "source") for cls in self._source_classes]
@@ -64,11 +77,34 @@ class CatalogServiceImpl:
         return [self._to_summary(cls, "sink") for cls in self._sink_classes]
 
     def get_schema(self, plugin_type: PluginKind, name: str) -> PluginSchemaInfo:
-        plugin_cls = self._get_plugin_class(plugin_type, name)
+        if plugin_type not in _VALID_TYPES:
+            raise ValueError(f"Unknown plugin type: {plugin_type}. Must be one of: {sorted(_VALID_TYPES)}")
 
+        key = (plugin_type, name)
+        if key in self._schema_cache:
+            return self._schema_cache[key]
+
+        available = self._available_names(plugin_type)
+        raise ValueError(f"Unknown {plugin_type} plugin: {name}. Available: {available}")
+
+    # -- Private helpers --
+
+    def _populate_schema_cache(self, plugin_type: PluginKind, classes: Sequence[PluginClass]) -> None:
+        for plugin_cls in classes:
+            name: str = plugin_cls.name
+            self._schema_cache[(plugin_type, name)] = self._build_schema_info(plugin_type, name, plugin_cls)
+
+    def _build_schema_info(
+        self,
+        plugin_type: PluginKind,
+        name: str,
+        plugin_cls: PluginClass,
+    ) -> PluginSchemaInfo:
         # Plugins own schema emission — single-model plugins use the default
         # on the plugin base, discriminated-union plugins override.
         json_schema = self._catalog_schema(plugin_cls, plugin_type)
+        knob_schema = self._knob_schema(plugin_cls, plugin_type=plugin_type, name=name)
+        validate_knob_schema(knob_schema, plugin_kind=plugin_type, plugin_name=name)
 
         # Full docstring for schema view (not just first line)
         description = (plugin_cls.__doc__ or "").strip()
@@ -80,9 +116,32 @@ class CatalogServiceImpl:
             plugin_type=plugin_type,
             description=description,
             json_schema=json_schema,
+            knob_schema=cast(dict[str, Any], knob_schema),
         )
 
-    # -- Private helpers --
+    def _knob_schema(self, plugin_cls: PluginClass, *, plugin_type: PluginKind, name: str) -> KnobSchema:
+        try:
+            discriminated_variants = cast(Any, plugin_cls).discriminated_variants
+        except AttributeError:
+            config_model = plugin_cls.get_config_model()
+            if config_model is None:
+                return {"fields": []}
+            return lower_model_to_knob_schema(
+                cast(type[BaseModel], config_model),
+                plugin_kind=plugin_type,
+                plugin_name=name,
+            )
+        if not callable(discriminated_variants):
+            return lower_discriminated_to_knob_schema(
+                plugin_cls,
+                plugin_kind=plugin_type,
+                plugin_name=name,
+            )
+        return lower_discriminated_to_knob_schema(
+            plugin_cls,
+            plugin_kind=plugin_type,
+            plugin_name=name,
+        )
 
     def _get_plugin_class(self, plugin_type: PluginKind, name: str) -> PluginClass:
         """Look up a plugin class by (type, name) with a descriptive error.

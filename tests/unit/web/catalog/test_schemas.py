@@ -101,5 +101,7 @@ class TestCatalogHappyPath:
             plugin_type="source",
             description="",
             json_schema={},
+            knob_schema={"fields": []},
         )
         assert resp.json_schema == {}
+        assert resp.knob_schema == {"fields": []}

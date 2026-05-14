@@ -571,6 +571,7 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
         plugin_type="source",
         description="CSV source",
         json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
     )
     app.state.catalog_service = catalog
     monkeypatch.setattr(

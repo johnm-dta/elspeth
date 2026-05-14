@@ -117,6 +117,7 @@ def _mock_catalog() -> MagicMock:
         plugin_type="source",
         description="CSV file source",
         json_schema={"title": "CsvSourceConfig", "properties": {"path": {"type": "string"}}},
+        knob_schema={"fields": []},
     )
     return catalog
 
@@ -6098,7 +6099,13 @@ class TestSetPipeline:
         def selective_schema(plugin_type: Literal["source", "transform", "sink"], name: str) -> PluginSchemaInfo:
             if plugin_type == "transform" and name == "badplugin":
                 raise ValueError(f"Unknown plugin: {name}")
-            return PluginSchemaInfo(name=name, plugin_type=plugin_type, description="", json_schema={})
+            return PluginSchemaInfo(
+                name=name,
+                plugin_type=plugin_type,
+                description="",
+                json_schema={},
+                knob_schema={"fields": []},
+            )
 
         catalog.get_schema.side_effect = selective_schema
         args = _valid_pipeline_args()
@@ -6116,7 +6123,13 @@ class TestSetPipeline:
         def selective_schema(plugin_type: Literal["source", "transform", "sink"], name: str) -> PluginSchemaInfo:
             if plugin_type == "sink" and name == "badsink":
                 raise ValueError(f"Unknown plugin: {name}")
-            return PluginSchemaInfo(name=name, plugin_type=plugin_type, description="", json_schema={})
+            return PluginSchemaInfo(
+                name=name,
+                plugin_type=plugin_type,
+                description="",
+                json_schema={},
+                knob_schema={"fields": []},
+            )
 
         catalog.get_schema.side_effect = selective_schema
         args = _valid_pipeline_args()

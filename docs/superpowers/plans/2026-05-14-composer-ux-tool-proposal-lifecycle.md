@@ -80,7 +80,9 @@ Tests:
 - Read-only verification across current source tree
 - No code changes
 
-- [ ] **Step 1: Confirm the execution checkout and branch**
+- [x] **Step 1: Confirm the execution checkout and branch**
+
+Preflight result: implementation moved to isolated worktree `/home/john/elspeth/.worktrees/composer-proposal-lifecycle` on branch `composer-proposal-lifecycle` at handoff commit `69a6d55d1`; `git status --short` was clean.
 
 Run:
 
@@ -93,7 +95,9 @@ git status --short
 
 Expected: implementation happens in a dedicated checkout such as `/home/john/elspeth/.worktrees/composer-proposal-lifecycle/`, or the operator explicitly confirms that the current branch/worktree is dedicated to this work. Do not start implementation in the dirty main checkout by accident.
 
-- [ ] **Step 2: Confirm the worktree-local Python environment**
+- [x] **Step 2: Confirm the worktree-local Python environment**
+
+Preflight result: created and targeted the worktree-local venv explicitly after detecting the shell had `VIRTUAL_ENV=/home/john/elspeth/.venv`; confirmed `.venv/bin/python` resolves to `/home/john/elspeth/.worktrees/composer-proposal-lifecycle/.venv/bin/python`, Python 3.13.1, with `pytest-asyncio` present in `pyproject.toml`.
 
 Run:
 
@@ -104,7 +108,9 @@ rg -n "pytest-asyncio|asyncio_mode" pyproject.toml
 
 Expected: Python 3.13.x in the worktree venv, and `pytest-asyncio` present in `pyproject.toml`. If the venv resolves outside the worktree or uses an older Python, recreate the venv before running tier-model checks so spurious policy violations do not swamp the real diff.
 
-- [ ] **Step 3: Capture policy-gate baseline before edits**
+- [x] **Step 3: Capture policy-gate baseline before edits**
+
+Preflight result: the literal plan command is stale because `enforce_tier_model.py check` now requires `--root`; the current repo-standard command `.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model` passed with `No bug-hiding patterns detected. Check passed.`
 
 Run on the unchanged branch:
 
@@ -114,7 +120,9 @@ Run on the unchanged branch:
 
 Expected: either PASS, or a recorded baseline of pre-existing violations. Any new violation after this plan lands must be fixed or explicitly narrowed in `config/cicd/enforce_tier_model/`.
 
-- [ ] **Step 4: Verify fragile codebase assumptions before editing**
+- [x] **Step 4: Verify fragile codebase assumptions before editing**
+
+Preflight result: `compose(...)` still uses the construction-wired session service; `_require_sessions_service()`, `turn_has_mutation`, `MANIFEST`, `redact_tool_call_arguments`, `_state_from_record`, `_state_data_from_composer_state`, `run_sync_in_worker`, `_FakeComposeLLM`, `_fake_llm_response`, and LiteLLM-shaped frontend `ToolCall` are present. `fake_llm_one_set_pipeline_tool_call` is still absent and belongs to Task 5. `catalog_service`, `session_service`, and `phase3_engine` are app-state attributes in live/test code; `data_dir` and `secrets_service` are not app-state attributes in the grep result, so the accept route must reuse the existing route-local settings/secrets source. No shared frontend `isHttpConflict` helper exists; Task 7 must add or centralize one at the API/store seam.
 
 Run:
 
@@ -140,7 +148,9 @@ Expected current shape as of this plan repair:
 - Frontend `ToolCall` uses LiteLLM/OpenAI shape with `id` and `function.name`/`function.arguments`.
 - If no frontend HTTP-conflict helper exists, Task 7 must add one at the API/store seam and test it with the stale-proposal regression.
 
-- [ ] **Step 5: Resolve the active session DB and plan reset**
+- [x] **Step 5: Resolve the active session DB and plan reset**
+
+Preflight result: `WebSettings.get_session_db_url()` still resolves `session_db_url`, then `data_dir / "sessions.db"`. The isolated worktree does not carry the ignored staging env file. The live staging checkout has `/home/john/elspeth/deploy/elspeth-web.env`, but redacted inspection found neither `ELSPETH_WEB__SESSION_DB_URL` nor `ELSPETH_WEB__DATA_DIR`, so staging resolves to `/home/john/elspeth/data/sessions.db`. SQLite reset must archive/delete `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` together using `docs/runbooks/staging-session-db-recreation.md`; no live reset/restart has been performed.
 
 This schema slice adds columns/tables and this project does not use Alembic migrations for the web session DB. Fresh test DBs work because `initialize_session_schema()` creates current metadata; existing dev/staging DBs must be reset before running the changed server.
 
@@ -165,7 +175,9 @@ Staging reset:
 - Stop `elspeth-web.service`, archive/delete the resolved SQLite artifact set, then restart after the schema lands. Use `docs/runbooks/staging-session-db-recreation.md` as the operator runbook.
 - If Codex cannot access systemd/sudo because of sandbox `no_new_privileges` or bus restrictions, report that blocker and do not claim live staging was reset or restarted.
 
-- [ ] **Step 6: Verify frontend dist policy**
+- [x] **Step 6: Verify frontend dist policy**
+
+Preflight result: `src/elspeth/web/frontend/dist/index.html` is ignored by `.gitignore:51` and not tracked by git, so build artifacts must not be committed.
 
 Run:
 
@@ -176,7 +188,9 @@ git ls-files src/elspeth/web/frontend/dist/index.html
 
 Expected: if `dist/` is ignored and untracked, do not commit it. Still run `npm run build` and live-check/locally inspect the generated asset names during deployment verification.
 
-- [ ] **Step 7: Use the required commit trailer**
+- [x] **Step 7: Use the required commit trailer**
+
+Preflight result: all implementation commits in this worktree must include `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
 
 Every commit step in this plan must use this message shape, changing only the subject:
 

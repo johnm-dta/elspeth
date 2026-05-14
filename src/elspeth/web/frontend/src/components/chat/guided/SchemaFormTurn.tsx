@@ -209,6 +209,19 @@ function initialValueFor(
  * name itself (fallback for schemas where Pydantic omits title).
  */
 function labelFor(name: string, prop: PropSchema): string {
+  const commonLabels: Record<string, string> = {
+    path: "Input file path",
+    output_path: "Output file path",
+    has_header: "Has header row",
+    delimiter: "Column delimiter",
+    encoding: "Text encoding",
+    mode: "Mode",
+    batch_size: "Batch size",
+    timeout: "Timeout seconds",
+  };
+  if (Object.prototype.hasOwnProperty.call(commonLabels, name)) {
+    return commonLabels[name];
+  }
   const t = prop["title"];
   return typeof t === "string" && t.length > 0 ? t : name;
 }
@@ -218,6 +231,7 @@ function labelFor(name: string, prop: PropSchema): string {
 interface SchemaFormTurnProps {
   payload: SchemaFormPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
+  disabled?: boolean;
 }
 
 // Form state holds current field values (string or boolean) and per-field
@@ -229,7 +243,11 @@ interface FormState {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
+export function SchemaFormTurn({
+  payload,
+  onSubmit,
+  disabled = false,
+}: SchemaFormTurnProps) {
   // Derive the ordered list of properties from the schema once.
   // schema_block.properties is a plain object; we preserve declaration order
   // (JS spec guarantees string-keyed insertion order on plain objects).
@@ -489,6 +507,7 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
                 type="checkbox"
                 className="guided-schema-checkbox"
                 checked={val as boolean}
+                disabled={disabled}
                 aria-describedby={describedBy}
                 onChange={(e) => handleCheckboxChange(name, e.target.checked)}
               />
@@ -512,6 +531,7 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
               ref={isFirst ? firstAdvancedCallback as (el: HTMLSelectElement | null) => void : undefined}
               className="guided-schema-select"
               value={val as string}
+              disabled={disabled}
               aria-describedby={describedBy}
               onChange={(e) => handleTextChange(name, e.target.value)}
             >
@@ -537,6 +557,7 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
               ref={isFirst ? firstAdvancedCallback as (el: HTMLTextAreaElement | null) => void : undefined}
               className={`guided-schema-textarea${hasError ? " guided-schema-textarea--error" : ""}`}
               value={val as string}
+              disabled={disabled}
               aria-describedby={describedBy}
               onChange={(e) => handleJsonChange(name, e.target.value)}
               rows={4}
@@ -572,6 +593,7 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
               }
               className="guided-schema-input"
               value={val as string}
+              disabled={disabled}
               aria-describedby={describedBy}
               onChange={(e) => handleTextChange(name, e.target.value)}
             />
@@ -607,6 +629,7 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
             onClick={() => setAdvancedExpanded((prev) => !prev)}
             aria-expanded={advancedExpanded}
             aria-controls={optionalSectionId}
+            disabled={disabled}
           >
             {advancedExpanded
               ? "Hide advanced"
@@ -641,8 +664,8 @@ export function SchemaFormTurn({ payload, onSubmit }: SchemaFormTurnProps) {
           type="button"
           className="guided-schema-continue-btn"
           onClick={handleContinue}
-          disabled={!canSubmit}
-          aria-disabled={!canSubmit}
+          disabled={disabled || !canSubmit}
+          aria-disabled={disabled || !canSubmit}
         >
           Continue
         </button>

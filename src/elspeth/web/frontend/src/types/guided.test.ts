@@ -32,11 +32,17 @@ describe("guided protocol types", () => {
   });
 
   it("ControlSignal union has 3 values", () => {
+    type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+    const _exact: Equals<
+      ControlSignal,
+      "exit_to_freeform" | "request_advisor" | "reject"
+    > = true;
     const all: ControlSignal[] = [
       "exit_to_freeform",
       "request_advisor",
       "reject",
     ];
+    expect(_exact).toBe(true);
     expect(all).toHaveLength(3);
   });
 

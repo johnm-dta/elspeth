@@ -3785,6 +3785,102 @@ summary:focus-visible {
        the pressed visual state.
    --------------------------------------------------------------------------- */
 
+.guided-workflow {
+  padding: var(--space-md) var(--space-md) 0;
+}
+
+.guided-workflow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-xs);
+}
+
+.guided-workflow-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  font-size: var(--font-size-sm);
+}
+
+.guided-workflow-step--complete {
+  color: var(--color-text-secondary);
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-workflow-step--current {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-workflow-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+}
+
+.guided-workflow-label {
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+}
+
+.guided-current-decision,
+.guided-step-chat {
+  margin: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+}
+
+.guided-current-decision-copy {
+  margin-bottom: var(--space-md);
+}
+
+.guided-current-decision-copy h2,
+.guided-step-chat-heading,
+.guided-history-heading {
+  margin: 0 0 var(--space-xs) 0;
+  font-size: var(--font-size-base);
+  line-height: 1.3;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.guided-current-decision-copy p,
+.guided-current-decision-pending {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.guided-current-decision-pending {
+  margin-top: var(--space-sm);
+}
+
+.guided-step-chat {
+  border-style: dashed;
+  background-color: var(--color-surface-elevated);
+}
+
 /* Base wrapper — each widget is an isolated block in the chat stream */
 .guided-turn {
   padding: var(--space-md) 0;
@@ -4234,6 +4330,34 @@ summary:focus-visible {
   font-family: inherit;
   min-height: 44px; /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease;
+}
+
+.guided-multi-escape-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: 44px;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-multi-escape-btn:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-multi-escape-btn:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.guided-multi-escape-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
 }
 
 .guided-multi-continue-btn:hover:not(:disabled) {
@@ -4833,40 +4957,12 @@ summary:focus-visible {
 .guided-history {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
-  margin-bottom: var(--space-sm);
-}
-
-.guided-history-toggle {
-  align-self: flex-start;
-  padding: var(--space-xs) var(--space-sm);
-  background-color: transparent;
-  color: var(--color-text-muted);
+  gap: var(--space-sm);
+  margin: var(--space-md);
+  padding: var(--space-md);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-size-sm);
-  font-family: inherit;
-  cursor: pointer;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
-  transition: background-color 0.1s ease, border-color 0.1s ease,
-    color 0.1s ease;
-}
-
-.guided-history-toggle:hover {
-  background-color: var(--color-surface-hover);
-  border-color: var(--color-border-strong);
-  color: var(--color-text-secondary);
-}
-
-.guided-history-toggle:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-/* The region itself: native [hidden] { display: none; } handles collapse.
-   No explicit display rule needed here — the browser default applies.  */
-.guided-history-region {
-  padding: var(--space-xs) 0;
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
 }
 
 .guided-history-list {
@@ -4879,38 +4975,22 @@ summary:focus-visible {
 }
 
 .guided-history-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(84px, auto) minmax(0, 1fr);
   align-items: baseline;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 
-.guided-history-step-number {
-  font-weight: 600;
-  color: var(--color-text-muted);
-  white-space: nowrap;
-}
-
 .guided-history-step-name {
-  color: var(--color-text-secondary);
+  color: var(--color-text);
+  font-weight: 600;
 }
 
-.guided-history-separator {
+.guided-history-summary {
   color: var(--color-text-muted);
-  user-select: none;
-}
-
-.guided-history-turn-type {
-  font-family: monospace;
-  font-size: var(--font-size-xs, 0.75rem);
-  color: var(--color-text-muted);
-}
-
-.guided-history-emitter {
-  font-size: var(--font-size-xs, 0.75rem);
-  color: var(--color-text-muted);
-  font-style: italic;
+  overflow-wrap: anywhere;
 }
 
 /* ---------------------------------------------------------------------------
@@ -4919,18 +4999,18 @@ summary:focus-visible {
 
    Terminal widget rendered when the guided wizard reaches kind="completed"
    and pipeline_yaml is non-null.  Displays the finalized pipeline YAML in a
-   syntax-highlighted block (prism-react-renderer, vsDark / vsLight) with two
-   action buttons that both call exitToFreeform():
-     "Save and exit"                   -- committed-state UX framing.
-     "Drop to freeform to keep editing" -- further-edit UX framing.
+   syntax-highlighted block (prism-react-renderer, vsDark / vsLight) with
+   task-oriented actions:
+     "Open freeform editor" -- continue editing in the freeform composer.
+     "Review YAML"          -- switch to the YAML review tab.
+     "Validate pipeline"    -- run validation for the active session.
 
    Visual hierarchy:
      heading     -- "Pipeline ready", h3, muted weight to avoid competing
                     with surrounding chat layout.
      yaml block  -- monospace pre inside a scrollable container with an
                     inset surface to visually contain the code.
-     action row  -- primary button (Save and exit) + secondary button
-                    (Drop to freeform to keep editing).
+     action row  -- primary freeform handoff plus YAML review and validation.
 
    Reduced-motion: guided-completion-save-btn and guided-completion-edit-btn
    both carry transitions; both are silenced in the @media block below.
@@ -4977,14 +5057,14 @@ summary:focus-visible {
   white-space: pre;
 }
 
-/* Action row: Save and exit + Drop to freeform to keep editing */
+/* Action row: freeform handoff, YAML review, and validation */
 .guided-completion-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-sm);
 }
 
-/* Primary action: Save and exit */
+/* Primary action: open the freeform editor */
 .guided-completion-save-btn {
   padding: var(--space-sm) var(--space-lg);
   background-color: var(--color-accent);
@@ -5007,7 +5087,7 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
-/* Secondary action: Drop to freeform to keep editing */
+/* Secondary action: review generated YAML */
 .guided-completion-edit-btn {
   padding: var(--space-sm) var(--space-lg);
   background-color: transparent;
@@ -5035,12 +5115,14 @@ summary:focus-visible {
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
   .guided-chip-btn,
+  .guided-workflow-step,
   .guided-inspect-confirm-btn,
   .guided-inspect-edit-btn,
   .guided-inspect-remove-btn,
   .guided-inspect-cancel-btn,
   .guided-inspect-apply-btn,
   .guided-multi-custom-remove-btn,
+  .guided-multi-escape-btn,
   .guided-multi-continue-btn,
   .guided-schema-input,
   .guided-schema-select,
@@ -5051,7 +5133,6 @@ summary:focus-visible {
   .guided-recipe-apply-btn,
   .guided-recipe-build-btn,
   .guided-exit-button,
-  .guided-history-toggle,
   .guided-completion-save-btn,
   .guided-completion-edit-btn {
     transition: none;

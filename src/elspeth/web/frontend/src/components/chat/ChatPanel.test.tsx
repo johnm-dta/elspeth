@@ -212,6 +212,107 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
   });
 
+  it("renders a persistent guided workflow stepper with the active step marked", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    const workflow = screen.getByRole("list", { name: /guided workflow/i });
+    for (const label of ["Source", "Output", "Recipe", "Transforms", "Ready"]) {
+      expect(workflow).toHaveTextContent(label);
+    }
+    expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
+      "Source",
+    );
+  });
+
+  it("renders the active turn in a current-decision panel with step purpose copy", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.getByRole("heading", { name: /current decision/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/choose the input and confirm what elspeth can read/i),
+    ).toBeInTheDocument();
+  });
+
+  it("visually separates guided sidecar chat as ask about this step", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    const chatRegion = screen.getByRole("region", {
+      name: /ask about this step/i,
+    });
+    expect(chatRegion).toContainElement(screen.getByTestId("chat-input"));
+  });
+
+  it("renders guided errors with the same alert banner as freeform mode", () => {
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: "Failed to submit guided response. Please try again.",
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Failed to submit guided response. Please try again.",
+    );
+  });
+
+  it("disables guided turn buttons while a guided response is pending", async () => {
+    const respondGuidedSpy = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedResponsePending: true,
+      respondGuided: respondGuidedSpy,
+    });
+
+    render(<ChatPanel />);
+
+    const csvButton = screen.getByRole("button", { name: "CSV" });
+    expect(csvButton).toBeDisabled();
+    await act(async () => {
+      csvButton.click();
+    });
+    expect(respondGuidedSpy).not.toHaveBeenCalled();
+  });
+
   it("renders the per-step placeholder for STEP_1_SOURCE", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -321,9 +422,15 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    // CompletionSummary renders the single backend-aligned exit action.
+    // CompletionSummary renders task-oriented terminal actions.
     expect(
-      screen.getByRole("button", { name: "Save and exit guided mode" }),
+      screen.getByRole("button", { name: "Open freeform editor" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Review YAML" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Validate pipeline" }),
     ).toBeInTheDocument();
 
     // Container carries the per-branch CSS hook AND preserves the skip-link anchor.
@@ -341,9 +448,8 @@ describe("ChatPanel mode discriminator", () => {
     // `<ExitToFreeformButton />`. If a future change forgets the if/else split
     // and rehoists the button above the discriminator, a button with label
     // "Exit to freeform" will appear on the completed surface alongside
-    // `CompletionSummary`'s "Save and exit" and "Drop to freeform to keep
-    // editing" buttons (which have wire-identical semantics but different UX
-    // framing). This `queryByRole` predicate catches that regression — it
+    // `CompletionSummary`'s task-oriented terminal actions. This
+    // `queryByRole` predicate catches that regression — it
     // returns `null` when the button is absent (correct state) and a non-null
     // element when present (regression).
     const terminal: TerminalState = {
@@ -388,7 +494,7 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     // Neither guided nor completed surface should be present.
     expect(
-      screen.queryByRole("button", { name: "Save and exit" }),
+      screen.queryByRole("button", { name: "Open freeform editor" }),
     ).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Exit to freeform" }),
@@ -423,7 +529,7 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     // CompletionSummary NOT rendered (its guard fails on kind !== "completed").
     expect(
-      screen.queryByRole("button", { name: "Save and exit" }),
+      screen.queryByRole("button", { name: "Open freeform editor" }),
     ).toBeNull();
   });
 

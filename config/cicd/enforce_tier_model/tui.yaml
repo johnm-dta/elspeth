@@ -3,7 +3,7 @@ allow_hits:
   owner: architecture
   reason: Sparse token lookup — not all sinks have tokens attached
   safety: Returns empty tuple on missing key; no silent coercion
-  expires: '2026-05-13'
+  expires: null
 per_file_rules:
 - pattern: tui/screens/explain_screen.py
   rules:

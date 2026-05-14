@@ -25,9 +25,14 @@ import type { GuidedRespondRequest, SingleSelectPayload } from "@/types/guided";
 interface SingleSelectTurnProps {
   payload: SingleSelectPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
+  disabled?: boolean;
 }
 
-export function SingleSelectTurn({ payload, onSubmit }: SingleSelectTurnProps) {
+export function SingleSelectTurn({
+  payload,
+  onSubmit,
+  disabled = false,
+}: SingleSelectTurnProps) {
   const [customText, setCustomText] = useState("");
 
   // useId scopes DOM IDs per-instance so multiple SingleSelectTurns rendered
@@ -79,6 +84,7 @@ export function SingleSelectTurn({ payload, onSubmit }: SingleSelectTurnProps) {
                   className="guided-chip-btn"
                   onClick={() => handleOptionClick(option.id)}
                   aria-describedby={hintId}
+                  disabled={disabled}
                 >
                   {option.label}
                 </button>
@@ -103,6 +109,7 @@ export function SingleSelectTurn({ payload, onSubmit }: SingleSelectTurnProps) {
             type="text"
             className="guided-custom-input"
             value={customText}
+            disabled={disabled}
             onChange={(e) => setCustomText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -120,7 +127,7 @@ export function SingleSelectTurn({ payload, onSubmit }: SingleSelectTurnProps) {
             type="button"
             className="guided-custom-submit-btn"
             onClick={handleCustomSubmit}
-            disabled={!customText.trim()}
+            disabled={disabled || !customText.trim()}
           >
             Submit custom
           </button>

@@ -90,13 +90,18 @@ function formatLlmAuthError(apiErr: ApiError): string {
 // grep-and-edit discipline.  See elspeth-obs-01f85f94b5.
 function clearedGuidedState(): Pick<
   SessionState,
-  "guidedSession" | "guidedNextTurn" | "guidedTerminal" | "guidedChatPending"
+  | "guidedSession"
+  | "guidedNextTurn"
+  | "guidedTerminal"
+  | "guidedChatPending"
+  | "guidedResponsePending"
 > {
   return {
     guidedSession: null,
     guidedNextTurn: null,
     guidedTerminal: null,
     guidedChatPending: false,
+    guidedResponsePending: false,
   };
 }
 
@@ -167,6 +172,9 @@ interface SessionState {
   // pending flag is local state.  Slice 4 carried an in-memory
   // guidedChatHistory array; slice 5 replaced it with the wire field.
   guidedChatPending: boolean;
+  // In-flight wizard answer flag. Distinct from guidedChatPending: this blocks
+  // turn-answer buttons while the server-authoritative state machine advances.
+  guidedResponsePending: boolean;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
@@ -720,11 +728,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Capture the session identity before the await (Codex #4 stale-fetch guard).
     // Mirrors the active-session guard in loadComposerProgress (lines 367-372).
     const requestedSessionId = activeSessionId;
+    set({ guidedResponsePending: true });
     try {
       const response = await api.respondGuided(activeSessionId, body);
       // Stale-fetch guard (Codex #4): drop the response if the active session
       // changed while the request was in flight.
       if (get().activeSessionId !== requestedSessionId) {
+        set({ guidedResponsePending: false });
         return;
       }
       // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
@@ -733,9 +743,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
         compositionState: response.composition_state,
+        guidedResponsePending: false,
       });
     } catch {
-      set({ error: "Failed to submit guided response. Please try again." });
+      set({
+        error: "Failed to submit guided response. Please try again.",
+        guidedResponsePending: false,
+      });
     }
   },
 

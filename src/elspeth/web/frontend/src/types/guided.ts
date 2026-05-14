@@ -23,8 +23,7 @@ export type TurnType =
 export type ControlSignal =
   | "exit_to_freeform"
   | "request_advisor"
-  | "reject"
-  | "back";
+  | "reject";
 
 export type GuidedStep =
   | "step_1_source"
@@ -183,18 +182,10 @@ export interface MultiSelectWithCustomPayload {
   /**
    * Server-emitted label for the "let source decide" escape button, or null.
    *
-   * NOTE: As of Task 7.4 this field is INTENTIONALLY NOT consumed by
-   * MultiSelectWithCustomTurn. The wire shape for the escape submission
-   * requires a cross-layer protocol decision: the plan describes
-   * `{edited_values: {schema_mode: "observed", required_fields: []}}`
-   * (no `outputs` wrapper, no plugin/options) but the only backend read
-   * site (state_machine.py:_advance_step_2 lines 476-483) unconditionally
-   * reads `edited_values["outputs"]` as a list of full output dicts. The
-   * widget owns neither the plugin nor the options needed to construct
-   * that array. The field stays here because the backend still emits it
-   * (do not remove).
-   *
-   * Tracker: filigree elspeth-5e905f3c9d
+   * The frontend renders this as a first-class escape choice. Submitting it
+   * sends `chosen: []` and `custom_inputs: []`; the backend combines that with
+   * the persisted sink intent and records schema_mode="observed", meaning the
+   * source decides the pass-through field set.
    */
   escape_label: string | null;
 }

@@ -79,6 +79,7 @@ import type { GuidedRespondRequest, RecipeOfferPayload, RecipeSlotInput } from "
 interface RecipeOfferTurnProps {
   payload: RecipeOfferPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
+  disabled?: boolean;
 }
 
 /**
@@ -130,7 +131,11 @@ function SecretAuditWarning({ id }: { id?: string }) {
   );
 }
 
-export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
+export function RecipeOfferTurn({
+  payload,
+  onSubmit,
+  disabled = false,
+}: RecipeOfferTurnProps) {
   // useId scopes DOM IDs per-instance so multiple RecipeOfferTurns rendered
   // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
   // produce id collisions when element IDs recur across turns.
@@ -255,6 +260,7 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
                     type={inputType}
                     className="guided-recipe-input-field"
                     value={slotInputs[slot.name] ?? ""}
+                    disabled={disabled}
                     onChange={(event) => setSlotInput(slot.name, event.target.value)}
                     required
                     aria-describedby={describedBy || undefined}
@@ -290,7 +296,7 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
             type="button"
             className="guided-recipe-apply-btn"
             onClick={handleApply}
-            disabled={applyDisabled}
+            disabled={disabled || applyDisabled}
           >
             Apply recipe
           </button>
@@ -298,6 +304,7 @@ export function RecipeOfferTurn({ payload, onSubmit }: RecipeOfferTurnProps) {
             type="button"
             className="guided-recipe-build-btn"
             onClick={handleBuildManually}
+            disabled={disabled}
           >
             Build manually
           </button>

@@ -62,6 +62,7 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const respondGuided = useSessionStore((s) => s.respondGuided);
   const chatGuided = useSessionStore((s) => s.chatGuided);
   const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
+  const guidedResponsePending = useSessionStore((s) => s.guidedResponsePending);
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
   const { sendMessage, retryMessage, isComposing, error } = useComposer();
@@ -210,6 +211,10 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
         className="chat-panel chat-panel--completed"
         aria-label="Pipeline summary"
       >
+        <GuidedWorkflowStepper activeStep="ready" />
+        {error && (
+          <GuidedErrorBanner error={error} onDismiss={clearError} />
+        )}
         <CompletionSummary terminal={guidedSession.terminal} />
       </div>
     );
@@ -222,6 +227,10 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
         className="chat-panel chat-panel--guided"
         aria-label="Guided composer"
       >
+        <GuidedWorkflowStepper activeStep={guidedSession.step} />
+        {error && (
+          <GuidedErrorBanner error={error} onDismiss={clearError} />
+        )}
         {/*
           aria-live region scope (mirrors the freeform body's
           `<div className="chat-panel-messages">` region below).
@@ -257,19 +266,36 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
           before the first chat exchange.
         */}
         <GuidedChatHistory chatHistory={guidedSession.chat_history} />
-        <div
-          ref={guidedLogRef}
-          className="chat-panel-guided-log"
-          role="log"
-          aria-label="Guided wizard step"
-          aria-live="polite"
-          aria-relevant="additions"
+        <section
+          className="guided-current-decision"
+          aria-labelledby="guided-current-decision-heading"
         >
-          <GuidedTurn
-            turn={guidedNextTurn}
-            onSubmit={(body) => void respondGuided(body)}
-          />
-        </div>
+          <div className="guided-current-decision-copy">
+            <h2 id="guided-current-decision-heading">
+              Current decision
+            </h2>
+            <p>{GUIDED_STEP_PURPOSES[guidedSession.step]}</p>
+          </div>
+          <div
+            ref={guidedLogRef}
+            className="chat-panel-guided-log"
+            role="log"
+            aria-label="Guided wizard step"
+            aria-live="polite"
+            aria-relevant="additions"
+          >
+            <GuidedTurn
+              turn={guidedNextTurn}
+              onSubmit={(body) => void respondGuided(body)}
+              disabled={guidedResponsePending}
+            />
+          </div>
+          {guidedResponsePending && (
+            <p className="guided-current-decision-pending" role="status">
+              Saving decision...
+            </p>
+          )}
+        </section>
         <ExitToFreeformButton />
         {/*
           Per-step conversational chat input (Phase A slice 4).
@@ -290,12 +316,19 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
           a chat round-trip is in flight.  The store's chatGuided action
           flips the flag back on response (or error).
         */}
-        <ChatInput
-          onSend={(content) => void chatGuided(content)}
-          disabled={guidedChatPending}
-          inputRef={inputRef}
-          placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
-        />
+        <section
+          className="guided-step-chat"
+          role="region"
+          aria-label="Ask about this step"
+        >
+          <h2 className="guided-step-chat-heading">Ask about this step</h2>
+          <ChatInput
+            onSend={(content) => void chatGuided(content)}
+            disabled={guidedChatPending}
+            inputRef={inputRef}
+            placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
+          />
+        </section>
       </div>
     );
   }
@@ -385,6 +418,75 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
         value={inputText}
         onChange={setInputText}
       />
+    </div>
+  );
+}
+
+type WorkflowStepId = GuidedStep | "ready";
+
+const GUIDED_STEP_PURPOSES: Record<GuidedStep, string> = {
+  step_1_source: "Choose the input and confirm what ELSPETH can read.",
+  step_2_sink: "Choose the output shape and the fields the pipeline should produce.",
+  step_2_5_recipe_match: "Review the suggested recipe before ELSPETH builds the transforms.",
+  step_3_transforms: "Review the transform chain that turns source data into the output.",
+};
+
+const GUIDED_WORKFLOW_STEPS: ReadonlyArray<{
+  id: WorkflowStepId;
+  label: string;
+}> = [
+  { id: "step_1_source", label: "Source" },
+  { id: "step_2_sink", label: "Output" },
+  { id: "step_2_5_recipe_match", label: "Recipe" },
+  { id: "step_3_transforms", label: "Transforms" },
+  { id: "ready", label: "Ready" },
+];
+
+function GuidedWorkflowStepper({ activeStep }: { activeStep: WorkflowStepId }) {
+  const activeIndex = GUIDED_WORKFLOW_STEPS.findIndex((step) => step.id === activeStep);
+  return (
+    <nav className="guided-workflow" aria-label="Guided workflow progress">
+      <ol className="guided-workflow-list" aria-label="Guided workflow">
+        {GUIDED_WORKFLOW_STEPS.map((step, index) => {
+          const state =
+            index < activeIndex
+              ? "complete"
+              : index === activeIndex
+                ? "current"
+                : "upcoming";
+          return (
+            <li
+              key={step.id}
+              className={`guided-workflow-step guided-workflow-step--${state}`}
+              aria-current={state === "current" ? "step" : undefined}
+            >
+              <span className="guided-workflow-index">{index + 1}</span>
+              <span className="guided-workflow-label">{step.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
+function GuidedErrorBanner({
+  error,
+  onDismiss,
+}: {
+  error: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div role="alert" className="chat-panel-error">
+      <span>{error}</span>
+      <button
+        onClick={onDismiss}
+        className="chat-panel-error-dismiss"
+        aria-label="Dismiss error"
+      >
+        {"\u00D7"}
+      </button>
     </div>
   );
 }

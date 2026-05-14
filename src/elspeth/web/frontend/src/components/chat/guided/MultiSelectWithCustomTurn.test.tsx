@@ -1,8 +1,7 @@
 // ============================================================================
 // MultiSelectWithCustomTurn — wire-response contract regression coverage.
 //
-// Pins TWO contracts (the third — escape-button submission — is intentionally
-// deferred from Task 7.4; see NOTE in MultiSelectWithCustomTurn.tsx):
+// Pins THREE contracts:
 //   1. Chip-toggle wire shape on Continue:
 //        chosen=[<sorted selected ids>], custom_inputs=[<added customs>],
 //        all four other fields explicitly null.
@@ -28,9 +27,9 @@
 // matches InspectAndConfirmTurn (Task 7.3) — refs + useEffect + firstRunRef
 // to skip initial mount. Future remove-path widgets should copy this.
 //
-// Escape branch coverage is INTENTIONALLY OUT OF SCOPE here — see the NOTE
-// in MultiSelectWithCustomTurn.tsx. Adding tests that pin the escape wire
-// would lock in a contract neither side currently agrees on.
+// Escape branch coverage pins the "let source decide" path: chosen=[] and
+// custom_inputs=[] leaves required fields source-decided while the backend
+// preserves observed schema mode from persisted sink intent.
 //
 // The GuidedRespondRequest shape is the unit under test; these tests will
 // catch any future refactor that silently drops a null field, swaps chosen
@@ -420,19 +419,35 @@ describe("MultiSelectWithCustomTurn — Continue disabled on empty assertion", (
   });
 });
 
-describe("MultiSelectWithCustomTurn — escape_label NOT rendered (Task 7.4 deferral)", () => {
-  // The escape-button rendering is intentionally deferred from Task 7.4
-  // pending a cross-layer wire-shape decision. These pin the deferral so a
-  // future contributor doesn't "helpfully" add the button without doing the
-  // contract work. See NOTE in MultiSelectWithCustomTurn.tsx.
-  it("does NOT render an escape button when escape_label is non-null", () => {
+describe("MultiSelectWithCustomTurn — escape_label", () => {
+  it("renders an escape button when escape_label is non-null", () => {
     render(
       <MultiSelectWithCustomTurn
         payload={PAYLOAD_WITH_ESCAPE_LABEL}
         onSubmit={vi.fn()}
       />,
     );
-    expect(screen.queryByText(/let source decide/i)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /let source decide/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("escape button submits empty required fields while preserving all null wire fields", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_WITH_ESCAPE_LABEL}
+        onSubmit={onSubmit}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /let source decide/i }));
+
+    expect(onSubmit).toHaveBeenCalledWith<GuidedRespondRequest[]>({
+      ...nullResponse(),
+      chosen: [],
+      custom_inputs: [],
+    });
   });
 
   it("does NOT render an escape button when escape_label is null", () => {

@@ -77,12 +77,11 @@
 //   SinkOutputResolved. edited_values is null — the widget does not own the
 //   plugin context. Resolved by elspeth-5e905f3c9d.
 //
-// NOTE: payload.escape_label is intentionally NOT rendered in this version.
-// The escape submission requires a separate protocol decision (what required_fields
-// should be when the user skips field selection). Do NOT add the escape button
-// without resolving that contract first. The deferral is pinned by tests
-// (escape-button-not-rendered for both null and non-null escape_label)
-// so a future contributor can't quietly re-add it.
+// ESCAPE PATH:
+//   payload.escape_label renders as a first-class "let source decide" action.
+//   It submits chosen=[] and custom_inputs=[] with the rest of the wire body
+//   null. The backend already treats that as observed schema mode with no fixed
+//   required fields, using the persisted sink intent for plugin/options.
 
 import { useEffect, useId, useRef, useState } from "react";
 import type {
@@ -93,6 +92,7 @@ import type {
 interface MultiSelectWithCustomTurnProps {
   payload: MultiSelectWithCustomPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
+  disabled?: boolean;
 }
 
 interface Selection {
@@ -104,6 +104,7 @@ interface Selection {
 export function MultiSelectWithCustomTurn({
   payload,
   onSubmit,
+  disabled = false,
 }: MultiSelectWithCustomTurnProps) {
   const [selection, setSelection] = useState<Selection>(() => ({
     chosen: new Set(payload.default_chosen),
@@ -244,6 +245,17 @@ export function MultiSelectWithCustomTurn({
     });
   }
 
+  function handleEscape() {
+    onSubmit({
+      chosen: [],
+      custom_inputs: [],
+      edited_values: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  }
+
   const continueDisabled =
     selection.chosen.size === 0 && selection.customs.length === 0;
   const addDisabled = !canAddPending(selection);
@@ -268,6 +280,7 @@ export function MultiSelectWithCustomTurn({
                   aria-pressed={pressed}
                   aria-describedby={hintId}
                   onClick={() => toggleOption(option.id)}
+                  disabled={disabled}
                 >
                   {option.label}
                 </button>
@@ -292,6 +305,7 @@ export function MultiSelectWithCustomTurn({
           type="text"
           className="guided-custom-input"
           value={selection.pending}
+          disabled={disabled}
           onChange={(e) =>
             setSelection((prev) => ({ ...prev, pending: e.target.value }))
           }
@@ -311,7 +325,7 @@ export function MultiSelectWithCustomTurn({
           type="button"
           className="guided-custom-submit-btn"
           onClick={handleAddCustom}
-          disabled={addDisabled}
+          disabled={disabled || addDisabled}
         >
           Add
         </button>
@@ -338,6 +352,7 @@ export function MultiSelectWithCustomTurn({
                 className="guided-multi-custom-remove-btn"
                 onClick={() => handleRemoveCustom(value)}
                 aria-label={`Remove ${value}`}
+                disabled={disabled}
               >
                 {/* ASCII multiplication-style X; visible glyph for sighted
                     users, accessible name from aria-label since the glyph
@@ -352,11 +367,21 @@ export function MultiSelectWithCustomTurn({
       )}
 
       <div className="guided-multi-actions">
+        {payload.escape_label !== null && (
+          <button
+            type="button"
+            className="guided-multi-escape-btn"
+            onClick={handleEscape}
+            disabled={disabled}
+          >
+            {payload.escape_label}
+          </button>
+        )}
         <button
           type="button"
           className="guided-multi-continue-btn"
           onClick={handleContinue}
-          disabled={continueDisabled}
+          disabled={disabled || continueDisabled}
         >
           Continue
         </button>

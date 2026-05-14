@@ -840,6 +840,14 @@ describe("edge cases", () => {
     expect(screen.getByRole("textbox", { name: /my_field/i })).toBeInTheDocument();
   });
 
+  it("translates common plugin config labels while preserving descriptions", () => {
+    renderTurn(CSV_PAYLOAD);
+    expect(
+      screen.getByRole("textbox", { name: /input file path/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Filesystem path to the CSV file")).toBeInTheDocument();
+  });
+
   it("renders Show advanced (N) with count of optional fields", () => {
     renderTurn(CSV_PAYLOAD); // 3 optional fields
     const btn = screen.getByRole("button", { name: /show advanced/i });

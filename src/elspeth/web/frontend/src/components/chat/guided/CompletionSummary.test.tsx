@@ -6,10 +6,8 @@
 //      string appears in the document when terminal.kind === "completed" and
 //      pipeline_yaml is non-null.  (Does NOT assert Prism token structure --
 //      that is Prism's contract, not ours.)
-//   2. Exactly one action button renders as <button type="button">. The
-//      terminal backend has one exit-to-freeform path, so the UI must not offer
-//      two differently worded actions that do the same thing.
-//   3. The exit click invokes useSessionStore.exitToFreeform once.
+//   2. Task-oriented terminal actions render as <button type="button">.
+//   3. The freeform click invokes useSessionStore.exitToFreeform once.
 //   5. pipeline_yaml === null -> widget returns null (nothing rendered).
 //      This is the strict gate: no defensive ?? "" coercion to silently
 //      render an empty highlight block.
@@ -35,6 +33,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CompletionSummary } from "./CompletionSummary";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useExecutionStore } from "@/stores/executionStore";
 import { resetStore } from "@/test/store-helpers";
 import type { TerminalState } from "@/types/guided";
 
@@ -62,6 +61,7 @@ const EXITED_TERMINAL: TerminalState = {
 
 beforeEach(() => {
   resetStore(useSessionStore);
+  useExecutionStore.setState({ validate: vi.fn().mockResolvedValue(undefined) });
 });
 
 // ── Contract 1: YAML text rendered in highlighted block ───────────────────────
@@ -94,46 +94,54 @@ describe("CompletionSummary -- YAML rendering", () => {
 // ── Contract 2: Single button renders with type="button" ─────────────────────
 
 describe("CompletionSummary -- button identity", () => {
-  it("renders a single 'Save and exit guided mode' button with type='button'", () => {
+  it("renders task-oriented action buttons with type='button'", () => {
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    const btn = screen.getByRole("button", {
-      name: /save and exit guided mode/i,
-    });
-    expect(btn).toBeInTheDocument();
-    expect(btn.getAttribute("type")).toBe("button");
-  });
-
-  it("does not render a second wire-identical keep-editing button", () => {
-    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    expect(
-      screen.queryByRole("button", {
-        name: /drop to freeform to keep editing/i,
-      }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("renders exactly one action button", () => {
-    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    const buttons = screen.getAllByRole("button");
-    expect(buttons).toHaveLength(1);
+    expect(screen.getAllByRole("button")).toHaveLength(3);
+    for (const name of [/open freeform editor/i, /review yaml/i, /validate pipeline/i]) {
+      expect(screen.getByRole("button", { name }).getAttribute("type")).toBe("button");
+    }
   });
 });
 
 // ── Contract 3: Exit calls exitToFreeform ────────────────────────────────────
 
 describe("CompletionSummary -- exit action", () => {
-  it("clicking 'Save and exit guided mode' calls exitToFreeform once", async () => {
+  it("clicking 'Open freeform editor' calls exitToFreeform once", async () => {
     const user = userEvent.setup();
     const mockExit = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({ exitToFreeform: mockExit });
 
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     await user.click(
-      screen.getByRole("button", { name: /save and exit guided mode/i }),
+      screen.getByRole("button", { name: /open freeform editor/i }),
     );
 
     expect(mockExit).toHaveBeenCalledTimes(1);
     expect(mockExit).toHaveBeenCalledWith();
+  });
+
+  it("clicking 'Review YAML' dispatches a YAML inspector-tab switch", async () => {
+    const user = userEvent.setup();
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+
+    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
+    await user.click(screen.getByRole("button", { name: /review yaml/i }));
+
+    const event = dispatchSpy.mock.calls[0][0] as CustomEvent<string>;
+    expect(event.type).toBe("elspeth-switch-tab");
+    expect(event.detail).toBe("yaml");
+  });
+
+  it("clicking 'Validate pipeline' validates the active session", async () => {
+    const user = userEvent.setup();
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    useExecutionStore.setState({ validate });
+
+    render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
+    await user.click(screen.getByRole("button", { name: /validate pipeline/i }));
+
+    expect(validate).toHaveBeenCalledWith("session-1");
   });
 });
 
@@ -201,7 +209,7 @@ describe("CompletionSummary -- no auto-focus on initial render", () => {
   it("the exit button does not have focus immediately after render", () => {
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     const saveBtn = screen.getByRole("button", {
-      name: /save and exit guided mode/i,
+      name: /open freeform editor/i,
     });
     expect(document.activeElement).not.toBe(saveBtn);
   });

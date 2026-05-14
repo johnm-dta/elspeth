@@ -1,25 +1,8 @@
 // src/components/chat/guided/GuidedHistory.tsx
 //
-// Guided-mode collapsible read-only list of completed wizard steps (Task 7.9).
-// Conventions inherited from the 7.x widget family:
-//   - useId() per-instance scoping (Task 7.4 I2): the toggle↔region
-//     aria-controls pair uses a useId() prefix so multiple GuidedHistory
-//     instances coexist without DOM id collisions.
-//   - aria-controls + hidden attribute (Task 7.5 I2): the collapsible region is
-//     ALWAYS rendered (hidden attribute toggles) so aria-controls resolves in
-//     both expanded and collapsed states. The conditional {expanded && children}
-//     pattern is BROKEN for aria-controls — a screen reader reaching the toggle
-//     while collapsed cannot resolve "expanded/collapsed WHAT" if the id is a
-//     dangling reference. Children remain gated on `expanded` to skip rendering
-//     work when collapsed.
-//   - <button type="button"> — never <div onClick>.
-//   - CSS via App.css class names with design tokens; no hardcoded colours.
-//   - Read-only: no onSubmit, no event handlers other than the toggle.
-//   - No auto-focus on mount (firstRunRef pattern inherited from
-//     InspectAndConfirmTurn.tsx): the widget appears because a turn was
-//     completed, not because the user requested focus.
-//
-import { useId, useState } from "react";
+// Guided-mode decision summary. This is deliberately not a protocol log: the
+// operator needs a visible recap of choices made so far, while low-level
+// emitter/type/hash details stay out of the default workflow surface.
 import type { GuidedStep, TurnRecord, TurnType } from "@/types/guided";
 
 // ── Display mappings ─────────────────────────────────────────────────────────
@@ -31,8 +14,8 @@ import type { GuidedStep, TurnRecord, TurnType } from "@/types/guided";
  */
 const STEP_LABELS: Record<GuidedStep, string> = {
   step_1_source: "Source",
-  step_2_sink: "Sink",
-  step_2_5_recipe_match: "Recipe match",
+  step_2_sink: "Output",
+  step_2_5_recipe_match: "Recipe",
   step_3_transforms: "Transforms",
 };
 
@@ -54,83 +37,40 @@ const TURN_TYPE_LABELS: Record<TurnType, string> = {
 interface Props {
   /** Completed turn records from GuidedSession.history. */
   history: TurnRecord[];
-  /** When true, the list starts expanded. Defaults to false. */
-  initiallyExpanded?: boolean;
 }
 
 /**
- * Collapsible read-only list of completed guided-mode wizard steps.
+ * Read-only plain-language list of completed guided-mode decisions.
  *
  * Returns null when history is empty — the parent should not render this
  * widget unless there are completed steps to show.
  */
-export function GuidedHistory({ history, initiallyExpanded = false }: Props): React.ReactElement | null {
-  const [expanded, setExpanded] = useState(initiallyExpanded);
-  const reactId = useId();
-  const regionId = `${reactId}-history-region`;
-
+export function GuidedHistory({ history }: Props): React.ReactElement | null {
   // Empty history: nothing to show.
   if (history.length === 0) {
     return null;
   }
 
-  const count = history.length;
-  const toggleLabel = expanded
-    ? `Hide steps (${count})`
-    : `Show steps (${count})`;
-
   return (
-    <div className="guided-history">
-      {/* Toggle button — aria-controls always resolves because the region is
-          always rendered (hidden toggles, not conditional mounting). */}
-      <button
-        type="button"
-        className="guided-history-toggle"
-        aria-expanded={expanded}
-        aria-controls={regionId}
-        onClick={() => setExpanded((prev) => !prev)}
-      >
-        {toggleLabel}
-      </button>
-
-      {/* Region container: ALWAYS rendered so aria-controls resolves in both
-          expanded and collapsed states (Task 7.5 I2 contract).
-          The `hidden` attribute removes this from the AT tree when collapsed —
-          no spurious "empty region" announcement — while keeping the id
-          resolvable. Children are gated on `expanded` to skip render work
-          while collapsed. */}
-      <div
-        id={regionId}
-        role="region"
-        aria-label="Wizard step history"
-        className="guided-history-region"
-        hidden={!expanded}
-      >
-        {expanded && (
-          <ol className="guided-history-list">
-            {history.map((turn, idx) => (
-              <li key={`${turn.step}-${idx}`} className="guided-history-item">
-                <span className="guided-history-step-number">
-                  Step {idx + 1}
-                </span>
-                <span className="guided-history-step-name">
-                  {STEP_LABELS[turn.step]}
-                </span>
-                <span className="guided-history-separator" aria-hidden="true">
-                  ·
-                </span>
-                <span className="guided-history-turn-type">
-                  {turn.summary ?? TURN_TYPE_LABELS[turn.turn_type]}
-                </span>
-                <span className="guided-history-separator" aria-hidden="true">
-                  ·
-                </span>
-                <span className="guided-history-emitter">{turn.emitter}</span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-    </div>
+    <section
+      className="guided-history"
+      aria-labelledby="guided-history-heading"
+    >
+      <h2 id="guided-history-heading" className="guided-history-heading">
+        Decisions so far
+      </h2>
+      <ol className="guided-history-list">
+        {history.map((turn, idx) => (
+          <li key={`${turn.step}-${idx}`} className="guided-history-item">
+            <span className="guided-history-step-name">
+              {STEP_LABELS[turn.step]}
+            </span>
+            <span className="guided-history-summary">
+              {turn.summary ?? TURN_TYPE_LABELS[turn.turn_type]}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }

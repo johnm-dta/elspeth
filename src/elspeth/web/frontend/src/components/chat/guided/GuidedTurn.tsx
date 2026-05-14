@@ -56,50 +56,61 @@ import { RecipeOfferTurn } from "./RecipeOfferTurn";
 interface GuidedTurnProps {
   turn: TurnPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
+  disabled?: boolean;
 }
 
-export function GuidedTurn({ turn, onSubmit }: GuidedTurnProps) {
+export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps) {
+  const guardedSubmit = (body: GuidedRespondRequest) => {
+    if (disabled) return;
+    onSubmit(body);
+  };
   switch (turn.type) {
     case "single_select":
       return (
         <SingleSelectTurn
           payload={turn.payload as SingleSelectPayload}
-          onSubmit={onSubmit}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
         />
       );
     case "inspect_and_confirm":
       return (
         <InspectAndConfirmTurn
           payload={turn.payload as InspectAndConfirmPayload}
-          onSubmit={onSubmit}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
         />
       );
     case "multi_select_with_custom":
       return (
         <MultiSelectWithCustomTurn
           payload={turn.payload as MultiSelectWithCustomPayload}
-          onSubmit={onSubmit}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
         />
       );
     case "schema_form":
       return (
         <SchemaFormTurn
           payload={turn.payload as SchemaFormPayload}
-          onSubmit={onSubmit}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
         />
       );
     case "propose_chain":
       return (
         <ProposeChainTurn
           payload={turn.payload as ProposeChainPayload}
-          onSubmit={onSubmit}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
         />
       );
     case "recipe_offer":
       return (
         <RecipeOfferTurn
           payload={turn.payload as RecipeOfferPayload}
-          onSubmit={onSubmit}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
         />
       );
     default: {

@@ -28,11 +28,7 @@ filigree start-work <issue-id> --assignee <name>    → atomically claim + trans
 filigree close <issue-id> --reason="summary of what was done"
 ```
 
-Do not use `filigree start-next-work --assignee <name>` as a general shortcut in
-repos whose ready queues include epics, features, milestones, or other
-coordination records. Inspect the ready item first and use `start-work <issue-id>`
-for actionable leaf work. Reserve `start-next-work` for queues already filtered or
-operationally constrained to leaf bugs/tasks.
+Or skip steps 1–3 entirely with `filigree start-next-work --assignee <name>` to grab the highest-priority ready issue.
 
 Always close with a `--reason` — it becomes audit trail for the next agent.
 
@@ -52,15 +48,14 @@ When triaging, use `filigree batch-update <ids...> --priority=N` for bulk change
 
 ### Solo or Swarm — Same Tool
 
-Use `start-work` for the usual case. `start-next-work` is safe only when the ready
-queue is already scoped to actionable leaf bugs/tasks. Both atomically
+Use `start-work` (or `start-next-work`) for the usual case. Both atomically
 claim the issue *and* transition it to `in_progress` in one DB transaction —
 optimistic-locking on the assignee, so concurrent callers can't both think
 they own the issue.
 
 ```bash
-filigree start-work <issue-id> --assignee <agent-name>     # specific inspected leaf issue
-filigree start-next-work --assignee <agent-name>           # only in leaf-scoped queues
+filigree start-work <issue-id> --assignee <agent-name>     # specific issue
+filigree start-next-work --assignee <agent-name>           # highest-priority ready
 ```
 
 If another agent already owns the claim, the call fails with `code: CONFLICT`

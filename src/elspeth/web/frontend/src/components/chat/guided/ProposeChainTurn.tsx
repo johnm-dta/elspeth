@@ -53,6 +53,7 @@ import type { GuidedRespondRequest, ProposeChainPayload } from "@/types/guided";
 interface ProposeChainTurnProps {
   payload: ProposeChainPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
+  disabled?: boolean;
 }
 
 /**
@@ -71,7 +72,11 @@ function formatOptionValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
+export function ProposeChainTurn({
+  payload,
+  onSubmit,
+  disabled = false,
+}: ProposeChainTurnProps) {
   // useId scopes DOM IDs per-instance so multiple ProposeChainTurns rendered
   // simultaneously (e.g. active turn + GuidedHistory replay in Task 7.9) don't
   // produce id collisions when per-card IDs recur across turns.
@@ -192,6 +197,7 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
                   type="button"
                   className="guided-propose-edit-btn"
                   onClick={() => handleEdit(idx)}
+                  disabled={disabled}
                 >
                   Edit step {idx + 1}
                 </button>
@@ -206,6 +212,7 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
           type="button"
           className="guided-propose-secondary-btn"
           onClick={handleReject}
+          disabled={disabled}
         >
           Reject
         </button>
@@ -213,6 +220,7 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
           type="button"
           className="guided-propose-secondary-btn"
           onClick={handleAskAdvisor}
+          disabled={disabled}
         >
           Ask advisor
         </button>
@@ -220,6 +228,7 @@ export function ProposeChainTurn({ payload, onSubmit }: ProposeChainTurnProps) {
           type="button"
           className="guided-propose-accept-btn"
           onClick={handleAccept}
+          disabled={disabled}
         >
           Accept all steps
         </button>

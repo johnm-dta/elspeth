@@ -61,6 +61,7 @@ import type { GuidedRespondRequest, InspectAndConfirmPayload } from "@/types/gui
 interface InspectAndConfirmTurnProps {
   payload: InspectAndConfirmPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
+  disabled?: boolean;
 }
 
 /** Edit-mode state. `null` = inspect view; non-null = edit view. */
@@ -68,7 +69,11 @@ interface EditorState {
   columns: string[];
 }
 
-export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTurnProps) {
+export function InspectAndConfirmTurn({
+  payload,
+  onSubmit,
+  disabled = false,
+}: InspectAndConfirmTurnProps) {
   const [editorState, setEditorState] = useState<EditorState | null>(null);
 
   // useId scopes DOM IDs per-instance so multiple InspectAndConfirmTurns rendered
@@ -186,12 +191,14 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
                 type="text"
                 className="guided-inspect-editor-input"
                 value={col}
+                disabled={disabled}
                 onChange={(e) => handleRenameColumn(index, e.target.value)}
               />
               <button
                 type="button"
                 className="guided-inspect-remove-btn"
                 onClick={() => handleRemoveColumn(index)}
+                disabled={disabled}
               >
                 Remove
               </button>
@@ -203,6 +210,7 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
             type="button"
             className="guided-inspect-cancel-btn"
             onClick={handleCancelEdit}
+            disabled={disabled}
           >
             Cancel
           </button>
@@ -210,6 +218,7 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
             type="button"
             className="guided-inspect-apply-btn"
             onClick={handleApplyEdits}
+            disabled={disabled}
           >
             Apply edits
           </button>
@@ -265,6 +274,7 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
           type="button"
           className="guided-inspect-confirm-btn"
           onClick={handleLooksRight}
+          disabled={disabled}
         >
           Looks right
         </button>
@@ -273,6 +283,7 @@ export function InspectAndConfirmTurn({ payload, onSubmit }: InspectAndConfirmTu
           type="button"
           className="guided-inspect-edit-btn"
           onClick={handleOpenEditor}
+          disabled={disabled}
         >
           Edit columns...
         </button>

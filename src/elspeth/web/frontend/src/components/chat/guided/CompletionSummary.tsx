@@ -9,10 +9,9 @@
 //     Returns null otherwise.  No defensive ?? "" coercion: an absent yaml is
 //     evidence (absence), not an invitation to render empty syntax-highlighted
 //     content.
-//   - One action button calls useSessionStore.exitToFreeform().  The backend
-//     has one handler for control_signal="exit_to_freeform", so the UI presents
-//     one matching action instead of two differently worded, wire-identical
-//     buttons.
+//   - Task-oriented actions expose the three next moves users expect after the
+//     wizard completes: open freeform editing, review generated YAML, or run
+//     validation.
 //   - useTheme() for Prism theme-awareness, matching YamlView.tsx:164.
 //   - <button type="button"> (never <div onClick>).
 //   - CSS via App.css guided-completion-* classes with design tokens.
@@ -21,7 +20,9 @@
 import { useId } from "react";
 import { Highlight, themes } from "prism-react-renderer";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useExecutionStore } from "@/stores/executionStore";
 import { useTheme } from "@/hooks/useTheme";
+import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
 import type { TerminalState } from "@/types/guided";
 
 // ── Props ─────────────────────────────────────────────────────────────────────
@@ -57,6 +58,9 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
   const preId = `${reactId}-pre`;
 
   const exitToFreeform = useSessionStore((s) => s.exitToFreeform);
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const validate = useExecutionStore((s) => s.validate);
+  const isValidating = useExecutionStore((s) => s.isValidating);
   const { resolvedTheme } = useTheme();
 
   // Match the theme-awareness pattern from YamlView.tsx:164.
@@ -65,6 +69,15 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
 
   function handleExit(): void {
     void exitToFreeform();
+  }
+
+  function handleReviewYaml(): void {
+    window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "yaml" }));
+  }
+
+  function handleValidate(): void {
+    if (activeSessionId === null) return;
+    void validate(activeSessionId);
   }
 
   return (
@@ -93,14 +106,28 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
         </Highlight>
       </div>
 
-      {/* Action row. One backend exit signal, one visible action. */}
       <div className="guided-completion-actions">
         <button
           type="button"
           className="guided-completion-save-btn"
           onClick={handleExit}
         >
-          Save and exit guided mode
+          Open freeform editor
+        </button>
+        <button
+          type="button"
+          className="guided-completion-edit-btn"
+          onClick={handleReviewYaml}
+        >
+          Review YAML
+        </button>
+        <button
+          type="button"
+          className="guided-completion-edit-btn"
+          onClick={handleValidate}
+          disabled={activeSessionId === null || isValidating}
+        >
+          {isValidating ? "Validating" : "Validate pipeline"}
         </button>
       </div>
     </div>

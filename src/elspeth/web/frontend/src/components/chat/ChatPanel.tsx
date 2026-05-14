@@ -1,5 +1,5 @@
 // src/components/chat/ChatPanel.tsx
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useMemo, useRef, useCallback, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useComposer } from "@/hooks/useComposer";
 import { FOCUSABLE_SELECTOR } from "@/hooks/useFocusTrap";
@@ -51,6 +51,13 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const compositionState = useSessionStore((s) => s.compositionState);
+  const compositionProposals = useSessionStore((s) => s.compositionProposals);
+  const staleProposalIds = useSessionStore((s) => s.staleProposalIds);
+  const proposalActionPendingIds = useSessionStore(
+    (s) => s.proposalActionPendingIds,
+  );
+  const acceptProposal = useSessionStore((s) => s.acceptProposal);
+  const rejectProposal = useSessionStore((s) => s.rejectProposal);
   const composerProgress = useSessionStore((s) => s.composerProgress);
   const clearError = useSessionStore((s) => s.clearError);
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage);
@@ -75,6 +82,16 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const [showBlobManager, setShowBlobManager] = useState(false);
   const [inputText, setInputText] = useState("");
   const activeComposerMessage = findActiveComposerMessage(messages);
+  const proposalsByToolCallId = useMemo(
+    () =>
+      new Map(
+        compositionProposals.map((proposal) => [
+          proposal.tool_call_id,
+          proposal,
+        ]),
+      ),
+    [compositionProposals],
+  );
 
   function scrollToBottom() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -380,6 +397,11 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
               isComposing={isComposing}
               onRetry={msg.role === "user" ? retryMessage : undefined}
               onFork={msg.role === "user" ? handleFork : undefined}
+              proposalsByToolCallId={proposalsByToolCallId}
+              staleProposalIds={staleProposalIds}
+              proposalActionPendingIds={proposalActionPendingIds}
+              onAcceptProposal={acceptProposal}
+              onRejectProposal={rejectProposal}
             />
           ))
         )}

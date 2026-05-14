@@ -1,16 +1,32 @@
 // src/components/chat/MessageBubble.tsx
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { ChatMessage } from "@/types/api";
+import type { ChatMessage, CompositionProposal } from "@/types/api";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { ToolCallCard } from "./ToolCallCard";
 
 interface MessageBubbleProps {
   message: ChatMessage;
   isComposing?: boolean;
   onRetry?: (messageId: string) => void;
   onFork?: (messageId: string, newContent: string) => void;
+  proposalsByToolCallId?: Map<string, CompositionProposal>;
+  staleProposalIds?: string[];
+  proposalActionPendingIds?: string[];
+  onAcceptProposal?: (proposalId: string) => void;
+  onRejectProposal?: (proposalId: string) => void;
 }
 
-export function MessageBubble({ message, isComposing, onRetry, onFork }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  isComposing,
+  onRetry,
+  onFork,
+  proposalsByToolCallId,
+  staleProposalIds = [],
+  proposalActionPendingIds = [],
+  onAcceptProposal = () => undefined,
+  onRejectProposal = () => undefined,
+}: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const [toolsExpanded, setToolsExpanded] = useState(false);
@@ -177,26 +193,35 @@ export function MessageBubble({ message, isComposing, onRetry, onFork }: Message
               {message.tool_calls.length})
             </button>
             {toolsExpanded && (
-              <ul className="message-tools-list">
+              <div className="message-tools-list">
                 {message.tool_calls.map((tc, i) => (
-                  <li
+                  <ToolCallCard
                     key={tc.id ?? i}
-                    className="message-tools-item"
-                  >
-                    <strong>{tc.function.name}</strong>
-                    {tc.function.arguments && (
-                      <details className="message-tools-details">
-                        <summary className="message-tools-summary">
-                          Arguments
-                        </summary>
-                        <pre className="message-tools-pre">
-                          {tc.function.arguments}
-                        </pre>
-                      </details>
-                    )}
-                  </li>
+                    toolCall={tc}
+                    proposal={
+                      tc.id
+                        ? proposalsByToolCallId?.get(tc.id) ?? null
+                        : null
+                    }
+                    isStale={
+                      tc.id
+                        ? staleProposalIds.includes(
+                            proposalsByToolCallId?.get(tc.id)?.id ?? "",
+                          )
+                        : false
+                    }
+                    isBusy={
+                      tc.id
+                        ? proposalActionPendingIds.includes(
+                            proposalsByToolCallId?.get(tc.id)?.id ?? "",
+                          )
+                        : false
+                    }
+                    onAccept={onAcceptProposal}
+                    onReject={onRejectProposal}
+                  />
                 ))}
-              </ul>
+              </div>
             )}
           </div>
         )}

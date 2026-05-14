@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MessageBubble } from "./MessageBubble";
-import type { ChatMessage } from "@/types/api";
+import type { ChatMessage, CompositionProposal } from "@/types/api";
 
 function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -12,6 +12,28 @@ function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
     content: "Hello world",
     tool_calls: null,
     created_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makeProposal(
+  overrides: Partial<CompositionProposal> = {},
+): CompositionProposal {
+  return {
+    id: "proposal-1",
+    session_id: "session-1",
+    tool_call_id: "tc-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "Replace the pipeline.",
+    rationale: "Requested by the current composer turn.",
+    affects: ["graph"],
+    arguments_redacted_json: {},
+    base_state_id: null,
+    committed_state_id: null,
+    audit_event_id: "event-1",
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
     ...overrides,
   };
 }
@@ -129,6 +151,44 @@ describe("MessageBubble", () => {
       await user.click(screen.getByLabelText("Copy message"));
 
       expect(writeText).toHaveBeenCalledWith("I'll set that up.");
+    });
+
+    it("renders proposal cards for matching tool calls", async () => {
+      const user = userEvent.setup();
+      const onAcceptProposal = vi.fn();
+      const onRejectProposal = vi.fn();
+      const proposal = makeProposal();
+      const message = makeMessage({
+        role: "assistant",
+        content: "I'll prepare that change.",
+        tool_calls: [
+          {
+            id: "tc-1",
+            type: "function",
+            function: { name: "set_pipeline", arguments: "{}" },
+          },
+        ],
+      });
+
+      render(
+        <MessageBubble
+          message={message}
+          proposalsByToolCallId={new Map([["tc-1", proposal]])}
+          onAcceptProposal={onAcceptProposal}
+          onRejectProposal={onRejectProposal}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "Tool calls (1)" }));
+
+      expect(screen.getByText("Proposed: set_pipeline")).toBeInTheDocument();
+      await user.click(
+        screen.getByRole("button", {
+          name: `Accept proposal: ${proposal.summary}`,
+        }),
+      );
+
+      expect(onAcceptProposal).toHaveBeenCalledWith("proposal-1");
+      expect(onRejectProposal).not.toHaveBeenCalled();
     });
   });
 });

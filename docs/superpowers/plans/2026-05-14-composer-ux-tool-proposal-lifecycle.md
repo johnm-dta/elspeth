@@ -2226,7 +2226,7 @@ EOF
 - Modify: `src/elspeth/web/frontend/src/components/chat/MessageBubble.test.tsx`
 - Modify: `src/elspeth/web/frontend/src/App.css`
 
-- [ ] **Step 1: Write failing ToolCallCard tests**
+- [x] **Step 1: Write failing ToolCallCard tests**
 
 Create `src/elspeth/web/frontend/src/components/chat/ToolCallCard.test.tsx`:
 
@@ -2338,7 +2338,7 @@ describe("ToolCallCard", () => {
 });
 ```
 
-- [ ] **Step 2: Run ToolCallCard tests to verify they fail**
+- [x] **Step 2: Run ToolCallCard tests to verify they fail**
 
 Run:
 
@@ -2349,7 +2349,9 @@ npm run test -- src/components/chat/ToolCallCard.test.tsx
 
 Expected: FAIL because `ToolCallCard.tsx` does not exist.
 
-- [ ] **Step 3: Implement ToolCallCard**
+Observed: FAIL because `ToolCallCard.tsx` did not exist; MessageBubble integration test also failed because raw tool-call rendering did not surface proposals.
+
+- [x] **Step 3: Implement ToolCallCard**
 
 Create `src/elspeth/web/frontend/src/components/chat/ToolCallCard.tsx`:
 
@@ -2441,7 +2443,7 @@ export function ToolCallCard({
 }
 ```
 
-- [ ] **Step 4: Wire MessageBubble to proposal records**
+- [x] **Step 4: Wire MessageBubble to proposal records**
 
 Change `MessageBubbleProps`:
 
@@ -2479,7 +2481,7 @@ Replace the existing raw tool call `<ul className="message-tools-list">` renderi
               </div>
 ```
 
-- [ ] **Step 5: Add CSS**
+- [x] **Step 5: Add CSS**
 
 In `src/elspeth/web/frontend/src/App.css`, add:
 
@@ -2539,7 +2541,7 @@ In `src/elspeth/web/frontend/src/App.css`, add:
 }
 ```
 
-- [ ] **Step 6: Run frontend tests**
+- [x] **Step 6: Run frontend tests**
 
 Run:
 
@@ -2550,7 +2552,9 @@ npm run test -- src/components/chat/ToolCallCard.test.tsx src/components/chat/Me
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+Observed: PASS (`ToolCallCard.test.tsx` and `MessageBubble.test.tsx`: `14 passed`; `ChatPanel.test.tsx`: `21 passed`). Additional verification: `npm run typecheck` PASS; `npm run lint` PASS with five pre-existing warnings in unrelated components.
+
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/chat/ToolCallCard.tsx src/elspeth/web/frontend/src/components/chat/ToolCallCard.test.tsx src/elspeth/web/frontend/src/components/chat/MessageBubble.tsx src/elspeth/web/frontend/src/components/chat/MessageBubble.test.tsx src/elspeth/web/frontend/src/App.css

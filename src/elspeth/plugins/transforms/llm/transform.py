@@ -25,8 +25,8 @@ from operator import or_
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 
 import structlog
+from pydantic import BaseModel, TypeAdapter
 from pydantic import Field as PydanticField
-from pydantic import TypeAdapter
 
 from elspeth.contracts import Determinism, TransformErrorReason, TransformResult, propagate_contract
 from elspeth.contracts.audit_protocols import PluginAuditWriter
@@ -1039,7 +1039,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:373c0b203b6adb4a"
+    source_file_hash: str | None = "sha256:6b6bb595f475a9b6"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1113,6 +1113,11 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             if "provider" not in required:
                 required.append("provider")
         return schema
+
+    @classmethod
+    def discriminated_variants(cls) -> tuple[str, dict[str, type[BaseModel]]]:
+        """Expose provider variants to composer knob-schema lowering."""
+        return ("provider", {provider: config_cls for provider, (config_cls, _) in _PROVIDERS.items()})
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

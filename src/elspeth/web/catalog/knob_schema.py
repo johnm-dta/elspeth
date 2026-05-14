@@ -274,3 +274,57 @@ def lower_slot_specs_to_knob_schema(slots: Mapping[str, SlotSpec]) -> KnobSchema
             field["default"] = spec.default
         fields.append(field)
     return {"fields": fields}
+
+
+def lower_discriminated_to_knob_schema(
+    plugin_cls: type,
+    *,
+    plugin_kind: str,
+    plugin_name: str,
+    composer_tier_default: str = "common",
+) -> KnobSchema:
+    """Lower a discriminated-union plugin to a flat visible_when schema."""
+    try:
+        discriminated_variants = cast(Any, plugin_cls).discriminated_variants
+    except AttributeError as exc:
+        raise KnobSchemaLoweringError(
+            plugin_kind=plugin_kind,
+            plugin_name=plugin_name,
+            field_path="<class>",
+            constraint=("plugin lacks discriminated_variants() classmethod required by DiscriminatedPlugin protocol"),
+            remediation=("Implement discriminated_variants() returning (discriminator_field_name, {literal_value: variant_cls})."),
+        ) from exc
+    if not callable(discriminated_variants):
+        raise KnobSchemaLoweringError(
+            plugin_kind=plugin_kind,
+            plugin_name=plugin_name,
+            field_path="<class>",
+            constraint=("plugin lacks discriminated_variants() classmethod required by DiscriminatedPlugin protocol"),
+            remediation=("Implement discriminated_variants() returning (discriminator_field_name, {literal_value: variant_cls})."),
+        )
+    discriminator, variants = discriminated_variants()
+
+    fields: list[KnobField] = [
+        {
+            "name": discriminator,
+            "label": discriminator,
+            "kind": "enum",
+            "enum": list(variants.keys()),
+            "required": True,
+            "nullable": False,
+        }
+    ]
+    for variant_value, variant_cls in variants.items():
+        for fname, info in variant_cls.model_fields.items():
+            if fname == discriminator:
+                continue
+            inner_field = _lower_field(
+                fname,
+                info,
+                plugin_kind=plugin_kind,
+                plugin_name=plugin_name,
+                composer_tier_default=composer_tier_default,
+            )
+            inner_field["visible_when"] = {"field": discriminator, "equals": variant_value}
+            fields.append(inner_field)
+    return {"fields": fields}

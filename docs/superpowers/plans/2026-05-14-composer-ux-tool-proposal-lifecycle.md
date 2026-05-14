@@ -1351,7 +1351,7 @@ EOF
 - Test: `tests/unit/web/composer/test_service.py`
 - Test: `tests/unit/web/sessions/test_routes.py`
 
-- [ ] **Step 1: Add the set_pipeline fake LLM fixture**
+- [x] **Step 1: Add the set_pipeline fake LLM fixture**
 
 In `tests/unit/web/composer/conftest.py`, add:
 
@@ -1388,7 +1388,7 @@ def fake_llm_one_set_pipeline_tool_call() -> _FakeComposeLLM:
     )
 ```
 
-- [ ] **Step 2: Write the failing compose-loop test**
+- [x] **Step 2: Write the failing compose-loop test**
 
 Add a test in `tests/unit/web/composer/test_service.py` using the existing fake LLM fixtures:
 
@@ -1427,7 +1427,7 @@ async def test_explicit_approve_mutating_tool_creates_pending_proposal_without_s
     assert proposals[0].status == "pending"
 ```
 
-- [ ] **Step 3: Run the compose-loop test to verify it fails**
+- [x] **Step 3: Run the compose-loop test to verify it fails**
 
 Run:
 
@@ -1437,7 +1437,7 @@ Run:
 
 Expected: FAIL because mutating tools still execute immediately.
 
-- [ ] **Step 4: Add proposal creation to the composer service path**
+- [x] **Step 4: Add proposal creation to the composer service path**
 
 In the compose loop section that iterates `assistant_message.tool_calls`, get the wired session service once with `sessions_service = self._require_sessions_service()`, initialize `proposals_this_turn = 0` at the turn scope, and after decoding/required-path validation but before `execute_tool`, add this branch:
 
@@ -1492,7 +1492,7 @@ Make sure `is_mutation_tool` is imported from `elspeth.web.composer.tools`, `bui
 
 Use the actor convention from `ProposalEventRecord`: proposals created from the composer loop use `actor=f"composer-web:user:{user_id}"`; direct human actions use `actor=f"user:{user_id}"`; background repairs use `actor="system:<component>"`.
 
-- [ ] **Step 5: Preserve auto-commit behavior**
+- [x] **Step 5: Preserve auto-commit behavior**
 
 Add a second test beside the first:
 
@@ -1528,7 +1528,7 @@ async def test_auto_commit_mutating_tool_preserves_existing_state_mutation_path(
     assert proposals == []
 ```
 
-- [ ] **Step 6: Run compose-loop tests**
+- [x] **Step 6: Run compose-loop tests**
 
 Run:
 
@@ -1538,7 +1538,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 7: Add route regression for atomic proposal response**
+- [x] **Step 7: Add route regression for atomic proposal response**
 
 Add to `tests/unit/web/sessions/test_routes.py`:
 
@@ -1582,7 +1582,7 @@ def test_send_message_response_includes_pending_proposals_created_during_compose
 
 If `UUID` is not already imported in `test_routes.py`, add `from uuid import UUID`. This test is deliberately route-level: it proves the live backend response includes proposals created during the compose request, so Task 7's mocked frontend test cannot drift away from the server contract.
 
-- [ ] **Step 8: Run route regression**
+- [x] **Step 8: Run route regression**
 
 Run:
 
@@ -1592,7 +1592,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/elspeth/web/composer/service.py tests/unit/web/composer/conftest.py tests/unit/web/composer/test_service.py tests/unit/web/sessions/test_routes.py

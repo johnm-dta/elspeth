@@ -495,6 +495,44 @@ def test_send_message_response_includes_empty_proposals_array(tmp_path) -> None:
     assert response.json()["proposals"] == []
 
 
+def test_send_message_response_includes_pending_proposals_created_during_compose(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    mock_composer = AsyncMock()
+
+    async def _compose_with_pending_proposal(*args: object, **kwargs: object) -> ComposerResult:
+        del args
+        session_id = uuid.UUID(str(kwargs["session_id"]))
+        await service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline.",
+            rationale="Requested by the current composer turn.",
+            affects=("graph", "yaml"),
+            arguments_json={"source": {"plugin": "csv", "options": {}}},
+            arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+            base_state_id=None,
+            actor="composer-web:alice",
+        )
+        return ComposerResult(message="Needs approval.", state=_EMPTY_STATE)
+
+    mock_composer.compose = AsyncMock(side_effect=_compose_with_pending_proposal)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Atomic proposals"}).json()
+
+    response = client.post(
+        f"/api/sessions/{session['id']}/messages",
+        json={"content": "Build a csv pipeline"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["message"]["content"] == "Needs approval."
+    assert body["proposals"][0]["tool_call_id"] == "call_set_pipeline"
+    assert body["proposals"][0]["status"] == "pending"
+
+
 def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
     """Create audit records that route three rows to the virtual discard sink."""
     (settings.data_dir / "runs").mkdir(parents=True, exist_ok=True)

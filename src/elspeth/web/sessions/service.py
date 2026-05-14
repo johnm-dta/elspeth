@@ -30,7 +30,9 @@ from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow,
 from elspeth.web.sessions.models import (
     audit_access_log_table,
     chat_messages_table,
+    composition_proposals_table,
     composition_states_table,
+    proposal_events_table,
     runs_table,
     sessions_table,
 )
@@ -45,10 +47,16 @@ from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
     ChatMessageRole,
     ChatMessageWriterPrincipal,
+    ComposerDensityDefault,
+    ComposerSessionPreferencesRecord,
+    ComposerTrustMode,
+    CompositionProposalRecord,
     CompositionStateData,
     CompositionStateProvenance,
     CompositionStateRecord,
     IllegalRunTransitionError,
+    ProposalEventRecord,
+    ProposalLifecycleStatus,
     RunAlreadyActiveError,
     RunRecord,
     SessionRecord,
@@ -313,6 +321,38 @@ def _normalize_pre_adr019_session_counters(
     ):
         return rows_succeeded, rows_failed
     return rows_succeeded + rows_routed_success, rows_failed + rows_routed_failure + rows_quarantined
+
+
+def _proposal_record_from_row(row: Any) -> CompositionProposalRecord:
+    return CompositionProposalRecord(
+        id=UUID(row.id),
+        session_id=UUID(row.session_id),
+        tool_call_id=row.tool_call_id,
+        tool_name=row.tool_name,
+        status=row.status,
+        summary=row.summary,
+        rationale=row.rationale,
+        affects=tuple(row.affects),
+        arguments_json=row.arguments_json,
+        arguments_redacted_json=row.arguments_redacted_json,
+        base_state_id=UUID(row.base_state_id) if row.base_state_id else None,
+        committed_state_id=UUID(row.committed_state_id) if row.committed_state_id else None,
+        audit_event_id=UUID(row.audit_event_id) if row.audit_event_id else None,
+        created_at=SessionServiceImpl._ensure_utc(row.created_at),
+        updated_at=SessionServiceImpl._ensure_utc(row.updated_at),
+    )
+
+
+def _proposal_event_record_from_row(row: Any) -> ProposalEventRecord:
+    return ProposalEventRecord(
+        id=UUID(row.id),
+        session_id=UUID(row.session_id),
+        proposal_id=UUID(row.proposal_id) if row.proposal_id else None,
+        event_type=row.event_type,
+        actor=row.actor,
+        payload=row.payload,
+        created_at=SessionServiceImpl._ensure_utc(row.created_at),
+    )
 
 
 class SessionServiceImpl:
@@ -1202,6 +1242,216 @@ class SessionServiceImpl:
                     quarantine_root.rmdir()
 
         await self._run_sync(_sync)
+
+    async def get_composer_preferences(self, session_id: UUID) -> ComposerSessionPreferencesRecord:
+        """Fetch composer trust/scaffolding preferences for a session."""
+
+        def _sync() -> ComposerSessionPreferencesRecord:
+            with self._engine.begin() as conn:
+                row = conn.execute(select(sessions_table).where(sessions_table.c.id == str(session_id))).one()
+                return ComposerSessionPreferencesRecord(
+                    session_id=UUID(row.id),
+                    trust_mode=row.trust_mode,
+                    density_default=row.density_default,
+                    updated_at=self._ensure_utc(row.updated_at),
+                )
+
+        return cast(ComposerSessionPreferencesRecord, await self._run_sync(_sync))
+
+    async def update_composer_preferences(
+        self,
+        session_id: UUID,
+        *,
+        trust_mode: ComposerTrustMode,
+        density_default: ComposerDensityDefault,
+        actor: str,
+    ) -> ComposerSessionPreferencesRecord:
+        """Update composer preferences and append the audit event first."""
+        now = self._now()
+        sid = str(session_id)
+
+        def _sync() -> ComposerSessionPreferencesRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=str(uuid.uuid4()),
+                        session_id=sid,
+                        proposal_id=None,
+                        event_type="trust_mode.changed",
+                        actor=actor,
+                        payload={
+                            "trust_mode": trust_mode,
+                            "density_default": density_default,
+                        },
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    update(sessions_table)
+                    .where(sessions_table.c.id == sid)
+                    .values(
+                        trust_mode=trust_mode,
+                        density_default=density_default,
+                        updated_at=now,
+                    )
+                )
+                row = conn.execute(select(sessions_table).where(sessions_table.c.id == sid)).one()
+                return ComposerSessionPreferencesRecord(
+                    session_id=UUID(row.id),
+                    trust_mode=row.trust_mode,
+                    density_default=row.density_default,
+                    updated_at=self._ensure_utc(row.updated_at),
+                )
+
+        return cast(ComposerSessionPreferencesRecord, await self._run_sync(_sync))
+
+    async def create_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        tool_call_id: str,
+        tool_name: str,
+        summary: str,
+        rationale: str,
+        affects: Sequence[str],
+        arguments_json: Mapping[str, Any],
+        arguments_redacted_json: Mapping[str, Any],
+        base_state_id: UUID | None,
+        actor: str,
+    ) -> CompositionProposalRecord:
+        """Create a pending composer proposal and its forward audit event."""
+        now = self._now()
+        sid = str(session_id)
+        proposal_id = str(uuid.uuid4())
+        event_id = str(uuid.uuid4())
+
+        def _sync() -> CompositionProposalRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        proposal_id=proposal_id,
+                        event_type="proposal.created",
+                        actor=actor,
+                        payload={
+                            "tool_call_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "status": "pending",
+                        },
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    insert(composition_proposals_table).values(
+                        id=proposal_id,
+                        session_id=sid,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        status="pending",
+                        summary=summary,
+                        rationale=rationale,
+                        affects=list(affects),
+                        arguments_json=deep_thaw(arguments_json),
+                        arguments_redacted_json=deep_thaw(arguments_redacted_json),
+                        base_state_id=str(base_state_id) if base_state_id else None,
+                        committed_state_id=None,
+                        audit_event_id=event_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                row = conn.execute(select(composition_proposals_table).where(composition_proposals_table.c.id == proposal_id)).one()
+                return _proposal_record_from_row(row)
+
+        return cast(CompositionProposalRecord, await self._run_sync(_sync))
+
+    async def list_composition_proposals(
+        self,
+        session_id: UUID,
+        *,
+        status: ProposalLifecycleStatus | None = None,
+    ) -> list[CompositionProposalRecord]:
+        """List composer proposals for a session in creation order."""
+        sid = str(session_id)
+
+        def _sync() -> list[CompositionProposalRecord]:
+            stmt = select(composition_proposals_table).where(composition_proposals_table.c.session_id == sid)
+            if status is not None:
+                stmt = stmt.where(composition_proposals_table.c.status == status)
+            stmt = stmt.order_by(composition_proposals_table.c.created_at)
+            with self._engine.begin() as conn:
+                rows = conn.execute(stmt).fetchall()
+                return [_proposal_record_from_row(row) for row in rows]
+
+        return cast(list[CompositionProposalRecord], await self._run_sync(_sync))
+
+    async def reject_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        actor: str,
+    ) -> CompositionProposalRecord:
+        """Reject a pending proposal by appending an event, then updating status."""
+        now = self._now()
+        sid = str(session_id)
+        pid = str(proposal_id)
+
+        def _sync() -> CompositionProposalRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                row = conn.execute(
+                    select(composition_proposals_table)
+                    .where(composition_proposals_table.c.id == pid)
+                    .where(composition_proposals_table.c.session_id == sid)
+                ).one_or_none()
+                if row is None:
+                    raise KeyError(pid)
+                if row.status != "pending":
+                    raise ValueError(f"Proposal {pid} must be pending to reject; got {row.status!r}")
+
+                conn.execute(
+                    insert(proposal_events_table).values(
+                        id=str(uuid.uuid4()),
+                        session_id=sid,
+                        proposal_id=pid,
+                        event_type="proposal.rejected",
+                        actor=actor,
+                        payload={"status": "rejected"},
+                        created_at=now,
+                    )
+                )
+                conn.execute(
+                    update(composition_proposals_table)
+                    .where(composition_proposals_table.c.id == pid)
+                    .where(composition_proposals_table.c.session_id == sid)
+                    .values(
+                        status="rejected",
+                        updated_at=now,
+                    )
+                )
+                updated_row = conn.execute(select(composition_proposals_table).where(composition_proposals_table.c.id == pid)).one()
+                return _proposal_record_from_row(updated_row)
+
+        return cast(CompositionProposalRecord, await self._run_sync(_sync))
+
+    async def list_proposal_events(
+        self,
+        session_id: UUID,
+    ) -> list[ProposalEventRecord]:
+        """List immutable composer proposal lifecycle events for a session."""
+        sid = str(session_id)
+
+        def _sync() -> list[ProposalEventRecord]:
+            with self._engine.begin() as conn:
+                rows = conn.execute(
+                    select(proposal_events_table)
+                    .where(proposal_events_table.c.session_id == sid)
+                    .order_by(proposal_events_table.c.created_at, proposal_events_table.c.id)
+                ).fetchall()
+                return [_proposal_event_record_from_row(row) for row in rows]
+
+        return cast(list[ProposalEventRecord], await self._run_sync(_sync))
 
     async def add_message(
         self,

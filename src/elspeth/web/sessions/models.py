@@ -319,7 +319,12 @@ proposal_events_table = Table(
     Column(
         "proposal_id",
         String,
-        ForeignKey("composition_proposals.id", ondelete="CASCADE"),
+        ForeignKey(
+            "composition_proposals.id",
+            ondelete="CASCADE",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
         nullable=True,
     ),
     Column("event_type", String, nullable=False),

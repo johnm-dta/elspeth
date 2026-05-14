@@ -4,8 +4,10 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+import structlog
 from sqlalchemy import insert, inspect, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import StaticPool
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
@@ -14,13 +16,28 @@ from elspeth.web.sessions.models import (
     sessions_table,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
 @pytest.fixture
 def engine():
-    eng = create_session_engine("sqlite:///:memory:")
+    eng = create_session_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     initialize_session_schema(eng)
     return eng
+
+
+@pytest.fixture
+def service(engine):
+    return SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
 
 
 def _insert_session(conn, session_id: str) -> None:
@@ -115,3 +132,97 @@ def test_default_session_preferences_are_inserted_by_database(engine) -> None:
 
     assert row.trust_mode == "explicit_approve"
     assert row.density_default == "high"
+
+
+@pytest.mark.asyncio
+async def test_get_composer_preferences_returns_defaults(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+
+    prefs = await service.get_composer_preferences(session_id)
+
+    assert str(prefs.session_id) == str(session_id)
+    assert prefs.trust_mode == "explicit_approve"
+    assert prefs.density_default == "high"
+
+
+@pytest.mark.asyncio
+async def test_update_trust_mode_writes_audit_event_before_return(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+
+    prefs = await service.update_composer_preferences(
+        session_id,
+        trust_mode="auto_commit",
+        density_default="medium",
+        actor="user:alice",
+    )
+
+    assert prefs.trust_mode == "auto_commit"
+    assert prefs.density_default == "medium"
+    events = await service.list_proposal_events(session_id)
+    assert [event.event_type for event in events] == ["trust_mode.changed"]
+    assert events[0].payload == {
+        "trust_mode": "auto_commit",
+        "density_default": "medium",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_composition_proposal_writes_created_event(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+
+    proposal = await service.create_composition_proposal(
+        session_id=session_id,
+        tool_call_id="call_set_pipeline",
+        tool_name="set_pipeline",
+        summary="Replace the pipeline with one source and one sink.",
+        rationale="Requested by the user.",
+        affects=("graph", "validation"),
+        arguments_json={"source": {"plugin": "csv", "options": {}}},
+        arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+        base_state_id=None,
+        actor="composer-web:user-alice",
+    )
+
+    assert proposal.status == "pending"
+    assert proposal.affects == ("graph", "validation")
+    events = await service.list_proposal_events(session_id)
+    assert [event.event_type for event in events] == ["proposal.created"]
+    assert str(events[0].proposal_id) == str(proposal.id)
+
+
+@pytest.mark.asyncio
+async def test_reject_composition_proposal_is_forward_only(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    proposal = await service.create_composition_proposal(
+        session_id=session_id,
+        tool_call_id="call_set_pipeline",
+        tool_name="set_pipeline",
+        summary="Replace the pipeline.",
+        rationale="Requested by the user.",
+        affects=("graph",),
+        arguments_json={"source": {"plugin": "csv", "options": {}}},
+        arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+        base_state_id=None,
+        actor="composer-web:user-alice",
+    )
+
+    rejected = await service.reject_composition_proposal(
+        session_id=session_id,
+        proposal_id=proposal.id,
+        actor="user:alice",
+    )
+
+    assert rejected.status == "rejected"
+    events = await service.list_proposal_events(session_id)
+    assert [event.event_type for event in events] == [
+        "proposal.created",
+        "proposal.rejected",
+    ]

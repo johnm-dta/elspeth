@@ -624,6 +624,55 @@ class SessionServiceProtocol(Protocol):
 
     async def archive_session(self, session_id: UUID) -> None: ...
 
+    async def get_composer_preferences(
+        self,
+        session_id: UUID,
+    ) -> ComposerSessionPreferencesRecord: ...
+
+    async def update_composer_preferences(
+        self,
+        session_id: UUID,
+        *,
+        trust_mode: ComposerTrustMode,
+        density_default: ComposerDensityDefault,
+        actor: str,
+    ) -> ComposerSessionPreferencesRecord: ...
+
+    async def create_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        tool_call_id: str,
+        tool_name: str,
+        summary: str,
+        rationale: str,
+        affects: Sequence[str],
+        arguments_json: Mapping[str, Any],
+        arguments_redacted_json: Mapping[str, Any],
+        base_state_id: UUID | None,
+        actor: str,
+    ) -> CompositionProposalRecord: ...
+
+    async def list_composition_proposals(
+        self,
+        session_id: UUID,
+        *,
+        status: ProposalLifecycleStatus | None = None,
+    ) -> list[CompositionProposalRecord]: ...
+
+    async def reject_composition_proposal(
+        self,
+        *,
+        session_id: UUID,
+        proposal_id: UUID,
+        actor: str,
+    ) -> CompositionProposalRecord: ...
+
+    async def list_proposal_events(
+        self,
+        session_id: UUID,
+    ) -> list[ProposalEventRecord]: ...
+
     async def add_message(
         self,
         session_id: UUID,

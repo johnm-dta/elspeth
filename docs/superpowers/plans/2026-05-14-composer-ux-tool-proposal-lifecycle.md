@@ -554,7 +554,7 @@ EOF
 - Modify: `src/elspeth/web/sessions/protocol.py`
 - Test: `tests/unit/web/sessions/test_composer_proposals.py`
 
-- [ ] **Step 1: Add failing service tests**
+- [x] **Step 1: Add failing service tests**
 
 Append to `tests/unit/web/sessions/test_composer_proposals.py`:
 
@@ -657,7 +657,9 @@ async def test_reject_composition_proposal_is_forward_only(service) -> None:
     ]
 ```
 
-- [ ] **Step 2: Run service tests to verify they fail**
+- [x] **Step 2: Run service tests to verify they fail**
+
+Task result: after correcting the live `SessionServiceImpl` fixture shape, `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py -q` failed with missing `get_composer_preferences`, `update_composer_preferences`, and `create_composition_proposal` methods.
 
 Run:
 
@@ -667,7 +669,7 @@ Run:
 
 Expected: FAIL with missing service methods.
 
-- [ ] **Step 3: Extend `SessionServiceProtocol`**
+- [x] **Step 3: Extend `SessionServiceProtocol`**
 
 In `src/elspeth/web/sessions/protocol.py`, add these methods to `SessionServiceProtocol`:
 
@@ -722,7 +724,7 @@ In `src/elspeth/web/sessions/protocol.py`, add these methods to `SessionServiceP
     ) -> list[ProposalEventRecord]: ...
 ```
 
-- [ ] **Step 4: Implement service helpers**
+- [x] **Step 4: Implement service helpers**
 
 In `src/elspeth/web/sessions/service.py`, import the new tables and protocol records, then add helper row converters:
 
@@ -825,7 +827,9 @@ Add the service methods to `SessionServiceImpl`:
 
 Implement `create_composition_proposal`, `list_composition_proposals`, `reject_composition_proposal`, and `list_proposal_events` with the same `_run_sync` pattern. In `create_composition_proposal`, insert the `proposal_events` row before the `composition_proposals` row in the same transaction, set `status="pending"`, and store the created event id in `audit_event_id`. In `reject_composition_proposal`, require `status == "pending"`, insert `proposal.rejected` before updating the proposal row to `rejected`, and return the updated record.
 
-- [ ] **Step 5: Run the service tests**
+- [x] **Step 5: Run the service tests**
+
+Task result: `.venv/bin/pytest tests/unit/web/sessions/test_composer_proposals.py -q` passed with `9 passed`; schema follow-up `.venv/bin/pytest tests/unit/web/sessions/test_schema.py tests/unit/web/sessions/test_composer_proposals.py -q` passed with `18 passed`.
 
 Run:
 
@@ -835,7 +839,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/sessions/protocol.py src/elspeth/web/sessions/service.py tests/unit/web/sessions/test_composer_proposals.py

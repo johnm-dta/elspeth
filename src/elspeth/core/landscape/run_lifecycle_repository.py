@@ -58,6 +58,14 @@ _TERMINAL_RUN_STATUSES = frozenset(
         RunStatus.INTERRUPTED,
     }
 )
+_IMMUTABLE_SUCCESS_RUN_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.COMPLETED_WITH_FAILURES,
+        RunStatus.EMPTY,
+    }
+)
+_IMMUTABLE_SUCCESS_RUN_STATUS_VALUES = tuple(status.value for status in _IMMUTABLE_SUCCESS_RUN_STATUSES)
 
 _AUTH_PROVIDER_TYPES = frozenset({"local", "oidc", "entra"})
 
@@ -483,9 +491,10 @@ class RunLifecycleRepository:
             record is final. FAILED and INTERRUPTED runs CAN be transitioned back
             to RUNNING during resume (orchestrator recovery path).
         """
-        if status == RunStatus.COMPLETED:
+        if status in _IMMUTABLE_SUCCESS_RUN_STATUSES:
             raise AuditIntegrityError(
-                "update_run_status() cannot set status to COMPLETED. Use complete_run() so completed_at is recorded in the audit trail."
+                f"update_run_status() cannot set status to {status.value!r}. "
+                "Use complete_run() so completed_at is recorded in the audit trail."
             )
 
         with self._db.connection() as conn:
@@ -498,15 +507,16 @@ class RunLifecycleRepository:
             result = conn.execute(
                 runs_table.update()
                 .where(runs_table.c.run_id == run_id)
-                .where(runs_table.c.status != RunStatus.COMPLETED.value)
+                .where(runs_table.c.status.notin_(_IMMUTABLE_SUCCESS_RUN_STATUS_VALUES))
                 .values(**values)
             )
             if result.rowcount == 0:
                 existing = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == run_id)).fetchone()
-                if existing is not None and existing.status == RunStatus.COMPLETED.value:
+                if existing is not None and existing.status in _IMMUTABLE_SUCCESS_RUN_STATUS_VALUES:
+                    existing_status = RunStatus(existing.status)
                     raise AuditIntegrityError(
-                        f"Cannot transition run {run_id} from COMPLETED to {status.value!r}. "
-                        f"Completed runs are immutable. "
+                        f"Cannot transition run {run_id} from {existing_status.name} ({existing_status.value!r}) to {status.value!r}. "
+                        f"Successful terminal runs are immutable. "
                         f"FAILED/INTERRUPTED runs can be resumed via update_run_status."
                     )
                 raise AuditIntegrityError(f"Cannot update run status to {status.value!r}: run {run_id} not found")

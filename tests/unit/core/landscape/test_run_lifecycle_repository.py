@@ -900,6 +900,30 @@ class TestUpdateRunStatus:
         with pytest.raises(AuditIntegrityError, match="complete_run"):
             repo.update_run_status("run-1", RunStatus.COMPLETED)
 
+    @pytest.mark.parametrize("status", [RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY])
+    def test_success_terminal_status_rejected(self, status: RunStatus) -> None:
+        """Successful terminal statuses must go through complete_run()."""
+        _, repo = _make_repo()
+        with pytest.raises(AuditIntegrityError, match="complete_run"):
+            repo.update_run_status("run-1", status)
+
+    @pytest.mark.parametrize("status", [RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY])
+    def test_success_terminal_to_running_rejected(self, status: RunStatus) -> None:
+        """Successful terminal runs are immutable — cannot be reopened."""
+        _, repo = _make_repo()
+        repo.complete_run("run-1", status)
+        completed = repo.get_run("run-1")
+        assert completed is not None
+        assert completed.completed_at is not None
+
+        with pytest.raises(AuditIntegrityError, match=status.value):
+            repo.update_run_status("run-1", RunStatus.RUNNING)
+
+        reread = repo.get_run("run-1")
+        assert reread is not None
+        assert reread.status == status
+        assert reread.completed_at == completed.completed_at
+
     def test_failed_to_running_allowed_for_resume(self) -> None:
         """FAILED→RUNNING is the resume path — must be allowed."""
         _, repo = _make_repo()

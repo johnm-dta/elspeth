@@ -114,6 +114,7 @@ from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
+from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
@@ -1892,13 +1893,21 @@ async def _handle_runtime_preflight_failure(
 
 
 def _initial_composition_state_with_guided_session() -> CompositionState:
-    """Construct a fresh CompositionState with a guided-mode session attached.
+    """Construct a fresh CompositionState with a latent guided-mode session attached.
 
-    Per spec §5.2 / errata C7: new sessions default to guided. Every lazy-
-    create branch in this module must use this helper rather than building
-    CompositionState directly, so the default-guided invariant holds
-    uniformly across endpoints (send_message, recompose, the future
-    guided/respond endpoint added in Task 3.5).
+    Originally added under spec §5.2 / errata C7 ("new sessions default to
+    guided"), and still pre-attaches :func:`GuidedSession.initial` so every
+    server-side lazy-create branch (send_message, recompose, /guided
+    endpoints) reaches a uniformly-shaped state.
+
+    The user-visible default is now **freeform**: the frontend stopped
+    auto-fetching ``GET /guided`` on session selection / creation, so the
+    latent guided session is invisible until the operator clicks "Switch
+    to guided" in the freeform chat header. That click hits ``GET /guided``,
+    which surfaces (and persists, on first visit) the same wizard state
+    this helper installs in-memory. The contract is unchanged — only the
+    activation gesture moved client-side. The spec doc has not been
+    re-issued; treat the title here as descriptive, not authoritative.
     """
     return CompositionState(
         source=None,
@@ -3538,6 +3547,76 @@ def create_session_router() -> APIRouter:
             user_id=str(user.user_id),
         )
         if result.updated_state.version == current_state.version:
+            # The tool ran but did not advance composition state. The route
+            # used to return a single uninformative 409 here regardless of
+            # whether the tool succeeded with no-op or failed semantically.
+            # Distinguish the cases so the operator sees the actual reason
+            # — a generic "did not change composition state" leaves a user
+            # with no path forward (session f613306b-… 2026-05-14: the LLM
+            # emitted a set_pipeline with no `options` blocks on any node;
+            # the validator rejected it; the 409 said only that state
+            # didn't change, marking the proposal as "stale" in the
+            # frontend without revealing the validation errors that were
+            # the actual blocker).
+            if not result.success:
+                error_summary = (
+                    result.data.get(_DATA_ERROR_KEY)
+                    if isinstance(result.data, Mapping)
+                    else None
+                ) or "Composer proposal failed validation."
+                validation_errors_payload: list[dict[str, Any]] = []
+                if result.validation is not None:
+                    for entry in result.validation.errors:
+                        validation_errors_payload.append(
+                            {
+                                "component": entry.component,
+                                "message": entry.message,
+                            }
+                        )
+                # Auto-reject the proposal. It is structurally unacceptable
+                # in its current form — the LLM emitted invalid arguments
+                # that the runtime validator rejects, and the proposal
+                # cannot become acceptable without the composer producing
+                # a fresh, corrected proposal. Leaving it pending causes
+                # the "refresh asks me to reapprove" friction reported by
+                # the operator on 2026-05-14: in-memory frontend stale
+                # marking is lost on page reload, so the broken proposal
+                # re-surfaces in the pending banner. Marking as rejected
+                # server-side keeps the audit trail honest (the user
+                # clicked Accept; the server recorded why it could not
+                # apply; the proposal is terminal). Audit attribution
+                # records the system as the rejecting actor so the trail
+                # distinguishes operator-driven rejection from this
+                # automatic-on-validation-failure path.
+                try:
+                    await service.reject_composition_proposal(
+                        session_id=session.id,
+                        proposal_id=proposal.id,
+                        actor=f"system:auto_reject_validation_failed:user:{user.user_id}",
+                    )
+                except (KeyError, ValueError):
+                    # The proposal might have been concurrently rejected or
+                    # otherwise transitioned; ignore — the validation-failure
+                    # response is still the correct surface for the operator.
+                    pass
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "detail": (
+                            f"The composer's proposed change could not be applied: {error_summary} "
+                            "The proposal has been automatically rejected. "
+                            "Ask the composer to revise and resubmit."
+                        ),
+                        "error_type": "proposal_validation_failed",
+                        "tool_name": proposal.tool_name,
+                        "validation_errors": validation_errors_payload,
+                    },
+                )
+            # Tool succeeded but produced no state change. This is rare
+            # post the blob-store-only-mutation interception fix
+            # (web/composer/service.py — create_blob/update_blob/delete_blob
+            # no longer reach this branch as proposals), but keep the
+            # surface in case a future tool ends up here.
             raise HTTPException(
                 status_code=409,
                 detail="Accepted proposal did not change composition state.",
@@ -3743,6 +3822,11 @@ def create_session_router() -> APIRouter:
 
             _COMPOSER_REQUESTS_INFLIGHT.add(1, {"endpoint": "send_message"})
             terminal_status: _ComposerRequestTerminalStatus = "failed"
+            # Initialized here so the finally block can reference it even
+            # if an exception fires before the first-message branch is
+            # reached. Assigned below only when first-message conditions
+            # hold.
+            auto_title_task: asyncio.Task[None] | None = None
             try:
                 # 3. Pre-fetch chat history as plain dicts (seam contract B)
                 # Pass limit=None to fetch the full conversation — the default
@@ -3759,6 +3843,31 @@ def create_session_router() -> APIRouter:
                         "interleaved session history."
                     )
                 chat_messages = _composer_chat_history(records[:-1])
+
+                # 3b. First-message auto-titling.
+                #
+                # When the just-persisted user message is the only message
+                # in the session AND the title is still the create-time
+                # default ("New session"), spawn a background task that
+                # asks the composer model for a 3-6 word session title
+                # and writes it via update_session_title. The task is
+                # awaited (with timeout) in the finally block below so
+                # the title is in the DB by the time the route returns —
+                # the frontend's post-send loadSessions() picks it up.
+                #
+                # The "default title" guard is a demo guard, not a
+                # contract: a user who manually rename-then-sends still
+                # gets re-titled. Tighten to a separate auto_titled_at
+                # column if this becomes annoying.
+                if len(records) == 1 and session.title == "New session":
+                    auto_title_task = asyncio.create_task(
+                        maybe_auto_title_session(
+                            service=service,
+                            session_id=session.id,
+                            user_message=body.content,
+                            model=settings.composer_model,
+                        )
+                    )
 
                 # 4. Run the LLM composition loop
                 composer: ComposerService = request.app.state.composer_service
@@ -4178,6 +4287,7 @@ def create_session_router() -> APIRouter:
                         provenance="session_seed",
                     )
                     post_compose_state_id = _transition_record.id
+                    state_response = _state_response(_transition_record)
 
                 # 6. Persist assistant message with post-compose provenance
                 assistant_msg = await service.add_message(
@@ -4305,6 +4415,16 @@ def create_session_router() -> APIRouter:
             finally:
                 _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "send_message"})
                 _record_composer_request_terminal(terminal_status, endpoint="send_message")
+                # Bounded await of the auto-title task so its result is in
+                # the DB before the route returns and the strong reference
+                # outlives the event-loop's weak-ref GC window. The task
+                # swallows its own exceptions; the wait_for timeout is
+                # belt-and-braces against a pathological provider hang.
+                if auto_title_task is not None:
+                    try:
+                        await asyncio.wait_for(auto_title_task, timeout=2.0)
+                    except (TimeoutError, asyncio.TimeoutError):
+                        auto_title_task.cancel()
 
     @router.post(
         "/{session_id}/recompose",
@@ -4726,6 +4846,7 @@ def create_session_router() -> APIRouter:
                         provenance="session_seed",
                     )
                     post_compose_state_id = _transition_record.id
+                    state_response = _state_response(_transition_record)
 
                 # Persist assistant message
                 assistant_msg = await service.add_message(
@@ -5432,6 +5553,42 @@ def create_session_router() -> APIRouter:
             return None
         return None
 
+    def _append_server_turn_record(
+        guided: GuidedSession,
+        *,
+        current_step: GuidedStep,
+        turn: Mapping[str, Any],
+    ) -> tuple[GuidedSession, TurnRecord, TurnType, str]:
+        """Append the server-emitted turn record for a guided step.
+
+        The caller decides whether to persist the returned guided session. This
+        lets the fresh-session GET /guided path return a deterministic initial
+        turn without allocating an empty composition-state version.
+        """
+        turn_type = TurnType(turn["type"])
+        payload_hash = stable_hash(turn["payload"])
+        new_record = TurnRecord(
+            step=current_step,
+            turn_type=turn_type,
+            payload_hash=payload_hash,
+            response_hash=None,
+            emitter="server",
+        )
+
+        if (
+            current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
+            and guided.step_1_result is not None
+            and guided.step_2_result is not None
+        ):
+            staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
+        else:
+            staged_offer = None
+
+        new_guided = _replace(guided, history=(*guided.history, new_record))
+        if staged_offer is not None:
+            new_guided = _replace(new_guided, step_2_5_recipe_offer=staged_offer)
+        return new_guided, new_record, turn_type, payload_hash
+
     @router.get("/{session_id}/guided", response_model=GetGuidedResponse)
     async def get_guided(
         session_id: UUID,
@@ -5440,14 +5597,16 @@ def create_session_router() -> APIRouter:
     ) -> GetGuidedResponse:
         """Return the current guided-mode state for a session.
 
-        **Mutating on first visit:** if the current step has no emitted
-        TurnRecord in the guided session history, a turn is built and
-        persisted.  Subsequent fetches are idempotent — the existing
-        TurnRecord's payload_hash is returned verbatim.
+        Fresh sessions are non-mutating on first visit: if there is no
+        existing CompositionState, the initial GuidedSession and first turn are
+        built in memory and returned with ``composition_state=None``. This keeps
+        the version history from starting with an empty graph solely because
+        the frontend auto-loaded guided mode.
 
-        If the session has no existing CompositionState, one is created
-        with ``GuidedSession.initial()`` attached (spec §5.2 default-guided
-        invariant).
+        For sessions that already have a persisted CompositionState, if the
+        current step has no emitted TurnRecord in the guided session history, a
+        turn is built and persisted. Subsequent fetches are idempotent — the
+        existing TurnRecord's payload_hash is returned verbatim.
 
         Returns 404 if the session does not exist or does not belong to
         the requesting user.
@@ -5503,7 +5662,7 @@ def create_session_router() -> APIRouter:
                 turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
                 payload_hash: str | None = stable_hash(turn["payload"]) if turn is not None else None
 
-                if existing_record_for_step is None and turn is not None:
+                if existing_record_for_step is None and turn is not None and state_record is not None:
                     # First fetch for this step AND a turn exists: record TurnRecord,
                     # persist, emit audit.  When turn is None (terminal state, STEP_3,
                     # or no-recipe STEP_2_5 path) there is no turn to record.
@@ -5520,32 +5679,11 @@ def create_session_router() -> APIRouter:
                         raise InvariantError(
                             "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
                         )
-                    new_record = TurnRecord(
-                        step=current_step,
-                        turn_type=turn_type,
-                        payload_hash=payload_hash,
-                        response_hash=None,
-                        emitter="server",
+                    new_guided, _new_record, turn_type, payload_hash = _append_server_turn_record(
+                        guided,
+                        current_step=current_step,
+                        turn=turn,
                     )
-                    from dataclasses import replace as _replace
-
-                    # If this is the STEP_2_5_RECIPE_MATCH step, populate
-                    # step_2_5_recipe_offer so the POST /respond accept branch
-                    # can verify the client-supplied recipe_name against the offer.
-                    # This covers the GET-before-POST flow (user reloads the page
-                    # while the session is at the recipe-offer step).
-                    if (
-                        current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
-                        and guided.step_1_result is not None
-                        and guided.step_2_result is not None
-                    ):
-                        staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
-                    else:
-                        staged_offer = None
-
-                    new_guided = _replace(guided, history=(*guided.history, new_record))
-                    if staged_offer is not None:
-                        new_guided = _replace(new_guided, step_2_5_recipe_offer=staged_offer)
                     new_state = _replace(state, guided_session=new_guided)
 
                     # Persist state with updated guided_session in composer_meta.
@@ -6039,7 +6177,7 @@ def create_session_router() -> APIRouter:
                         reason=TerminalReason.USER_PRESSED_EXIT,
                         pipeline_yaml=None,
                     )
-                    new_guided = _replace(guided, terminal=new_terminal)
+                    new_guided = _replace(guided, terminal=new_terminal, transition_consumed=True)
 
                     emit_dropped_to_freeform(
                         recorder,
@@ -6138,12 +6276,32 @@ def create_session_router() -> APIRouter:
                     None,
                 )
                 if existing_record is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=("No turn has been emitted for the current step. Fetch GET /api/sessions/{id}/guided first."),
-                    )
+                    from dataclasses import replace as _replace
 
-                current_turn_type = existing_record.turn_type
+                    turn = _build_get_guided_turn(state, guided, catalog=catalog)
+                    if turn is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=("No turn has been emitted for the current step. Fetch GET /api/sessions/{id}/guided first."),
+                        )
+                    guided, existing_record, current_turn_type, emitted_payload_hash = _append_server_turn_record(
+                        guided,
+                        current_step=current_step,
+                        turn=turn,
+                    )
+                    state = _replace(state, guided_session=guided)
+                    emit_turn_emitted(
+                        recorder,
+                        step=current_step,
+                        turn_type=current_turn_type,
+                        payload_hash=emitted_payload_hash,
+                        payload_payload_id="",
+                        emitter="server",
+                        composition_version=state.version,
+                        actor=user.user_id,
+                    )
+                else:
+                    current_turn_type = existing_record.turn_type
 
                 # --- Wire-boundary validation (Codex #7, #12) -------------------
                 # ``control_signal`` was parsed earlier (above the
@@ -6277,6 +6435,13 @@ def create_session_router() -> APIRouter:
 
                 guided = new_guided
                 terminal = terminal_from_advance
+                if (
+                    terminal is not None
+                    and terminal.kind is TerminalKind.EXITED_TO_FREEFORM
+                    and terminal.reason is TerminalReason.USER_PRESSED_EXIT
+                ):
+                    guided = _replace(guided, transition_consumed=True)
+                    state = _replace(state, guided_session=guided)
 
                 # Run side-effect dispatcher if the session is not yet terminal.
                 # The dispatcher calls step handlers (handle_step_1_source,

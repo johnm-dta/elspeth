@@ -487,6 +487,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
       // Fire-and-forget: refresh blob list in case the LLM created files
       useBlobStore.getState().loadBlobs(activeSessionId);
+      // Fire-and-forget: refresh the session list. The backend send_message
+      // route may have auto-titled this session (first-message-of-session
+      // generates a 3-6 word title via a side LLM call and writes it
+      // before send_message returns). Refreshing keeps the sidebar title
+      // in step with the DB without a manual reload.
+      void get().loadSessions();
     } catch (err) {
       let errorMessage: string;
       // Client-side abort (the useComposer COMPOSE_TIMEOUT_MS guard or any

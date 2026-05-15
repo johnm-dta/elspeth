@@ -156,22 +156,11 @@ allow_hits:
   safety: Crashes immediately with PluginContractViolation naming the failsink and observed artifact type;
     no silent coercion
   expires: null
-- key: engine/processor.py:TC:_module_:fp=873d5f90adf363e0
-  owner: architecture
-  reason: "TYPE_CHECKING import of TelemetryManager \u2014 RowProcessor emits telemetry events"
-  safety: "No runtime coupling \u2014 annotation-only import behind TYPE_CHECKING guard"
-  expires: null
 - key: engine/commencement.py:R5:evaluate_commencement_gates:fp=18ca009ccd49b5e0
   owner: architecture
   reason: "Offensive isinstance check \u2014 gate results must be bool before recording in audit trail.\
     \ Non-boolean results from expression evaluation are a config bug, not data to coerce."
   safety: Crashes with CommencementGateFailedError explaining the type mismatch; no coercion
-  expires: null
-- key: engine/orchestrator/core.py:TC:_module_:fp=aea9837d6932e65d
-  owner: architecture
-  reason: "TYPE_CHECKING import of TelemetryManager \u2014 Orchestrator accepts telemetry manager for\
-    \ span emission"
-  safety: "No runtime coupling \u2014 annotation-only import behind TYPE_CHECKING guard"
   expires: null
 - key: engine/executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=86d1554e15f3f1f6
   owner: architecture

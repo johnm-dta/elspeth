@@ -46,6 +46,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 from evals.lib.composer_rgr_score import score
 from sqlalchemy.pool import StaticPool
 
@@ -57,6 +58,8 @@ from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SUITE = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "convergence-suite"
@@ -133,13 +136,19 @@ def _make_settings(data_dir: Path) -> WebSettings:
     )
 
 
-def _session_engine() -> tuple[Any, str]:
+def _session_engine() -> tuple[Any, str, SessionServiceImpl]:
     engine = create_session_engine(
         "sqlite:///:memory:",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
     initialize_session_schema(engine)
+    sessions_service = SessionServiceImpl(
+        engine,
+        data_dir=None,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.convergence-scenarios"),
+    )
     session_id = str(uuid4())
     now = datetime.now(UTC)
     with engine.begin() as conn:
@@ -148,12 +157,13 @@ def _session_engine() -> tuple[Any, str]:
                 id=session_id,
                 user_id="test-user",
                 auth_provider_type="local",
+                trust_mode="auto_commit",
                 title="Convergence Test",
                 created_at=now,
                 updated_at=now,
             )
         )
-    return engine, session_id
+    return engine, session_id, sessions_service
 
 
 def _seed_blob(engine: Any, session_id: str, *, body: bytes, filename: str, mime_type: str, storage_dir: Path) -> str:
@@ -261,7 +271,7 @@ class TestCsvClassifierScenario:
 
     @pytest.mark.asyncio
     async def test_csv_classifier_converges_with_one_repair_turn(self, tmp_path: Path) -> None:
-        engine, session_id = _session_engine()
+        engine, session_id, sessions_service = _session_engine()
         # Five observed columns, mirroring the scenario's prompt CSV.
         body = b"ticket_id,customer_name,subject,body,received_at\nT-001,Alice,Issue,desc,2026-05-06\n"
         blob_id = _seed_blob(
@@ -275,7 +285,7 @@ class TestCsvClassifierScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
 
         # Turn 1: blocking pipeline — fixed schema declaring only ticket_id,
         # omitting the other four observed columns. on_validation_failure=
@@ -400,7 +410,7 @@ class TestNumericGateScenario:
 
     @pytest.mark.asyncio
     async def test_numeric_gate_first_pass_success(self, tmp_path: Path) -> None:
-        engine, session_id = _session_engine()
+        engine, session_id, sessions_service = _session_engine()
         body = b"order_id,customer,price,shipped_at\nO-1,Alice,49.95,2026-05-01\nO-2,Bob,150.00,2026-05-02\n"
         blob_id = _seed_blob(
             engine,
@@ -413,7 +423,7 @@ class TestNumericGateScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
 
         # Single-turn build: type_coerce on price + gate + two outputs.
         turn1 = _llm_response(
@@ -517,7 +527,7 @@ class TestNumericGateScenario:
 
     @pytest.mark.asyncio
     async def test_numeric_gate_direct_observed_csv_gate_repairs_with_one_turn(self, tmp_path: Path) -> None:
-        engine, session_id = _session_engine()
+        engine, session_id, sessions_service = _session_engine()
         body = b"order_id,customer,price,shipped_at\nO-1,Alice,49.95,2026-05-01\nO-2,Bob,150.00,2026-05-02\n"
         blob_id = _seed_blob(
             engine,
@@ -530,7 +540,7 @@ class TestNumericGateScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
 
         # Turn 1: structurally valid but runtime-broken pipeline — observed
         # CSV values are raw strings, so the direct numeric gate would fail
@@ -705,7 +715,7 @@ class TestUrlTextSmokeScenario:
 
     @pytest.mark.asyncio
     async def test_url_text_smoke_converges_with_one_repair_turn(self, tmp_path: Path) -> None:
-        engine, session_id = _session_engine()
+        engine, session_id, sessions_service = _session_engine()
         # Single-line text blob containing only a URL — exactly the shape
         # the proof step's text_source_url_without_web_scrape blocker keys
         # off. inspect_blob_content sets source_kind="text" and populates
@@ -722,7 +732,7 @@ class TestUrlTextSmokeScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, session_engine=engine)
+        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
 
         # Turn 1: blocking pipeline — text source whose blob content is a
         # URL, but no web_scrape transform downstream. The URL string

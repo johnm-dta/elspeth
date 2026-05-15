@@ -158,4 +158,38 @@ describe("YamlView", () => {
     expect(await screen.findByText(/Pending YAML change/)).toBeInTheDocument();
     expect(screen.getByText(/Replace the pipeline/)).toBeInTheDocument();
   });
+
+  it("keeps pending YAML proposal actions visible when current YAML export is invalid", async () => {
+    const { fetchYaml } = await import("@/api/client");
+    vi.mocked(fetchYaml).mockRejectedValue({
+      status: 409,
+      detail: "Current composition state is invalid.",
+    });
+    const acceptProposal = vi.fn();
+    const rejectProposal = vi.fn();
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+      compositionProposals: [makeProposal()],
+      acceptProposal,
+      rejectProposal,
+    });
+
+    render(<YamlView />);
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "YAML export is blocked by validation errors.",
+    );
+    expect(screen.getByText(/Pending YAML change/)).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Accept YAML proposal: Replace the pipeline.",
+      }),
+    );
+
+    expect(acceptProposal).toHaveBeenCalledWith("proposal-1");
+  });
 });

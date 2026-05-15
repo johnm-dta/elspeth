@@ -155,7 +155,7 @@
     "shape": "declarative"
   },
   "set_pipeline": {
-    "hash": "b6b40d081710f873910400e49073b21846085b9ffcef09f05320c991e6e401cc",
+    "hash": "53019b00866c3a2959fc50d547326648889c1f687d487cd9932a92c38adf5b8f",
     "sensitive_path_count": 4,
     "shape": "type_driven"
   },

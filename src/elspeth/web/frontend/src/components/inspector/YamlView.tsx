@@ -50,6 +50,12 @@ export function YamlView() {
   const compositionState = useSessionStore((s) => s.compositionState);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const compositionProposals = useSessionStore((s) => s.compositionProposals);
+  const proposalActionPendingIds = useSessionStore(
+    (s) => s.proposalActionPendingIds,
+  );
+  const staleProposalIds = useSessionStore((s) => s.staleProposalIds);
+  const acceptProposal = useSessionStore((s) => s.acceptProposal);
+  const rejectProposal = useSessionStore((s) => s.rejectProposal);
   const pendingYamlProposals = useMemo(
     () =>
       compositionProposals.filter(
@@ -125,6 +131,45 @@ export function YamlView() {
     URL.revokeObjectURL(url);
   }, [yaml, compositionState?.version]);
 
+  const pendingYamlProposal = pendingYamlProposals[0] ?? null;
+  const pendingYamlProposalIsBusy =
+    pendingYamlProposal !== null &&
+    proposalActionPendingIds.includes(pendingYamlProposal.id);
+  const pendingYamlProposalIsStale =
+    pendingYamlProposal !== null && staleProposalIds.includes(pendingYamlProposal.id);
+  const pendingYamlProposalPanel =
+    pendingYamlProposal === null ? null : (
+      <div className="yaml-pending-summary" role="note">
+        <span>Pending YAML change: {pendingYamlProposal.summary}</span>
+        {pendingYamlProposalIsStale ? (
+          <span className="tool-call-stale">
+            Stale proposal. Ask the composer to rebase or revise this proposal.
+          </span>
+        ) : (
+          <span className="tool-call-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              disabled={pendingYamlProposalIsBusy}
+              onClick={() => void acceptProposal(pendingYamlProposal.id)}
+              aria-label={`Accept YAML proposal: ${pendingYamlProposal.summary}`}
+            >
+              Accept
+            </button>
+            <button
+              type="button"
+              className="btn btn-danger btn-small"
+              disabled={pendingYamlProposalIsBusy}
+              onClick={() => void rejectProposal(pendingYamlProposal.id)}
+              aria-label={`Reject YAML proposal: ${pendingYamlProposal.summary}`}
+            >
+              Reject
+            </button>
+          </span>
+        )}
+      </div>
+    );
+
   // Empty state
   if (!compositionState || version === null) {
     return (
@@ -149,13 +194,16 @@ export function YamlView() {
 
   if (yamlError && !yaml) {
     return (
-      <div
-        role="alert"
-        className="validation-banner validation-banner-fail"
-      >
-        <div className="validation-banner-content">
-          <div className="validation-banner-summary">{yamlError.title}</div>
-          <div>{yamlError.detail}</div>
+      <div className="yaml-view">
+        {pendingYamlProposalPanel}
+        <div
+          role="alert"
+          className="validation-banner validation-banner-fail"
+        >
+          <div className="validation-banner-content">
+            <div className="validation-banner-summary">{yamlError.title}</div>
+            <div>{yamlError.detail}</div>
+          </div>
         </div>
       </div>
     );
@@ -174,11 +222,7 @@ export function YamlView() {
 
   return (
     <div className="yaml-view">
-      {pendingYamlProposals.length > 0 && (
-        <div className="yaml-pending-summary" role="note">
-          Pending YAML change: {pendingYamlProposals[0].summary}
-        </div>
-      )}
+      {pendingYamlProposalPanel}
 
       {/* Toolbar: Copy + Download buttons */}
       <div className="yaml-view-toolbar">

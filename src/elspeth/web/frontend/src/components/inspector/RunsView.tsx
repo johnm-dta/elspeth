@@ -186,9 +186,27 @@ export function RunsView() {
   const loadRunDiagnostics = useExecutionStore((s) => s.loadRunDiagnostics);
   const evaluateRunDiagnostics = useExecutionStore((s) => s.evaluateRunDiagnostics);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const compositionProposals = useSessionStore((s) => s.compositionProposals);
+  const proposalActionPendingIds = useSessionStore((s) => s.proposalActionPendingIds);
+  const staleProposalIds = useSessionStore((s) => s.staleProposalIds);
+  const acceptProposal = useSessionStore((s) => s.acceptProposal);
+  const rejectProposal = useSessionStore((s) => s.rejectProposal);
   const hasActiveRun = runs.some((run) => run.status === "pending" || run.status === "running");
   const expandedRun = expandedRunId ? runs.find((run) => run.id === expandedRunId) : undefined;
   const expandedRunIsActive = expandedRun?.status === "pending" || expandedRun?.status === "running";
+  const pendingPipelineProposal = compositionProposals.find(
+    (proposal) =>
+      proposal.status === "pending" &&
+      proposal.affects.some((affect) =>
+        affect === "graph" || affect === "validation" || affect === "yaml",
+      ),
+  ) ?? null;
+  const pendingPipelineProposalIsBusy =
+    pendingPipelineProposal !== null &&
+    proposalActionPendingIds.includes(pendingPipelineProposal.id);
+  const pendingPipelineProposalIsStale =
+    pendingPipelineProposal !== null &&
+    staleProposalIds.includes(pendingPipelineProposal.id);
 
   // Load runs when the view mounts or session changes
   useEffect(() => {
@@ -227,7 +245,38 @@ export function RunsView() {
           fontSize: 14,
         }}
       >
-        No runs yet. Validate your pipeline, then click Execute to run it.
+        {pendingPipelineProposal !== null && (
+          <div className="runs-pending-proposal" role="note">
+            <span>Pending pipeline change: {pendingPipelineProposal.summary}</span>
+            {pendingPipelineProposalIsStale ? (
+              <span className="proposal-status proposal-status-stale">
+                Stale
+              </span>
+            ) : (
+              <span className="proposal-actions">
+                <button
+                  type="button"
+                  className="btn btn-xs btn-primary"
+                  disabled={pendingPipelineProposalIsBusy}
+                  onClick={() => void acceptProposal(pendingPipelineProposal.id)}
+                  aria-label={`Accept pending pipeline proposal: ${pendingPipelineProposal.summary}`}
+                >
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-xs"
+                  disabled={pendingPipelineProposalIsBusy}
+                  onClick={() => void rejectProposal(pendingPipelineProposal.id)}
+                  aria-label={`Reject pending pipeline proposal: ${pendingPipelineProposal.summary}`}
+                >
+                  Reject
+                </button>
+              </span>
+            )}
+          </div>
+        )}
+        <p>No runs yet. Validate your pipeline, then click Execute to run it.</p>
       </div>
     );
   }

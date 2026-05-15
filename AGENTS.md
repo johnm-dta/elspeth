@@ -158,7 +158,7 @@ These standards interact in non-obvious ways. The tier model's fabrication rule 
 
 ---
 
-<!-- filigree:instructions:v2.0.0:62c3b0c5 -->
+<!-- filigree:instructions:v2.0.0:450bea4e -->
 ## Filigree Issue Tracker
 
 Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
@@ -355,15 +355,17 @@ Use `GET /api/files/_schema` for available endpoints and valid field values.
 
 API generations: `loom` (`/api/loom/*`) is the stable 2.0 federation contract;
 `classic` (`/api/v1/*`) is frozen but supported. The un-prefixed living surface
-(`/api/<endpoint>`) aliases the recommended generation (`loom` as of 2.0). New
-emitters should target `loom` or the living surface; `classic` exists for
-existing integrations only. See ADR-002 and `docs/federation/contracts.md`.
+(`/api/<endpoint>`) only aliases `loom` for endpoints explicitly listed as
+living-surface aliases; many un-prefixed routes still serve classic shapes. New
+Loom consumers should target `/api/loom/*` except for explicitly listed aliases.
+`classic` exists for existing integrations only. See ADR-002 and
+`docs/federation/contracts.md`.
 
 Key endpoints:
 - `GET /api/files/_schema` — Discovery: valid enums, endpoint catalog
 - `POST /api/loom/scan-results` (or `/api/scan-results`) — Ingest scan results (loom envelope)
 - `POST /api/v1/scan-results` — Same intake, classic frozen response shape
-- `GET /api/loom/files` (or `/api/files`) — List tracked files with filtering and sorting
+- `GET /api/loom/files` — List tracked files with filtering and sorting
 - `GET /api/loom/files/{file_id}` — File detail with associations and findings summary
 - `GET /api/loom/files/{file_id}/findings` — Findings for a specific file
 

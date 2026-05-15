@@ -40,6 +40,7 @@ from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import TurnResponse, TurnType
+from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep, TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.progress import ComposerProgressEvent, ComposerProgressRegistry
 from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
@@ -353,6 +354,7 @@ class _ProgressRouteSessionService:
             validation_errors=data.validation_errors,
             created_at=datetime.now(UTC),
             derived_from_state_id=self.current_state.id if self.current_state is not None else None,
+            composer_meta=data.composer_meta,
         )
         self.current_state = record
         return record
@@ -3317,6 +3319,56 @@ class TestStateRoutes:
         assert versions_resp.json() == []
 
 
+class TestGuidedBootstrapStateVersions:
+    """Regression coverage for guided bootstrap not polluting state history."""
+
+    def test_get_guided_does_not_persist_empty_initial_state(self, tmp_path) -> None:
+        """Auto-starting guided mode must not create an empty v1 graph.
+
+        The frontend calls GET /guided automatically when a session is created
+        or selected. That read path may return the deterministic first turn,
+        but it must not allocate a composition_state version before the user
+        submits an actual guided response.
+        """
+        app, service = _make_app(tmp_path)
+        catalog = MagicMock()
+        catalog.list_sources.return_value = []
+        app.state.catalog_service = catalog
+        app.state.session_engine = service._engine
+        client = TestClient(app)
+
+        resp = client.post("/api/sessions", json={"title": "Guided"})
+        session_id = resp.json()["id"]
+
+        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
+        assert guided_resp.status_code == 200
+        guided_body = guided_resp.json()
+        assert guided_body["next_turn"] is not None
+        assert guided_body["guided_session"]["history"] == []
+        assert guided_body["composition_state"] is None
+
+        state_resp = client.get(f"/api/sessions/{session_id}/state")
+        assert state_resp.status_code == 200
+        assert state_resp.json() is None
+
+        versions_resp = client.get(f"/api/sessions/{session_id}/state/versions")
+        assert versions_resp.status_code == 200
+        assert versions_resp.json() == []
+
+        respond_resp = client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"control_signal": "exit_to_freeform"},
+        )
+        assert respond_resp.status_code == 200
+        respond_body = respond_resp.json()
+        assert respond_body["composition_state"]["version"] == 1
+        assert respond_body["composition_state"]["composer_meta"]["guided_session"]["transition_consumed"] is True
+
+        versions_after_resp = client.get(f"/api/sessions/{session_id}/state/versions")
+        assert versions_after_resp.status_code == 200
+        assert [version["version"] for version in versions_after_resp.json()] == [1]
+
+
 class TestRevertEndpoint:
     """Tests for POST /api/sessions/{id}/state/revert (R1)."""
 
@@ -4070,6 +4122,90 @@ class TestComposerProgressRoutes:
         assert progress["request_id"] == user_message_id
         assert progress["phase"] == "complete"
         assert progress["headline"] == "The composer has updated the pipeline."
+
+    @pytest.mark.asyncio
+    async def test_send_message_returns_transition_only_state_row(self, tmp_path) -> None:
+        """A guided->freeform transition save is still the session's new current state.
+
+        Regression for the live stale_compose_state loop: the first freeform
+        compose turn may only persist ``guided_session.transition_consumed`` and
+        leave ``CompositionState.version`` unchanged. The route must still return
+        the newly persisted state row so the SPA's next message uses the current
+        state id.
+        """
+        from elspeth.web.composer.state import CompositionState
+
+        app, service = _make_progress_route_app(tmp_path)
+        guided = GuidedSession(
+            step=GuidedStep.STEP_1_SOURCE,
+            history=(),
+            step_1_result=None,
+            step_2_result=None,
+            step_3_proposal=None,
+            terminal=TerminalState(
+                kind=TerminalKind.EXITED_TO_FREEFORM,
+                reason=TerminalReason.USER_PRESSED_EXIT,
+                pipeline_yaml=None,
+            ),
+            transition_consumed=False,
+        )
+        initial_state = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided,
+        )
+        initial_state_d = initial_state.to_dict()
+        await service.save_composition_state(
+            service.session.id,
+            CompositionStateData(
+                source=initial_state_d["source"],
+                nodes=initial_state_d["nodes"],
+                edges=initial_state_d["edges"],
+                outputs=initial_state_d["outputs"],
+                metadata_=initial_state_d["metadata"],
+                is_valid=False,
+                validation_errors=None,
+                composer_meta={"guided_session": guided.to_dict()},
+            ),
+            provenance="session_seed",
+        )
+
+        class _NoGraphChangeComposer:
+            async def compose(
+                self,
+                message: str,
+                chat_messages: list[dict[str, object]],
+                state: CompositionState,
+                *,
+                session_id: str | None = None,
+                current_state_id: str | None = None,
+                user_id: str | None = None,
+                progress=None,
+                guided_terminal=None,
+            ) -> ComposerResult:
+                del message, chat_messages, session_id, current_state_id, user_id, progress
+                assert guided_terminal == guided.terminal
+                return ComposerResult(message="Freeform response", state=state)
+
+        app.state.composer_service = _NoGraphChangeComposer()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                f"/api/sessions/{service.session.id}/messages",
+                json={"content": "continue in freeform"},
+            )
+            messages = (await client.get(f"/api/sessions/{service.session.id}/messages")).json()
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] is not None
+        assert body["state"]["version"] == 2
+        assert body["state"]["id"] == messages[-1]["composition_state_id"]
+        assert body["state"]["composer_meta"]["guided_session"]["transition_consumed"] is True
 
     @pytest.mark.asyncio
     async def test_recompose_marks_terminal_progress_with_last_user_message_id(self, tmp_path) -> None:

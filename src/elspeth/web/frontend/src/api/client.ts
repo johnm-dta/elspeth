@@ -486,7 +486,8 @@ export async function recompose(
  * Returns the active GuidedSession (step + history + terminal), the
  * server-emitted next turn payload (if any), and the current composition
  * state.  When no guided session has started for the session, the server
- * initialises one and returns the Step 1 turn.
+ * returns an in-memory initial GuidedSession and Step 1 turn without creating
+ * a composition-state version.
  */
 export async function getGuided(
   sessionId: string,

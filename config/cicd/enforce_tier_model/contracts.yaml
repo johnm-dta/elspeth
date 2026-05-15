@@ -163,21 +163,6 @@ allow_hits:
   reason: except ValueError on get_fingerprint_key() — explicit branch for dev mode (no key) vs production (fail_if_no_key)
   safety: Raises SecretFingerprintError when fail_if_no_key=True; only silently continues in dev mode
   expires: null
-- key: contracts/plugin_context.py:TC:_module_:fp=5dfc642462528293
-  owner: architecture
-  reason: TYPE_CHECKING import of RateLimitRegistry — PluginContext type annotations need L1 rate limiter type
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
-  expires: null
-- key: contracts/contexts.py:TC:_module_:fp=b29b41656c78b873
-  owner: architecture
-  reason: TYPE_CHECKING import of RateLimitRegistry — context protocols declare rate_limiter property type
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
-  expires: null
-- key: contracts/config/runtime.py:TC:_module_:fp=07abedf4392ba82e
-  owner: architecture
-  reason: TYPE_CHECKING import of Settings models — Runtime*Config.from_settings() type annotations
-  safety: No runtime coupling — annotation-only import behind TYPE_CHECKING guard
-  expires: null
 - key: contracts/data.py:R6:_get_allow_inf_nan:fp=a073efa3e28410f3
   owner: bugfix
   reason: vars(item) raises TypeError on non-object Pydantic metadata (plain strings, ints); skipping is correct since only object metadata can carry allow_inf_nan
@@ -187,7 +172,7 @@ allow_hits:
   owner: bugfix
   reason: TypeError from normalize_type_for_contract for unsupported types (dict, list, Decimal) — maps to object
   safety: Preserves field in contract as 'any' type; no data loss or silent skip
-  expires: '2026-05-14'
+  expires: '2026-06-15'
 - key: contracts/transform_contract.py:R2:_get_python_type:fp=24df5cf5593bf5fa
   owner: bugfix
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages

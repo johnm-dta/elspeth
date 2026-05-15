@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RunsView } from "./RunsView";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import type { CompositionProposal } from "@/types/api";
 import type { Run, RunAccounting, RunDiagnostics } from "@/types/index";
 
 vi.mock("@/api/client", () => ({
@@ -132,12 +133,64 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
   };
 }
 
+function makeProposal(
+  overrides: Partial<CompositionProposal> = {},
+): CompositionProposal {
+  return {
+    id: "proposal-1",
+    session_id: "session-1",
+    tool_call_id: "call-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "Replace the pipeline.",
+    rationale: "Requested by the current composer turn.",
+    affects: ["graph", "validation", "yaml"],
+    arguments_redacted_json: {},
+    base_state_id: null,
+    committed_state_id: null,
+    audit_event_id: "event-1",
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("RunsView", () => {
   beforeEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
-    useSessionStore.setState({ activeSessionId: null });
+    useSessionStore.setState({
+      activeSessionId: null,
+      compositionProposals: [],
+      proposalActionPendingIds: [],
+      staleProposalIds: [],
+    });
+  });
+
+  it("surfaces pending pipeline proposals when there are no runs yet", async () => {
+    const acceptProposal = vi.fn();
+    const rejectProposal = vi.fn();
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionProposals: [makeProposal()],
+      acceptProposal,
+      rejectProposal,
+    });
+    const user = userEvent.setup();
+
+    render(<RunsView />);
+
+    expect(screen.getByText(/Pending pipeline change/)).toBeInTheDocument();
+    expect(screen.getByText(/Replace the pipeline/)).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Accept pending pipeline proposal: Replace the pipeline.",
+      }),
+    );
+
+    expect(acceptProposal).toHaveBeenCalledWith("proposal-1");
   });
 
   it("renders the stored failure reason for failed runs", () => {

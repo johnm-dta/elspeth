@@ -228,6 +228,7 @@ def _session_service_for_characterization(
     )
     with engine.begin() as conn:
         _make_session(conn, session_id=session_id, user_id=EVAL_USER_ID)
+        conn.execute(text("UPDATE sessions SET trust_mode = 'auto_commit' WHERE id = :session_id"), {"session_id": session_id})
     return service
 
 

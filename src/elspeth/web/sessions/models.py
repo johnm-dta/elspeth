@@ -40,7 +40,41 @@ sessions_table = Table(
     Column("user_id", String, nullable=False, index=True),
     Column("auth_provider_type", String, nullable=False, default="local"),
     Column("title", String, nullable=False),
-    Column("trust_mode", String, nullable=False, server_default="explicit_approve"),
+    # Default trust_mode is auto_commit, not explicit_approve.
+    #
+    # The explicit_approve flow (commit 1d2abca8e, 2026-05-14) intercepts
+    # mutation tool calls *before* the validator runs and turns them into
+    # pending proposals. The LLM gets back ``success=True`` /
+    # ``status=APPROVAL_REQUIRED`` and stops iterating; the validator
+    # only fires later at accept time, with no path back to the LLM for
+    # self-correction. With a small composer model (gpt-5.4-mini), the
+    # LLM's normal retry-on-validation-error loop is the load-bearing
+    # mechanism for converging on a valid pipeline. Intercepting before
+    # validation silently removes it, producing consistent stuck-proposal
+    # dead-ends across multi-plugin pipelines (observed empirically
+    # 2026-05-15 across multiple session retries with the exact prompt
+    # that ran reliably 2026-05-14 under the pre-intercept default).
+    #
+    # explicit_approve remains a supported value via
+    # ``PATCH /sessions/{id}/composer/preferences`` for operators who
+    # want a hard human-approval gate on every mutation. Setting it as
+    # the *default* is the regression; restoring auto_commit as the
+    # default restores convergence. The proper fix to make
+    # explicit_approve viable as a default is to dry-run the tool before
+    # creating the proposal (so the LLM sees validation errors and can
+    # retry within the same compose turn) — out of scope for the
+    # default-revert; tracked as a follow-up.
+    # ``default="auto_commit"`` is the Python-side INSERT default —
+    # SQLAlchemy supplies it on inserts that omit ``trust_mode``. The
+    # ``server_default`` is the DDL default baked into the table at
+    # CREATE TABLE time and is preserved here for symmetry, but the
+    # live staging DB was created when the DDL default was
+    # "explicit_approve" — SQLite does not retroactively change column
+    # defaults on existing tables. The Python-side ``default`` is what
+    # actually takes effect for newly-inserted rows in already-deployed
+    # databases. Per the project DB policy ("DB migration = delete the
+    # old DB"), changing the DDL alone is insufficient.
+    Column("trust_mode", String, nullable=False, default="auto_commit", server_default="auto_commit"),
     Column("density_default", String, nullable=False, server_default="high"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),

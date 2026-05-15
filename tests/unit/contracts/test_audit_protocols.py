@@ -67,7 +67,12 @@ class TestAdapterConstruction:
     def test_call_recorder_remains_narrow_subset(self) -> None:
         call_recorder_methods = _public_method_names(CallRecorder)
 
-        assert call_recorder_methods == {"allocate_call_index", "record_call"}
+        assert call_recorder_methods == {
+            "allocate_call_index",
+            "allocate_operation_call_index",
+            "record_call",
+            "record_operation_call",
+        }
         assert call_recorder_methods < _public_method_names(PluginAuditWriter)
 
 

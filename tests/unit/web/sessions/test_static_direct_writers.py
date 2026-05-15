@@ -864,6 +864,53 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
             "verified independently of the rev-4 service-layer writer path"
         ),
     ),
+    # ------ tests/property/web/composer/test_compose_loop_invariants.py — property harness seed ------
+    ReviewedWriter(
+        path="tests/property/web/composer/test_compose_loop_invariants.py",
+        enclosing_symbol="_make_harness",
+        table="chat_messages",
+        operation="raw_string_in_text",
+        purpose=(
+            "property harness fixture seeds a prior user row only for the "
+            "has_prior_state scenario before driving ComposerServiceImpl's "
+            "real compose-loop persistence; raw text keeps the injection arm "
+            "mechanically close to the simulated commit/advisory-lock failures"
+        ),
+    ),
+    # ------ tests/unit/web/sessions/* — targeted chat transcript fixtures ------
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_count_tool_responses_for_assistant.py",
+        enclosing_symbol="_persist_assistant_with_tools",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "read-helper fixture seeds one assistant row plus N tool rows to "
+            "verify count_tool_responses_for_assistant against persisted "
+            "parent_assistant_id/tool_call_id shapes; not a production writer"
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_messages_route_include_tool_rows.py",
+        enclosing_symbol="_seed_user_assistant_tool_rows",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "route-view fixture seeds a minimal user/assistant/tool transcript "
+            "so include_tool_rows filtering can be verified without invoking "
+            "the composer loop"
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_record_audit_grade_view.py",
+        enclosing_symbol="_seed_user_assistant_tool_rows",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "audit-grade transcript view fixture seeds a minimal "
+            "user/assistant/tool transcript; the test target is the audit "
+            "access log/view path, not chat-message writing"
+        ),
+    ),
     # ------ tests/unit/web/sessions/test_routes.py — OperationalError canaries ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_routes.py",
@@ -888,6 +935,28 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
             "is the OperationalError param to simulate a real chat_messages "
             "INSERT failure; the test asserts the success-path tool-invocation "
             "helper raises AuditIntegrityError (500). Not an executed query"
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_routes.py",
+        enclosing_symbol="TestMessageRoutes.test_guided_respond_tool_invocation_persistence_failure_raises_on_success_path.flaky_add_message",
+        table="chat_messages",
+        operation="raw_string_in_OperationalError",
+        purpose=(
+            "Guided-mode audit sidecar canary: OperationalError statement "
+            "string simulates a real chat_messages INSERT failure after the "
+            "state transition succeeds; not an executed query"
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_routes.py",
+        enclosing_symbol="TestMessageRoutes.test_guided_chat_turn_persistence_failure_raises_on_success_path.flaky_add_message",
+        table="chat_messages",
+        operation="raw_string_in_OperationalError",
+        purpose=(
+            "Guided chat audit-row canary: OperationalError statement string "
+            "simulates a failed audit chat_messages INSERT so the route must "
+            "surface 500 instead of swallowing audit loss; not an executed query"
         ),
     ),
     ReviewedWriter(
@@ -956,16 +1025,16 @@ _LOCK_DISCIPLINE_NEGATIVE_TESTS: tuple[LockDisciplineNegativeTest, ...] = (
 # ---------------------------------------------------------------------------
 #
 # The reviewed-writer snapshot for ``tests/unit/web/blobs/test_service.py``
-# (10 sites) and ``tests/unit/web/composer/test_tools.py`` (5 sites) is
+# (11 sites) and ``tests/unit/web/composer/test_tools.py`` (5 sites) is
 # tedious to enumerate by hand: each line lives in a distinct test
 # function and the enclosing-symbol resolution requires AST traversal.
-# Rather than hand-tabulating 15 entries, we expand the allowlist at
+# Rather than hand-tabulating 16 entries, we expand the allowlist at
 # import time with a hard-coded purpose tag, then verify the expanded
 # set matches the §57-68 reviewed snapshot count exactly. Any drift
 # (a new direct insert added in either file) shows up as a violation.
 
 _BLOBS_ALLOWLIST_PATH = "tests/unit/web/blobs/test_service.py"
-_BLOBS_EXPECTED_LINES = (315, 368, 429, 487, 546, 596, 1105, 1254, 1708, 2070)
+_BLOBS_EXPECTED_LINES = (315, 374, 441, 511, 577, 654, 716, 1272, 1427, 1887, 2255)
 _COMPOSER_TOOLS_ALLOWLIST_PATH = "tests/unit/web/composer/test_tools.py"
 _COMPOSER_TOOLS_EXPECTED_LINES = (3125, 3188, 7581, 7634, 7875)
 

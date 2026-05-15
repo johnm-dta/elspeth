@@ -659,6 +659,175 @@ def fake_llm_one_set_pipeline_tool_call(tmp_path: Path) -> _FakeComposeLLM:
 
 
 @pytest.fixture
+def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
+    """Fake LLM that emits a create_blob proposal followed by a set_pipeline.
+
+    Reproduces the live-staging failure shape from session
+    986fabf6-a723-4eb3-84de-2db1b7ae4e96 (2026-05-14): the agent's turn
+    emits both a blob-store side-effect (create_blob) and the composition
+    mutation that references its content (set_pipeline). Under
+    trust_mode="explicit_approve" the previous behaviour intercepted both
+    as proposals, but the create_blob proposal could never be accepted
+    (the accept endpoint requires CompositionState.version to advance,
+    which create_blob does not).
+
+    The corrected behaviour: create_blob executes immediately (blob is
+    written to the session store, a fresh UUID is allocated); only
+    set_pipeline becomes a pending proposal awaiting operator approval.
+    """
+
+    output_path = tmp_path / "outputs" / "review.json"
+
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {
+                        "id": "call_create_blob_urls",
+                        "name": "create_blob",
+                        "arguments": {
+                            "filename": "agency_urls.txt",
+                            "mime_type": "text/plain",
+                            "content": "https://www.example.gov\nhttps://www.example2.gov\n",
+                            "description": "Five agency URLs for review",
+                        },
+                    },
+                    {
+                        "id": "call_set_pipeline_with_blob",
+                        "name": "set_pipeline",
+                        "arguments": {
+                            "source": {
+                                "plugin": "text",
+                                "on_success": "url_rows",
+                                "options": {
+                                    "column": "url",
+                                    "path": "/tmp/agency_urls.txt",
+                                    "schema": {"mode": "observed"},
+                                },
+                                "on_validation_failure": "discard",
+                            },
+                            "nodes": [
+                                {
+                                    "id": "t1",
+                                    "node_type": "transform",
+                                    "plugin": "passthrough",
+                                    "input": "url_rows",
+                                    "on_success": "main",
+                                    "on_error": "discard",
+                                    "options": {"schema": {"mode": "observed"}},
+                                }
+                            ],
+                            "edges": [
+                                {
+                                    "id": "e1",
+                                    "from_node": "source",
+                                    "to_node": "t1",
+                                    "edge_type": "on_success",
+                                    "label": None,
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "sink_name": "main",
+                                    "plugin": "json",
+                                    "options": {
+                                        "path": str(output_path),
+                                        "schema": {"mode": "observed"},
+                                        "collision_policy": "auto_increment",
+                                    },
+                                    "on_write_failure": "discard",
+                                }
+                            ],
+                            "metadata": {"name": "blob-then-pipeline-test"},
+                        },
+                    },
+                )
+            ),
+            _fake_llm_response(content="Blob created; pipeline proposal queued for approval."),
+        )
+    )
+
+
+@pytest.fixture
+def fake_llm_set_pipeline_with_misplaced_schema(tmp_path: Path) -> _FakeComposeLLM:
+    """Fake LLM that emits a structurally-invalid set_pipeline.
+
+    Reproduces the live failure shape from staging session
+    100dc5cb-fd66-400b-8041-a1c165cbd8bd (2026-05-14): the LLM placed
+    ``schema`` directly on the node body instead of inside ``options``.
+    The redaction MANIFEST's ``SetPipelineArgumentsModel`` declares
+    ``nodes[*]`` with ``extra="forbid"``, so the model rejects this
+    shape with a Pydantic ValidationError during the proposal-redaction
+    step under ``trust_mode == "explicit_approve"``.
+
+    The fixture's second response is the model's followup after seeing
+    the ToolArgumentError — a final text turn closes the compose loop.
+    """
+
+    input_path = tmp_path / "blobs" / "input.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("value\n1\n", encoding="utf-8")
+
+    return _FakeComposeLLM(
+        (
+            _fake_llm_response(
+                tool_calls=(
+                    {
+                        "id": "call_set_pipeline_invalid",
+                        "name": "set_pipeline",
+                        "arguments": {
+                            "source": {
+                                "plugin": "csv",
+                                "on_success": "source_out",
+                                "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+                                "on_validation_failure": "quarantine",
+                            },
+                            "nodes": [
+                                {
+                                    "id": "t1",
+                                    "node_type": "transform",
+                                    "plugin": "passthrough",
+                                    "input": "source_out",
+                                    "on_success": "main",
+                                    "on_error": "discard",
+                                    # BUG: schema placed at node body level instead of inside options.
+                                    # The redaction MANIFEST's argument_model forbids extra fields.
+                                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                                    "options": {},
+                                }
+                            ],
+                            "edges": [
+                                {
+                                    "id": "e1",
+                                    "from_node": "source",
+                                    "to_node": "t1",
+                                    "edge_type": "on_success",
+                                    "label": None,
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "sink_name": "main",
+                                    "plugin": "csv",
+                                    "options": {
+                                        "path": str(tmp_path / "outputs" / "output.csv"),
+                                        "schema": {"mode": "observed"},
+                                        "collision_policy": "auto_increment",
+                                    },
+                                    "on_write_failure": "discard",
+                                }
+                            ],
+                            "metadata": {"name": "regression-misplaced-schema"},
+                        },
+                    },
+                )
+            ),
+            _fake_llm_response(content="I made a mistake with the schema field placement; I will retry."),
+        )
+    )
+
+
+@pytest.fixture
 def fake_llm_three_tool_calls(fake_llm_emitting_n_tool_calls: Any) -> _FakeComposeLLM:
     """Fake LLM for exactly three successful tool calls."""
 

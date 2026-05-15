@@ -6279,6 +6279,29 @@ def is_mutation_tool(name: str) -> bool:
     return name in _MUTATION_TOOLS or name in _BLOB_MUTATION_TOOLS or name in _SECRET_MUTATION_TOOLS
 
 
+# Tools that mutate the session blob store as a side effect but do NOT advance
+# CompositionState.version. These are session-scoped artifact writes (file
+# uploads, deletions); the pipeline only reacts to them when a *composition*
+# mutation (set_pipeline, set_source_from_blob, apply_pipeline_recipe)
+# references the resulting blob. Under trust_mode="explicit_approve" these
+# must not be intercepted as proposals — the accept endpoint enforces a
+# state-version advance (see web/sessions/routes.py:accept_composition_proposal)
+# that these tools cannot satisfy by design, so an intercepted proposal is
+# structurally unacceptable. The composition mutations that reference the
+# resulting blob remain gated and carry the meaningful operator approval.
+_BLOB_STORE_ONLY_MUTATION_TOOLS: frozenset[str] = frozenset({"create_blob", "update_blob", "delete_blob"})
+
+
+def is_blob_store_only_mutation_tool(name: str) -> bool:
+    """Return True for blob-store side-effect tools that never advance CompositionState.
+
+    See ``_BLOB_STORE_ONLY_MUTATION_TOOLS`` for the rationale on excluding
+    these from the ``trust_mode == "explicit_approve"`` proposal-interception
+    gate.
+    """
+    return name in _BLOB_STORE_ONLY_MUTATION_TOOLS
+
+
 def is_cacheable_discovery_tool(name: str) -> bool:
     """Return True if the tool's results can be cached within a compose() call."""
     return name in _CACHEABLE_DISCOVERY_TOOLS

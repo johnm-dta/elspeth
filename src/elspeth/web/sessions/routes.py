@@ -3560,9 +3560,7 @@ def create_session_router() -> APIRouter:
             # the actual blocker).
             if not result.success:
                 error_summary = (
-                    result.data.get(_DATA_ERROR_KEY)
-                    if isinstance(result.data, Mapping)
-                    else None
+                    result.data.get(_DATA_ERROR_KEY) if isinstance(result.data, Mapping) else None
                 ) or "Composer proposal failed validation."
                 validation_errors_payload: list[dict[str, Any]] = []
                 if result.validation is not None:
@@ -3594,11 +3592,11 @@ def create_session_router() -> APIRouter:
                         proposal_id=proposal.id,
                         actor=f"system:auto_reject_validation_failed:user:{user.user_id}",
                     )
-                except (KeyError, ValueError):
+                except (KeyError, ValueError) as rejection_exc:
                     # The proposal might have been concurrently rejected or
                     # otherwise transitioned; ignore — the validation-failure
                     # response is still the correct surface for the operator.
-                    pass
+                    rejection_exc.add_note("proposal already terminal during validation-failure auto-reject")
                 raise HTTPException(
                     status_code=422,
                     detail={
@@ -4423,7 +4421,7 @@ def create_session_router() -> APIRouter:
                 if auto_title_task is not None:
                     try:
                         await asyncio.wait_for(auto_title_task, timeout=2.0)
-                    except (TimeoutError, asyncio.TimeoutError):
+                    except TimeoutError:
                         auto_title_task.cancel()
 
     @router.post(
@@ -5575,11 +5573,7 @@ def create_session_router() -> APIRouter:
             emitter="server",
         )
 
-        if (
-            current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
-            and guided.step_1_result is not None
-            and guided.step_2_result is not None
-        ):
+        if current_step is GuidedStep.STEP_2_5_RECIPE_MATCH and guided.step_1_result is not None and guided.step_2_result is not None:
             staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
         else:
             staged_offer = None

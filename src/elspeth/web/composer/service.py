@@ -94,6 +94,7 @@ from elspeth.web.composer.tools import (
     compute_proof_diagnostics,
     execute_tool,
     get_tool_definitions,
+    is_blob_store_only_mutation_tool,
     is_cacheable_discovery_tool,
     is_discovery_tool,
     is_mutation_tool,
@@ -998,6 +999,41 @@ def _tool_failure_detail(payload: Mapping[str, Any]) -> str:
     return "."
 
 
+def _last_mutation_was_pending_proposal(tool_invocations: tuple[ComposerToolInvocation, ...]) -> bool:
+    """Return True iff the most recent non-discovery dispatch was an APPROVAL_REQUIRED proposal.
+
+    Under ``trust_mode == "explicit_approve"`` the compose loop intercepts
+    mutation tools, writes a ``composition_proposals`` row with
+    ``status="pending"``, and returns ``success=True`` with an
+    ``APPROVAL_REQUIRED`` payload while leaving ``CompositionState.version``
+    unchanged. The work is complete from the model's perspective — only the
+    human-approval step remains, and that step is intentionally outside the
+    composer's reach. Treating this as a no-mutation failure was the
+    convergence-blocking bug: the empty-state augmentation gate would
+    synthesize ``[ELSPETH-SYSTEM] The pipeline is still empty`` over a turn
+    that successfully landed a proposal, derailing both the operator's
+    framing and (via the same content the LLM reads back on subsequent
+    turns) the model's own state model.
+
+    Discovery tools are transparent — the model interleaves them between
+    real mutations — so we skip past them. The first non-discovery dispatch
+    we find decides the answer.
+    """
+    for invocation in reversed(tool_invocations):
+        if is_discovery_tool(invocation.tool_name):
+            continue
+        if invocation.status is not ComposerToolStatus.SUCCESS:
+            return False
+        if invocation.result_canonical is None:
+            return False
+        payload = json.loads(invocation.result_canonical)
+        if type(payload) is not dict:
+            return False
+        data = payload.get("data")
+        return type(data) is dict and data.get("status") == "APPROVAL_REQUIRED"
+    return False
+
+
 def _blocking_result_from_tool_invocations(tool_invocations: tuple[ComposerToolInvocation, ...]) -> str:
     """Name the most recent failed build/edit tool result, if one exists."""
     for invocation in reversed(tool_invocations):
@@ -1631,7 +1667,12 @@ class ComposerServiceImpl:
         partial-state preservation by the coordinator's exception handling
         path — they are not caught here.
         """
-        if _user_request_expects_pipeline_mutation(user_message) and not mutation_success_seen and _state_is_structurally_empty(state):
+        if (
+            _user_request_expects_pipeline_mutation(user_message)
+            and not mutation_success_seen
+            and _state_is_structurally_empty(state)
+            and not _last_mutation_was_pending_proposal(tool_invocations)
+        ):
             # No-mutation empty-state augmentation. The model produced
             # honest diagnostic prose about what it tried and what blocked
             # convergence (audit-DB inspection across 2026-05-08 panel-cohort
@@ -1641,6 +1682,15 @@ class ComposerServiceImpl:
             # output from both the user and (via routes._composer_history_content)
             # from the model itself on subsequent turns
             # (cf. elspeth-861b0c58f5).
+            #
+            # Exception: APPROVAL_REQUIRED proposals are not failures. Under
+            # explicit_approve trust mode the build SUCCEEDED — the work is
+            # queued for human approval and the state will advance on accept.
+            # The model's prose ("approval pending state, not applied") is
+            # already truthful; injecting "[ELSPETH-SYSTEM] pipeline is still
+            # empty" over it corrupts both operator framing and (via the
+            # synthesized suffix being re-read on subsequent turns) the
+            # model's state model.
             blocker = _blocking_result_from_tool_invocations(tool_invocations)
             empty_state_runtime_result = _no_mutation_empty_state_validation(blocker)
             augmented_message = _compose_empty_state_message(content, blocker=blocker)
@@ -2652,78 +2702,114 @@ class ComposerServiceImpl:
                     and turn_preferences is not None
                     and turn_preferences.trust_mode == "explicit_approve"
                     and is_mutation_tool(tool_name)
+                    # Blob-store side-effect tools (create_blob, update_blob,
+                    # delete_blob) cannot be intercepted as proposals: they
+                    # never advance CompositionState.version, but the accept
+                    # endpoint requires a version advance, so an intercepted
+                    # proposal would be structurally unacceptable. Their
+                    # composition-affecting reference points (set_pipeline,
+                    # set_source_from_blob, apply_pipeline_recipe) ARE
+                    # intercepted and carry the meaningful operator approval.
+                    and not is_blob_store_only_mutation_tool(tool_name)
                 ):
                     if proposals_this_turn >= _MAX_PENDING_PROPOSALS_PER_TURN:
                         raise ComposerServiceError(
                             f"Composer produced too many pending tool proposals in one turn ({_MAX_PENDING_PROPOSALS_PER_TURN} maximum)."
                         )
 
+                    from pydantic import ValidationError as PydanticValidationError
+
                     from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
 
+                    # The LLM may produce arguments that fail the redaction
+                    # MANIFEST's argument_model — most commonly a misplaced
+                    # field like ``nodes[*].schema`` belonging at
+                    # ``nodes[*].options.schema``. The runtime validator
+                    # would reject these the same way. On redaction
+                    # ValidationError we fall through to normal dispatch:
+                    # execute_tool emits a clean ToolArgumentError, the
+                    # existing post-dispatch arg-error handling records
+                    # the failure for audit (with the
+                    # ``_redaction_status: invalid_tool_arguments`` marker),
+                    # and the compose loop continues so the model can
+                    # self-correct. The previous behaviour — letting the
+                    # ValidationError propagate — crashed the compose
+                    # request with HTTP 500 (session 100dc5cb… 2026-05-14:
+                    # frontend rendered a generic ApiError as a bare
+                    # "retry" button with no diagnostic).
+                    redacted_arguments: Mapping[str, Any] | None
                     if tool_name in MANIFEST:
-                        redacted_arguments: Mapping[str, Any] = redact_tool_call_arguments(
-                            tool_name,
-                            arguments,
-                            telemetry=self._redaction_telemetry,
-                        )
+                        try:
+                            redacted_arguments = redact_tool_call_arguments(
+                                tool_name,
+                                arguments,
+                                telemetry=self._redaction_telemetry,
+                            )
+                        except PydanticValidationError:
+                            redacted_arguments = None
                     else:
                         redacted_arguments = arguments
-                    proposal_summary = build_tool_proposal_summary(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        redacted_arguments=redacted_arguments,
-                    )
-                    proposal = await turn_sessions_service.create_composition_proposal(
-                        session_id=turn_session_uuid,
-                        tool_call_id=tool_call.id,
-                        tool_name=tool_name,
-                        summary=proposal_summary.summary,
-                        rationale=proposal_summary.rationale,
-                        affects=proposal_summary.affects,
-                        arguments_json=arguments,
-                        arguments_redacted_json=proposal_summary.arguments_redacted_json,
-                        base_state_id=UUID(current_state_id) if current_state_id is not None else None,
-                        actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
-                    )
-                    proposals_this_turn += 1
-                    proposal_payload = {
-                        "success": True,
-                        "status": "APPROVAL_REQUIRED",
-                        "proposal_id": str(proposal.id),
-                        "tool_name": tool_name,
-                        "summary": proposal.summary,
-                        "message": "The requested pipeline change is pending human approval and has not been applied.",
-                    }
-                    proposal_result = ToolResult(
-                        success=True,
-                        updated_state=state,
-                        validation=last_validation if last_validation is not None else state.validate(),
-                        affected_nodes=(),
-                        data=proposal_payload,
-                    )
-                    recorder.record(
-                        finish_success(
-                            audit,
-                            result_payload=proposal_result.to_dict(),
-                            version_after=state.version,
+
+                    if redacted_arguments is not None:
+                        proposal_summary = build_tool_proposal_summary(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            redacted_arguments=redacted_arguments,
                         )
-                    )
-                    _append_tool_outcome(
-                        response=proposal_result,
-                        error_class=None,
-                        error_message=None,
-                        post_version=state.version,
-                    )
-                    anti_anchor.record_success()
-                    llm_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": _serialize_tool_result(proposal_result),
+                        proposal = await turn_sessions_service.create_composition_proposal(
+                            session_id=turn_session_uuid,
+                            tool_call_id=tool_call.id,
+                            tool_name=tool_name,
+                            summary=proposal_summary.summary,
+                            rationale=proposal_summary.rationale,
+                            affects=proposal_summary.affects,
+                            arguments_json=arguments,
+                            arguments_redacted_json=proposal_summary.arguments_redacted_json,
+                            base_state_id=UUID(current_state_id) if current_state_id is not None else None,
+                            actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
+                        )
+                        proposals_this_turn += 1
+                        proposal_payload = {
+                            "success": True,
+                            "status": "APPROVAL_REQUIRED",
+                            "proposal_id": str(proposal.id),
+                            "tool_name": tool_name,
+                            "summary": proposal.summary,
+                            "message": "The requested pipeline change is pending human approval and has not been applied.",
                         }
-                    )
-                    turn_has_mutation = True
-                    continue
+                        proposal_result = ToolResult(
+                            success=True,
+                            updated_state=state,
+                            validation=last_validation if last_validation is not None else state.validate(),
+                            affected_nodes=(),
+                            data=proposal_payload,
+                        )
+                        recorder.record(
+                            finish_success(
+                                audit,
+                                result_payload=proposal_result.to_dict(),
+                                version_after=state.version,
+                            )
+                        )
+                        _append_tool_outcome(
+                            response=proposal_result,
+                            error_class=None,
+                            error_message=None,
+                            post_version=state.version,
+                        )
+                        anti_anchor.record_success()
+                        llm_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": _serialize_tool_result(proposal_result),
+                            }
+                        )
+                        turn_has_mutation = True
+                        continue
+                    # redacted_arguments is None → invalid LLM arguments;
+                    # fall through to normal dispatch, which will emit a
+                    # ToolArgumentError through the standard arg-error path.
 
                 await _emit_progress(progress, _tool_started_progress_event(tool_name))
 

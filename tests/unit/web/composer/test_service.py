@@ -513,6 +513,104 @@ class TestComposerSingleToolCall:
         assert result.tool_outcomes[0].post_version == state.version
 
     @pytest.mark.asyncio
+    async def test_explicit_approve_does_not_intercept_create_blob(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_create_blob_then_set_pipeline: Any,
+    ) -> None:
+        """Regression for staging session 986fabf6-a723-4eb3-84de-2db1b7ae4e96:
+        under trust_mode=explicit_approve the previous behaviour intercepted
+        both create_blob and set_pipeline as proposals. The create_blob
+        proposal was structurally unacceptable — the accept endpoint
+        requires CompositionState.version to advance, but create_blob
+        never advances state (it is a blob-store side effect). So users
+        clicked 'Accept' on the proposal and got HTTP 409 'did not change
+        composition state'.
+
+        After the fix, create_blob executes immediately; only
+        composition-mutation tools (set_pipeline here) become pending
+        proposals."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_create_blob_then_set_pipeline,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        proposal_tools = sorted(p.tool_name for p in proposals)
+        # create_blob is NOT intercepted — it executes immediately and the
+        # resulting blob is available to set_pipeline at proposal-creation
+        # time.
+        assert "create_blob" not in proposal_tools
+        # set_pipeline IS still intercepted — it advances composition state
+        # and represents the meaningful operator approval.
+        assert "set_pipeline" in proposal_tools
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_invalid_arguments_do_not_crash_compose_loop(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_set_pipeline_with_misplaced_schema: Any,
+    ) -> None:
+        """Regression for staging session 100dc5cb-fd66-400b-8041-a1c165cbd8bd:
+        under trust_mode=explicit_approve the proposal-interception path
+        called redact_tool_call_arguments() with no exception handler. When
+        the LLM produced structurally-invalid arguments (schema at the node
+        body level instead of inside options), the Pydantic ValidationError
+        propagated up, crashed the compose request with HTTP 500, and the
+        frontend rendered a bare 'retry' button with no diagnostic.
+
+        After the fix, the redaction failure is caught, the proposal block
+        is skipped, and the normal dispatch path produces a clean
+        ToolArgumentError that the compose loop surfaces to the model as
+        a tool message — letting the model self-correct rather than
+        crashing the request."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+        state = _empty_state()
+
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+
+        # Must not raise — the previous behavior raised a 500 here.
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_set_pipeline_with_misplaced_schema,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        # No proposal was created — the LLM arguments were invalid.
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert proposals == []
+        # The set_pipeline outcome surfaces as a tool argument failure that
+        # the loop carries into the model's next turn for self-correction.
+        outcome_tool_names = [o.call.function.name for o in result.tool_outcomes]
+        assert "set_pipeline" in outcome_tool_names
+        invalid_outcome = next(o for o in result.tool_outcomes if o.call.function.name == "set_pipeline")
+        assert invalid_outcome.error_class is not None
+        # State did not advance — invalid arguments are not committed.
+        assert invalid_outcome.post_version == state.version
+
+    @pytest.mark.asyncio
     async def test_auto_commit_mutating_tool_preserves_existing_state_mutation_path(
         self,
         composer_service_with_real_sessions: ComposerServiceImpl,
@@ -4487,7 +4585,195 @@ class TestEmptyStateFinalizePassthrough:
         assert "augmentation" in message
         assert "discriminator" in message
 
-    # ── End-to-end through _finalize_no_tool_response ────────────────────
+    # ── _last_mutation_was_pending_proposal helper ───────────────────────
+
+    @staticmethod
+    def _proposal_invocation(
+        *,
+        tool_name: str = "set_pipeline",
+        version: int = 1,
+    ) -> Any:
+        """Build an invocation whose result_canonical mirrors the proposal-payload shape.
+
+        Mirrors the proposal_result envelope written at composer/service.py
+        line ~2697: ToolResult(success=True, data={status: APPROVAL_REQUIRED, ...}).
+        The blocker classifier reads result_canonical, so the test pins the
+        wire shape — if the proposal payload moves, this test will catch it.
+        """
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.core.canonical import canonical_json, stable_hash
+
+        result_payload = {
+            "success": True,
+            "data": {
+                "status": "APPROVAL_REQUIRED",
+                "proposal_id": "00000000-0000-0000-0000-000000000000",
+                "tool_name": tool_name,
+                "summary": "Replace the pipeline with csv input, 3 transforms, and 1 output.",
+                "message": "The requested pipeline change is pending human approval and has not been applied.",
+            },
+        }
+        canon = canonical_json(result_payload)
+        h = stable_hash(result_payload)
+        t = datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC)
+        return ComposerToolInvocation(
+            tool_call_id="call_proposal",
+            tool_name=tool_name,
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=canon,
+            result_hash=h,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=version,
+            version_after=version,
+            started_at=t,
+            finished_at=t,
+            latency_ms=1,
+            actor="test",
+        )
+
+    def test_last_mutation_was_pending_proposal_true_for_approval_required_payload(self) -> None:
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        invocations = (self._proposal_invocation(),)
+        assert _last_mutation_was_pending_proposal(invocations) is True
+
+    def test_last_mutation_was_pending_proposal_false_for_empty_invocations(self) -> None:
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        assert _last_mutation_was_pending_proposal(()) is False
+
+    def test_last_mutation_was_pending_proposal_skips_discovery_tools(self) -> None:
+        """Discovery tools (get_plugin_schema, list_*) are transparent — the
+        model interleaves them between real mutations. A proposal followed by
+        a discovery call still counts as a pending-proposal turn."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        proposal = self._proposal_invocation()
+        discovery = ComposerToolInvocation(
+            tool_call_id="call_discovery",
+            tool_name="get_plugin_schema",
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=b'{"success": true}',
+            result_hash="1" * 64,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=1,
+            version_after=1,
+            started_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            latency_ms=1,
+            actor="test",
+        )
+        assert _last_mutation_was_pending_proposal((proposal, discovery)) is True
+
+    def test_last_mutation_was_pending_proposal_false_when_most_recent_mutation_is_arg_error(self) -> None:
+        """An ARG_ERROR after a successful proposal means the model retried
+        and the retry failed. The augmentation should fire."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        proposal = self._proposal_invocation()
+        arg_error = ComposerToolInvocation(
+            tool_call_id="call_failed",
+            tool_name="set_pipeline",
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=None,
+            result_hash=None,
+            status=ComposerToolStatus.ARG_ERROR,
+            error_class="ToolArgumentError",
+            error_message="bad shape",
+            version_before=1,
+            version_after=None,
+            started_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            latency_ms=1,
+            actor="test",
+        )
+        assert _last_mutation_was_pending_proposal((proposal, arg_error)) is False
+
+    def test_last_mutation_was_pending_proposal_false_for_create_blob_success(self) -> None:
+        """create_blob success without state advance is the original target
+        of the empty-state augmentation — it must continue to fire."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+        from elspeth.web.composer.service import _last_mutation_was_pending_proposal
+
+        create_blob_inv = ComposerToolInvocation(
+            tool_call_id="call_blob",
+            tool_name="create_blob",
+            arguments_canonical=b"{}",
+            arguments_hash="0" * 64,
+            result_canonical=b'{"success": true, "data": {"blob_id": "abc"}}',
+            result_hash="2" * 64,
+            status=ComposerToolStatus.SUCCESS,
+            error_class=None,
+            error_message=None,
+            version_before=1,
+            version_after=1,
+            started_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 5, 14, 21, 29, 5, tzinfo=UTC),
+            latency_ms=1,
+            actor="test",
+        )
+        assert _last_mutation_was_pending_proposal((create_blob_inv,)) is False
+
+    # ── End-to-end: pending-proposal suppression of empty-state augmentation ─
+
+    @pytest.mark.asyncio
+    async def test_pending_proposal_does_not_trigger_empty_state_augmentation(self) -> None:
+        """Reproduces the convergence-failure path from staging session
+        d121ba9c-8775-463d-afdf-75fd6b6f2456: under trust_mode=explicit_approve
+        a successful set_pipeline produces a pending proposal with
+        version_after == version_before. The empty-state augmentation gate
+        previously misclassified this as no-mutation and appended
+        '[ELSPETH-SYSTEM] The pipeline is still empty', derailing both the
+        operator's framing and (via the synthesized suffix being re-read on
+        subsequent turns) the model's own state model."""
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        model_prose = (
+            "I picked 5 Australian Government agency pages and prepared the workflow, "
+            "but the platform has put the pipeline change into human-approval pending "
+            "state, so it has not been applied yet."
+        )
+
+        with patch.object(service, "_runtime_preflight") as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=model_prose,
+                state=state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                user_message="please build me a pipeline",
+                tool_invocations=(self._proposal_invocation(),),
+            )
+
+        # Model's truthful pending-approval prose preserved verbatim.
+        assert result.message == model_prose
+        # No "[ELSPETH-SYSTEM] pipeline is still empty" suffix — the build
+        # succeeded as a pending proposal; that is not an empty-state failure.
+        assert "[ELSPETH-SYSTEM]" not in result.message
+        assert "pipeline is still empty" not in result.message
+        # No re-run of runtime preflight (state.version unchanged).
+        mock_preflight.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_empty_state_invalid_preflight_passes_through_model_content(self) -> None:

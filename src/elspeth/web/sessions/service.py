@@ -1271,7 +1271,7 @@ class SessionServiceImpl:
         """Fetch composer trust/scaffolding preferences for a session."""
 
         def _sync() -> ComposerSessionPreferencesRecord:
-            with self._engine.begin() as conn:
+            with self._engine.connect() as conn:
                 row = conn.execute(select(sessions_table).where(sessions_table.c.id == str(session_id))).one()
                 return ComposerSessionPreferencesRecord(
                     session_id=UUID(row.id),

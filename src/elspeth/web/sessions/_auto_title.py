@@ -37,6 +37,14 @@ _AUTO_TITLE_SYSTEM_PROMPT = (
 _AUTO_TITLE_MAX_LEN = 60
 _AUTO_TITLE_MAX_TOKENS = 20
 _AUTO_TITLE_TEMPERATURE = 0.0
+_SURROUNDING_TITLE_QUOTES = (
+    '"',
+    "'",
+    chr(0x201C),
+    chr(0x201D),
+    chr(0x2018),
+    chr(0x2019),
+)
 
 
 def _sanitize_title(raw: str) -> str:
@@ -48,7 +56,7 @@ def _sanitize_title(raw: str) -> str:
     usable remains — caller skips the title update in that case.
     """
     cleaned = raw.strip()
-    for quote in ('"', "'", "“", "”", "‘", "’"):
+    for quote in _SURROUNDING_TITLE_QUOTES:
         if cleaned.startswith(quote):
             cleaned = cleaned[1:]
         if cleaned.endswith(quote):

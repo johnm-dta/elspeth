@@ -303,6 +303,56 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
   });
 
+  // ── enterGuided unified entry point (default-freeform switch button) ──────
+  //
+  // The "Switch to guided" affordance in the freeform ChatPanel header
+  // binds to enterGuided().  It branches on the current guidedSession
+  // terminal so callers always have a single action regardless of whether
+  // the session is fresh or has previously exited.
+
+  it("enterGuided: calls startGuided when guidedSession is null (fresh / default-freeform)", async () => {
+    const { getGuided } = await import("@/api/client");
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleGetGuidedResponse,
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: null,
+    });
+
+    await useSessionStore.getState().enterGuided();
+
+    expect(getGuided).toHaveBeenCalledWith("sess-1");
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+  });
+
+  it("enterGuided: calls reenterGuided when terminal.kind === 'exited_to_freeform'", async () => {
+    const { reenterGuided, getGuided } = await import("@/api/client");
+    (reenterGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleGetGuidedResponse,
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: sampleExitedGuidedSession,
+      guidedTerminal: sampleExitedGuidedSession.terminal,
+    });
+
+    await useSessionStore.getState().enterGuided();
+
+    expect(reenterGuided).toHaveBeenCalledWith("sess-1");
+    // startGuided's underlying GET must NOT be called on the reenter path.
+    expect(getGuided).not.toHaveBeenCalled();
+  });
+
+  it("enterGuided: throws when activeSessionId is null", async () => {
+    await expect(useSessionStore.getState().enterGuided()).rejects.toThrow(
+      "enterGuided called without active session",
+    );
+  });
+
   // ── Test 7: session switch clears guided state (leak regression) ──────────
 
   it("selectSession: clears guidedSession, guidedNextTurn, guidedTerminal on session switch", async () => {
@@ -435,13 +485,22 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedTerminal).toBeNull();
   });
 
-  // ── Test 11: forkFromMessage clears guided state and reloads (Codex #6) ──
+  // ── Test 11: forkFromMessage clears guided state (default-freeform) ──
   //
-  // After a successful fork:
-  // 1. The fork's guided state must start null (synchronous clear).
-  // 2. startGuided must be called for the new fork session.
+  // Default-freeform contract (post-Phase-A button-switch change):
+  // - The fork's guided state must start null (synchronous clear).
+  // - The fork must NOT auto-fetch GET /guided.  Forks open into the
+  //   freeform surface like create/select; the user opts into guided
+  //   by clicking "Switch to guided" in the header.
+  //
+  // Earlier revisions of this test required getGuided to be called for
+  // the fork session.  That invariant was deliberately removed when the
+  // operator asked for default-freeform sessions with a button-switch to
+  // guided; see _initial_composition_state_with_guided_session docstring
+  // and sessionStore.selectSession / .createSession / .forkFromMessage
+  // comments for the new contract.
 
-  it("forkFromMessage: clears guided state and fires startGuided for fork", async () => {
+  it("forkFromMessage: clears guided state and does NOT auto-fetch guided for fork (default-freeform)", async () => {
     const { forkFromMessage, getGuided } = await import("@/api/client");
 
     const forkResult = {
@@ -452,15 +511,6 @@ describe("sessionStore — guided-mode fields and actions", () => {
 
     (forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValueOnce(forkResult);
 
-    // Controllable promise for startGuided so we can verify it was called
-    // without letting it resolve (keeps test deterministic).
-    let resolveGuided!: (v: GetGuidedResponse) => void;
-    (getGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
-      new Promise<GetGuidedResponse>((resolve) => {
-        resolveGuided = resolve;
-      }),
-    );
-
     // Pre-seed: parent session has guided state that must NOT bleed into fork.
     useSessionStore.setState({
       activeSessionId: "sess-parent",
@@ -470,7 +520,6 @@ describe("sessionStore — guided-mode fields and actions", () => {
       guidedTerminal: null,
     });
 
-    // Start the fork — this triggers the async forkFromMessage path.
     const forkPromise = useSessionStore.getState().forkFromMessage("msg-1", "new content");
     await forkPromise;
 
@@ -481,17 +530,8 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
 
-    // startGuided must have been invoked for the fork session.
-    expect(getGuided).toHaveBeenCalledWith("sess-fork");
-
-    // Let startGuided resolve — must write into the fork's guided state
-    // since activeSessionId is still "sess-fork".
-    resolveGuided(sampleGetGuidedResponse);
-    // Give microtask queue a tick to drain.
-    await Promise.resolve();
-
-    const stateAfterReload = useSessionStore.getState();
-    expect(stateAfterReload.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+    // GET /guided must NOT be auto-called for the fork (default-freeform).
+    expect(getGuided).not.toHaveBeenCalled();
   });
 
   describe("chatGuided", () => {

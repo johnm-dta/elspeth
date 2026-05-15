@@ -610,6 +610,32 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.queryByRole("button", { name: "Exit to freeform" }),
     ).toBeNull();
+    // Default-freeform contract: freeform body surfaces a "Switch to guided"
+    // affordance in the header so the user can opt into guided mode.
+    expect(
+      screen.getByRole("button", { name: "Switch to guided" }),
+    ).toBeInTheDocument();
+  });
+
+  it("'Switch to guided' button calls enterGuided() when clicked from the freeform body", async () => {
+    const enterGuidedSpy = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: null,
+      guidedNextTurn: null,
+      enterGuided: enterGuidedSpy,
+    });
+
+    render(<ChatPanel />);
+
+    const button = screen.getByRole("button", { name: "Switch to guided" });
+    await act(async () => {
+      button.click();
+    });
+
+    expect(enterGuidedSpy).toHaveBeenCalledTimes(1);
   });
 
   it("falls through to the freeform body when terminal.kind === 'exited_to_freeform'", () => {

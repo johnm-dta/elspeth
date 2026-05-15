@@ -10,6 +10,7 @@ import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
 import { CompletionSummary } from "./guided/CompletionSummary";
 import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
+import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
@@ -70,9 +71,10 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
   const chatGuided = useSessionStore((s) => s.chatGuided);
   const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
   const guidedResponsePending = useSessionStore((s) => s.guidedResponsePending);
+  const enterGuided = useSessionStore((s) => s.enterGuided);
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
-  const { sendMessage, retryMessage, isComposing, error } = useComposer();
+  const { sendMessage, retryMessage, isComposing, error, errorDetails } = useComposer();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -360,17 +362,42 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
       className="chat-panel"
       aria-label="Chat panel"
     >
-      {/* Session title header */}
-      {activeSessionTitle && (
-        <div className="chat-panel-header">
+      {/* Session title header.  The "Switch to guided" affordance lives in
+          the header so it's always visible without competing with the chat
+          input for vertical real-estate.  Symmetric with the "Exit to
+          freeform" button rendered by the guided branch above. */}
+      <div className="chat-panel-header">
+        {activeSessionTitle ? (
           <h2 className="chat-panel-header-title">{activeSessionTitle}</h2>
-        </div>
-      )}
+        ) : (
+          <span aria-hidden="true" />
+        )}
+        <button
+          type="button"
+          className="chat-panel-switch-to-guided"
+          onClick={() => void enterGuided()}
+        >
+          Switch to guided
+        </button>
+      </div>
 
-      {/* Error banner */}
+      {/* Error banner. Renders the primary error message plus, when
+          present, a bulleted list of structured `errorDetails` (currently
+          populated from `validation_errors` on a proposal-accept failure).
+          Without the bullets the toast collapses Pydantic's flattened
+          error string into one unreadable line. */}
       {error && (
         <div role="alert" className="chat-panel-error">
-          <span>{error}</span>
+          <div className="chat-panel-error-body">
+            <p className="chat-panel-error-message">{error}</p>
+            {errorDetails && errorDetails.length > 0 && (
+              <ul className="chat-panel-error-details">
+                {errorDetails.map((detail, idx) => (
+                  <li key={idx}>{detail}</li>
+                ))}
+              </ul>
+            )}
+          </div>
           <button
             onClick={clearError}
             className="chat-panel-error-dismiss"
@@ -432,6 +459,18 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
 
       {/* Blob manager drawer */}
       {showBlobManager && <BlobManager onUseAsInput={handleUseAsInput} />}
+
+      {/* Pending-proposal banner — surfaces composer proposals that need
+          operator approval, co-located with the input so the user does not
+          have to scroll up to find the Accept button on the originating
+          tool-call message. Component returns null when nothing is pending. */}
+      <PendingProposalsBanner
+        proposals={compositionProposals}
+        staleProposalIds={staleProposalIds}
+        proposalActionPendingIds={proposalActionPendingIds}
+        onAccept={acceptProposal}
+        onReject={rejectProposal}
+      />
 
       {/* Input */}
       <ChatInput

@@ -160,6 +160,14 @@ interface SessionState {
   isComposing: boolean;
   stateVersions: CompositionStateVersion[];
   error: string | null;
+  /**
+   * Optional structured detail rows rendered as bullet points beneath
+   * `error` in the error banner. Populated when an ApiError carries
+   * structured `validation_errors` — currently set by `acceptProposal`
+   * on a 422 `proposal_validation_failed` response. Cleared whenever
+   * `error` is cleared.
+   */
+  errorDetails: string[] | null;
   recoveryError: ComposerRecoveryError | null;
   recoveryStartedCompositionVersion: number | null;
 
@@ -210,6 +218,12 @@ interface SessionState {
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
   reenterGuided: () => Promise<void>;
+  // Unified entry point bound by the "Switch to guided" button in ChatPanel's
+  // freeform body.  Branches on the current guidedSession terminal:
+  //   * no session or non-terminal session => startGuided (lazy-create / GET)
+  //   * terminal.kind === "exited_to_freeform" => reenterGuided
+  // The button stays a single affordance with one label regardless of branch.
+  enterGuided: () => Promise<void>;
   chatGuided: (message: string) => Promise<void>;
   exitToFreeform: () => Promise<void>;
   clearError: () => void;
@@ -231,6 +245,7 @@ const initialState = {
   stateVersions: [] as CompositionStateVersion[],
   isLoadingVersions: false,
   error: null as string | null,
+  errorDetails: null as string[] | null,
   selectedNodeId: null as string | null,
   ...clearedGuidedState(),
   ...clearedRecoveryState(),
@@ -268,11 +283,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ...clearedGuidedState(),
         ...clearedRecoveryState(),
       }));
-      // Auto-start guided mode.  New sessions are created with
-      // GuidedSession.initial() already attached by the backend (spec §5.2,
-      // errata C7).  startGuided's own catch block handles failures without
-      // clobbering the session we just set above.
-      void get().startGuided(session.id);
+      // Default-freeform: new sessions surface the freeform chat, with a
+      // "Switch to guided" affordance in the freeform body that activates
+      // guided mode on demand via enterGuided().  No GET /guided fetch
+      // here means no audit pollution / persisted guided state for users
+      // who stay in freeform.
     } catch {
       set({ error: "Failed to create session. Please try again." });
     }
@@ -372,20 +387,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         composerPreferences: composerPreferences ?? null,
       });
 
-      // Auto-start guided mode for the selected session.
-      //
-      // Per spec §5.2 and errata C7: new sessions are created with
-      // GuidedSession.initial() already attached by the backend.  The
-      // GET /guided endpoint auto-initialises on first call and returns the
-      // current step (or terminal state for sessions that have already
-      // exited to freeform).
-      //
-      // startGuided is fire-and-forget here: its own catch block sets the
-      // error field without clobbering the session/messages/compositionState
-      // we just loaded.  ChatPanel's guided-mode discriminator falls through
-      // to the freeform surface when guidedSession is null (startup race) or
-      // when terminal.kind === "exited_to_freeform" — both safe.
-      void get().startGuided(id);
+      // Default-freeform: do NOT auto-fetch /guided on session select.
+      // The freeform surface renders by default; the "Switch to guided"
+      // button in ChatPanel's freeform body calls enterGuided() to fetch
+      // (and lazy-persist) a guided session on user request.  Sessions that
+      // already have a persisted guided_session require the user to click
+      // the button to surface it — symmetric with "Exit to freeform".
 
       // Fire-and-forget: refresh blob list for the newly selected session
       useBlobStore.getState().loadBlobs(id);
@@ -592,9 +599,33 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
       } else {
         const apiErr = err as ApiError;
-        set({
-          error: apiErr.detail ?? "Failed to accept proposal. Please try again.",
-        });
+        // proposal_validation_failed (HTTP 422) carries structured
+        // validation entries plus a server-side auto-reject side effect.
+        // Reload proposals so the now-rejected one drops off the pending
+        // banner; surface the entries as bullet points in the error
+        // banner via `errorDetails`. Without this, the toast renders the
+        // Pydantic-flattened message as one wall-of-text line and the
+        // banner keeps showing the proposal as actionable until refresh.
+        const isProposalValidationFailure =
+          apiErr.error_type === "proposal_validation_failed";
+        if (isProposalValidationFailure) {
+          await get().loadCompositionProposals(activeSessionId);
+        }
+        if (get().activeSessionId === activeSessionId) {
+          const validationEntries = apiErr.validation_errors as
+            | Array<{ message?: string }>
+            | undefined;
+          const errorDetails =
+            isProposalValidationFailure && Array.isArray(validationEntries)
+              ? validationEntries
+                  .map((entry) => entry?.message)
+                  .filter((msg): msg is string => typeof msg === "string" && msg.length > 0)
+              : null;
+          set({
+            error: apiErr.detail ?? "Failed to accept proposal. Please try again.",
+            errorDetails: errorDetails && errorDetails.length > 0 ? errorDetails : null,
+          });
+        }
       }
     } finally {
       if (get().activeSessionId === activeSessionId) {
@@ -869,12 +900,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Fire-and-forget: refresh blob list for the NEW forked session
       useBlobStore.getState().loadBlobs(result.session.id);
 
-      // Auto-start guided mode for the forked session — same pattern as
-      // selectSession and createSession.  The backend initialises a fresh
-      // GuidedSession on the first GET /guided call (spec §5.2, errata C7).
-      // The stale-fetch guard inside startGuided ensures the response is
-      // dropped if the user switches away again before it resolves.
-      void get().startGuided(result.session.id);
+      // Default-freeform: forked sessions surface freeform (same contract as
+      // selectSession / createSession).  Forks are a new conversation context;
+      // the user activates guided explicitly via the "Switch to guided"
+      // button in ChatPanel if they want the wizard surface back.
     } catch {
       set({
         isComposing: false,
@@ -1019,6 +1048,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
+  async enterGuided() {
+    // Unified "Switch to guided" entry point.  Default-freeform sessions
+    // (no fetched guidedSession) take the startGuided path — GET /guided
+    // builds and persists the initial wizard turn server-side.  Sessions
+    // that were previously in guided and exited via the operator's "Exit
+    // to freeform" button reach a terminal of kind === "exited_to_freeform";
+    // those go through reenterGuided instead, because startGuided would
+    // return the terminal state and leave the discriminator on freeform.
+    //
+    // Other terminal kinds (completed, solver-exhausted, protocol-violation)
+    // are NOT re-entrable by design — see the reenter route handler at
+    // routes.py:5921 for the closed-list policy.  We still call startGuided
+    // for those; the discriminator at ChatPanel handles each terminal kind
+    // appropriately (completed → CompletionSummary; others → freeform).
+    const { activeSessionId, guidedSession } = get();
+    if (activeSessionId === null) {
+      throw new Error("enterGuided called without active session");
+    }
+    if (guidedSession?.terminal?.kind === "exited_to_freeform") {
+      await get().reenterGuided();
+      return;
+    }
+    await get().startGuided(activeSessionId);
+  },
+
   async chatGuided(message: string) {
     const { activeSessionId, guidedSession } = get();
     // Offensive guards: caller must not invoke without an active session
@@ -1125,7 +1179,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   clearError() {
-    set({ error: null });
+    set({ error: null, errorDetails: null });
   },
 
   selectNode(nodeId: string | null) {

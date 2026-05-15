@@ -18,6 +18,7 @@ export function useComposer() {
   const isComposing = useSessionStore((s) => s.isComposing);
   const compositionState = useSessionStore((s) => s.compositionState);
   const error = useSessionStore((s) => s.error);
+  const errorDetails = useSessionStore((s) => s.errorDetails);
 
   const sendMessage = useCallback(
     async (content: string) => {
@@ -45,5 +46,5 @@ export function useComposer() {
     [storeRetryMessage],
   );
 
-  return { sendMessage, retryMessage, isComposing, compositionState, error };
+  return { sendMessage, retryMessage, isComposing, compositionState, error, errorDetails };
 }

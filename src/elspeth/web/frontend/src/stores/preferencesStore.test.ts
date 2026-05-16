@@ -190,7 +190,7 @@ describe("preferences → session integration (real stores, API mocked)", () => 
     vi.clearAllMocks();
   });
 
-  it("createSession enters guided when the live preference is guided", async () => {
+  it("createSession enters guided when the live preference is guided (smoke)", async () => {
     const { useSessionStore } = await import("@/stores/sessionStore");
     const api = await import("@/api/client");
     usePreferencesStore.setState({
@@ -212,5 +212,164 @@ describe("preferences → session integration (real stores, API mocked)", () => 
     await useSessionStore.getState().createSession();
 
     expect(enterGuided).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Phase 1B panel banner-cluster + writeError additions ─────────────────
+describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)", () => {
+  beforeEach(() => {
+    resetStore(usePreferencesStore);
+    vi.clearAllMocks();
+    // Clean localStorage so the cross-tab broadcast tests don't see
+    // residue from prior tests in the same worker.
+    try {
+      window.localStorage.clear();
+    } catch {
+      // localStorage may be unavailable in some test envs; fine.
+    }
+  });
+
+  it("setDefaultMode('freeform', activeSessionId) captures optedOutAtSessionId watermark", async () => {
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      updated_at: "2026-05-16T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().setDefaultMode("freeform", "sess-a");
+
+    expect(usePreferencesStore.getState().optedOutAtSessionId).toBe("sess-a");
+  });
+
+  it("setDefaultMode('guided', ...) clears optedOutAtSessionId (re-opt-in resets)", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "freeform",
+      optedOutAtSessionId: "sess-old",
+    });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      updated_at: "2026-05-16T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().setDefaultMode("guided", "sess-b");
+
+    expect(usePreferencesStore.getState().optedOutAtSessionId).toBeNull();
+  });
+
+  it("setDefaultMode failure clears the watermark on revert (banner doesn't suppress for a write that didn't land)", async () => {
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockRejectedValueOnce(new Error("503"));
+
+    await expect(
+      usePreferencesStore.getState().setDefaultMode("freeform", "sess-c"),
+    ).rejects.toThrow("503");
+
+    expect(usePreferencesStore.getState().optedOutAtSessionId).toBeNull();
+    expect(usePreferencesStore.getState().defaultMode).toBe("guided");
+  });
+
+  it("setDefaultMode populates writeError on failure (role=alert surface for AT users)", async () => {
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockRejectedValueOnce(new Error("network down"));
+
+    await expect(
+      usePreferencesStore.getState().setDefaultMode("freeform", null),
+    ).rejects.toThrow("network down");
+
+    expect(usePreferencesStore.getState().writeError).toMatch(/network down/);
+  });
+
+  it("setDefaultMode clears writeError on next success (recovery semantics)", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      writeError: "prior failure",
+    });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      updated_at: "2026-05-16T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().setDefaultMode("freeform", null);
+
+    expect(usePreferencesStore.getState().writeError).toBeNull();
+  });
+
+  it("dismissDefaultChangedBanner writes resolved value to localStorage (cross-tab broadcast)", async () => {
+    const stamp = "2026-05-16T01:00:00Z";
+    usePreferencesStore.setState({ loaded: true, defaultMode: "freeform" });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: stamp,
+      updated_at: stamp,
+    });
+
+    await usePreferencesStore.getState().dismissDefaultChangedBanner();
+
+    expect(window.localStorage.getItem("elspeth_prefs_banner_dismissed_v1")).toBe(stamp);
+  });
+
+  it("storage event from a peer tab updates bannerDismissedAt without making a PATCH", () => {
+    // Simulate a peer tab having just dismissed: the storage event fires
+    // in THIS tab, and our store listener updates local state.
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "freeform",
+      bannerDismissedAt: null,
+    });
+    const peerStamp = "2026-05-16T02:00:00Z";
+
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: "elspeth_prefs_banner_dismissed_v1",
+        newValue: peerStamp,
+      }),
+    );
+
+    expect(usePreferencesStore.getState().bannerDismissedAt).toBe(peerStamp);
+    // No PATCH issued — the peer tab already wrote the value.
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("storage event for unrelated keys is ignored", () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "freeform",
+      bannerDismissedAt: null,
+    });
+
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: "some-other-key",
+        newValue: "value",
+      }),
+    );
+
+    expect(usePreferencesStore.getState().bannerDismissedAt).toBeNull();
+  });
+
+  it("dismissDefaultChangedBanner populates writeError on failure", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "freeform",
+      bannerDismissedAt: null,
+    });
+    mockUpdate.mockRejectedValueOnce(new Error("503 Service Unavailable"));
+
+    await expect(
+      usePreferencesStore.getState().dismissDefaultChangedBanner(),
+    ).rejects.toThrow("503");
+
+    expect(usePreferencesStore.getState().writeError).toMatch(/503/);
+  });
+
+  it("clearError() returns writeError to null", () => {
+    usePreferencesStore.setState({ writeError: "some error" });
+    usePreferencesStore.getState().clearError();
+    expect(usePreferencesStore.getState().writeError).toBeNull();
   });
 });

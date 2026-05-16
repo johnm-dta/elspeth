@@ -9,6 +9,22 @@ interface UserMenuProps {
  * Account dropdown in the sidebar toolbar. Click-outside, Escape-to-close
  * with focus return to the trigger, and Tab/Shift+Tab navigation (the
  * project convention; CommandPalette.tsx uses the same pattern).
+ *
+ * Role contract: this is a disclosure/popover of actions, NOT a WAI-ARIA
+ * `menu` widget. The earlier `role="menu"` / `role="menuitem"` assertion
+ * (with `aria-haspopup="menu"`) promised the full menu keyboard
+ * contract (arrow keys, Home/End, type-ahead) which we don't implement.
+ * Per the Phase 1B accessibility-audit panel finding, the correct fix
+ * is to drop the menu role rather than add arrow keys: this component
+ * is already a correct disclosure (Tab + Escape + focus-return).
+ * Trigger uses `aria-haspopup="true"` (the "no specific popup role
+ * promise" value); the dropdown is a plain `<ul>` of `<button>`
+ * elements with their implicit roles.
+ *
+ * Item naming: "Composer preferences" rather than "Settings" because
+ * the pane today only contains composer preferences — the broader
+ * "Settings" framing was the UX panel's "absorb into a hub later"
+ * placeholder which would mis-label a single-pane experience.
  */
 export function UserMenu({
   onOpenSettings,
@@ -62,7 +78,7 @@ export function UserMenu({
         ref={triggerRef}
         type="button"
         aria-label="account menu"
-        aria-haspopup="menu"
+        aria-haspopup="true"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
@@ -70,7 +86,6 @@ export function UserMenu({
       </button>
       {open && (
         <ul
-          role="menu"
           style={{
             position: "absolute",
             top: "100%",
@@ -82,37 +97,47 @@ export function UserMenu({
             border: "1px solid var(--color-border)",
             borderRadius: 4,
             boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-            minWidth: 140,
+            minWidth: 180,
             zIndex: 50,
           }}
         >
-          <li
-            role="menuitem"
-            tabIndex={0}
-            onClick={onSettings}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onSettings();
-              }
-            }}
-            style={{ padding: "6px 12px", cursor: "pointer" }}
-          >
-            Settings
+          <li style={{ margin: 0 }}>
+            <button
+              type="button"
+              onClick={onSettings}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "6px 12px",
+                textAlign: "left",
+                background: "transparent",
+                border: 0,
+                cursor: "pointer",
+                font: "inherit",
+                minHeight: 24,
+              }}
+            >
+              Composer preferences
+            </button>
           </li>
-          <li
-            role="menuitem"
-            tabIndex={0}
-            onClick={onSignOutClick}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onSignOutClick();
-              }
-            }}
-            style={{ padding: "6px 12px", cursor: "pointer" }}
-          >
-            Sign out
+          <li style={{ margin: 0 }}>
+            <button
+              type="button"
+              onClick={onSignOutClick}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "6px 12px",
+                textAlign: "left",
+                background: "transparent",
+                border: 0,
+                cursor: "pointer",
+                font: "inherit",
+                minHeight: 24,
+              }}
+            >
+              Sign out
+            </button>
           </li>
         </ul>
       )}

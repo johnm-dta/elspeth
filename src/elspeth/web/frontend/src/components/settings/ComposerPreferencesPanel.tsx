@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/stores/preferencesStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import type { ComposerMode } from "@/types/api";
 
@@ -8,20 +9,29 @@ import type { ComposerMode } from "@/types/api";
  * it without the modal chrome; the full panel embeds it.
  *
  * Returns null before bootstrap completes — defaultMode is null until then.
+ *
+ * Surfaces a role="alert" region (Panel a11y F2) for failed PATCH results
+ * so the write failure is announced rather than silently logging to
+ * console only. Also forwards activeSessionId to setDefaultMode so the
+ * banner's timing watermark is set if the user opts out from settings
+ * while a session is active.
  */
 export function ComposerPreferencesForm(): JSX.Element | null {
   const defaultMode = usePreferencesStore((s) => s.defaultMode);
   const loaded = usePreferencesStore((s) => s.loaded);
   const writing = usePreferencesStore((s) => s.writing);
+  const writeError = usePreferencesStore((s) => s.writeError);
   const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
 
   // useCallback must be unconditional (React rules of hooks); the early-return
   // for !loaded sits after the hook calls.
   const onChange = useCallback(
     async (mode: ComposerMode) => {
+      const activeSessionId = useSessionStore.getState().activeSessionId;
       try {
-        await setDefaultMode(mode);
+        await setDefaultMode(mode, activeSessionId);
       } catch (err) {
+        // Surfaced via writeError -> role="alert" region below.
         console.error("[preferences] setDefaultMode failed:", err);
       }
     },
@@ -31,31 +41,46 @@ export function ComposerPreferencesForm(): JSX.Element | null {
   if (!loaded || defaultMode === null) return null;
 
   return (
-    <fieldset disabled={writing} aria-busy={writing}>
-      <legend>Default mode for new sessions</legend>
-      <label>
-        <input
-          type="radio"
-          name="composer-default-mode"
-          value="guided"
-          checked={defaultMode === "guided"}
-          disabled={writing}
-          onChange={() => void onChange("guided")}
-        />
-        <span>Guided (recommended)</span>
-      </label>
-      <label>
-        <input
-          type="radio"
-          name="composer-default-mode"
-          value="freeform"
-          checked={defaultMode === "freeform"}
-          disabled={writing}
-          onChange={() => void onChange("freeform")}
-        />
-        <span>Freeform</span>
-      </label>
-    </fieldset>
+    <>
+      <fieldset disabled={writing} aria-busy={writing}>
+        <legend>Default mode for new sessions</legend>
+        <label>
+          <input
+            type="radio"
+            name="composer-default-mode"
+            value="guided"
+            checked={defaultMode === "guided"}
+            disabled={writing}
+            onChange={() => void onChange("guided")}
+          />
+          <span>Guided (recommended)</span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="composer-default-mode"
+            value="freeform"
+            checked={defaultMode === "freeform"}
+            disabled={writing}
+            onChange={() => void onChange("freeform")}
+          />
+          <span>Freeform</span>
+        </label>
+      </fieldset>
+      {writeError !== null && (
+        <div
+          role="alert"
+          className="composer-preferences-error"
+          style={{
+            marginTop: 8,
+            color: "var(--color-danger, #b00020)",
+            fontSize: 13,
+          }}
+        >
+          {writeError}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -105,7 +130,7 @@ export function ComposerPreferencesPanel({
         ref={modalRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Composer preferences"
+        aria-labelledby="composer-preferences-title"
         style={{
           position: "fixed",
           top: "50%",
@@ -126,12 +151,22 @@ export function ComposerPreferencesPanel({
         }}
       >
         <div className="secrets-panel-header">
-          <h2 className="secrets-panel-title">Composer preferences</h2>
+          <h2 id="composer-preferences-title" className="secrets-panel-title">
+            Composer preferences
+          </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close composer preferences panel"
             className="secrets-panel-close"
+            style={{
+              minWidth: 32,
+              minHeight: 32,
+              padding: 4,
+              fontSize: 18,
+              lineHeight: 1,
+              cursor: "pointer",
+            }}
           >
             ×
           </button>

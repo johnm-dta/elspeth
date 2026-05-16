@@ -12,6 +12,23 @@
 // defaultMode is null before bootstrap completes. Components MUST gate on
 // `loaded === true` before assuming a non-null mode; the typed getter
 // resolveDefaultMode() does this for non-component callers.
+//
+// Cross-tab coordination (Phase 1B Panel: banner cluster):
+//   When one tab calls dismissDefaultChangedBanner(), we write the resolved
+//   timestamp to localStorage under BANNER_DISMISSED_STORAGE_KEY. Other
+//   tabs subscribe (via initCrossTabSync) and update their local
+//   bannerDismissedAt without making a second PATCH. The storage event
+//   does not fire in the originating tab, so there is no echo loop.
+//   Mirrors src/hooks/useTheme.test.tsx's cross-tab pattern.
+//
+// Banner timing watermark (Phase 1B Panel: "first session after opt-out"):
+//   When setDefaultMode("freeform") is called and a session is currently
+//   active, we capture the activeSessionId into optedOutAtSessionId. The
+//   DefaultModeChangedBanner suppresses itself while the user is still in
+//   that session — they see the banner only after navigating to a new
+//   session or reloading. The watermark is in-memory only; a reload
+//   surfaces the banner (matches "I opted out, refreshed, see
+//   confirmation" intuition).
 // ============================================================================
 
 import { create } from "zustand";
@@ -21,16 +38,29 @@ import {
 } from "@/api/client";
 import type { ComposerMode } from "@/types/api";
 
+// localStorage key for cross-tab banner-dismiss broadcasts. Versioned
+// (`v1`) so a future schema change can add a `v2` key without colliding
+// with stale tabs that pre-date the upgrade.
+const BANNER_DISMISSED_STORAGE_KEY = "elspeth_prefs_banner_dismissed_v1";
+
 interface PreferencesState {
   defaultMode: ComposerMode | null;
   bannerDismissedAt: string | null;
   loaded: boolean;
   writing: boolean;
+  // Most-recent error from a setDefaultMode or dismiss call. Components
+  // render this as an accessible role="alert" region (Panel a11y F2).
+  // Cleared on the next successful write or by explicit clearError().
+  writeError: string | null;
+  // Session in which the user opted out of guided. Banner suppresses while
+  // activeSessionId matches this watermark. See module comment.
+  optedOutAtSessionId: string | null;
 
   bootstrap: () => Promise<void>;
   resolveDefaultMode: () => Promise<ComposerMode>;
-  setDefaultMode: (mode: ComposerMode) => Promise<void>;
+  setDefaultMode: (mode: ComposerMode, activeSessionId?: string | null) => Promise<void>;
   dismissDefaultChangedBanner: () => Promise<void>;
+  clearError: () => void;
   reset: () => void;
 }
 
@@ -39,6 +69,8 @@ const INITIAL_STATE = {
   bannerDismissedAt: null as string | null,
   loaded: false,
   writing: false,
+  writeError: null as string | null,
+  optedOutAtSessionId: null as string | null,
 };
 
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
@@ -70,17 +102,41 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     return after.defaultMode;
   },
 
-  setDefaultMode: async (mode) => {
+  setDefaultMode: async (mode, activeSessionId = null) => {
     if (get().writing) return;
     const previous = get().defaultMode;
-    set({ defaultMode: mode, writing: true });
+    const wasOptOut = mode === "freeform" && previous !== "freeform";
+    // Capture the timing watermark BEFORE the async write so a reload
+    // mid-write still suppresses the banner for the current session if
+    // the write succeeds. Reset to null on opt-IN (mode === "guided") so
+    // an opt-out → opt-in → opt-out cycle gets a fresh watermark.
+    set({
+      defaultMode: mode,
+      writing: true,
+      writeError: null,
+      optedOutAtSessionId: wasOptOut
+        ? activeSessionId
+        : mode === "guided"
+          ? null
+          : get().optedOutAtSessionId,
+    });
     try {
       const payload = await updateUserComposerPreferences({
         default_mode: mode,
       });
       set({ defaultMode: payload.default_mode, writing: false });
     } catch (err) {
-      set({ defaultMode: previous, writing: false });
+      set({
+        defaultMode: previous,
+        writing: false,
+        writeError:
+          err instanceof Error
+            ? `Couldn't save your preference: ${err.message}`
+            : "Couldn't save your preference.",
+        // Revert the watermark on failure so the banner doesn't suppress
+        // for a write that didn't land.
+        optedOutAtSessionId: wasOptOut ? null : get().optedOutAtSessionId,
+      });
       throw err;
     }
   },
@@ -89,20 +145,72 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     if (get().writing) return;
     const stamp = new Date().toISOString();
     const previous = get().bannerDismissedAt;
-    set({ bannerDismissedAt: stamp, writing: true });
+    set({ bannerDismissedAt: stamp, writing: true, writeError: null });
     try {
       const payload = await updateUserComposerPreferences({
         banner_dismissed_at: stamp,
       });
+      const resolved = payload.banner_dismissed_at;
       set({
-        bannerDismissedAt: payload.banner_dismissed_at,
+        bannerDismissedAt: resolved,
         writing: false,
       });
+      // Cross-tab broadcast (Panel banner cluster): write the resolved
+      // value to localStorage so peer tabs update their local state
+      // without making a second PATCH. The storage event does not fire
+      // in this tab.
+      if (typeof window !== "undefined" && resolved !== null) {
+        try {
+          window.localStorage.setItem(
+            BANNER_DISMISSED_STORAGE_KEY,
+            resolved,
+          );
+        } catch {
+          // localStorage may be disabled (private browsing strict mode);
+          // in-tab state is correct, peer tabs will catch up on next
+          // bootstrap. No user-visible failure.
+        }
+      }
     } catch (err) {
-      set({ bannerDismissedAt: previous, writing: false });
+      set({
+        bannerDismissedAt: previous,
+        writing: false,
+        writeError:
+          err instanceof Error
+            ? `Couldn't dismiss the banner: ${err.message}`
+            : "Couldn't dismiss the banner.",
+      });
       throw err;
     }
   },
 
+  clearError: () => set({ writeError: null }),
+
   reset: () => set(INITIAL_STATE),
 }));
+
+// ── Cross-tab sync wiring ────────────────────────────────────────────────
+// Idempotent at-most-once subscription, attached at module load. Mirrors
+// the useTheme storage-event pattern but for the banner-dismiss key.
+// Guarded against re-execution (e.g. HMR) and SSR (no window).
+let crossTabSyncInitialised = false;
+
+export function initCrossTabSync(): void {
+  if (crossTabSyncInitialised) return;
+  if (typeof window === "undefined") return;
+  crossTabSyncInitialised = true;
+
+  window.addEventListener("storage", (event: StorageEvent) => {
+    if (event.key !== BANNER_DISMISSED_STORAGE_KEY) return;
+    if (event.newValue === null) return;
+    // Update local state to match the broadcast value WITHOUT making
+    // another PATCH (the originating tab already wrote it). If the
+    // current store already has a non-null dismissed_at, prefer the
+    // peer's value (idempotent — the peer's value won the race).
+    usePreferencesStore.setState({ bannerDismissedAt: event.newValue });
+  });
+}
+
+// Auto-initialise on module load in browser environments. SSR/test
+// environments without window are gracefully skipped.
+initCrossTabSync();

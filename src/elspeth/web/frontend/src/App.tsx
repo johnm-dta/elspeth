@@ -269,7 +269,12 @@ function App() {
         <div className="app-main" role="main">
           <Layout
             sidebar={<SessionSidebar />}
-            chat={<ChatPanel onOpenSecrets={openSecrets} />}
+            chat={
+              <ChatPanel
+                onOpenSecrets={openSecrets}
+                onOpenComposerPreferences={openComposerSettings}
+              />
+            }
             inspector={<InspectorPanel />}
             onOpenSettings={openComposerSettings}
             onSignOut={logout}

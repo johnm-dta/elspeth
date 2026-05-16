@@ -3,11 +3,14 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { InlineOptOutCheckbox } from "./InlineOptOutCheckbox";
 import { usePreferencesStore } from "@/stores/preferencesStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
 
 vi.mock("@/api/client", () => ({
   fetchUserComposerPreferences: vi.fn(),
   updateUserComposerPreferences: vi.fn(),
+  fetchSessions: vi.fn(),
+  createSession: vi.fn(),
 }));
 
 describe("InlineOptOutCheckbox", () => {
@@ -18,7 +21,10 @@ describe("InlineOptOutCheckbox", () => {
       defaultMode: "guided",
       bannerDismissedAt: null,
       writing: false,
+      writeError: null,
+      optedOutAtSessionId: null,
     });
+    useSessionStore.setState({ activeSessionId: null });
     vi.clearAllMocks();
   });
 
@@ -33,13 +39,15 @@ describe("InlineOptOutCheckbox", () => {
     expect(screen.getByRole("checkbox")).toBeChecked();
   });
 
-  it("writes 'freeform' when ticked from guided default", async () => {
+  it("writes 'freeform' when ticked from guided default (forwards activeSessionId watermark)", async () => {
     const setDefault = vi
       .spyOn(usePreferencesStore.getState(), "setDefaultMode")
       .mockResolvedValueOnce(undefined);
     render(<InlineOptOutCheckbox />);
     await userEvent.click(screen.getByRole("checkbox"));
-    expect(setDefault).toHaveBeenCalledWith("freeform");
+    // Second arg is the banner-timing watermark (null here = no session
+    // active in test setup).
+    expect(setDefault).toHaveBeenCalledWith("freeform", null);
   });
 
   it("writes 'guided' when re-ticked from freeform default", async () => {
@@ -49,7 +57,17 @@ describe("InlineOptOutCheckbox", () => {
       .mockResolvedValueOnce(undefined);
     render(<InlineOptOutCheckbox />);
     await userEvent.click(screen.getByRole("checkbox"));
-    expect(setDefault).toHaveBeenCalledWith("guided");
+    expect(setDefault).toHaveBeenCalledWith("guided", null);
+  });
+
+  it("forwards the active session id when one is set", async () => {
+    useSessionStore.setState({ activeSessionId: "sess-9" });
+    const setDefault = vi
+      .spyOn(usePreferencesStore.getState(), "setDefaultMode")
+      .mockResolvedValueOnce(undefined);
+    render(<InlineOptOutCheckbox />);
+    await userEvent.click(screen.getByRole("checkbox"));
+    expect(setDefault).toHaveBeenCalledWith("freeform", "sess-9");
   });
 
   it("disables the checkbox during write", () => {
@@ -62,5 +80,13 @@ describe("InlineOptOutCheckbox", () => {
     usePreferencesStore.setState({ loaded: false, defaultMode: null });
     const { container } = render(<InlineOptOutCheckbox />);
     expect(container.firstChild).toBeNull();
+  });
+
+  it("surfaces writeError via role=alert when a PATCH fails (Panel a11y F2)", () => {
+    usePreferencesStore.setState({
+      writeError: "Couldn't save your preference: 503",
+    });
+    render(<InlineOptOutCheckbox />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/503/);
   });
 });

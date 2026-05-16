@@ -408,4 +408,44 @@ describe("App preferences bootstrap (Phase 1B)", () => {
       expect(bootstrap).toHaveBeenCalled();
     });
   });
+
+  it("App still renders when preferences bootstrap rejects (Panel test #1)", async () => {
+    // Resilience claim: a failing prefs bootstrap MUST NOT block app
+    // render. The earlier test only spied on bootstrap; it never made
+    // bootstrap reject, so the .catch branch was uncovered — the test
+    // would have passed even if the .catch were deleted, making the
+    // "preferences are non-fatal" claim unverified.
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    const bootstrap = vi
+      .spyOn(usePreferencesStore.getState(), "bootstrap")
+      .mockRejectedValueOnce(new Error("network down"));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(bootstrap).toHaveBeenCalled();
+    });
+    // The error path was exercised — operator-side breadcrumb logged.
+    // We tolerate the exact message format; the contract is "[preferences]"
+    // prefix so logs are greppable.
+    await waitFor(() => {
+      expect(
+        consoleError.mock.calls.some(
+          ([first]) =>
+            typeof first === "string" && first.includes("[preferences]"),
+        ),
+      ).toBe(true);
+    });
+    // App chrome remains rendered. The Layout/ChatPanel stubs are still
+    // present — proves the bootstrap rejection didn't unmount the tree.
+    // Using the chat-panel-stub testid (App.test.tsx wires its own stubs
+    // for the sub-components; this assertion does not depend on real
+    // SessionSidebar content which isn't rendered in the stub world).
+    expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
+
+    consoleError.mockRestore();
+  });
 });

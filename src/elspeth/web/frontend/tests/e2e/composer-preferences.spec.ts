@@ -160,7 +160,14 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     await composer.goto();
 
     await page.getByRole("button", { name: /account/i }).click();
-    await page.getByRole("menuitem", { name: /settings/i }).click();
+    // UserMenu items are now plain <button> elements (the menu role
+    // contract was dropped in the Phase 1B panel round-2 fix because we
+    // don't implement the WAI-ARIA arrow-key contract). The item label
+    // also changed from "Settings" to "Composer preferences" since the
+    // pane only contains composer prefs today.
+    await page
+      .getByRole("button", { name: /composer preferences/i })
+      .click();
 
     await expect(
       page.getByRole("dialog", { name: /composer preferences/i }),

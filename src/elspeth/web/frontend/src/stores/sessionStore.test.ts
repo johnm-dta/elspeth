@@ -831,6 +831,56 @@ describe("sessionStore", () => {
       expect(enterGuided).toHaveBeenCalledTimes(1);
     });
 
+    it("prefs-bootstrap failure does NOT mask successful session creation (Panel M1)", async () => {
+      // Regression pin for the createSession try-block split. Earlier shape:
+      // single try wrapped both api.createSession() and resolveDefaultMode();
+      // a prefs-bootstrap rejection was attributed to "Failed to create
+      // session" even though the session had already been created and
+      // activated. New shape: separate try blocks per concern.
+      const apiClient = await import("@/api/client");
+      const { usePreferencesStore } = await import("@/stores/preferencesStore");
+      // Unloaded prefs, bootstrap rejects with a network error.
+      resetStore(usePreferencesStore);
+      (apiClient.fetchUserComposerPreferences as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("Network error"),
+      );
+      (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: "sess-prefs-fail",
+        title: "untitled",
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+
+      await useSessionStore.getState().createSession();
+
+      const state = useSessionStore.getState();
+      // Session was created and is the active session — NOT masked.
+      expect(state.activeSessionId).toBe("sess-prefs-fail");
+      expect(state.sessions[0]?.id).toBe("sess-prefs-fail");
+      // The error message names the *secondary* failure, not the false
+      // "Failed to create session" attribution.
+      expect(state.error).toMatch(/couldn't apply your default mode/i);
+      expect(state.error).not.toMatch(/failed to create session/i);
+      // No guided entry attempted because resolveDefaultMode threw before
+      // returning a mode value.
+      expect(state.guidedSession).toBeNull();
+    });
+
+    it("session-create failure still surfaces 'Failed to create session' (no regression)", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.createSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("500"),
+      );
+
+      await useSessionStore.getState().createSession();
+
+      const state = useSessionStore.getState();
+      expect(state.error).toMatch(/failed to create session/i);
+      // No session was added; the early-return prevented the activation
+      // set() from running.
+      expect(state.activeSessionId).toBeNull();
+    });
+
     it("bootstrap race: createSession before bootstrap resolves still enters guided when prefs resolve to guided", async () => {
       const apiClient = await import("@/api/client");
       const { usePreferencesStore } = await import("@/stores/preferencesStore");

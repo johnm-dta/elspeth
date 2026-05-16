@@ -174,7 +174,10 @@ def test_validation_row_error_lists_component_ids():
     assert row.component_ids == ("out",)
 
 
-def test_plugin_trust_row_ok_when_all_internal():
+def test_plugin_trust_row_ok_summary_when_boundary_plugins_present():
+    # Default source_plugin="csv" → classify_plugin("source", "csv") is BOUNDARY
+    # (sources are uniformly BOUNDARY per trust.py:87-88). Exercises the
+    # boundary branch of _build_plugin_trust_row (service.py:174-185).
     svc = _make_service(
         _state(transforms=(("t", "passthrough"),), sinks=(("out", "csv"),)),
         _OK,
@@ -185,7 +188,55 @@ def test_plugin_trust_row_ok_when_all_internal():
             user_id="alice",
         )
     )
-    assert _row(snap, "plugin_trust").status == "ok"
+    row = _row(snap, "plugin_trust")
+    assert row.status == "ok"
+    assert "external-boundary" in row.summary
+    assert "source" in row.component_ids
+    assert row.component_ids != ()
+
+
+def test_plugin_trust_row_ok_summary_when_no_boundary_plugins():
+    # source_plugin=None skips the source _record call (service.py:145-146),
+    # all-internal transforms+sinks leave `boundary` empty, hitting the
+    # no-boundary branch (service.py:164-172).
+    svc = _make_service(
+        _state(
+            source_plugin=None,
+            transforms=(("t", "passthrough"),),
+            sinks=(("out", "csv"),),
+        ),
+        _OK,
+    )
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id="11111111-1111-1111-1111-111111111111",
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "plugin_trust")
+    assert row.status == "ok"
+    assert row.summary == "All plugins operate on pipeline data"
+    assert row.component_ids == ()
+
+
+def test_plugin_trust_row_error_on_unknown_plugin():
+    # NodeSpec.plugin is str | None; a None plugin reaches the unknown
+    # branch in _build_plugin_trust_row (service.py:153-162) and flips the
+    # row to status="error".
+    svc = _make_service(
+        _state(transforms=(("bad", None),)),
+        _OK,
+    )
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id="11111111-1111-1111-1111-111111111111",
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "plugin_trust")
+    assert row.status == "error"
+    assert row.summary == "Unknown plugin in composition"
+    assert "bad" in row.component_ids
 
 
 def test_provenance_warning_on_identity_advisory():

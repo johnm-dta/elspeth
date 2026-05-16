@@ -71,6 +71,21 @@ ids — Phase 2A's `ReadinessRowId` Literal is mirrored as a TypeScript discrimi
 union, and the renderer's switch is exhaustive (compiler-enforced via the `never`
 default arm).
 
+**Authorized exception — transport-layer shape validation (Amendment 14b-1, frontend-001):**
+`parseResponse` in `api/auditReadiness.ts` (lines 51–66) performs a shallow shape check on
+`session_id` (string) and `composition_version` (number) before returning the body to
+the caller. This is an explicit policy exception to the "no defensive checks on Tier 1 data"
+rule. Rationale: CLAUDE.md's trust-tier model addresses data *origin* (who produced the
+value), not transport-layer corruption (a proxy, CDN, or body-truncation delivering a
+well-formed HTTP 200 with a corrupted body). The check is shallow — only the two fields
+shared by both response types — and throws a typed `ApiError` on mismatch so callers see
+a structured failure rather than a silent runtime TypeError later in the call chain.
+
+A deeper version of this check (validating all six rows, `ReadinessRowId` literals,
+`ReadinessStatus` values) is tracked as observation `elspeth-obs-2e58958765` for future
+strengthening. A future CLAUDE.md update may add a fourth tier (transport / wire) — this
+is the first place that boundary surfaces in the codebase.
+
 ## File structure
 
 **New:**
@@ -78,6 +93,8 @@ default arm).
 - `src/elspeth/web/frontend/src/api/auditReadiness.test.ts`
 - `src/elspeth/web/frontend/src/stores/auditReadinessStore.ts`
 - `src/elspeth/web/frontend/src/stores/auditReadinessStore.test.ts`
+- `src/elspeth/web/frontend/src/stores/subscriptions.ts` *(added by 2B.5 follow-up — see commits `084b8c34b` + `163737068`)*
+- `src/elspeth/web/frontend/src/stores/subscriptions.test.ts` *(added by 2B.5 follow-up)*
 - `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx`
 - `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx`
 - `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx` *(placeholder; 14c replaces it)*
@@ -525,8 +542,9 @@ describe("useAuditReadinessStore", () => {
 
     const state = useAuditReadinessStore.getState();
     expect(state.snapshotsBySession[SESSION_ID]?.composition_version).toBe(1);
-    expect(state.isLoading).toBe(false);
-    expect(state.error).toBeNull();
+    // Amendment 14b-4 (frontend-005): per-session maps, not flat scalars.
+    expect(state.isLoadingBySession[SESSION_ID]).toBeFalsy();
+    expect(state.errorBySession[SESSION_ID]).toBeNull();
   });
 
   it("loadSnapshot is a no-op when the cached snapshot's version matches", async () => {
@@ -562,7 +580,8 @@ describe("useAuditReadinessStore", () => {
     await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
 
     const state = useAuditReadinessStore.getState();
-    expect(state.error).toContain("No composition state");
+    // Amendment 14b-4 (frontend-005): per-session errorBySession, not flat error.
+    expect(state.errorBySession[SESSION_ID]).toContain("No composition state");
     expect(state.snapshotsBySession[SESSION_ID]).toBeUndefined();
   });
 
@@ -651,10 +670,11 @@ describe("useAuditReadinessStore", () => {
   // --- AbortController cancellation contract ---
   // This test exercises the abort path: when a second loadSnapshot call starts
   // while the first is still in-flight, the store must abort the first fetch's
-  // AbortController and clear isLoading after the second completes.
+  // AbortController and clear isLoadingBySession[SESSION_ID] after the second
+  // completes. Amendment 14b-4 (frontend-005): per-session map, not flat scalar.
   // It is CONCURRENT: both fetches are in-flight simultaneously. It covers a
   // different contract from the monotonic-guard test above — both are required.
-  it("abort-cancellation: second in-flight fetch aborts the first; isLoading resets cleanly", async () => {
+  it("abort-cancellation: second in-flight fetch aborts the first; isLoadingBySession resets cleanly", async () => {
     let resolveFirst!: (s: AuditReadinessSnapshot) => void;
     let rejectFirst!: (err: unknown) => void;
     const firstFetch = new Promise<AuditReadinessSnapshot>((res, rej) => {
@@ -685,8 +705,9 @@ describe("useAuditReadinessStore", () => {
     // Complete the second fetch.
     await secondPromise;
 
-    // isLoading must be false — the abort arm must have cleared it.
-    expect(useAuditReadinessStore.getState().isLoading).toBe(false);
+    // isLoadingBySession[SESSION_ID] must be false — the abort arm must have
+    // cleared the per-session flag. Amendment 14b-4 (frontend-005).
+    expect(useAuditReadinessStore.getState().isLoadingBySession[SESSION_ID]).toBeFalsy();
     // Second fetch's result must be stored.
     expect(
       useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
@@ -746,10 +767,15 @@ export interface AuditReadinessState {
    *  does not cancel a concurrent snapshot fetch for the same session.
    *  clearSession aborts both controllers. */
   explainAbortControllers: Record<string, AbortController>;
-  isLoading: boolean;
-  isLoadingExplain: boolean;
-  error: string | null;
-  explainError: string | null;
+  /** Per-session loading and error state. Amendment 14b-4 (frontend-005):
+   *  flat scalars (`isLoading`, `error`, etc.) replaced with per-session keyed
+   *  maps to prevent cross-session contamination — switching from a failing
+   *  session A to a healthy session B would otherwise render A's error on B.
+   *  Commit: c3f3d0ae6. 14c's Task 4C extends with `userExpandedBySession`. */
+  isLoadingBySession: Record<string, boolean>;
+  isLoadingExplainBySession: Record<string, boolean>;
+  errorBySession: Record<string, string | null>;
+  explainErrorBySession: Record<string, string | null>;
 
   loadSnapshot: (sessionId: string, compositionVersion: number) => Promise<void>;
   loadExplain: (sessionId: string, compositionVersion: number) => Promise<void>;
@@ -762,10 +788,10 @@ export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "l
   explainsBySession: {},
   abortControllers: {},
   explainAbortControllers: {},
-  isLoading: false,
-  isLoadingExplain: false,
-  error: null,
-  explainError: null,
+  isLoadingBySession: {},
+  isLoadingExplainBySession: {},
+  errorBySession: {},
+  explainErrorBySession: {},
 });
 
 export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => ({
@@ -781,10 +807,11 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
     const prev = get().abortControllers[sessionId];
     if (prev) prev.abort();
     const controller = new AbortController();
+    // Amendment 14b-4 (frontend-005): per-session isLoadingBySession/errorBySession.
     set((state) => ({
       abortControllers: { ...state.abortControllers, [sessionId]: controller },
-      isLoading: true,
-      error: null,
+      isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: true },
+      errorBySession: { ...state.errorBySession, [sessionId]: null },
     }));
 
     try {
@@ -794,27 +821,46 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
       set((state) => {
         const current = state.snapshotsBySession[sessionId];
         if (current && current.composition_version > snapshot.composition_version) {
-          return { isLoading: false };
+          const { [sessionId]: _staleCtrl, ...restStaleCtrl } = state.abortControllers;
+          return {
+            abortControllers: restStaleCtrl,
+            isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          };
         }
         const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
         return {
           snapshotsBySession: { ...state.snapshotsBySession, [sessionId]: snapshot },
           abortControllers: restCtrl,
-          isLoading: false,
+          isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          errorBySession: { ...state.errorBySession, [sessionId]: null },
         };
       });
     } catch (err) {
-      // AbortError is the expected path for an aborted-by-newer-fetch scenario;
-      // the loading indicator must clear because no successor fetch may arrive
-      // (e.g., session navigation away). isLoading is global, not per-session.
+      // AbortError: per-session flag clears. Controller-identity guard: if our
+      // controller is no longer the tracked one (clearSession or newer fetch
+      // took over), do not resurrect state we no longer own.
       if ((err as { name?: string }).name === "AbortError") {
-        set({ isLoading: false });
+        set((state) => {
+          if (state.abortControllers[sessionId] !== controller) {
+            return state;
+          }
+          return {
+            isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          };
+        });
         return;
       }
       const apiErr = err as ApiError;
-      set({
-        isLoading: false,
-        error: apiErr.detail ?? "Failed to load audit readiness.",
+      set((state) => {
+        const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
+        return {
+          abortControllers: restCtrl,
+          isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          errorBySession: {
+            ...state.errorBySession,
+            [sessionId]: apiErr.detail ?? "Failed to load audit readiness.",
+          },
+        };
       });
     }
   },
@@ -831,10 +877,11 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
     const prevExplain = get().explainAbortControllers[sessionId];
     if (prevExplain) prevExplain.abort();
     const explainController = new AbortController();
+    // Amendment 14b-4 (frontend-005): per-session isLoadingExplainBySession/explainErrorBySession.
     set((state) => ({
       explainAbortControllers: { ...state.explainAbortControllers, [sessionId]: explainController },
-      isLoadingExplain: true,
-      explainError: null,
+      isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: true },
+      explainErrorBySession: { ...state.explainErrorBySession, [sessionId]: null },
     }));
 
     try {
@@ -847,20 +894,36 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
             [sessionId]: explain,
           },
           explainAbortControllers: restCtrl,
-          isLoadingExplain: false,
+          isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: false },
+          explainErrorBySession: { ...state.explainErrorBySession, [sessionId]: null },
         };
       });
     } catch (err) {
-      // Mirror the snapshot AbortError pattern: clear isLoadingExplain so the
-      // UI does not hang on "Loading explain…" after navigation away.
+      // Mirror the snapshot AbortError pattern: per-session flag clears.
+      // Controller-identity guard: if our explainController is no longer tracked,
+      // clearSession or a newer fetch has taken over — do not resurrect stale state.
       if ((err as { name?: string }).name === "AbortError") {
-        set({ isLoadingExplain: false });
+        set((state) => {
+          if (state.explainAbortControllers[sessionId] !== explainController) {
+            return state;
+          }
+          return {
+            isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: false },
+          };
+        });
         return;
       }
       const apiErr = err as ApiError;
-      set({
-        isLoadingExplain: false,
-        explainError: apiErr.detail ?? "Failed to load the explain narrative.",
+      set((state) => {
+        const { [sessionId]: _ctrl, ...restCtrl } = state.explainAbortControllers;
+        return {
+          explainAbortControllers: restCtrl,
+          isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: false },
+          explainErrorBySession: {
+            ...state.explainErrorBySession,
+            [sessionId]: apiErr.detail ?? "Failed to load the explain narrative.",
+          },
+        };
       });
     }
   },
@@ -871,18 +934,25 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
     if (ctrl) ctrl.abort();
     const explainCtrl = get().explainAbortControllers[sessionId];
     if (explainCtrl) explainCtrl.abort();
+    // Amendment 14b-4 (frontend-005): clear all per-session keys for this session.
     set((state) => {
       const { [sessionId]: _snap, ...restSnap } = state.snapshotsBySession;
       const { [sessionId]: _expl, ...restExpl } = state.explainsBySession;
       const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
       const { [sessionId]: _eCtrl, ...restECtrl } = state.explainAbortControllers;
+      const { [sessionId]: _il, ...restIL } = state.isLoadingBySession;
+      const { [sessionId]: _ilx, ...restILX } = state.isLoadingExplainBySession;
+      const { [sessionId]: _err, ...restErr } = state.errorBySession;
+      const { [sessionId]: _errx, ...restErrX } = state.explainErrorBySession;
       return {
         snapshotsBySession: restSnap,
         explainsBySession: restExpl,
         abortControllers: restCtrl,
         explainAbortControllers: restECtrl,
-        isLoading: false,
-        isLoadingExplain: false,
+        isLoadingBySession: restIL,
+        isLoadingExplainBySession: restILX,
+        errorBySession: restErr,
+        explainErrorBySession: restErrX,
       };
     });
   },
@@ -943,7 +1013,7 @@ The panel:
 
 > **Fixture extraction (R2-W6):** `makeComposition()` must NOT be defined locally in this test file. Create the canonical fixture module first:
 >
-> **`frontend/src/test-utils/composerFixtures.ts`** (new file):
+> **`frontend/src/test/composerFixtures.ts`** (new file — Amendment 14b-3: implementation placed at `src/test/`, not `src/test-utils/`):
 > ```typescript
 > import type { CompositionState } from "../types/api";
 >
@@ -987,7 +1057,7 @@ The panel:
 > }
 > ```
 >
-> `AuditReadinessPanel.test.tsx` imports it via `import { makeComposition } from "@/test-utils/composerFixtures"` (path alias `@/` → `src/`). 14c's `ReadinessRowDetail.test.tsx` imports from the same module — do not duplicate. See 14c plan for the matching import note.
+> `AuditReadinessPanel.test.tsx` imports it via `import { makeComposition } from "@/test/composerFixtures"` (path alias `@/` → `src/`). 14c's `ReadinessRowDetail.test.tsx` imports from the same module — do not duplicate. See 14c plan for the matching import note.
 
 - [ ] **Step 1: Confirm the mount strategy**
 
@@ -1003,10 +1073,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AuditReadinessPanel } from "./AuditReadinessPanel";
 import { useSessionStore } from "../../stores/sessionStore";
-import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
 import * as api from "../../api/auditReadiness";
 import type { AuditReadinessSnapshot } from "../../types/api";
-import { makeComposition } from "@/test-utils/composerFixtures";
+import { makeComposition } from "@/test/composerFixtures";
 
 vi.mock("../../api/auditReadiness");
 
@@ -1051,14 +1121,8 @@ describe("AuditReadinessPanel", () => {
       activeSessionId: SESSION_ID,
       compositionState: makeComposition(1),
     } as never);
-    useAuditReadinessStore.setState({
-      snapshotsBySession: {},
-      explainsBySession: {},
-      isLoading: false,
-      isLoadingExplain: false,
-      error: null,
-      explainError: null,
-    } as never);
+    // Amendment 14b-4 (frontend-005): per-session keyed maps, not flat scalars.
+    useAuditReadinessStore.setState(getInitialState());
     vi.clearAllMocks();
   });
 
@@ -1267,8 +1331,13 @@ export function AuditReadinessPanel() {
   const snapshot = useAuditReadinessStore((s) =>
     activeSessionId ? s.snapshotsBySession[activeSessionId] : undefined,
   );
-  const isLoading = useAuditReadinessStore((s) => s.isLoading);
-  const error = useAuditReadinessStore((s) => s.error);
+  // Amendment 14b-4 (frontend-005): per-session keyed maps — not flat scalars.
+  const isLoading = useAuditReadinessStore((s) =>
+    activeSessionId ? !!s.isLoadingBySession[activeSessionId] : false,
+  );
+  const error = useAuditReadinessStore((s) =>
+    activeSessionId ? s.errorBySession[activeSessionId] ?? null : null,
+  );
   const loadSnapshot = useAuditReadinessStore((s) => s.loadSnapshot);
 
   const hasCompositionContent =
@@ -1281,21 +1350,32 @@ export function AuditReadinessPanel() {
     if (!activeSessionId || !compositionState || !hasCompositionContent) return;
     // Fire and forget; store handles errors.
     void loadSnapshot(activeSessionId, compositionState.version);
-  }, [activeSessionId, compositionState, hasCompositionContent, loadSnapshot]);
+    return () => {
+      // Unmount-during-fetch cleanup: abort the in-flight controller for this session.
+      const ctrl = useAuditReadinessStore.getState().abortControllers[activeSessionId];
+      if (ctrl) ctrl.abort();
+    };
+  // Amendment 14b-2 (frontend-003): dep is compositionState?.version, not compositionState.
+  // Using the object reference re-runs the effect on every render that creates a new
+  // compositionState without an actual version change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, compositionState?.version, hasCompositionContent, loadSnapshot]);
 
   const anyActionable = useMemo(
     () => snapshot?.rows.some((r) => isActionable(r.status)) ?? false,
     [snapshot],
   );
 
-  const [expanded, setExpanded] = useState(false);
+  // Amendment 14b-4 (frontend-005): userExpanded tracks explicit user intent.
+  // Auto-expansion on actionable snapshots is computed atomically as
+  // `anyActionable || userExpanded` rather than synced through a useEffect,
+  // avoiding an extra render cycle and making the panel auto-collapse when
+  // a later snapshot returns all-green (unless the user explicitly clicked Expand).
+  const [userExpanded, setUserExpanded] = useState(false);
   const [selectedRowId, setSelectedRowId] = useState<ReadinessRowId | null>(null);
   const [explainOpen, setExplainOpen] = useState(false);
 
-  // When the snapshot changes and contains a warning/error, force expansion.
-  useEffect(() => {
-    if (anyActionable) setExpanded(true);
-  }, [anyActionable]);
+  const showExpanded = anyActionable || userExpanded;
 
   if (!activeSessionId || !hasCompositionContent) {
     return null;
@@ -1331,8 +1411,10 @@ export function AuditReadinessPanel() {
     return null;
   }
 
-  // Collapsed view — single summary line when nothing is actionable.
-  if (!expanded && !anyActionable) {
+  // Collapsed view — single summary line when nothing is actionable and user
+  // hasn't explicitly expanded. Amendment 14b-4: uses showExpanded (derived
+  // from anyActionable || userExpanded) rather than a plain expanded bool.
+  if (!showExpanded) {
     return (
       <section
         aria-label="Audit readiness"
@@ -1341,7 +1423,7 @@ export function AuditReadinessPanel() {
         <button
           type="button"
           className="audit-readiness-summary"
-          onClick={() => setExpanded(true)}
+          onClick={() => setUserExpanded(true)}
           aria-expanded="false"
           aria-controls="audit-readiness-rows"
         >
@@ -1369,7 +1451,7 @@ export function AuditReadinessPanel() {
               <button
                 type="button"
                 className="btn audit-readiness-action-btn audit-readiness-action-btn--ghost"
-                onClick={() => setExpanded(false)}
+                onClick={() => setUserExpanded(false)}
                 aria-label="Collapse audit readiness"
               >
                 Collapse
@@ -1450,20 +1532,29 @@ export function AuditReadinessPanel() {
 
 The `AuditReadinessPanel` component imports `ReadinessRowDetail` and `ExplainDialog`, both of which 14c implements properly. 14b ships these as minimal placeholders so the imports resolve and the panel's tests run.
 
+> **Amendment 14b-5 (frontend-006):** Placeholders intentionally do NOT include `role="dialog"`.
+> Shipping a dialog claim without a focus management contract is a W2 accessibility defect.
+> Both components are tagged with `data-testid` instead so panel tests can assert the component
+> mounted. The 14c real implementations re-introduce `role="dialog"` with the full focus
+> contract (`useFocusTrap`, `aria-modal`, escape-to-close, backdrop dismiss) per 14c's B3 fix.
+
 `frontend/src/components/audit/ReadinessRowDetail.tsx`:
 
 ```typescript
 /**
  * Placeholder shipped by 14b. 14c replaces this with the full implementation
- * (per-row warning detail + jump-to-component). The placeholder renders a
- * dialog stub so AuditReadinessPanel's tests can mount the component, and so
- * lint/typecheck pass before 14c lands.
+ * (per-row warning detail + jump-to-component, with proper dialog semantics:
+ * focus trap, aria-modal, initial focus, focus restoration).
  *
- * The dialog renders the row's label + summary + (if present) detail. No
- * jump-to-component button. No telemetry. No close affordance beyond the
- * onClose prop the parent wires up.
+ * This placeholder is intentionally NOT a dialog. It renders a minimal stub
+ * tagged with `data-testid="readinessrowdetail-placeholder"` so the panel's
+ * tests can assert the component mounted, lint/typecheck pass, and the W2
+ * accessibility defect (role="dialog" without focus management) does not ship.
+ * The `onClose` callback is wired up so the parent's close-on-trigger flow is
+ * already exercised — 14c only needs to add the modal semantics.
  *
- * DO NOT extend the placeholder. Extensions belong in 14c.
+ * DO NOT extend the placeholder. Extensions (real dialog markup with focus
+ * trap, aria-modal, escape-to-close, backdrop dismiss) belong in 14c.
  */
 import type { ReadinessRow } from "../../types/api";
 
@@ -1474,7 +1565,11 @@ export interface ReadinessRowDetailProps {
 
 export function ReadinessRowDetail({ row, onClose }: ReadinessRowDetailProps) {
   return (
-    <div role="dialog" aria-label={row.label} className="readiness-row-detail">
+    <div
+      data-testid="readinessrowdetail-placeholder"
+      aria-label={row.label}
+      className="readiness-row-detail"
+    >
       <h3>{row.label}</h3>
       <p>{row.summary}</p>
       {row.detail && <pre>{row.detail}</pre>}
@@ -1491,9 +1586,15 @@ export function ReadinessRowDetail({ row, onClose }: ReadinessRowDetailProps) {
 ```typescript
 /**
  * Placeholder shipped by 14b. 14c replaces this with the full implementation
- * (modal narrative view that fetches lazily via useAuditReadinessStore.loadExplain).
- * The placeholder accepts the same props as the final implementation so the
- * AuditReadinessPanel tests can drive both this stub and the real version.
+ * (modal narrative view with proper dialog semantics: focus trap, aria-modal,
+ * initial focus, focus restoration, escape-to-close, backdrop dismiss).
+ *
+ * This placeholder is intentionally NOT a dialog. It renders a minimal stub
+ * tagged with `data-testid="explaindialog-placeholder"` so the panel's tests
+ * can assert the component mounted, lint/typecheck pass, and the W2
+ * accessibility defect (role="dialog" without focus management) does not ship.
+ * The loadExplain side-effect is wired here so the parent's lazy-fetch flow
+ * is already exercised — 14c only needs to add the modal semantics.
  *
  * DO NOT extend the placeholder. Extensions belong in 14c.
  */
@@ -1516,7 +1617,10 @@ export function ExplainDialog({ sessionId, compositionVersion, onClose }: Explai
   }, [sessionId, compositionVersion, loadExplain]);
 
   return (
-    <div role="dialog" aria-label="What this pipeline will record">
+    <div
+      data-testid="explaindialog-placeholder"
+      aria-label="What this pipeline will record"
+    >
       {explain && <pre>{explain.narrative}</pre>}
       <button type="button" onClick={onClose}>
         Close
@@ -1544,11 +1648,57 @@ git commit -m "feat(web/frontend): add AuditReadinessPanel + placeholder subcomp
 
 ---
 
+## Task 2B.5: Session-removal cache cleanup (landed — 2B.5 follow-up)
+
+**Finding:** frontend-007. **Commits:** `084b8c34b` + `163737068` (follow-up; landed after the
+main Phase 2B merge).
+
+**Problem:** When a session is removed from `sessionStore.sessions` (archive, 404 self-eviction,
+or future removal paths), the `auditReadinessStore` retains the stale cached snapshot and
+explain for that session indefinitely. With only a single active session this is invisible;
+with multi-session switching the cache grows and stale entries are never reclaimed.
+
+**Solution:** `stores/subscriptions.ts` — a cross-store subscription module that wires
+`useAuditReadinessStore.clearSession(prevId)` to fire whenever a session id disappears from
+`sessionStore.sessions`. The subscriber seeds `previousSessionIds` at initialization to
+detect removals of sessions that were present before `initStoreSubscriptions()` was called
+(relevant if sessions are pre-populated before app startup, e.g. SSR hydration or test
+fixtures).
+
+**Files added:**
+- `src/elspeth/web/frontend/src/stores/subscriptions.ts` — `initStoreSubscriptions()` and
+  `_resetSubscriptionsForTesting()` (test-only reset helper, not exported from any barrel).
+- `src/elspeth/web/frontend/src/stores/subscriptions.test.ts` — verifies that session removal
+  triggers `clearSession` on `auditReadinessStore`.
+
+**Key code paths:**
+
+`initStoreSubscriptions()` subscribes to `useSessionStore` and tracks `previousSessionIds`:
+```typescript
+const currentIds = new Set(state.sessions.map((s) => s.id));
+for (const prevId of previousSessionIds) {
+  if (!currentIds.has(prevId)) {
+    useAuditReadinessStore.getState().clearSession(prevId);
+  }
+}
+previousSessionIds = currentIds;
+```
+
+`initStoreSubscriptions()` must be called exactly once at app startup (e.g. in `App.tsx`).
+The `initialized` guard makes it idempotent.
+
+This module lives at the application boundary — it has imports from all three stores
+(`sessionStore`, `executionStore`, `auditReadinessStore`) and was extracted to break
+potential circular-import cycles between the stores themselves.
+
+---
+
 ## What Phase 2B leaves the frontend in
 
 - New `types/index.ts` entries for the audit-readiness wire shape, re-exported via `types/api.ts`.
 - New `api/auditReadiness.ts` with two typed GET wrappers.
-- New `stores/auditReadinessStore.ts` with version-keyed cache.
+- New `stores/auditReadinessStore.ts` with per-session keyed cache (see frontend-005).
+- New `stores/subscriptions.ts` wiring session-removal → `clearSession` on the audit-readiness store (Task 2B.5).
 - New `AuditReadinessPanel.tsx` rendered standalone (not yet mounted into `InspectorPanel.tsx` — 14c).
 - Placeholder `ReadinessRowDetail.tsx` and `ExplainDialog.tsx` that 14c replaces.
 - All vitest assertions in this plan pass; `tsc --noEmit` is clean; ESLint is clean.
@@ -1560,7 +1710,7 @@ git commit -m "feat(web/frontend): add AuditReadinessPanel + placeholder subcomp
 |---|---|
 | Backend wire-shape drift breaks the renderer | The discriminated-union `never` arm fails the build; Phase 2A's `_StrictResponse` fails at server-side construction. No silent path. |
 | 14c lands before 14b and the placeholders are overwritten mid-flight | Per the sequencing in §"Sequencing and dependencies", 14b lands first. If the working branch is shared between 14b and 14c, the 14c PR's diff against 14b's placeholders is reviewable; the placeholder comments explicitly say "DO NOT extend". |
-| Concurrent `loadSnapshot` calls resolve out of order (stale-fetch race) | Addressed in this revision: `loadSnapshot` stores the in-flight `AbortController` in store state and aborts the previous request before starting a new one on `composition_version` change or `clearSession`. The resolution arm applies a monotonic write guard — if the arriving response's `composition_version` is lower than the version already cached, the response is silently discarded. Two tests cover distinct contracts: (1) a sequential monotonic-write-guard test (fast-v2 completes before slow-v1 resolves) and (2) a true-concurrency abort-cancellation test (both fetches in-flight simultaneously; asserts `AbortController.signal.aborted` and `isLoading` reset). |
+| Concurrent `loadSnapshot` calls resolve out of order (stale-fetch race) | Addressed in this revision: `loadSnapshot` stores the in-flight `AbortController` in store state and aborts the previous request before starting a new one on `composition_version` change or `clearSession`. The resolution arm applies a monotonic write guard — if the arriving response's `composition_version` is lower than the version already cached, the response is silently discarded. Two tests cover distinct contracts: (1) a sequential monotonic-write-guard test (fast-v2 completes before slow-v1 resolves) and (2) a true-concurrency abort-cancellation test (both fetches in-flight simultaneously; asserts `AbortController.signal.aborted` and `isLoadingBySession[SESSION_ID]` reset — per-session, see frontend-005). |
 | Per-row "Jump to component" is missing in 14b | 14b's panel still emits the row click; 14b's placeholder `ReadinessRowDetail` lacks the jump button. 14c restores it. The user-visible UX gap exists for the duration of the 14b→14c gap; the design spec's persona table tolerates a partial first cut because Linda's primary trust mechanism (visibility of the row status) is already present. |
 | Telemetry can't be added later without rewriting the panel | The row-click handlers are isolated functions in `AuditReadinessPanel`. Phase 8 telemetry adds one line per handler. |
 
@@ -1589,11 +1739,50 @@ Reviewers: reality, architecture, quality, systems (full report:
 resolved; fixes below address the round-2 warnings that affect this file.
 
 Fixes applied to 14b in this revision:
-1. R2-W2 — AbortError catch arm now resets `isLoading: false` before returning (was: bare `return`, leaving panel stuck at "Checking audit readiness…" after session navigation during in-flight fetch). `clearSession` set() payload updated with `isLoading: false` as belt-and-suspenders.
-2. R2-W3 — Existing sequential test re-labelled "monotonic write guard — sequential ordering" (correctly exercises the version monotonicity guard). New true-concurrency abort-cancellation test added: starts both fetches without awaiting the first, delays mock fetch, asserts `AbortController.signal.aborted === true` after the second starts, and asserts `isLoading` resets to false cleanly. Two distinct contracts, two distinct tests.
-3. R2-W6 — `makeComposition()` fixture extraction prescribed: canonical location `frontend/src/test-utils/composerFixtures.ts`; `AuditReadinessPanel.test.tsx` imports from there. 14c will import from the same module.
+1. R2-W2 — AbortError catch arm now resets `isLoading: false` before returning (was: bare `return`, leaving panel stuck at "Checking audit readiness…" after session navigation during in-flight fetch). `clearSession` set() payload updated with `isLoading: false` as belt-and-suspenders. (Amended 2026-05-17: landed code uses `isLoadingBySession[sessionId]: false` — per-session map; see frontend-005.)
+2. R2-W3 — Existing sequential test re-labelled "monotonic write guard — sequential ordering" (correctly exercises the version monotonicity guard). New true-concurrency abort-cancellation test added: starts both fetches without awaiting the first, delays mock fetch, asserts `AbortController.signal.aborted === true` after the second starts, and asserts `isLoading` resets to false cleanly. Two distinct contracts, two distinct tests. (Amended 2026-05-17: assertion uses `isLoadingBySession[SESSION_ID]` — per-session; see frontend-005.)
+3. R2-W6 — `makeComposition()` fixture extraction prescribed: canonical location `frontend/src/test/composerFixtures.ts` (amended 2026-05-17: implementation placed it at `src/test/`, not `src/test-utils/` — see frontend-004); `AuditReadinessPanel.test.tsx` imports from there. 14c will import from the same module.
 4. R2-W9 — `loadExplain` AbortController asymmetry addressed: option (a) prescribed (mirror the abort-controller pattern via a parallel `explainAbortControllers` field; `clearSession` aborts both controllers). Option (b) documented as the operator/architect alternative.
 5. carry-W2 — Prose claim "same pattern used by `executionStore`" corrected to "similar shape to `executionStore`'s `reset()` pattern": `executionStore` uses a module-internal `initialExecutionState` const (not an exported `getInitialState`).
+
+### 2026-05-17 — Post-landing audit reconciliation (elspeth-a615f8c418)
+
+Source findings: frontend-001, frontend-003, frontend-004, frontend-005, frontend-006, frontend-007.
+
+**frontend-001 (14b-1):** `parseResponse` in `api/auditReadiness.ts` (lines 51–66) includes a
+defensive shape check for `session_id` (string) and `composition_version` (number). Authorized
+exception to CLAUDE.md trust-tier — check defends against transport-layer corruption
+(proxy/CDN body corruption), not data-origin trust. Documented in the Trust-tier check section.
+Future strengthening tracked as `elspeth-obs-2e58958765`.
+
+**frontend-003 (14b-2):** `AuditReadinessPanel` `useEffect` deps list uses
+`compositionState?.version` instead of `compositionState` to prevent the effect from
+re-firing on every render that creates a new object reference without an actual version
+change. Suppresses `react-hooks/exhaustive-deps` lint rule at the call site with an inline
+`eslint-disable-next-line` comment and an explanatory note.
+
+**frontend-004 (14b-3):** Fixture module canonicalized at `src/test/composerFixtures.ts`
+(not `src/test-utils/composerFixtures.ts` as originally prescribed). All plan references
+updated. The R2-W6 Review-history entry (2026-05-16) has been updated to match. 14c already
+uses `@/test/composerFixtures` — no change required there.
+
+**frontend-005 (14b-4):** Store implemented with per-session keyed maps
+(`isLoadingBySession`, `errorBySession`, `isLoadingExplainBySession`, `explainErrorBySession`)
+instead of flat scalars (`isLoading`, `error`, etc.). Reason: flat scalars cause
+cross-session contamination — switching from a failing session A to a healthy session B
+would render A's error banner on B. Landed in commit `c3f3d0ae6`. Task 3 code blocks
+updated to reflect the per-session shape, including the controller-identity guard in the
+AbortError arm. 14c's Task 4C extends this with `userExpandedBySession` for the same reason.
+
+**frontend-006 (14b-5):** Placeholder `ReadinessRowDetail` and `ExplainDialog` ship without
+`role="dialog"` to avoid the W2 accessibility defect (claiming dialog semantics without
+focus management). Both are tagged with `data-testid` instead. The 14c real implementations
+will re-introduce `role="dialog"` with the full focus contract (`useFocusTrap`, etc.) per
+14c's B3 fix.
+
+**frontend-007 (14b-6):** `stores/subscriptions.ts` and `stores/subscriptions.test.ts`
+added by the 2B.5 follow-up (commits `084b8c34b` + `163737068`). Not in the original plan.
+Task 2B.5 subsection and file-structure listing added to document landed work.
 
 ## Memory references
 

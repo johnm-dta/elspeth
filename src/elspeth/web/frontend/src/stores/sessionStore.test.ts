@@ -30,6 +30,17 @@ vi.mock("@/api/client", () => ({
   archiveSession: vi.fn(),
   updateSessionTitle: vi.fn(),
   getGuided: vi.fn(),
+  // Phase 1B — sessionStore.createSession calls resolveDefaultMode() on the
+  // preferencesStore, which falls back to fetchUserComposerPreferences()
+  // when the prefs store hasn't been bootstrapped. The default mock returns
+  // freeform so existing createSession-touching tests (which preceded this
+  // change and assert non-guided behaviour) keep passing.
+  fetchUserComposerPreferences: vi.fn().mockResolvedValue({
+    default_mode: "freeform",
+    banner_dismissed_at: null,
+    updated_at: "2026-05-15T00:00:00Z",
+  }),
+  updateUserComposerPreferences: vi.fn(),
 }));
 
 // Mock the execution store dependency
@@ -99,9 +110,30 @@ function makeCompositionProposal(
 }
 
 describe("sessionStore", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
     resetStore(useSessionStore);
+    // Phase 1B: keep existing createSession-touching tests on the pre-change
+    // behaviour by pinning preferences to freeform-loaded. The new
+    // "createSession honours default mode" describe overrides this per test
+    // to exercise guided / unloaded paths explicitly.
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    resetStore(usePreferencesStore);
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "freeform",
+      bannerDismissedAt: null,
+      writing: false,
+    });
+    // Reseed the @/api/client mock that vi.resetAllMocks() cleared so the
+    // preferences-bootstrap fallback path in resolveDefaultMode() still
+    // resolves under tests that drive an unloaded prefs store.
+    const apiMod = await import("@/api/client");
+    (apiMod.fetchUserComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      updated_at: "2026-05-15T00:00:00Z",
+    });
   });
 
   describe("initial state", () => {
@@ -744,6 +776,86 @@ describe("sessionStore", () => {
       expect(state.activeSessionId).toBeNull();
       expect(state.isComposing).toBe(false);
       expect(state.error).toBeNull();
+    });
+  });
+
+  // ── Phase 1B: createSession honours composer default-mode preference ──
+  describe("createSession honours default mode", () => {
+    it("leaves guidedSession null when default mode is freeform", async () => {
+      const apiClient = await import("@/api/client");
+      const { usePreferencesStore } = await import("@/stores/preferencesStore");
+      usePreferencesStore.setState({
+        loaded: true,
+        defaultMode: "freeform",
+        bannerDismissedAt: null,
+        writing: false,
+      });
+      (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: "sess-1",
+        title: "untitled",
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      const enterGuided = vi
+        .spyOn(useSessionStore.getState(), "enterGuided")
+        .mockResolvedValue();
+
+      await useSessionStore.getState().createSession();
+
+      expect(enterGuided).not.toHaveBeenCalled();
+      expect(useSessionStore.getState().guidedSession).toBeNull();
+      expect(useSessionStore.getState().activeSessionId).toBe("sess-1");
+    });
+
+    it("enters guided mode when default mode is guided", async () => {
+      const apiClient = await import("@/api/client");
+      const { usePreferencesStore } = await import("@/stores/preferencesStore");
+      usePreferencesStore.setState({
+        loaded: true,
+        defaultMode: "guided",
+        bannerDismissedAt: null,
+        writing: false,
+      });
+      (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: "sess-2",
+        title: "untitled",
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      const enterGuided = vi
+        .spyOn(useSessionStore.getState(), "enterGuided")
+        .mockResolvedValue();
+
+      await useSessionStore.getState().createSession();
+
+      expect(enterGuided).toHaveBeenCalledTimes(1);
+    });
+
+    it("bootstrap race: createSession before bootstrap resolves still enters guided when prefs resolve to guided", async () => {
+      const apiClient = await import("@/api/client");
+      const { usePreferencesStore } = await import("@/stores/preferencesStore");
+      // Start with unloaded prefs — resolveDefaultMode() must await bootstrap.
+      resetStore(usePreferencesStore);
+      (apiClient.fetchUserComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        default_mode: "guided",
+        banner_dismissed_at: null,
+        updated_at: "2026-05-15T00:00:00Z",
+      });
+      (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: "sess-3",
+        title: "untitled",
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      const enterGuided = vi
+        .spyOn(useSessionStore.getState(), "enterGuided")
+        .mockResolvedValue();
+
+      await useSessionStore.getState().createSession();
+
+      expect(apiClient.fetchUserComposerPreferences).toHaveBeenCalled();
+      expect(enterGuided).toHaveBeenCalledTimes(1);
+      expect(usePreferencesStore.getState().loaded).toBe(true);
     });
   });
 });

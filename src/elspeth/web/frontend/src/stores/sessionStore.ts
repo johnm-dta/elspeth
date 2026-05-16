@@ -23,6 +23,7 @@ import * as api from "@/api/client";
 import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
+import { usePreferencesStore } from "./preferencesStore";
 
 function getExecutionStore() {
   return useExecutionStore.getState();
@@ -283,11 +284,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ...clearedGuidedState(),
         ...clearedRecoveryState(),
       }));
-      // Default-freeform: new sessions surface the freeform chat, with a
-      // "Switch to guided" affordance in the freeform body that activates
-      // guided mode on demand via enterGuided().  No GET /guided fetch
-      // here means no audit pollution / persisted guided state for users
-      // who stay in freeform.
+      // Phase 1B — honour the account-level default-mode preference.
+      // resolveDefaultMode() awaits the preferences bootstrap if it
+      // hasn't completed yet (Ctrl+N race: user hits "new session" before
+      // App.tsx's bootstrap effect has resolved). Guided users enter via
+      // the same enterGuided() the manual "Switch to guided" button uses.
+      // A failure here surfaces through the existing catch and sets
+      // state.error; tighter error attribution is a Phase 3 follow-up.
+      const mode = await usePreferencesStore.getState().resolveDefaultMode();
+      if (mode === "guided") {
+        await get().enterGuided();
+      }
     } catch {
       set({ error: "Failed to create session. Please try again." });
     }

@@ -37,6 +37,19 @@
 - Auto-rerun on every composition change (Phase 2B fires on `compositionState.version`).
 - Repair-hints click-target (Phase 2B; `component_ids` are already in the payload).
 
+## Pre-existing test baseline (reviewers — read before TDD)
+
+`tests/integration/web/composer/guided/*` has **17 pre-existing failures** on the RC5.2 baseline (independently verified at HEAD `fb73a4f76`, not caused by Phase 1A or 1B work). Failure pattern: `assert None is not None` on `get_current_state()` returns plus 200-vs-400/409 status mismatches in `step_chat` and `respond` endpoints — looks like a single guided-session fixture or state-bootstrap regression, not 17 independent bugs.
+
+**Tracked as:** `elspeth-b1e04bea6d` (P2 bug, "17 pre-existing guided composer test failures on RC5.2") — owned by the per-step-chat track.
+
+**Implications for Phase 2A reviewers:**
+
+- Phase 2A's red→green discipline runs the full `tests/integration/web/` suite. Those 17 failures will appear in your output and are **not** caused by Phase 2A work.
+- Phase 2A's own file surface is `src/elspeth/web/audit_readiness/` (new package) + `tests/integration/web/audit_readiness/` and `tests/unit/web/audit_readiness/` (new test directories). No overlap with the guided-session test surface.
+- If you see **18+** failures, the 18th is on Phase 2A. If you see the same 17, the baseline is unchanged.
+- If `elspeth-b1e04bea6d` ships before Phase 2A, this section becomes stale — delete it.
+
 ## Trust tier check (per CLAUDE.md)
 
 - **Inbound:** `session_id` (path UUID parsed by FastAPI) + auth via `get_current_user`. No payload body.

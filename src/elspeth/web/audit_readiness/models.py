@@ -47,15 +47,16 @@ class AuditReadinessSnapshot(_StrictResponse):
 
     @model_validator(mode="after")
     def _check_row_completeness(self) -> Self:
+        # ReadinessRow.id is typed Literal[ReadinessRowId]; Pydantic rejects
+        # any other value at row construction, so checking for "extra" ids
+        # here would be unreachable. Only duplicate-id and missing-id remain
+        # as real failure modes.
         ids = [row.id for row in self.rows]
         if len(ids) != len(set(ids)):
             raise ValueError(f"duplicate row ids in snapshot: {ids}")
         missing = _EXPECTED_ROW_IDS - set(ids)
         if missing:
             raise ValueError(f"snapshot missing required rows: {sorted(missing)}")
-        extra = set(ids) - _EXPECTED_ROW_IDS
-        if extra:
-            raise ValueError(f"snapshot has unexpected rows: {sorted(extra)}")
         return self
 
 

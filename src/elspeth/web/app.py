@@ -45,6 +45,8 @@ from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
+from elspeth.web.preferences.routes import create_preferences_router
+from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
@@ -449,6 +451,11 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.state.session_service = session_service
     app.state.session_engine = session_engine  # available to guided step handlers
 
+    # --- Preferences service ---
+    # Per-user composer settings (default_composer_mode, banner_dismissed_at).
+    # Shares the session engine; preferences live on the same metadata.
+    app.state.preferences_service = PreferencesService(session_engine)
+
     # --- Blob service ---
     app.state.blob_service = BlobServiceImpl(
         session_engine,
@@ -525,6 +532,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # --- Register routers ---
     app.include_router(create_auth_router())
     app.include_router(create_session_router())
+    app.include_router(create_preferences_router())
     app.include_router(create_blobs_router())
     app.include_router(create_secrets_router())
     app.include_router(create_execution_router())

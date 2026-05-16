@@ -168,6 +168,21 @@ class TestWebSettingsValidation:
                 composer_rate_limit_per_minute=10,
             )
 
+    def test_payload_store_retention_days_zero_rejected(self) -> None:
+        """The audit-readiness retention row reads this setting and surfaces
+        it to operators ("System retention: N days"). An accidental ``ge=0``
+        relaxation would render as "System retention: 0 days" — wire-valid
+        but semantically meaningless. The ``ge=1`` floor is load-bearing.
+        """
+        with pytest.raises(ValidationError):
+            WebSettings(
+                payload_store_retention_days=0,
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+            )
+
 
 class TestWebSettingsDerivedAccessors:
     """Tests for get_landscape_url() and get_payload_store_path()."""

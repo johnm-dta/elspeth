@@ -1,0 +1,176 @@
+# Phase 7 — Catalog Reshape (Reference, Not Toolkit)
+
+**Status:** 2026-05-15. Companion to [08-catalog-reshape.md](08-catalog-reshape.md)
+(the design spec) and [00-implementation-roadmap.md](00-implementation-roadmap.md)
+(the phase map).
+
+This phase is **split into three plans** because the surface-area diff is
+large enough that a single plan would exceed the 1500-line budget:
+
+- **[16a-phase-7a-backend.md](16a-phase-7a-backend.md)** — Plugin metadata
+  schema extension (class-attribute fields on `BaseSource` / `BaseTransform` /
+  `BaseSink`), catalog API surface extension (new optional fields on
+  `PluginSummary`), one canonical filled-in example
+  (`csv_source.py`) so future authors have a pattern to copy. **No prose
+  authoring for other plugins** — that's a per-plugin documentation task that
+  proceeds incrementally outside this phase.
+- **[16b-phase-7b-frontend.md](16b-phase-7b-frontend.md)** — Frontend
+  primitives: extended `PluginSummary` types, the centralised
+  `auditCharacteristics` metadata table, `AuditCharacteristicIcon`,
+  `TrustTierBadge`, and the `PluginCard.tsx` rewrite (removing the
+  "Use in pipeline" toolkit affordance).
+- **[16c-phase-7c-frontend-integration.md](16c-phase-7c-frontend-integration.md)**
+  — Drawer integration: `FilterChipStrip` (capability / trust tier /
+  audit-characteristic filter chips), synthetic `InlineChatSourceEntry`
+  at the top of the Sources tab, `CatalogDrawer.tsx` wire-up with
+  extended `scorePlugin` across prose + tags, and the `ShortcutsHelp`
+  regroup under "Actions" / "Reference."
+
+This file is the **index**. The actual TDD-shaped task lists live in 16a,
+16b, and 16c.
+
+Mergeability:
+
+- 16a is a pure backend schema extension that adds optional fields and one
+  filled-in example; the existing frontend safely ignores them.
+- 16b is the frontend primitives and `PluginCard` rewrite. Cards "come
+  alive" with reference content once 16a ships; before that, every
+  plugin's card renders the "see the technical description" fallback.
+- 16c is the drawer integration. It imports from 16b (filter chips use
+  `lookupAuditCharacteristic`; the synthetic entry uses 16b's
+  `PREFILL_CHAT_INPUT_EVENT` re-export). 16c **must not ship before 16b**.
+
+Recommended ship order: 16a → 16b → 16c. 16a + 16b can run in parallel
+(different surfaces); 16c depends on 16b.
+
+---
+
+## Phase 7 in the roadmap
+
+Per [00-implementation-roadmap.md §C](00-implementation-roadmap.md), Phase 7
+is **independent** of Phases 4–6 and can ship **any time after Phase 2**.
+This independence is structural: the catalog is reference; it has no
+data-flow dependency on Phases 3 (IA cleanup), 4 (tutorial), 5a/5b (chat as
+data entry / interpretation surface), or 6 (completion gestures).
+
+The only upstream coupling is the architectural pattern itself — Phase 7
+follows the same backend/frontend split as Phase 1 (plans 12 / 13). When
+reading 16a or 16b, the sibling-pattern reference is plan 12 and plan 13;
+the design reference is [08-catalog-reshape.md](08-catalog-reshape.md).
+
+## Trust-tier semantics for this phase
+
+Two readings of "trust tier" exist; only one is in scope:
+
+| Reading | In scope? | What it means |
+|---|---|---|
+| (a) "What tier of data does this plugin handle?" | **Yes** | Sources and external-call transforms surface Tier 3 data at their boundary; pure transforms operate on Tier 2 data; sinks emit Tier 2 data |
+| (b) "How trusted is the plugin itself?" | No | All plugins are Tier 1 system code (per CLAUDE.md "Plugin Ownership"); this is uniform and uninteresting to display |
+
+The badge in the design spec (08 — "Tier 3" on the CSV card) is reading (a):
+it documents *what the user is dealing with at this boundary* so a
+compliance-oriented user (Linda) can scan a card and see "this source reads
+external Tier 3 data; it will coerce and validate; here are the audit
+characteristics that follow from that." Reading (b) is enforced by the
+no-user-plugins policy and is not surfaced in the catalog UI.
+
+The plan refers to this throughout as `data_trust_tier` (an `int | None`
+with values `1`, `2`, or `3`) to avoid conflation. The frontend renders
+this as `Tier {n}` text on the card, with a tooltip explaining what the
+tier means in plain language.
+
+## What 7a is *not* doing
+
+- 7a does **not** write the "when you'd use this" / "when you wouldn't" /
+  "example use" prose for every plugin. That is a per-plugin documentation
+  task; the design doc 08-§Risks calls it out as an incremental author
+  responsibility. 7a ships the **schema** for the prose plus **one** filled
+  example (`csv_source.py`) as a pattern to copy.
+- 7a does **not** generate prose via LLM. Open question D3 (per
+  [00-implementation-roadmap.md §A](00-implementation-roadmap.md)) admits
+  (c) LLM-drafted-to-bootstrap as a possible future path, but the plan
+  explicitly excludes it — the schema must exist *first* and authors must
+  see a hand-written canonical example before any LLM-bootstrap pass
+  proceeds, because the canonical example sets the voice and tone.
+- 7a does **not** infer prose from docstrings. Existing plugin docstrings
+  are technical descriptions; the new "when you'd use this" framing is
+  intentionally different (persona-facing, not implementation-facing).
+  Reusing docstrings would produce technical prose with a "when you'd use
+  this" header, which is worse than leaving the field `None` and letting
+  the frontend fall back to "see the technical description."
+- 7a does **not** create a backend "Inline data from chat" plugin. Per
+  reconnaissance (see scope-boundaries in 16b), there is no such plugin
+  today and design doc 08 frames it as "explicitly an option, not a
+  plugin." 16b adds it as a synthetic frontend-only catalog entry.
+
+## What 7b / 7c are *not* doing
+
+- 7b/7c do **not** ship per-plugin prose. If 7a's canonical example is
+  the only plugin with prose by the time the frontend ships, the new
+  card layout will show "see the technical description" fallbacks for
+  every other plugin — that's the expected staging behaviour. Per
+  design doc 08-§Risks: "Empty entries fall back to a generic 'see the
+  technical description' message rather than blocking display."
+- 7b/7c do **not** add "Add to pipeline" / "Select" buttons. Per design
+  doc 08, these are the load-bearing removal; the catalog stops being a
+  toolkit.
+- 7b/7c do **not** add "in use" highlighting, drag handles, "recently
+  used," or "favorites." Per design doc 08, these would imply a
+  workflow link back to composition and reintroduce the toolkit framing.
+- 7b/7c do **not** add schema-field-name search (a stretch goal from
+  design doc 08-§Search). Schema is lazy-fetched; extending fuzzy
+  search across schema field names would require a preload pass and
+  conflicts with the existing lazy-load design. Flagged in 16b's "Out
+  of scope" section.
+
+## Independence from Phase 1
+
+Phase 1 (plans 12 / 13) added the `user_preferences` table; Phase 7 does
+not touch it. There is no preference for "show / hide audit-characteristic
+icons" — they're always shown, because the design's whole point is that
+audit characteristics are not a power-user toggle, they're the central
+reference content. If a future phase wants to add a "show technical
+details" preference, that's a Phase 8 polish concern, not a Phase 7
+concern.
+
+## Memory references
+
+- `feedback_catalog_is_reference_not_toolkit` — the design call this implements.
+- `project_composer_personas` — each persona's catalog use case (08-§"Plugin
+  card content design" maps the four persona reads).
+- `project_composer_dynamic_source_from_chat` — the inline-data entry that
+  16b adds as a synthetic frontend-only catalog row.
+- `project_db_migration_policy` — informs 16a's no-Alembic posture (no DB
+  migration is needed; the schema extension is class-attribute level on
+  Python plugin code).
+
+## Sequencing recommendation
+
+The recommended sequence is **16a → 16b → 16c**:
+
+- **16a first** (small, surgical schema extension + one canonical
+  example). Lets 16b's TDD steps assert against real backend responses
+  in the integration-test layer.
+- **16b next** (frontend primitives + `PluginCard` rewrite). At this
+  point each card renders the new reference layout; the CSV card shows
+  authored prose, others show the "see the technical description"
+  fallback.
+- **16c last** (drawer integration, filter chips, synthetic entry,
+  shortcuts regroup). 16c imports from 16b's primitives and must not
+  ship before 16b.
+
+16a and 16b can run in parallel — different surfaces, no shared files.
+16c depends on 16b's primitives existing. If 16b and 16c ship as a
+stacked PR, the sequence between them is 16b merge → 16c rebase →
+16c merge.
+
+If 16b/16c ship before 16a, the frontend renders all-fallback content
+for every plugin, then "comes alive" for the canonical CSV example when
+16a merges. That order is acceptable but provides less verification
+value.
+
+---
+
+## Review history
+
+(empty — populate when reviewers comment)

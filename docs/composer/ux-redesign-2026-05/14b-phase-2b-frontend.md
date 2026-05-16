@@ -1,0 +1,1370 @@
+# Phase 2B — Frontend foundations: types, API client, store, AuditReadinessPanel
+
+> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or superpowers:executing-plans. Steps use `- [ ]` checkboxes. Every task is TDD-shaped (failing test → run-to-fail → implement → run-to-pass → commit).
+
+**Goal:** Land the foundations of the frontend half of Phase 2 — TypeScript types mirroring Phase 2A's Pydantic response shapes, two typed API wrappers, a Zustand store with composition-version-keyed cache, and the `AuditReadinessPanel` component itself (six rows, all-green collapse, auto-fetch on composition-version change). Sub-components (`ReadinessRowDetail`, `ExplainDialog`), the `InspectorPanel.tsx` mount, the standalone-Validate-button removal, and the end-to-end smoke land in **14c-phase-2c-frontend-integration.md**.
+
+**Architecture:** Backend-first via Phase 2A. The plan adds:
+
+1. Two typed API wrappers (`fetchAuditReadiness`, `fetchAuditReadinessExplain`) in `api/auditReadiness.ts`.
+2. A `useAuditReadinessStore` (Zustand) that caches snapshots by `composition_version` and refetches when the version changes.
+3. An `AuditReadinessPanel` component that renders six rows, collapses to a single "Audit ready" line when all-green, and auto-fetches on composition-version change. The component imports `ReadinessRowDetail` and `ExplainDialog` — those are provided by 14c; this plan ships minimal placeholders so 14b's tests resolve and pass before 14c lands.
+
+**Tech Stack:** React + Zustand + Vitest + testing-library + userEvent.
+
+**Sibling plans:**
+- [14a-phase-2a-backend.md](14a-phase-2a-backend.md) — backend response models, service, routes.
+- [14c-phase-2c-frontend-integration.md](14c-phase-2c-frontend-integration.md) — sub-components, inspector mount, Validate-button removal, end-to-end smoke.
+
+**Umbrella plan:** [14-phase-2-audit-readiness-panel.md](14-phase-2-audit-readiness-panel.md).
+
+**Design reference:** [07-audit-readiness-panel.md](07-audit-readiness-panel.md).
+
+---
+
+## Scope boundaries
+
+**In scope (this plan):**
+- New types in `frontend/src/types/index.ts` mirroring Phase 2A's Pydantic models exactly:
+  `AuditReadinessSnapshot`, `ReadinessRow`, `AuditReadinessExplain`, `ReadinessRowId`, `ReadinessStatus`.
+- New API client in `frontend/src/api/auditReadiness.ts` with `fetchAuditReadiness` and `fetchAuditReadinessExplain`.
+- New Zustand store `frontend/src/stores/auditReadinessStore.ts` keyed by `(sessionId, compositionVersion)`.
+- New `frontend/src/components/audit/AuditReadinessPanel.tsx` — six-row panel with all-green collapse and version-keyed auto-fetch.
+- Minimal placeholder `frontend/src/components/audit/ReadinessRowDetail.tsx` and `frontend/src/components/audit/ExplainDialog.tsx` so 14b's tests pass before 14c replaces them with the real implementations.
+
+**Out of scope (deferred to 14c-phase-2c-frontend-integration.md):**
+- `ReadinessRowDetail` full implementation (per-row warning detail with jump-to-component).
+- `ExplainDialog` full implementation (narrative modal).
+- Mounting the panel inside `InspectorPanel.tsx`.
+- Removing the standalone Validate button.
+- The hash-router / keyboard-navigation smoke that follows the button removal.
+- The staging smoke that exercises Phase 2 end-to-end against the deployed backend.
+
+**Out of scope (entire Phase 2):**
+- Backend (Phase 2A delivered).
+- Telemetry on row-click (Phase 8).
+- Phase 3's side-rail reorganisation.
+- A per-user retention preference UI.
+- LLM-interpretations row content (Phase 5b).
+- Auto-validate-on-keystroke (fires on `composition_version` change, not on each keystroke).
+
+## Sequencing and dependencies
+
+Phase 2A **must** be merged before this plan's tests hit a real backend, but 14b's vitest suite mocks `globalThis.fetch` end-to-end and can land ahead of 2A. The recommended sequence is:
+
+1. Merge Phase 2A.
+2. Implement 14b Tasks 1–4 in order on a fresh branch.
+3. Land 14c (sub-components + mount + button removal + smoke) on the same branch.
+
+## Trust-tier check (per CLAUDE.md)
+
+The frontend store reads only data the backend just produced (Tier 1):
+
+- Snapshot payload — direct typed access; `_StrictResponse` on the backend means
+  unknown fields fail at construction, not in the client.
+- `composition_version` — used as a cache key; integer.
+- `narrative` — rendered as text; the backend produces deterministic prose with no
+  external content.
+
+No defensive `.get()` / `getattr` patterns. No fallback rendering of unknown row
+ids — Phase 2A's `ReadinessRowId` Literal is mirrored as a TypeScript discriminated
+union, and the renderer's switch is exhaustive (compiler-enforced via the `never`
+default arm).
+
+## File structure
+
+**New:**
+- `src/elspeth/web/frontend/src/api/auditReadiness.ts`
+- `src/elspeth/web/frontend/src/api/auditReadiness.test.ts`
+- `src/elspeth/web/frontend/src/stores/auditReadinessStore.ts`
+- `src/elspeth/web/frontend/src/stores/auditReadinessStore.test.ts`
+- `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx`
+- `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx`
+- `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx` *(placeholder; 14c replaces it)*
+- `src/elspeth/web/frontend/src/components/audit/ExplainDialog.tsx` *(placeholder; 14c replaces it)*
+
+**Modified:**
+- `src/elspeth/web/frontend/src/types/index.ts` — add the five new exported types.
+- `src/elspeth/web/frontend/src/types/api.ts` — re-export the new types.
+- `src/elspeth/web/frontend/src/api/client.ts` — re-export the two new functions for `import * as api from "./api/client"` callers.
+
+`InspectorPanel.tsx` and its tests are touched by 14c, not by 14b.
+
+---
+
+## Task 1: Frontend types — mirror Phase 2A's Pydantic models
+
+**Files:**
+- Modify: `frontend/src/types/index.ts`
+- Modify: `frontend/src/types/api.ts`
+
+- [ ] **Step 1: Confirm Phase 2A's wire shape**
+
+Read [14a-phase-2a-backend.md](14a-phase-2a-backend.md) §"Task 1: Pydantic response models". Confirm the exhaustive list of `ReadinessRowId` literals is:
+
+```text
+validation | plugin_trust | provenance | retention | llm_interpretations | secrets
+```
+
+and `ReadinessStatus` is:
+
+```text
+ok | warning | error | not_applicable
+```
+
+If Phase 2A has been amended and the literal sets diverge, **stop and reconcile** — this task encodes the wire contract, not an interpretation of it.
+
+- [ ] **Step 2: Add types to `types/index.ts`**
+
+After the existing `CompositionState`/`ValidationResult` block, append:
+
+```typescript
+// ── Audit Readiness Panel (Phase 2) ────────────────────────────────────────
+//
+// These types mirror the Pydantic models in
+// src/elspeth/web/audit_readiness/models.py (Phase 2A). If a backend literal
+// is added, the union here must be widened in the same commit and the
+// AuditReadinessPanel's row-renderer switch must add a case — the exhaustive
+// `never` default arm fails the build otherwise.
+
+export type ReadinessRowId =
+  | "validation"
+  | "plugin_trust"
+  | "provenance"
+  | "retention"
+  | "llm_interpretations"
+  | "secrets";
+
+export type ReadinessStatus = "ok" | "warning" | "error" | "not_applicable";
+
+export interface ReadinessRow {
+  id: ReadinessRowId;
+  label: string;
+  status: ReadinessStatus;
+  summary: string;
+  detail: string | null;
+  /**
+   * IDs of components the row implicates. May reference node ids, source,
+   * or sink names. The frontend's click handler resolves these against
+   * CompositionState.nodes for jump-to-component navigation; non-node ids
+   * fall through to a no-op (no error).
+   */
+  component_ids: readonly string[];
+}
+
+export interface AuditReadinessSnapshot {
+  session_id: string;
+  composition_version: number;
+  rows: readonly ReadinessRow[];
+}
+
+export interface AuditReadinessExplain {
+  session_id: string;
+  composition_version: number;
+  narrative: string;
+}
+```
+
+- [ ] **Step 3: Re-export from `types/api.ts`**
+
+In the existing `export type { ... } from "./index";` block, add the five names:
+
+```typescript
+  ReadinessRowId,
+  ReadinessStatus,
+  ReadinessRow,
+  AuditReadinessSnapshot,
+  AuditReadinessExplain,
+```
+
+- [ ] **Step 4: Typecheck — no runtime test yet**
+
+```bash
+cd src/elspeth/web/frontend && npx tsc --noEmit
+```
+
+Expected: clean. Types are unused so far but the build must accept them.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/elspeth/web/frontend/src/types/index.ts src/elspeth/web/frontend/src/types/api.ts
+git commit -m "feat(web/frontend): add audit-readiness response types (Phase 2B.1)"
+```
+
+---
+
+## Task 2: API client — `fetchAuditReadiness` + `fetchAuditReadinessExplain`
+
+**Files:**
+- Create: `frontend/src/api/auditReadiness.ts`
+- Create: `frontend/src/api/auditReadiness.test.ts`
+- Modify: `frontend/src/api/client.ts` (re-export the two functions)
+
+The Phase 2A routes are **GET** (Finding 4 in 14a-phase-2a-backend.md):
+
+```
+GET /api/sessions/{sid}/audit-readiness
+GET /api/sessions/{sid}/audit-readiness/explain
+```
+
+Both take no body. Both return the strict Pydantic payload with `Cache-Control: no-store`. Mirror the existing pattern in `api/client.ts::validatePipeline` (line 702): `fetch` + `authHeaders()` + `parseResponse<T>` — no `Content-Type` body header needed on GET.
+
+- [ ] **Step 1: Confirm `parseResponse` and `authHeaders` are exported**
+
+```bash
+grep -n "parseResponse\|authHeaders" src/elspeth/web/frontend/src/api/client.ts | head -5
+```
+
+Expected: both exist but are **not** exported. The convention is to inline the same idiom in sibling modules. The Phase 1B preferences client is the precedent (`api/preferences.ts`). Mirror that file's structure.
+
+- [ ] **Step 2: Write the failing test**
+
+`src/elspeth/web/frontend/src/api/auditReadiness.test.ts`:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import {
+  fetchAuditReadiness,
+  fetchAuditReadinessExplain,
+} from "./auditReadiness";
+
+const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+
+describe("auditReadiness API client", () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  it("fetchAuditReadiness GETs the right URL with auth header", async () => {
+    const body = {
+      session_id: SESSION_ID,
+      composition_version: 3,
+      rows: [
+        {
+          id: "validation",
+          label: "Validation",
+          status: "ok",
+          summary: "All checks pass",
+          detail: null,
+          component_ids: [],
+        },
+        {
+          id: "plugin_trust",
+          label: "Plugin trust",
+          status: "ok",
+          summary: "All Tier 1/2",
+          detail: null,
+          component_ids: [],
+        },
+        {
+          id: "provenance",
+          label: "Provenance",
+          status: "warning",
+          summary: "Identity passthrough detected",
+          detail: "Identity passthrough — provenance gap on transform 'select_columns'.",
+          component_ids: ["select_columns"],
+        },
+        {
+          id: "retention",
+          label: "Retention",
+          status: "not_applicable",
+          summary: "System retention: 90 days",
+          detail: null,
+          component_ids: [],
+        },
+        {
+          id: "llm_interpretations",
+          label: "LLM interpretations",
+          status: "not_applicable",
+          summary: "No LLM transforms in this pipeline",
+          detail: null,
+          component_ids: [],
+        },
+        {
+          id: "secrets",
+          label: "Secrets",
+          status: "not_applicable",
+          summary: "No secret references in this pipeline",
+          detail: null,
+          component_ids: [],
+        },
+      ],
+    };
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const snapshot = await fetchAuditReadiness(SESSION_ID);
+    expect(snapshot.composition_version).toBe(3);
+    expect(snapshot.rows).toHaveLength(6);
+    expect(snapshot.rows[2].status).toBe("warning");
+
+    const mock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const [url, init] = mock.mock.calls[0];
+    expect(url).toBe(`/api/sessions/${SESSION_ID}/audit-readiness`);
+    expect(init?.method).toBe("GET");
+  });
+
+  it("fetchAuditReadiness throws on non-2xx", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response("server error", { status: 500 }),
+    );
+    await expect(fetchAuditReadiness(SESSION_ID)).rejects.toThrow();
+  });
+
+  it("fetchAuditReadiness propagates 404 (session missing or no state) as ApiError", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ detail: "No composition state for this session" }),
+        { status: 404, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await expect(fetchAuditReadiness(SESSION_ID)).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
+  it("fetchAuditReadinessExplain GETs the explain URL and returns narrative", async () => {
+    const body = {
+      session_id: SESSION_ID,
+      composition_version: 3,
+      narrative: "When you run this pipeline, ELSPETH will record:\n\n• Source data — 5 URLs ...",
+    };
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const explain = await fetchAuditReadinessExplain(SESSION_ID);
+    expect(explain.narrative).toContain("ELSPETH will record");
+    expect(explain.composition_version).toBe(3);
+
+    const mock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const [url, init] = mock.mock.calls[0];
+    expect(url).toBe(`/api/sessions/${SESSION_ID}/audit-readiness/explain`);
+    expect(init?.method).toBe("GET");
+  });
+
+  it("fetchAuditReadinessExplain throws on non-2xx", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response("nope", { status: 500 }),
+    );
+    await expect(fetchAuditReadinessExplain(SESSION_ID)).rejects.toThrow();
+  });
+});
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run src/api/auditReadiness.test.ts
+```
+
+Expected: `Cannot find module './auditReadiness'`.
+
+- [ ] **Step 4: Implement**
+
+`src/elspeth/web/frontend/src/api/auditReadiness.ts`:
+
+```typescript
+/**
+ * API client for the audit-readiness panel (Phase 2).
+ *
+ * Two GET endpoints; both return strict Pydantic payloads. Mirrors
+ * the auth/parse pattern used by api/client.ts::validatePipeline.
+ *
+ * Technical debt: getToken/authHeaders/parseResponse are duplicated from
+ * api/preferences.ts. Phase 8 cleanup task: consolidate these helpers as
+ * exports from client.ts. Currently three API modules carry duplicates
+ * (preferences, auditReadiness, future ones).
+ */
+import type {
+  AuditReadinessSnapshot,
+  AuditReadinessExplain,
+  ApiError,
+} from "../types/api";
+
+function getToken(): string | null {
+  return localStorage.getItem("elspeth_access_token");
+}
+
+function authHeaders(contentType?: string): HeadersInit {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (contentType) headers["Content-Type"] = contentType;
+  return headers;
+}
+
+async function parseResponse<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    let detail: string | undefined;
+    let error_type: string | undefined;
+    try {
+      const body = (await response.clone().json()) as Record<string, unknown>;
+      if (typeof body.detail === "string") detail = body.detail;
+      if (typeof body.error_type === "string") error_type = body.error_type;
+    } catch {
+      // body wasn't JSON; ignore
+    }
+    const error: ApiError = {
+      status: response.status,
+      detail: detail ?? response.statusText,
+      error_type,
+    };
+    throw error;
+  }
+  return (await response.json()) as T;
+}
+
+export async function fetchAuditReadiness(
+  sessionId: string,
+): Promise<AuditReadinessSnapshot> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/audit-readiness`,
+    { method: "GET", headers: authHeaders() },
+  );
+  return parseResponse<AuditReadinessSnapshot>(response);
+}
+
+export async function fetchAuditReadinessExplain(
+  sessionId: string,
+): Promise<AuditReadinessExplain> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/audit-readiness/explain`,
+    { method: "GET", headers: authHeaders() },
+  );
+  return parseResponse<AuditReadinessExplain>(response);
+}
+```
+
+Re-export from `frontend/src/api/client.ts` (add near the bottom, after existing exports):
+
+```typescript
+export {
+  fetchAuditReadiness,
+  fetchAuditReadinessExplain,
+} from "./auditReadiness";
+```
+
+- [ ] **Step 5: Run tests — expect PASS**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run src/api/auditReadiness.test.ts
+```
+
+Expected: 5/5 pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/elspeth/web/frontend/src/api/auditReadiness.ts src/elspeth/web/frontend/src/api/auditReadiness.test.ts src/elspeth/web/frontend/src/api/client.ts
+git commit -m "feat(web/frontend): add audit-readiness API client (Phase 2B.2)"
+```
+
+---
+
+## Task 3: Zustand store — `useAuditReadinessStore`
+
+**Files:**
+- Create: `frontend/src/stores/auditReadinessStore.ts`
+- Create: `frontend/src/stores/auditReadinessStore.test.ts`
+
+The store holds **at most one snapshot per session** and refetches whenever `compositionState.version` advances. Explain narratives are fetched lazily on dialog open and cached on the same key.
+
+- [ ] **Step 1: Write the failing test**
+
+`frontend/src/stores/auditReadinessStore.test.ts`:
+
+```typescript
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { useAuditReadinessStore, getInitialState } from "./auditReadinessStore";
+import * as api from "../api/auditReadiness";
+import type { AuditReadinessSnapshot, AuditReadinessExplain } from "../types/api";
+
+vi.mock("../api/auditReadiness");
+
+const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+
+function snapshot(version: number): AuditReadinessSnapshot {
+  return {
+    session_id: SESSION_ID,
+    composition_version: version,
+    rows: [
+      { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
+      { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
+      { id: "provenance", label: "Provenance", status: "ok", summary: "Complete lineage", detail: null, component_ids: [] },
+      { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
+      { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
+      { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secrets referenced", detail: null, component_ids: [] },
+    ],
+  };
+}
+
+describe("useAuditReadinessStore", () => {
+  beforeEach(() => {
+    useAuditReadinessStore.setState(getInitialState());
+    vi.clearAllMocks();
+  });
+
+  it("loadSnapshot fetches and stores by sessionId", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(snapshot(1));
+
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+
+    const state = useAuditReadinessStore.getState();
+    expect(state.snapshotsBySession[SESSION_ID]?.composition_version).toBe(1);
+    expect(state.isLoading).toBe(false);
+    expect(state.error).toBeNull();
+  });
+
+  it("loadSnapshot is a no-op when the cached snapshot's version matches", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(snapshot(2));
+
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
+
+    expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1);
+  });
+
+  it("loadSnapshot refetches when the version advances", async () => {
+    vi.mocked(api.fetchAuditReadiness)
+      .mockResolvedValueOnce(snapshot(1))
+      .mockResolvedValueOnce(snapshot(2));
+
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
+
+    expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(2);
+    expect(
+      useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]
+        ?.composition_version,
+    ).toBe(2);
+  });
+
+  it("loadSnapshot stores error on 404", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockRejectedValueOnce({
+      status: 404,
+      detail: "No composition state for this session",
+    });
+
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+
+    const state = useAuditReadinessStore.getState();
+    expect(state.error).toContain("No composition state");
+    expect(state.snapshotsBySession[SESSION_ID]).toBeUndefined();
+  });
+
+  it("loadExplain fetches narrative and caches by version", async () => {
+    const expl: AuditReadinessExplain = {
+      session_id: SESSION_ID,
+      composition_version: 1,
+      narrative: "When you run this pipeline, ELSPETH will record …",
+    };
+    vi.mocked(api.fetchAuditReadinessExplain).mockResolvedValueOnce(expl);
+
+    await useAuditReadinessStore.getState().loadExplain(SESSION_ID, 1);
+    await useAuditReadinessStore.getState().loadExplain(SESSION_ID, 1);
+
+    expect(api.fetchAuditReadinessExplain).toHaveBeenCalledTimes(1);
+    expect(
+      useAuditReadinessStore.getState().explainsBySession[SESSION_ID]?.narrative,
+    ).toContain("ELSPETH will record");
+  });
+
+  it("loadExplain refetches when the version advances", async () => {
+    vi.mocked(api.fetchAuditReadinessExplain)
+      .mockResolvedValueOnce({ session_id: SESSION_ID, composition_version: 1, narrative: "v1 text" })
+      .mockResolvedValueOnce({ session_id: SESSION_ID, composition_version: 2, narrative: "v2 text" });
+
+    await useAuditReadinessStore.getState().loadExplain(SESSION_ID, 1);
+    await useAuditReadinessStore.getState().loadExplain(SESSION_ID, 2);
+
+    expect(api.fetchAuditReadinessExplain).toHaveBeenCalledTimes(2);
+    expect(
+      useAuditReadinessStore.getState().explainsBySession[SESSION_ID]?.narrative,
+    ).toBe("v2 text");
+  });
+
+  it("clearSession removes both snapshot and explain", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(snapshot(1));
+    vi.mocked(api.fetchAuditReadinessExplain).mockResolvedValueOnce({
+      session_id: SESSION_ID,
+      composition_version: 1,
+      narrative: "text",
+    });
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+    await useAuditReadinessStore.getState().loadExplain(SESSION_ID, 1);
+
+    useAuditReadinessStore.getState().clearSession(SESSION_ID);
+
+    const state = useAuditReadinessStore.getState();
+    expect(state.snapshotsBySession[SESSION_ID]).toBeUndefined();
+    expect(state.explainsBySession[SESSION_ID]).toBeUndefined();
+  });
+});
+```
+
+- [ ] **Step 2: Run test — expect FAIL**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run src/stores/auditReadinessStore.test.ts
+```
+
+Expected: `Cannot find module './auditReadinessStore'`.
+
+- [ ] **Step 3: Implement**
+
+`frontend/src/stores/auditReadinessStore.ts`:
+
+```typescript
+/**
+ * Zustand store for the audit-readiness panel (Phase 2B).
+ *
+ * Caches snapshots and explain narratives by sessionId, keyed by the
+ * composition_version each carries. `loadSnapshot` is a no-op when the
+ * cached snapshot's version matches the requested version — this is what
+ * makes auto-validate-on-composition-change cheap.
+ *
+ * The store never coerces server payloads — Phase 2A's `_StrictResponse`
+ * is the contract. If a literal value doesn't match the TypeScript union,
+ * that's a backend/frontend version skew and the panel renderer will
+ * surface it via the exhaustive `never` arm in AuditReadinessPanel.tsx.
+ */
+import { create } from "zustand";
+
+import {
+  fetchAuditReadiness,
+  fetchAuditReadinessExplain,
+} from "../api/auditReadiness";
+import type {
+  AuditReadinessSnapshot,
+  AuditReadinessExplain,
+  ApiError,
+} from "../types/api";
+
+export interface AuditReadinessState {
+  snapshotsBySession: Record<string, AuditReadinessSnapshot>;
+  explainsBySession: Record<string, AuditReadinessExplain>;
+  isLoading: boolean;
+  isLoadingExplain: boolean;
+  error: string | null;
+  explainError: string | null;
+
+  loadSnapshot: (sessionId: string, compositionVersion: number) => Promise<void>;
+  loadExplain: (sessionId: string, compositionVersion: number) => Promise<void>;
+  clearSession: (sessionId: string) => void;
+  reset: () => void;
+}
+
+export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "loadExplain" | "clearSession" | "reset"> => ({
+  snapshotsBySession: {},
+  explainsBySession: {},
+  isLoading: false,
+  isLoadingExplain: false,
+  error: null,
+  explainError: null,
+});
+
+export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => ({
+  ...getInitialState(),
+
+  async loadSnapshot(sessionId: string, compositionVersion: number) {
+    const cached = get().snapshotsBySession[sessionId];
+    if (cached && cached.composition_version === compositionVersion) {
+      return;
+    }
+    set({ isLoading: true, error: null });
+    try {
+      const snapshot = await fetchAuditReadiness(sessionId);
+      set((state) => ({
+        snapshotsBySession: {
+          ...state.snapshotsBySession,
+          [sessionId]: snapshot,
+        },
+        isLoading: false,
+      }));
+    } catch (err) {
+      const apiErr = err as ApiError;
+      set({
+        isLoading: false,
+        error: apiErr.detail ?? "Failed to load audit readiness.",
+      });
+    }
+  },
+
+  async loadExplain(sessionId: string, compositionVersion: number) {
+    const cached = get().explainsBySession[sessionId];
+    if (cached && cached.composition_version === compositionVersion) {
+      return;
+    }
+    set({ isLoadingExplain: true, explainError: null });
+    try {
+      const explain = await fetchAuditReadinessExplain(sessionId);
+      set((state) => ({
+        explainsBySession: {
+          ...state.explainsBySession,
+          [sessionId]: explain,
+        },
+        isLoadingExplain: false,
+      }));
+    } catch (err) {
+      const apiErr = err as ApiError;
+      set({
+        isLoadingExplain: false,
+        explainError: apiErr.detail ?? "Failed to load the explain narrative.",
+      });
+    }
+  },
+
+  clearSession(sessionId: string) {
+    set((state) => {
+      const { [sessionId]: _snap, ...restSnap } = state.snapshotsBySession;
+      const { [sessionId]: _expl, ...restExpl } = state.explainsBySession;
+      return { snapshotsBySession: restSnap, explainsBySession: restExpl };
+    });
+  },
+
+  reset() {
+    set(getInitialState());
+  },
+}));
+```
+
+> `getInitialState` is exported as a named const (not via an ad-hoc cast), so tests can import it directly. The `reset()` action calls `set(getInitialState())` — same pattern used by `executionStore`. Verify the import with `grep -n "getInitialState" src/elspeth/web/frontend/src/stores/` to confirm the naming convention is consistent.
+
+- [ ] **Step 4: Run tests — expect PASS**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run src/stores/auditReadinessStore.test.ts
+```
+
+Expected: 7/7 pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/elspeth/web/frontend/src/stores/auditReadinessStore.ts src/elspeth/web/frontend/src/stores/auditReadinessStore.test.ts
+git commit -m "feat(web/frontend): add auditReadinessStore with version-keyed cache (Phase 2B.3)"
+```
+
+---
+
+## Task 4: `AuditReadinessPanel` component — six rows, auto-fetch, all-green collapse
+
+**Files:**
+- Create: `frontend/src/components/audit/AuditReadinessPanel.tsx`
+- Create: `frontend/src/components/audit/AuditReadinessPanel.test.tsx`
+
+The panel:
+
+- Auto-fetches the snapshot when `compositionState.version` changes.
+- Renders six rows (or five if `llm_interpretations` is omitted — Phase 2A always emits it but Phase 2B's design spec allows hiding when `status == "not_applicable"`).
+- Per the spec's "Reduce visual weight when all-green" risk mitigation, when every actionable row is `ok`/`not_applicable`, collapses to a single "Audit ready ✓" summary that expands on click.
+- Clicking any row opens `ReadinessRowDetail` (Task 5).
+- Includes an "Explain →" button that opens `ExplainDialog` (Task 6).
+
+- [ ] **Step 1: Confirm the mount strategy**
+
+The panel is rendered from `InspectorPanel.tsx` (Task 7). For this task, render it directly with mocked stores; the mount wiring is Task 7's concern.
+
+- [ ] **Step 2: Write the failing test**
+
+`frontend/src/components/audit/AuditReadinessPanel.test.tsx`:
+
+```typescript
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { AuditReadinessPanel } from "./AuditReadinessPanel";
+import { useSessionStore } from "../../stores/sessionStore";
+import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import * as api from "../../api/auditReadiness";
+import type { AuditReadinessSnapshot, CompositionState } from "../../types/api";
+
+vi.mock("../../api/auditReadiness");
+
+const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+
+function makeComposition(version: number): CompositionState {
+  return {
+    id: "comp-1",
+    version,
+    source: { kind: "csv_file", config: { path: "x.csv" } } as never,
+    nodes: [
+      { id: "select_columns", node_type: "transform", plugin: "select_columns", config: {} } as never,
+    ],
+    edges: [],
+    outputs: [],
+    metadata: { name: "demo", description: "" },
+  };
+}
+
+function allGreenSnapshot(version: number): AuditReadinessSnapshot {
+  return {
+    session_id: SESSION_ID,
+    composition_version: version,
+    rows: [
+      { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
+      { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
+      { id: "provenance", label: "Provenance", status: "ok", summary: "Complete lineage", detail: null, component_ids: [] },
+      { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
+      { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
+      { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secrets", detail: null, component_ids: [] },
+    ],
+  };
+}
+
+function snapshotWithProvenanceWarning(version: number): AuditReadinessSnapshot {
+  const base = allGreenSnapshot(version);
+  return {
+    ...base,
+    rows: base.rows.map((r) =>
+      r.id === "provenance"
+        ? {
+            ...r,
+            status: "warning",
+            summary: "Identity passthrough detected",
+            detail: "Identity passthrough — provenance gap on 'select_columns'.",
+            component_ids: ["select_columns"],
+          }
+        : r,
+    ),
+  };
+}
+
+describe("AuditReadinessPanel", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(1),
+    } as never);
+    useAuditReadinessStore.setState({
+      snapshotsBySession: {},
+      explainsBySession: {},
+      isLoading: false,
+      isLoadingExplain: false,
+      error: null,
+      explainError: null,
+    } as never);
+    vi.clearAllMocks();
+  });
+
+  it("auto-fetches on mount using compositionState.version", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    render(<AuditReadinessPanel />);
+    await waitFor(() => {
+      expect(api.fetchAuditReadiness).toHaveBeenCalledWith(SESSION_ID);
+    });
+  });
+
+  it("collapses to a single 'Audit ready' summary when all rows are ok/not_applicable", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    render(<AuditReadinessPanel />);
+    expect(await screen.findByText(/Audit ready/i)).toBeInTheDocument();
+    // Six row labels are not all rendered up-front in collapsed mode.
+    expect(screen.queryByText("Plugin trust")).not.toBeInTheDocument();
+  });
+
+  it("expands to all rows when the summary is clicked", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    const summary = await screen.findByRole("button", { name: /Audit ready/i });
+    await user.click(summary);
+    expect(screen.getByText("Validation")).toBeInTheDocument();
+    expect(screen.getByText("Plugin trust")).toBeInTheDocument();
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText("Retention")).toBeInTheDocument();
+  });
+
+  it("shows all rows by default when any row has warning or error status", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(snapshotWithProvenanceWarning(1));
+    render(<AuditReadinessPanel />);
+    await waitFor(() => {
+      expect(screen.getByText("Validation")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText("Identity passthrough detected")).toBeInTheDocument();
+  });
+
+  it("refetches when compositionState.version advances", async () => {
+    vi.mocked(api.fetchAuditReadiness)
+      .mockResolvedValueOnce(allGreenSnapshot(1))
+      .mockResolvedValueOnce(allGreenSnapshot(2));
+    const { rerender } = render(<AuditReadinessPanel />);
+    await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1));
+
+    useSessionStore.setState({ compositionState: makeComposition(2) } as never);
+    rerender(<AuditReadinessPanel />);
+
+    await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(2));
+  });
+
+  it("renders a loading state on first fetch", async () => {
+    let resolve!: (s: AuditReadinessSnapshot) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((r) => {
+        resolve = r;
+      }),
+    );
+    render(<AuditReadinessPanel />);
+    expect(screen.getByText(/Checking audit readiness/i)).toBeInTheDocument();
+    resolve(allGreenSnapshot(1));
+    await waitFor(() => {
+      expect(screen.queryByText(/Checking audit readiness/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it("renders an error message on fetch failure", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockRejectedValueOnce({
+      status: 500,
+      detail: "Internal server error",
+    });
+    render(<AuditReadinessPanel />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Internal server error/);
+  });
+
+  it("opens the Explain dialog when Explain → is clicked", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    vi.mocked(api.fetchAuditReadinessExplain).mockResolvedValueOnce({
+      session_id: SESSION_ID,
+      composition_version: 1,
+      narrative: "Narrative body for testing.",
+    });
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    const summary = await screen.findByRole("button", { name: /Audit ready/i });
+    await user.click(summary); // expand
+    const explainBtn = screen.getByRole("button", { name: /Explain/i });
+    await user.click(explainBtn);
+    expect(await screen.findByText("Narrative body for testing.")).toBeInTheDocument();
+  });
+
+  it("renders nothing when there is no active session", () => {
+    useSessionStore.setState({ activeSessionId: null, compositionState: null } as never);
+    const { container } = render(<AuditReadinessPanel />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders nothing when the composition is empty (no source, no nodes, no outputs)", () => {
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: {
+        ...makeComposition(1),
+        source: null,
+        nodes: [],
+        outputs: [],
+      },
+    } as never);
+    const { container } = render(<AuditReadinessPanel />);
+    expect(container).toBeEmptyDOMElement();
+  });
+});
+```
+
+- [ ] **Step 3: Run test — expect FAIL**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run src/components/audit/AuditReadinessPanel.test.tsx
+```
+
+Expected: `Cannot find module './AuditReadinessPanel'`.
+
+- [ ] **Step 4: Implement**
+
+`frontend/src/components/audit/AuditReadinessPanel.tsx`:
+
+```typescript
+/**
+ * AuditReadinessPanel (Phase 2)
+ *
+ * Persistent right-rail panel showing six rows of audit-readiness state.
+ * Auto-fetches on compositionState.version change; collapses to a single
+ * "Audit ready ✓" summary when nothing actionable is present.
+ *
+ * Design spec: docs/composer/ux-redesign-2026-05/07-audit-readiness-panel.md
+ *
+ * The renderer is intentionally exhaustive on ReadinessRowId — the `never`
+ * default arm fails the build if a new row is added to the wire schema
+ * without a UI case.
+ */
+import { useEffect, useMemo, useState } from "react";
+
+import { useSessionStore } from "../../stores/sessionStore";
+import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import type {
+  ReadinessRow,
+  ReadinessRowId,
+  ReadinessStatus,
+} from "../../types/api";
+import { ReadinessRowDetail } from "./ReadinessRowDetail";
+import { ExplainDialog } from "./ExplainDialog";
+
+/** Glyph + accessible label for each row status. */
+function statusGlyph(status: ReadinessStatus): { glyph: string; aria: string } {
+  switch (status) {
+    case "ok":
+      return { glyph: "✓", aria: "OK" };
+    case "warning":
+      return { glyph: "⚠", aria: "Warning" };
+    case "error":
+      return { glyph: "✗", aria: "Error" };
+    case "not_applicable":
+      return { glyph: "—", aria: "Not applicable" };
+    default: {
+      const _exhaustive: never = status;
+      throw new Error(`unknown readiness status: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/** Linda-vocabulary heading for each row id. The wire schema's `label` is
+ *  authoritative; this map is the fallback when the backend label is empty,
+ *  which Phase 2A's `Field(min_length=1)` rules out — but the renderer must
+ *  be exhaustive on the id type regardless. */
+function rowHeading(id: ReadinessRowId): string {
+  switch (id) {
+    case "validation":
+      return "Validation";
+    case "plugin_trust":
+      return "Plugin trust";
+    case "provenance":
+      return "Provenance";
+    case "retention":
+      return "Retention";
+    case "llm_interpretations":
+      return "LLM interpretations";
+    case "secrets":
+      return "Secrets";
+    default: {
+      const _exhaustive: never = id;
+      throw new Error(`unknown readiness row id: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+function isActionable(status: ReadinessStatus): boolean {
+  return status === "warning" || status === "error";
+}
+
+export function AuditReadinessPanel() {
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const compositionState = useSessionStore((s) => s.compositionState);
+
+  const snapshot = useAuditReadinessStore((s) =>
+    activeSessionId ? s.snapshotsBySession[activeSessionId] : undefined,
+  );
+  const isLoading = useAuditReadinessStore((s) => s.isLoading);
+  const error = useAuditReadinessStore((s) => s.error);
+  const loadSnapshot = useAuditReadinessStore((s) => s.loadSnapshot);
+
+  const hasCompositionContent =
+    !!compositionState &&
+    (compositionState.source !== null ||
+      compositionState.nodes.length > 0 ||
+      compositionState.outputs.length > 0);
+
+  useEffect(() => {
+    if (!activeSessionId || !compositionState || !hasCompositionContent) return;
+    // Fire and forget; store handles errors.
+    void loadSnapshot(activeSessionId, compositionState.version);
+  }, [activeSessionId, compositionState, hasCompositionContent, loadSnapshot]);
+
+  const anyActionable = useMemo(
+    () => snapshot?.rows.some((r) => isActionable(r.status)) ?? false,
+    [snapshot],
+  );
+
+  const [expanded, setExpanded] = useState(false);
+  const [selectedRowId, setSelectedRowId] = useState<ReadinessRowId | null>(null);
+  const [explainOpen, setExplainOpen] = useState(false);
+
+  // When the snapshot changes and contains a warning/error, force expansion.
+  useEffect(() => {
+    if (anyActionable) setExpanded(true);
+  }, [anyActionable]);
+
+  if (!activeSessionId || !hasCompositionContent) {
+    return null;
+  }
+
+  if (isLoading && !snapshot) {
+    return (
+      <section
+        aria-label="Audit readiness"
+        className="audit-readiness audit-readiness--loading"
+      >
+        <span className="audit-readiness-loading">
+          Checking audit readiness…
+        </span>
+      </section>
+    );
+  }
+
+  if (error && !snapshot) {
+    return (
+      <section
+        aria-label="Audit readiness"
+        className="audit-readiness audit-readiness--error"
+      >
+        <div role="alert" className="audit-readiness-error">
+          {error}
+        </div>
+      </section>
+    );
+  }
+
+  if (!snapshot) {
+    return null;
+  }
+
+  // Collapsed view — single summary line when nothing is actionable.
+  if (!expanded && !anyActionable) {
+    return (
+      <section
+        aria-label="Audit readiness"
+        className="audit-readiness audit-readiness--collapsed"
+      >
+        <button
+          type="button"
+          className="audit-readiness-summary"
+          onClick={() => setExpanded(true)}
+          aria-expanded="false"
+          aria-controls="audit-readiness-rows"
+        >
+          <span aria-hidden="true">{"✓"}</span> Audit ready
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <>
+      <section aria-label="Audit readiness" className="audit-readiness">
+        <header className="audit-readiness-header">
+          <h2 className="audit-readiness-title">Audit readiness</h2>
+          <div className="audit-readiness-actions">
+            <button
+              type="button"
+              className="btn audit-readiness-action-btn"
+              onClick={() => setExplainOpen(true)}
+              aria-label="Explain what this pipeline will record"
+            >
+              Explain →
+            </button>
+            {!anyActionable && (
+              <button
+                type="button"
+                className="btn audit-readiness-action-btn audit-readiness-action-btn--ghost"
+                onClick={() => setExpanded(false)}
+                aria-label="Collapse audit readiness"
+              >
+                Collapse
+              </button>
+            )}
+          </div>
+        </header>
+
+        <ul id="audit-readiness-rows" className="audit-readiness-rows">
+          {snapshot.rows.map((row: ReadinessRow) => {
+            const { glyph, aria } = statusGlyph(row.status);
+            const heading = row.label || rowHeading(row.id);
+            const clickable = isActionable(row.status);
+            return (
+              <li
+                key={row.id}
+                className={`audit-readiness-row audit-readiness-row--${row.status}`}
+              >
+                {clickable ? (
+                  <button
+                    type="button"
+                    className="audit-readiness-row-btn"
+                    onClick={() => setSelectedRowId(row.id)}
+                    aria-label={`${heading}: ${aria}. ${row.summary}. Click for detail.`}
+                  >
+                    <span
+                      className="audit-readiness-glyph"
+                      aria-hidden="true"
+                    >
+                      {glyph}
+                    </span>
+                    <span className="audit-readiness-row-label">{heading}</span>
+                    <span className="audit-readiness-row-summary">{row.summary}</span>
+                  </button>
+                ) : (
+                  <div
+                    className="audit-readiness-row-static"
+                    aria-label={`${heading}: ${aria}. ${row.summary}.`}
+                  >
+                    <span
+                      className="audit-readiness-glyph"
+                      aria-hidden="true"
+                    >
+                      {glyph}
+                    </span>
+                    <span className="audit-readiness-row-label">{heading}</span>
+                    <span className="audit-readiness-row-summary">{row.summary}</span>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+
+      {selectedRowId && (
+        <ReadinessRowDetail
+          row={snapshot.rows.find((r) => r.id === selectedRowId)!}
+          onClose={() => setSelectedRowId(null)}
+        />
+      )}
+
+      {explainOpen && (
+        <ExplainDialog
+          sessionId={activeSessionId}
+          compositionVersion={snapshot.composition_version}
+          onClose={() => setExplainOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+```
+
+> CSS: this plan does not introduce new design tokens. Reuse the existing `.validation-banner` family or add scoped classes in the project's main stylesheet. The class names above (`.audit-readiness*`) are placeholders the styling pass picks up; the component does not depend on any specific stylesheet.
+
+- [ ] **Step 5: Create placeholder `ReadinessRowDetail` and `ExplainDialog` files**
+
+The `AuditReadinessPanel` component imports `ReadinessRowDetail` and `ExplainDialog`, both of which 14c implements properly. 14b ships these as minimal placeholders so the imports resolve and the panel's tests run.
+
+`frontend/src/components/audit/ReadinessRowDetail.tsx`:
+
+```typescript
+/**
+ * Placeholder shipped by 14b. 14c replaces this with the full implementation
+ * (per-row warning detail + jump-to-component). The placeholder renders a
+ * dialog stub so AuditReadinessPanel's tests can mount the component, and so
+ * lint/typecheck pass before 14c lands.
+ *
+ * The dialog renders the row's label + summary + (if present) detail. No
+ * jump-to-component button. No telemetry. No close affordance beyond the
+ * onClose prop the parent wires up.
+ *
+ * DO NOT extend the placeholder. Extensions belong in 14c.
+ */
+import type { ReadinessRow } from "../../types/api";
+
+export interface ReadinessRowDetailProps {
+  row: ReadinessRow;
+  onClose: () => void;
+}
+
+export function ReadinessRowDetail({ row, onClose }: ReadinessRowDetailProps) {
+  return (
+    <div role="dialog" aria-label={row.label} className="readiness-row-detail">
+      <h3>{row.label}</h3>
+      <p>{row.summary}</p>
+      {row.detail && <pre>{row.detail}</pre>}
+      <button type="button" onClick={onClose}>
+        Close
+      </button>
+    </div>
+  );
+}
+```
+
+`frontend/src/components/audit/ExplainDialog.tsx`:
+
+```typescript
+/**
+ * Placeholder shipped by 14b. 14c replaces this with the full implementation
+ * (modal narrative view that fetches lazily via useAuditReadinessStore.loadExplain).
+ * The placeholder accepts the same props as the final implementation so the
+ * AuditReadinessPanel tests can drive both this stub and the real version.
+ *
+ * DO NOT extend the placeholder. Extensions belong in 14c.
+ */
+import { useEffect } from "react";
+
+import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+
+export interface ExplainDialogProps {
+  sessionId: string;
+  compositionVersion: number;
+  onClose: () => void;
+}
+
+export function ExplainDialog({ sessionId, compositionVersion, onClose }: ExplainDialogProps) {
+  const explain = useAuditReadinessStore((s) => s.explainsBySession[sessionId]);
+  const loadExplain = useAuditReadinessStore((s) => s.loadExplain);
+
+  useEffect(() => {
+    void loadExplain(sessionId, compositionVersion);
+  }, [sessionId, compositionVersion, loadExplain]);
+
+  return (
+    <div role="dialog" aria-label="What this pipeline will record">
+      {explain && <pre>{explain.narrative}</pre>}
+      <button type="button" onClick={onClose}>
+        Close
+      </button>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 6: Run tests — expect PASS**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run src/components/audit/AuditReadinessPanel.test.tsx
+```
+
+Expected: 10/10 pass. The placeholders satisfy the panel's imports; the tests stub the API surface end-to-end and never depend on the placeholders' internal behaviour beyond the rendered text the assertions search for.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx src/elspeth/web/frontend/src/components/audit/ExplainDialog.tsx
+git commit -m "feat(web/frontend): add AuditReadinessPanel + placeholder subcomponents (Phase 2B.4)"
+```
+
+---
+
+## What Phase 2B leaves the frontend in
+
+- New `types/index.ts` entries for the audit-readiness wire shape, re-exported via `types/api.ts`.
+- New `api/auditReadiness.ts` with two typed GET wrappers.
+- New `stores/auditReadinessStore.ts` with version-keyed cache.
+- New `AuditReadinessPanel.tsx` rendered standalone (not yet mounted into `InspectorPanel.tsx` — 14c).
+- Placeholder `ReadinessRowDetail.tsx` and `ExplainDialog.tsx` that 14c replaces.
+- All vitest assertions in this plan pass; `tsc --noEmit` is clean; ESLint is clean.
+- `InspectorPanel.tsx`, `App.tsx`, and the staging deployment are **untouched** — 14c owns the integration.
+
+## Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Backend wire-shape drift breaks the renderer | The discriminated-union `never` arm fails the build; Phase 2A's `_StrictResponse` fails at server-side construction. No silent path. |
+| 14c lands before 14b and the placeholders are overwritten mid-flight | Per the sequencing in §"Sequencing and dependencies", 14b lands first. If the working branch is shared between 14b and 14c, the 14c PR's diff against 14b's placeholders is reviewable; the placeholder comments explicitly say "DO NOT extend". |
+| Auto-fetch races a still-mutating composition | Auto-fetch is keyed on `composition_version` (integer, monotonic). The store short-circuits when the version matches; a mid-mutation render reuses the cached value, and the next render after the version advances triggers a fresh fetch. |
+| Per-row "Jump to component" is missing in 14b | 14b's panel still emits the row click; 14b's placeholder `ReadinessRowDetail` lacks the jump button. 14c restores it. The user-visible UX gap exists for the duration of the 14b→14c gap; the design spec's persona table tolerates a partial first cut because Linda's primary trust mechanism (visibility of the row status) is already present. |
+| Telemetry can't be added later without rewriting the panel | The row-click handlers are isolated functions in `AuditReadinessPanel`. Phase 8 telemetry adds one line per handler. |
+
+## Review history
+
+**2026-05-15** — Panel findings applied: replaced ad-hoc `getInitialState` cast with exported top-level const + `reset()` action (CRITICAL); acknowledged `authHeaders`/`parseResponse` duplication with Phase 8 cleanup note in module JSDoc (IMPORTANT); cascaded 14a POST→GET change through client implementation and all test method assertions.
+
+## Memory references
+
+- `project_composer_personas` — Linda-vocabulary row labels.
+- `feedback_no_calendar_shipping_commitments` — no SLAs in this plan.
+- `feedback_default_is_fix_not_ticket` — placeholder behaviour is bounded by the explicit "DO NOT extend" comment; extensions belong in 14c and shouldn't drift into 14b.
+
+---

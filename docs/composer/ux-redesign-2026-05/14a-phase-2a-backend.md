@@ -1,0 +1,1500 @@
+# Phase 2A — Backend: audit-readiness aggregation endpoint
+
+> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or superpowers:executing-plans. Steps use `- [ ]` checkboxes.
+
+**Goal:** Land the backend for Phase 2 — a new `audit_readiness` package that composes existing validation, catalog, secrets, and retention signals into a per-session snapshot endpoint plus a separate narrative-Explain endpoint. No new audit-trail work, no new validation logic.
+
+**Architecture:** Service-then-routes (mirrors Phase 1A). The package `src/elspeth/web/audit_readiness/` exposes `ReadinessService` taking the existing `ExecutionService`, `SessionServiceProtocol`, `WebSecretService`, and `WebSettings` as injected dependencies. Two routes: `GET /api/sessions/{sid}/audit-readiness` (with `Cache-Control: no-store`) returns the snapshot; `GET /api/sessions/{sid}/audit-readiness/explain` returns narrative.
+
+**Tech Stack:** FastAPI, Pydantic v2, pytest.
+
+**Sibling plan:** [14b-phase-2b-frontend.md](14b-phase-2b-frontend.md) — frontend panel, Explain view, Validate-button removal.
+
+**Design reference:** [07-audit-readiness-panel.md](07-audit-readiness-panel.md).
+
+**Roadmap reference:** [00-implementation-roadmap.md](00-implementation-roadmap.md).
+
+---
+
+## Scope boundaries
+
+**In scope:**
+- New package `src/elspeth/web/audit_readiness/` with `__init__.py`, `models.py`, `trust.py`, `service.py`, `explain.py`, `routes.py`.
+- Pydantic models `AuditReadinessSnapshot`, `ReadinessRow`, `AuditReadinessExplain` inheriting `_StrictResponse` from `web/execution/schemas.py`.
+- A closed allowlist of "external-boundary" plugin names in `trust.py` (see §"Plugin-trust derivation").
+- `ReadinessService` composing existing checks (see §"Six rows"). `__init__` accepts a `state_from_record` collaborator (default: real converter) for test injection.
+- `ValidationError` gains `error_code: str | None`; `ValidationCheck` gains `affected_nodes: tuple[str, ...]` — used by the secrets and provenance rows respectively.
+- Narrative `build_narrative()` in `explain.py` — deterministic prose, no LLM call.
+- Two GET routes (`Cache-Control: no-store`) wired into `src/elspeth/web/app.py`.
+- `src/elspeth/web/sessions/ownership.py` (L3 peer) — shared `verify_session_ownership`; both `execution/routes.py` and `audit_readiness/routes.py` import from there.
+- New field `WebSettings.payload_store_retention_days: int = Field(default=90, ge=1)` to back the Retention row.
+
+**Out of scope (Phase 2B or later):**
+- Frontend store, panel component, Explain view (Phase 2B).
+- Removal of the standalone Validate button (Phase 2B).
+- A per-user retention preference to compare against (would need new schema).
+- LLM-interpretations row content (Phase 5b, gated by roadmap question B2).
+- Auto-rerun on every composition change (Phase 2B fires on `compositionState.version`).
+- Repair-hints click-target (Phase 2B; `component_ids` are already in the payload).
+
+## Trust tier check (per CLAUDE.md)
+
+- **Inbound:** `session_id` (path UUID parsed by FastAPI) + auth via `get_current_user`. No payload body.
+- **Reads:** `CompositionState` via `state_from_record(record)` — **Tier 1**, direct typed access; no `.get()` defensive lookups.
+- **Reads:** `CatalogService`, `WebSecretService.list_refs()`, `WebSettings` — **Tier 1**.
+- **Composes:** the existing `ValidationResult` — **Tier 1** (we produced it). Direct attribute access.
+- **Output:** strict Pydantic (`strict=True`, `extra="forbid"`) — drift crashes at construction.
+
+## Plugin-trust derivation (load-bearing — DO NOT defer)
+
+No `trust_tier` attribute exists on plugin classes; CLAUDE.md treats trust as per-data-flow. The audit panel collapses this onto per-component classification:
+
+- Sources are uniformly `BOUNDARY` (their job is to cross Tier-3).
+- Transforms are `BOUNDARY` only if on the closed list `EXTERNAL_BOUNDARY_TRANSFORMS`. Internal otherwise.
+- Sinks are `BOUNDARY` only if on the closed list `EXTERNAL_BOUNDARY_SINKS`. Internal otherwise.
+
+Closed lists are short by design. Adding a plugin that crosses Tier-3 requires updating `trust.py` in the same commit. The subset-of-catalog test in `test_trust.py` fails the build when an entry doesn't resolve to a registered plugin. **No fallback heuristic.**
+
+## Retention row (load-bearing — DO NOT defer)
+
+`payload_store.retention_days` is system-level (CLI default 90 in `cli.py:1356,1446`). No per-user surface exists. Phase 2A behaviour:
+
+- Row `value` reports `WebSettings.payload_store_retention_days`.
+- Row `status` is `not_applicable` (no user requirement to compare against).
+- Row `summary` is `f"System retention: {days} days"`.
+
+Phase 2A **does not** invent a phantom user-retention preference. A future phase that adds a per-composition retention surface flips this row to `ok`/`warning`.
+
+## LLM-interpretations row (load-bearing — DO NOT defer)
+
+Roadmap gates this behind Phase 5b (question B2). Phase 2A behaviour:
+
+- Row always emitted with `status = not_applicable`.
+- The "shown only if pipeline has LLM transforms" condition lives in **Phase 2B** as a frontend rendering rule. Backend is unconditional so Phase 5b flips one place.
+
+## Six rows — projection mapping
+
+| Row | Reads | Status logic |
+|---|---|---|
+| `validation` | `ValidationResult.is_valid`, `.errors` | `ok` if `is_valid`; else `error`. |
+| `plugin_trust` | `CompositionState` + `trust.classify_plugin()` | `error` on unknown plugin name; else `ok` (boundary plugins listed in detail). |
+| `provenance` | `ValidationResult.checks` filtered by `name == "identity_node_advisory"`; node ids from `check.affected_nodes` (structured field, not prose parse) | `warning` if any advisory; else `ok`. |
+| `retention` | `WebSettings.payload_store_retention_days` | Always `not_applicable` in Phase 2A. |
+| `llm_interpretations` | `CompositionState.nodes` (for the summary text only) | Always `not_applicable` in Phase 2A. |
+| `secrets` | `ValidationResult.errors` filtered by `error_code` (structured discriminant, not substring match); `WebSecretService.list_refs()` | `error` on missing/fabricated refs; `ok` if refs and they resolve; `not_applicable` if no refs in the composition. |
+
+## File structure
+
+**New:**
+- `src/elspeth/web/audit_readiness/{__init__.py, models.py, trust.py, service.py, explain.py, routes.py}`
+- `tests/unit/web/audit_readiness/{__init__.py, test_models.py, test_trust.py, test_service.py, test_explain.py}`
+- `tests/integration/web/test_audit_readiness_routes.py`
+
+**Modified:**
+- `src/elspeth/web/config.py` — add `payload_store_retention_days` to `WebSettings`.
+- `src/elspeth/web/app.py` — wire `ReadinessService` to `app.state.readiness_service` and `include_router(create_audit_readiness_router())`.
+- `src/elspeth/web/execution/routes.py` — import `verify_session_ownership` from `sessions/ownership.py`; drop local copy in the same commit.
+- `src/elspeth/web/execution/schemas.py` (or equivalent) — add `error_code: str | None = None` to `ValidationError` (default keeps existing call sites valid); add `affected_nodes: tuple[str, ...] = ()` to the identity-advisory `ValidationCheck` type (default keeps existing validation code valid; `_build_provenance_row` in service.py will produce empty `component_ids` on old check instances until the advisory code is updated).
+
+**New (additional):**
+- `src/elspeth/web/sessions/ownership.py` — shared `verify_session_ownership` (L3 peer).
+
+---
+
+## Task 1: Pydantic response models + Settings field
+
+**Files:** `web/audit_readiness/__init__.py`, `web/audit_readiness/models.py`, `web/config.py`, `tests/unit/web/audit_readiness/__init__.py`, `tests/unit/web/audit_readiness/test_models.py`.
+
+- [ ] **Step 1: Write the failing test**
+
+Empty `tests/unit/web/audit_readiness/__init__.py` (one-line comment).
+
+Create `tests/unit/web/audit_readiness/test_models.py`:
+
+```python
+"""Tests for audit-readiness Pydantic response models."""
+
+from typing import get_args
+
+import pytest
+from pydantic import ValidationError
+
+from elspeth.web.audit_readiness.models import (
+    AuditReadinessExplain,
+    AuditReadinessSnapshot,
+    ReadinessRow,
+    ReadinessRowId,
+    ReadinessStatus,
+)
+
+
+def _row(row_id, status="ok"):
+    return ReadinessRow(
+        id=row_id, label=row_id, status=status, summary="x",
+        detail=None, component_ids=(),
+    )
+
+
+def test_row_constructs_with_minimal_fields():
+    row = _row("validation")
+    assert row.status == "ok"
+
+
+def test_row_rejects_unknown_id():
+    with pytest.raises(ValidationError):
+        ReadinessRow(id="kiosk", label="x", status="ok", summary="x",
+                     detail=None, component_ids=())  # type: ignore[arg-type]
+
+
+def test_row_rejects_unknown_status():
+    with pytest.raises(ValidationError):
+        ReadinessRow(id="validation", label="x", status="purple",  # type: ignore[arg-type]
+                     summary="x", detail=None, component_ids=())
+
+
+def test_row_rejects_extra_fields():
+    with pytest.raises(ValidationError):
+        ReadinessRow(id="validation", label="x", status="ok",
+                     summary="x", detail=None, component_ids=(),
+                     sneaky="oops")  # type: ignore[call-arg]
+
+
+def test_snapshot_emits_six_canonical_rows():
+    rows = tuple(_row(r) for r in (
+        "validation", "plugin_trust", "provenance",
+        "retention", "llm_interpretations", "secrets",
+    ))
+    snap = AuditReadinessSnapshot(
+        session_id="11111111-1111-1111-1111-111111111111",
+        composition_version=1, rows=rows,
+    )
+    assert {row.id for row in snap.rows} == set(get_args(ReadinessRowId))
+
+
+def test_snapshot_rejects_duplicate_rows():
+    rows = (_row("validation"), _row("validation"))
+    with pytest.raises(ValidationError, match="duplicate"):
+        AuditReadinessSnapshot(
+            session_id="11111111-1111-1111-1111-111111111111",
+            composition_version=1, rows=rows,
+        )
+
+
+def test_snapshot_rejects_missing_rows():
+    rows = (_row("validation"),)
+    with pytest.raises(ValidationError, match="missing"):
+        AuditReadinessSnapshot(
+            session_id="11111111-1111-1111-1111-111111111111",
+            composition_version=1, rows=rows,
+        )
+
+
+def test_explain_constructs():
+    ex = AuditReadinessExplain(
+        session_id="11111111-1111-1111-1111-111111111111",
+        composition_version=1,
+        narrative="When you run this pipeline, ELSPETH will record:\n- foo",
+    )
+    assert "ELSPETH" in ex.narrative
+
+
+def test_explain_rejects_empty_narrative():
+    with pytest.raises(ValidationError):
+        AuditReadinessExplain(
+            session_id="11111111-1111-1111-1111-111111111111",
+            composition_version=1, narrative="",
+        )
+
+
+def test_status_literal_closed_set():
+    assert set(get_args(ReadinessStatus)) == {
+        "ok", "warning", "error", "not_applicable",
+    }
+```
+
+Run: `.venv/bin/python -m pytest tests/unit/web/audit_readiness/test_models.py -v` → FAIL (ModuleNotFoundError).
+
+- [ ] **Step 2: Implement**
+
+`src/elspeth/web/audit_readiness/__init__.py`:
+
+```python
+"""Audit-readiness package — composition-time presentation of audit signals.
+
+Read-only: no audit-trail writes happen here. Composes existing checks
+(validation, catalog, secrets, retention) into a single panel snapshot.
+
+Layer: L3 (application).
+"""
+```
+
+`src/elspeth/web/audit_readiness/models.py`:
+
+```python
+"""Pydantic models for the audit-readiness endpoints."""
+
+from __future__ import annotations
+
+from typing import Literal, Self, get_args
+
+from pydantic import Field, model_validator
+
+from elspeth.web.execution.schemas import _StrictResponse
+
+# Maps 1:1 to panel rows per docs/composer/ux-redesign-2026-05/07-audit-readiness-panel.md.
+# Adding a row requires updating ReadinessService and Phase 2B's renderer.
+ReadinessRowId = Literal[
+    "validation",
+    "plugin_trust",
+    "provenance",
+    "retention",
+    "llm_interpretations",
+    "secrets",
+]
+
+# Panel glyphs: ok→✓, warning→⚠, error→✗, not_applicable→—.
+ReadinessStatus = Literal["ok", "warning", "error", "not_applicable"]
+
+_EXPECTED_ROW_IDS: frozenset[str] = frozenset(get_args(ReadinessRowId))
+
+
+class ReadinessRow(_StrictResponse):
+    """One row in the audit-readiness panel."""
+
+    id: ReadinessRowId
+    label: str = Field(min_length=1)
+    status: ReadinessStatus
+    summary: str = Field(min_length=1)
+    detail: str | None
+    # component_ids let the frontend render jump-to-where links (Phase 2B).
+    # Empty when the row is system-scoped (retention) or all-green.
+    component_ids: tuple[str, ...]
+
+
+class AuditReadinessSnapshot(_StrictResponse):
+    """Aggregated payload for the audit-readiness panel."""
+
+    session_id: str = Field(min_length=1)
+    composition_version: int = Field(ge=1)
+    rows: tuple[ReadinessRow, ...]
+
+    @model_validator(mode="after")
+    def _check_row_completeness(self) -> Self:
+        ids = [row.id for row in self.rows]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"duplicate row ids in snapshot: {ids}")
+        missing = _EXPECTED_ROW_IDS - set(ids)
+        if missing:
+            raise ValueError(f"snapshot missing required rows: {sorted(missing)}")
+        extra = set(ids) - _EXPECTED_ROW_IDS
+        if extra:
+            raise ValueError(f"snapshot has unexpected rows: {sorted(extra)}")
+        return self
+
+
+class AuditReadinessExplain(_StrictResponse):
+    """Narrative form for the Explain detail view."""
+
+    session_id: str = Field(min_length=1)
+    composition_version: int = Field(ge=1)
+    narrative: str = Field(min_length=1)
+```
+
+In `src/elspeth/web/config.py`, after the existing `payload_store_path` field (around line 99), add:
+
+```python
+    payload_store_retention_days: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Payload retention in days surfaced by the audit-readiness "
+            "panel. Mirrors the CLI default (cli.py:1356). The panel "
+            "row is informational only in Phase 2A — there is no "
+            "user-stated requirement to compare against yet."
+        ),
+    )
+```
+
+Run tests → PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/elspeth/web/audit_readiness/__init__.py src/elspeth/web/audit_readiness/models.py src/elspeth/web/config.py tests/unit/web/audit_readiness/__init__.py tests/unit/web/audit_readiness/test_models.py
+git commit -m "feat(web): add audit-readiness response models (Phase 2A.1)"
+```
+
+## Task 2: Plugin-trust classifier (closed allowlists)
+
+**Files:** `web/audit_readiness/trust.py`, `tests/unit/web/audit_readiness/test_trust.py`.
+
+The closed allowlists are the load-bearing rule. Plugin renames without an allowlist update fail the subset-of-catalog test.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""Tests for plugin-trust classification."""
+
+from __future__ import annotations
+
+import pytest
+
+from elspeth.web.audit_readiness.trust import (
+    EXTERNAL_BOUNDARY_SINKS,
+    EXTERNAL_BOUNDARY_TRANSFORMS,
+    PluginTrust,
+    classify_plugin,
+)
+
+
+def test_source_kind_always_boundary():
+    assert classify_plugin("source", "csv") is PluginTrust.BOUNDARY
+    assert classify_plugin("source", "json") is PluginTrust.BOUNDARY
+
+
+def test_external_call_transforms_are_boundary():
+    for name in EXTERNAL_BOUNDARY_TRANSFORMS:
+        assert classify_plugin("transform", name) is PluginTrust.BOUNDARY
+
+
+def test_internal_transforms_are_internal():
+    assert classify_plugin("transform", "passthrough") is PluginTrust.INTERNAL
+
+
+def test_external_sinks_are_boundary():
+    for name in EXTERNAL_BOUNDARY_SINKS:
+        assert classify_plugin("sink", name) is PluginTrust.BOUNDARY
+
+
+def test_internal_sinks_are_internal():
+    assert classify_plugin("sink", "csv") is PluginTrust.INTERNAL
+
+
+def test_unknown_plugin_kind_raises():
+    with pytest.raises(ValueError, match="unknown plugin kind"):
+        classify_plugin("gate", "anything")  # type: ignore[arg-type]
+
+
+def test_external_boundary_transforms_subset_of_catalog():
+    """Allowlist drift guard: every entry must resolve via the live catalog."""
+    from elspeth.plugins.infrastructure.manager import PluginManager
+
+    pm = PluginManager()
+    pm.register_builtin_plugins()
+    transform_names = {cls.name for cls in pm.get_transforms()}
+    missing = EXTERNAL_BOUNDARY_TRANSFORMS - transform_names
+    assert not missing, (
+        f"EXTERNAL_BOUNDARY_TRANSFORMS has unregistered plugins: "
+        f"{sorted(missing)}. Either register the plugin or drop the entry."
+    )
+
+
+def test_external_boundary_sinks_subset_of_catalog():
+    from elspeth.plugins.infrastructure.manager import PluginManager
+
+    pm = PluginManager()
+    pm.register_builtin_plugins()
+    sink_names = {cls.name for cls in pm.get_sinks()}
+    missing = EXTERNAL_BOUNDARY_SINKS - sink_names
+    assert not missing, (
+        f"EXTERNAL_BOUNDARY_SINKS has unregistered plugins: "
+        f"{sorted(missing)}. Either register the plugin or drop the entry."
+    )
+
+
+def test_every_external_call_plugin_is_on_allowlist_or_explicitly_excepted():
+    """Every Determinism.EXTERNAL_CALL plugin must be on an allowlist or EXTERNAL_CALL_EXCEPTIONS.
+
+    This test FAILS when a new external-call plugin is added without being
+    categorised. Keep EXTERNAL_CALL_EXCEPTIONS empty; populate only with
+    an explicit written justification.
+    """
+    from elspeth.plugins.infrastructure.manager import PluginManager
+    from elspeth.contracts.enums import Determinism  # Determinism lives in contracts/enums.py (StrEnum, EXTERNAL_CALL = "external_call")
+
+    EXTERNAL_CALL_EXCEPTIONS: frozenset[str] = frozenset()  # noqa: N806
+    pm = PluginManager()
+    pm.register_builtin_plugins()
+    external_call_plugins = {
+        cls.name for cls in list(pm.get_transforms()) + list(pm.get_sinks())
+        if getattr(cls, "determinism", None) is Determinism.EXTERNAL_CALL
+    }
+    covered = EXTERNAL_BOUNDARY_TRANSFORMS | EXTERNAL_BOUNDARY_SINKS | EXTERNAL_CALL_EXCEPTIONS
+    uncategorised = external_call_plugins - covered
+    assert not uncategorised, (
+        f"External-call plugins not categorised for audit-readiness: "
+        f"{sorted(uncategorised)}. Add to an allowlist or EXTERNAL_CALL_EXCEPTIONS."
+    )
+```
+
+Run → FAIL (ModuleNotFoundError).
+
+- [ ] **Step 2: Confirm plugin names in the live catalog before implementing**
+
+Run:
+```bash
+grep -rn 'name = "\|name: ClassVar.*=' src/elspeth/plugins/transforms --include="*.py" | grep -v __pycache__
+grep -rn 'name = "\|name: ClassVar.*=' src/elspeth/plugins/sinks --include="*.py" | grep -v __pycache__
+```
+
+The `EXTERNAL_BOUNDARY_TRANSFORMS`/`_SINKS` names below are best-effort matches against CLAUDE.md's data-trust descriptions and the file headers in `plugins/transforms/web_scrape_extraction.py` etc. If a name in the allowlist doesn't appear in the grep output, **drop it**. Do not invent plugin names — the subset-of-catalog tests will fail.
+
+- [ ] **Step 3: Implement**
+
+`src/elspeth/web/audit_readiness/trust.py`:
+
+```python
+"""Plugin-trust classification for the audit-readiness panel.
+
+CLAUDE.md treats trust as a per-data-flow doctrine: sources cross Tier-3
+(external input), transforms that make external calls (HTTP, LLM, blob
+store) cross Tier-3 at the call boundary, everything else is Tier-2.
+
+This module collapses that into a per-component classification:
+
+  - BOUNDARY: crosses Tier-3. Sources are uniformly BOUNDARY; transforms
+    and sinks are BOUNDARY only when on the closed allowlists below.
+  - INTERNAL: operates only on pipeline data.
+
+The allowlists are closed by design. Adding a plugin that crosses Tier-3
+requires updating this file in the same commit. The subset-of-catalog
+tests fail the build when an entry doesn't resolve to a registered
+plugin — a rename without an update fails CI rather than silently
+breaking the panel.
+
+Layer: L3 (application).
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Literal
+
+PluginKind = Literal["source", "transform", "sink"]
+
+
+class PluginTrust(StrEnum):
+    BOUNDARY = "boundary"
+    INTERNAL = "internal"
+
+
+# Transform plugins that make external calls.
+# Adding to this list:
+#   1. Add the plugin's `.name` value here.
+#   2. Confirm the plugin module documents the external surface.
+#   3. The subset-of-catalog test in test_trust.py validates the name is real.
+EXTERNAL_BOUNDARY_TRANSFORMS: frozenset[str] = frozenset({
+    "llm",                    # plugins/transforms/llm/transform.py
+    "web_fetch",              # HTTP fetches (confirm name via grep before commit)
+    "web_scrape_extraction",  # plugins/transforms/web_scrape_extraction.py
+    "dataverse_query",        # external Dataverse API (confirm name)
+})
+
+# Sink plugins that write to external systems.
+EXTERNAL_BOUNDARY_SINKS: frozenset[str] = frozenset({
+    "azure_blob",             # plugins/sinks/azure_blob_sink.py
+})
+
+
+def classify_plugin(kind: PluginKind, name: str) -> PluginTrust:
+    """Classify a plugin by kind + name.
+
+    Raises:
+        ValueError: when ``kind`` is not one of the three known values.
+            Tier-1 invariant — the aggregator dispatches kinds taken from
+            the typed CompositionState.
+    """
+    if kind == "source":
+        return PluginTrust.BOUNDARY
+    if kind == "transform":
+        return (
+            PluginTrust.BOUNDARY
+            if name in EXTERNAL_BOUNDARY_TRANSFORMS
+            else PluginTrust.INTERNAL
+        )
+    if kind == "sink":
+        return (
+            PluginTrust.BOUNDARY
+            if name in EXTERNAL_BOUNDARY_SINKS
+            else PluginTrust.INTERNAL
+        )
+    raise ValueError(f"unknown plugin kind: {kind!r}")
+```
+
+Run tests → PASS. If the subset-of-catalog tests fail, drop the offending entries from the allowlists.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/elspeth/web/audit_readiness/trust.py tests/unit/web/audit_readiness/test_trust.py
+git commit -m "feat(web): add closed-list plugin-trust classifier (Phase 2A.2)"
+```
+
+## Task 3: ReadinessService — compose existing signals
+
+**Files:** `web/audit_readiness/service.py`, `tests/unit/web/audit_readiness/test_service.py`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""Tests for ReadinessService."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Sequence
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from elspeth.web.audit_readiness.service import ReadinessService
+from elspeth.web.composer.state import (
+    CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec,
+)
+from elspeth.web.execution.schemas import (
+    ValidationCheck, ValidationError, ValidationResult,
+)
+
+
+def _state(*, source_plugin="csv", transforms=(), sinks=(("out", "csv"),)):
+    src = (
+        SourceSpec(plugin=source_plugin, on_success="src_out",
+                   options={}, on_validation_failure="quarantine")
+        if source_plugin is not None else None
+    )
+    nodes = tuple(
+        NodeSpec(id=nid, node_type="transform", plugin=plg,
+                 input="src_out" if i == 0 else f"t{i - 1}_out",
+                 on_success=f"t{i}_out", options={})
+        for i, (nid, plg) in enumerate(transforms)
+    )
+    outputs = tuple(
+        OutputSpec(name=n, plugin=p, options={}) for n, p in sinks
+    )
+    return CompositionState(
+        source=src, nodes=nodes, edges=(), outputs=outputs,
+        metadata=PipelineMetadata(name="t", description=""), version=1,
+    )
+
+
+def _make_service(state, validation_result, inventory=()):
+    exec_svc = MagicMock()
+    exec_svc.validate = AsyncMock(return_value=validation_result)
+    sess_svc = MagicMock()
+    record = MagicMock()
+    sess_svc.get_current_state = AsyncMock(return_value=record)
+    sec_svc = MagicMock()
+    sec_svc.list_refs = MagicMock(return_value=list(inventory))
+    settings = MagicMock()
+    settings.payload_store_retention_days = 90
+    settings.auth_provider = "local"
+    return ReadinessService(
+        execution_service=exec_svc, session_service=sess_svc,
+        secret_service=sec_svc, settings=settings,
+        state_from_record=lambda _record: state,
+    )
+
+
+def _row(snap, row_id):
+    matches = [r for r in snap.rows if r.id == row_id]
+    if not matches:
+        raise AssertionError(f"row {row_id!r} not in snapshot")
+    return matches[0]
+
+
+_OK = ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+
+
+def test_validation_row_ok_when_no_errors():
+    svc = _make_service(_state(transforms=(("t", "passthrough"),)), _OK)
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    assert _row(snap, "validation").status == "ok"
+
+
+def test_validation_row_error_lists_component_ids():
+    result = ValidationResult(
+        is_valid=False, checks=[],
+        errors=[ValidationError(component_id="out", component_type="sink",
+                                message="boom", suggestion=None)],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    row = _row(snap, "validation")
+    assert row.status == "error"
+    assert row.component_ids == ("out",)
+
+
+def test_plugin_trust_row_ok_when_all_internal():
+    svc = _make_service(
+        _state(transforms=(("t", "passthrough"),), sinks=(("out", "csv"),)), _OK,
+    )
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    assert _row(snap, "plugin_trust").status == "ok"
+
+
+def test_provenance_warning_on_identity_advisory():
+    result = ValidationResult(
+        is_valid=True,
+        checks=[ValidationCheck(
+            name="identity_node_advisory", passed=True,
+            detail="Node 'pass' is an identity-shaped passthrough between 'source' and sink 'out'.",
+            affected_nodes=("pass",),  # structured field; no prose parse needed
+        )],
+        errors=[], semantic_contracts=[],
+    )
+    svc = _make_service(_state(transforms=(("pass", "passthrough"),)), result)
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    row = _row(snap, "provenance")
+    assert row.status == "warning"
+    assert "pass" in (row.detail or "")
+    assert "pass" in row.component_ids
+
+
+def test_retention_row_reports_system_value():
+    svc = _make_service(_state(), _OK)
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    row = _row(snap, "retention")
+    assert row.status == "not_applicable"
+    assert "90" in row.summary
+
+
+def test_llm_interpretations_always_not_applicable_in_phase_2a():
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK)
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    assert _row(snap, "llm_interpretations").status == "not_applicable"
+
+
+def test_secrets_not_applicable_when_no_refs():
+    svc = _make_service(_state(), _OK, inventory=())
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    assert _row(snap, "secrets").status == "not_applicable"
+
+
+def test_secrets_error_on_missing_refs():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[ValidationCheck(name="secret_refs", passed=False,
+                                detail="Missing secret references: openai_key")],
+        errors=[ValidationError(
+            component_id=None, component_type=None,
+            message="Cannot resolve secret references: openai_key",
+            suggestion="Add via Secrets panel.",
+            error_code="missing_secret_ref",  # structured discriminant
+        )],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(svc.compute_snapshot(
+        session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+    ))
+    assert _row(snap, "secrets").status == "error"
+
+
+def test_snapshot_raises_when_no_state():
+    exec_svc = MagicMock()
+    exec_svc.validate = AsyncMock(return_value=_OK)
+    sess_svc = MagicMock()
+    sess_svc.get_current_state = AsyncMock(return_value=None)
+    sec_svc = MagicMock()
+    sec_svc.list_refs = MagicMock(return_value=[])
+    settings = MagicMock(payload_store_retention_days=90, auth_provider="local")
+    svc = ReadinessService(
+        execution_service=exec_svc, session_service=sess_svc,
+        secret_service=sec_svc, settings=settings,
+    )
+    with pytest.raises(LookupError, match="no composition state"):
+        asyncio.run(svc.compute_snapshot(
+            session_id="11111111-1111-1111-1111-111111111111", user_id="alice",
+        ))
+```
+
+Run → FAIL (ModuleNotFoundError).
+
+- [ ] **Step 2: Implement**
+
+`src/elspeth/web/audit_readiness/service.py`:
+
+```python
+"""ReadinessService — pure aggregation of audit signals into a snapshot.
+No new validation logic. Layer: L3 (application).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Protocol
+
+from elspeth.contracts.secrets import SecretInventoryItem
+from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.audit_readiness.models import (
+    AuditReadinessSnapshot, ReadinessRow,
+)
+from elspeth.web.audit_readiness.trust import (
+    EXTERNAL_BOUNDARY_SINKS, EXTERNAL_BOUNDARY_TRANSFORMS,
+    PluginTrust, classify_plugin,
+)
+from elspeth.web.composer.state import CompositionState
+from elspeth.web.execution.schemas import (
+    ValidationCheck, ValidationError, ValidationResult,
+)
+from elspeth.web.sessions.converters import state_from_record as _default_state_from_record
+
+# Mirror of validation.py's private constant — duplicated to keep the
+# dependency unidirectional (audit_readiness depends on the result shape,
+# not on validation's internal naming).
+_CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+
+
+class _ExecutionServiceLike(Protocol):
+    async def validate(self, session_id, *, user_id: str | None = None) -> ValidationResult: ...
+
+
+class _SessionServiceLike(Protocol):
+    async def get_current_state(self, session_id): ...
+
+
+class _SecretServiceLike(Protocol):
+    def list_refs(self, user_id: str, *, auth_provider_type: str) -> list[SecretInventoryItem]: ...  # sync; caller uses run_sync_in_worker
+
+
+class _SettingsLike(Protocol):
+    payload_store_retention_days: int
+    auth_provider: str
+
+
+class ReadinessService:
+    """Compose audit-readiness signals into a snapshot for the panel."""
+
+    def __init__(
+        self, *,
+        execution_service: _ExecutionServiceLike,
+        session_service: _SessionServiceLike,
+        secret_service: _SecretServiceLike,
+        settings: _SettingsLike,
+        state_from_record: Callable[..., CompositionState] | None = None,
+    ) -> None:
+        self._execution_service = execution_service
+        self._session_service = session_service
+        self._secret_service = secret_service
+        self._settings = settings
+        self._state_from_record: Callable[..., CompositionState] = (
+            state_from_record if state_from_record is not None
+            else _default_state_from_record
+        )
+
+    async def compute_snapshot(
+        self, *, session_id: str, user_id: str,
+    ) -> AuditReadinessSnapshot:
+        """Return the six-row snapshot.
+
+        Raises:
+            LookupError: when the session has no composition state. The
+                route layer translates this into a 404.
+        """
+        record = await self._session_service.get_current_state(session_id)
+        if record is None:
+            raise LookupError(f"no composition state for session {session_id!r}")
+        state: CompositionState = self._state_from_record(record)
+        validation = await self._execution_service.validate(session_id, user_id=user_id)
+        inventory = await run_sync_in_worker(
+            self._secret_service.list_refs,
+            user_id, auth_provider_type=self._settings.auth_provider,
+        )
+        rows: tuple[ReadinessRow, ...] = (
+            _build_validation_row(validation),
+            _build_plugin_trust_row(state),
+            _build_provenance_row(validation),
+            _build_retention_row(self._settings.payload_store_retention_days),
+            _build_llm_interpretations_row(state),
+            _build_secrets_row(validation, inventory),
+        )
+        return AuditReadinessSnapshot(
+            session_id=session_id,
+            composition_version=state.version,
+            rows=rows,
+        )
+
+
+# ── Row projections ───────────────────────────────────────────────
+
+
+def _build_validation_row(result: ValidationResult) -> ReadinessRow:
+    if result.is_valid:
+        return ReadinessRow(
+            id="validation", label="Validation", status="ok",
+            summary="All checks pass", detail=None, component_ids=(),
+        )
+    component_ids = tuple(sorted({
+        err.component_id for err in result.errors if err.component_id is not None
+    }))
+    summary = (
+        f"{len(result.errors)} errors — see details"
+        if len(result.errors) != 1 else "1 error — see details"
+    )
+    detail = "\n".join(
+        f"[{err.component_type or 'unknown'}] {err.component_id or 'unknown'}: {err.message}"
+        for err in result.errors
+    )
+    return ReadinessRow(
+        id="validation", label="Validation", status="error",
+        summary=summary, detail=detail, component_ids=component_ids,
+    )
+
+
+def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
+    """Classify every plugin in the composition (boundary vs internal).
+    Panel uses "Plugin trust" vocabulary; tier numbers belong in the Explain view.
+    """
+    boundary: list[tuple[str, str, str]] = []
+    unknown: list[tuple[str, str]] = []
+
+    def _record(kind: str, component_id: str, name: str | None) -> None:
+        if name is None:
+            unknown.append((kind, component_id))
+            return
+        trust = classify_plugin(kind, name)  # type: ignore[arg-type]
+        if trust is PluginTrust.BOUNDARY:
+            boundary.append((kind, component_id, name))
+
+    if state.source is not None:
+        _record("source", "source", state.source.plugin)
+    for node in state.nodes:
+        if node.node_type == "transform":
+            _record("transform", node.id, node.plugin)
+    for output in state.outputs:
+        _record("sink", output.name, output.plugin)
+
+    if unknown:
+        ids = tuple(sorted({cid for _, cid in unknown}))
+        return ReadinessRow(
+            id="plugin_trust", label="Plugin trust", status="error",
+            summary="Unknown plugin in composition",
+            detail=("The composition references plugin names not in the "
+                    "registered catalog. Validation will block execution."),
+            component_ids=ids,
+        )
+
+    if not boundary:
+        return ReadinessRow(
+            id="plugin_trust", label="Plugin trust", status="ok",
+            summary="All plugins operate on pipeline data",
+            detail=None, component_ids=(),
+        )
+
+    # Boundary plugins are recorded as ok with the boundaries named in
+    # detail. The "sensitivity-vs-tier mismatch" warning case needs a
+    # user-stated sensitivity surface that does not yet exist (roadmap §G2).
+    detail = "\n".join(
+        f"- [{kind}] {cid} ({name}) — crosses an external boundary"
+        for kind, cid, name in boundary
+    )
+    return ReadinessRow(
+        id="plugin_trust", label="Plugin trust", status="ok",
+        summary=f"{len(boundary)} external-boundary plugin(s) recorded",
+        detail=detail,
+        component_ids=tuple(cid for _, cid, _ in boundary),
+    )
+
+
+def _build_provenance_row(result: ValidationResult) -> ReadinessRow:
+    """Project identity_node_advisory checks into the provenance row.
+
+    Node ids come from check.affected_nodes (structured tuple added by
+    Finding 2). No prose parsing of the detail field.
+    """
+    advisories = [
+        c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY
+    ]
+    if not advisories:
+        return ReadinessRow(
+            id="provenance", label="Provenance", status="ok",
+            summary="All paths record provenance",
+            detail=None, component_ids=(),
+        )
+    component_ids = tuple(
+        node_id
+        for c in advisories
+        for node_id in c.affected_nodes  # structured field; no prose parse
+    )
+    return ReadinessRow(
+        id="provenance", label="Provenance", status="warning",
+        summary=f"{len(advisories)} identity passthrough(s) — provenance gap",
+        detail="\n".join(c.detail for c in advisories),
+        component_ids=component_ids,
+    )
+
+
+def _build_retention_row(retention_days: int) -> ReadinessRow:
+    """System-configured; no user requirement to compare against."""
+    return ReadinessRow(
+        id="retention", label="Retention", status="not_applicable",
+        summary=f"System retention: {retention_days} days",
+        detail=("Per-composition retention configuration is not yet "
+                "exposed; configured retention applies to all payloads."),
+        component_ids=(),
+    )
+
+
+def _build_llm_interpretations_row(state: CompositionState) -> ReadinessRow:
+    """Always not_applicable in Phase 2A; Phase 5b implements the real signal."""
+    has_llm = any(
+        n.node_type == "transform" and n.plugin == "llm" for n in state.nodes
+    )
+    summary = (
+        "Interpretation surface not yet available (Phase 5b)"
+        if has_llm else "No LLM transforms in this composition"
+    )
+    return ReadinessRow(
+        id="llm_interpretations", label="LLM interpretations",
+        status="not_applicable", summary=summary,
+        detail=None, component_ids=(),
+    )
+
+
+_SECRET_ERROR_CODES: frozenset[str] = frozenset({
+    "missing_secret_ref", "fabricated_secret_ref", "disallowed_secret_ref",
+})
+
+
+def _build_secrets_row(
+    validation: ValidationResult, inventory: list[SecretInventoryItem],
+) -> ReadinessRow:
+    """error/ok/not_applicable per secret ref resolution.
+    Keyed on ValidationError.error_code, not message substring.
+    """
+    secret_errors = [
+        err for err in validation.errors
+        if err.error_code in _SECRET_ERROR_CODES
+    ]
+    if secret_errors:
+        return ReadinessRow(
+            id="secrets", label="Secrets", status="error",
+            summary="Secret references unresolved",
+            detail="\n".join(err.message for err in secret_errors),
+            component_ids=tuple(
+                err.component_id for err in secret_errors if err.component_id
+            ),
+        )
+    secret_check = next(
+        (c for c in validation.checks if c.name == "secret_refs"), None,
+    )
+    if secret_check is None and not inventory:
+        return ReadinessRow(
+            id="secrets", label="Secrets", status="not_applicable",
+            summary="No secret references in this composition",
+            detail=None, component_ids=(),
+        )
+    return ReadinessRow(
+        id="secrets", label="Secrets", status="ok",
+        summary="All secret references resolve",
+        detail=(f"{len(inventory)} secret(s) in your inventory"
+                if inventory else "Composition references no secrets"),
+        component_ids=(),
+    )
+```
+
+Run tests → PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/elspeth/web/audit_readiness/service.py tests/unit/web/audit_readiness/test_service.py
+git commit -m "feat(web): add ReadinessService composing audit signals (Phase 2A.3)"
+```
+
+## Task 4: Explain narrative builder
+
+**Files:** `web/audit_readiness/explain.py`, `tests/unit/web/audit_readiness/test_explain.py`.
+
+Deterministic stringification of CompositionState — no LLM call.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+"""Tests for the Explain narrative builder."""
+
+from __future__ import annotations
+
+from elspeth.web.audit_readiness.explain import build_narrative
+from elspeth.web.composer.state import (
+    CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec,
+)
+
+
+def _state(*, source_plugin="csv", transforms=(), sinks=(("out", "csv"),)):
+    src = (
+        SourceSpec(plugin=source_plugin, on_success="src_out",
+                   options={}, on_validation_failure="quarantine")
+        if source_plugin is not None else None
+    )
+    nodes = tuple(
+        NodeSpec(id=nid, node_type="transform", plugin=plg,
+                 input="src_out" if i == 0 else f"t{i - 1}_out",
+                 on_success=f"t{i}_out", options={})
+        for i, (nid, plg) in enumerate(transforms)
+    )
+    outputs = tuple(OutputSpec(name=n, plugin=p, options={}) for n, p in sinks)
+    return CompositionState(
+        source=src, nodes=nodes, edges=(), outputs=outputs,
+        metadata=PipelineMetadata(name="t", description=""), version=1,
+    )
+
+
+def test_opens_with_recorded_promise():
+    text = build_narrative(_state(), retention_days=90)
+    assert text.startswith("When you run this pipeline, ELSPETH will record:")
+
+
+def test_names_source_plugin():
+    text = build_narrative(_state(source_plugin="csv"), retention_days=90)
+    assert "csv" in text.lower()
+
+
+def test_walks_transforms_in_order():
+    text = build_narrative(
+        _state(transforms=(("t1", "passthrough"), ("t2", "llm"))),
+        retention_days=90,
+    )
+    assert text.index("t1") < text.index("t2")
+
+
+def test_calls_out_llm_recording_details():
+    text = build_narrative(_state(transforms=(("judge", "llm"),)), retention_days=90)
+    assert "prompt" in text.lower()
+    assert "response" in text.lower() or "model" in text.lower()
+
+
+def test_includes_each_sink():
+    text = build_narrative(
+        _state(sinks=(("primary", "csv"), ("backup", "json"))), retention_days=90,
+    )
+    assert "primary" in text and "backup" in text
+
+
+def test_mentions_retention():
+    text = build_narrative(_state(), retention_days=42)
+    assert "42" in text
+
+
+def test_is_deterministic():
+    s = _state(transforms=(("t", "passthrough"),))
+    assert build_narrative(s, retention_days=90) == build_narrative(s, retention_days=90)
+
+
+def test_no_source_explains_incomplete():
+    text = build_narrative(_state(source_plugin=None), retention_days=90)
+    assert "no source" in text.lower() or "incomplete" in text.lower()
+
+
+def test_closes_with_evidence_promise():
+    text = build_narrative(_state(), retention_days=90)
+    assert "evidence" in text.lower() or "answer" in text.lower()
+```
+
+Run → FAIL (ModuleNotFoundError).
+
+- [ ] **Step 2: Implement**
+
+`src/elspeth/web/audit_readiness/explain.py`:
+
+```python
+"""Narrative builder for the audit-readiness Explain view.
+
+Generates deterministic prose describing what ELSPETH will record when
+the composition runs. No LLM call; same composition + retention → same text.
+
+Layer: L3 (application).
+"""
+
+from __future__ import annotations
+
+from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec
+
+
+def build_narrative(state: CompositionState, *, retention_days: int) -> str:
+    lines: list[str] = [
+        "When you run this pipeline, ELSPETH will record:", "",
+    ]
+
+    if state.source is None:
+        lines.append(
+            "- No source configured yet — the composition is incomplete. "
+            "Once you add a source, this view will describe what it records."
+        )
+    else:
+        lines.append(_describe_source(state.source.plugin))
+
+    for node in state.nodes:
+        if node.node_type == "transform":
+            lines.append(_describe_transform(node))
+
+    for output in state.outputs:
+        lines.append(_describe_output(output))
+
+    lines.extend([
+        "",
+        f"Retention: {retention_days} days by default. This applies to "
+        "stored payloads; row-level hashes are retained indefinitely.",
+        "",
+        "Run metadata: when, who (you), and which plugin versions were "
+        "in use at run time.",
+        "",
+        "This evidence is sufficient to answer questions about any output "
+        "row of this pipeline, including which plugin produced it and "
+        "from what input.",
+    ])
+    return "\n".join(lines)
+
+
+def _describe_source(plugin: str | None) -> str:
+    if plugin is None:
+        return ("- Source — plugin not yet selected. Once chosen, each row "
+                "read from the source will be hashed and recorded.")
+    if plugin == "csv":
+        return ("- Source data — each row from the CSV input. SHA-256 hash "
+                "recorded for the source file and for each row.")
+    if plugin == "json":
+        return ("- Source data — each record from the JSON input. SHA-256 "
+                "hash recorded for the source file and for each record.")
+    if plugin == "dataverse":
+        return ("- Source data — each record returned by the Dataverse "
+                "query, with query parameters and result hashes recorded.")
+    return (f"- Source data — each row from the {plugin} source. "
+            f"Row-level hash recorded for every record.")
+
+
+def _describe_transform(node: NodeSpec) -> str:
+    name = node.id
+    plugin = node.plugin or "unknown"
+    if plugin == "llm":
+        return (f"- {name} (LLM transform) — for each row: the full prompt "
+                f"(with your accepted definitions), the full response, the "
+                f"model and version, and the timestamp. Recorded in the "
+                f"audit database.")
+    if plugin == "passthrough":
+        return (f"- {name} (passthrough) — copies the row unchanged. The "
+                f"audit trail records the hop; no new fields are written.")
+    if plugin == "web_fetch":
+        return (f"- {name} (web fetch) — for each URL: HTTP status, "
+                f"response time, and response body hash. Bytes are stored "
+                f"under the payload retention policy.")
+    if plugin == "web_scrape_extraction":
+        return (f"- {name} (web extraction) — recorded selectors and the "
+                f"extracted-field hashes for each row.")
+    return (f"- {name} ({plugin} transform) — input row hash, output row "
+            f"hash, and per-row outcome recorded.")
+
+
+def _describe_output(output: OutputSpec) -> str:
+    plugin = output.plugin or "unknown"
+    if plugin in ("csv", "json"):
+        return (f"- {output.name} ({plugin} file) — written to your session "
+                f"storage. SHA-256-hashed; chain-of-custody recorded with "
+                f"the run id and timestamp.")
+    if plugin == "azure_blob":
+        return (f"- {output.name} (Azure Blob) — uploaded to the configured "
+                f"container. Content hash and remote path recorded; the "
+                f"local emit is hashed before transit.")
+    return (f"- {output.name} ({plugin} sink) — write outcome and output "
+            f"hash recorded for each row.")
+```
+
+Run tests → PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/elspeth/web/audit_readiness/explain.py tests/unit/web/audit_readiness/test_explain.py
+git commit -m "feat(web): add deterministic Explain narrative builder (Phase 2A.4)"
+```
+
+## Task 5: REST routes — snapshot + explain
+
+**Files:** `web/audit_readiness/routes.py`, `web/app.py`, `tests/integration/web/test_audit_readiness_routes.py`.
+
+- [ ] **Step 1: Confirm the app-composition site**
+
+The router wiring lives in `src/elspeth/web/app.py` around line 386 (`catalog_router` is included there). The attributes the new routes need:
+- `app.state.execution_service` (confirmed in `execution/routes.py:80`).
+- `app.state.session_service`.
+- `app.state.secret_service` — confirm via `grep -n "secret_service\b" src/elspeth/web/app.py`. If the attribute is named differently (e.g., `secret_resolver`), use the actual name; do not rename.
+- `app.state.settings`.
+
+- [ ] **Step 2: Write the failing route test**
+
+Read `tests/integration/web/conftest.py` and the existing `test_execution_routes.py` first to pick up the auth-bypass / session-creation fixtures. Adapt fixture names below.
+
+```python
+"""Integration tests for /api/sessions/{sid}/audit-readiness routes."""
+
+# Fixture names below match conventions used by test_execution_routes.py.
+# Adapt to whatever conftest.py actually exposes.
+
+
+def test_snapshot_returns_six_canonical_rows(client_with_session):
+    client, session_id = client_with_session
+    response = client.get(f"/api/sessions/{session_id}/audit-readiness")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == str(session_id)
+    assert body["composition_version"] >= 1
+    assert {row["id"] for row in body["rows"]} == {
+        "validation", "plugin_trust", "provenance",
+        "retention", "llm_interpretations", "secrets",
+    }
+
+
+def test_snapshot_404_when_no_state(client_with_session_without_state):
+    client, session_id = client_with_session_without_state
+    response = client.get(f"/api/sessions/{session_id}/audit-readiness")
+    assert response.status_code == 404
+
+
+def test_snapshot_404_on_cross_user_access(client_with_user, other_users_session_id):
+    client, _user = client_with_user
+    response = client.get(
+        f"/api/sessions/{other_users_session_id}/audit-readiness"
+    )
+    assert response.status_code == 404
+
+
+def test_snapshot_requires_auth(client_anonymous, any_session_id):
+    response = client_anonymous.get(
+        f"/api/sessions/{any_session_id}/audit-readiness"
+    )
+    assert response.status_code == 401
+
+
+def test_explain_returns_narrative(client_with_session):
+    client, session_id = client_with_session
+    response = client.get(
+        f"/api/sessions/{session_id}/audit-readiness/explain"
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["narrative"].startswith(
+        "When you run this pipeline, ELSPETH will record:"
+    )
+
+
+def test_explain_404_when_no_state(client_with_session_without_state):
+    client, session_id = client_with_session_without_state
+    response = client.get(
+        f"/api/sessions/{session_id}/audit-readiness/explain"
+    )
+    assert response.status_code == 404
+
+
+def test_explain_requires_auth(client_anonymous, any_session_id):
+    response = client_anonymous.get(
+        f"/api/sessions/{any_session_id}/audit-readiness/explain"
+    )
+    assert response.status_code == 401
+
+
+def test_snapshot_includes_no_store_cache_header(client_with_session):
+    client, session_id = client_with_session
+    response = client.get(f"/api/sessions/{session_id}/audit-readiness")
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "no-store"
+
+
+def test_rejects_malformed_session_id(client_with_user):
+    client, _user = client_with_user
+    response = client.get("/api/sessions/not-a-uuid/audit-readiness")
+    assert response.status_code == 422
+```
+
+If `client_with_session_without_state` isn't already a fixture, create one that creates a session and skips composition persistence. Model `other_users_session_id` on the IDOR test in `test_execution_routes.py`.
+
+Run → FAIL.
+
+- [ ] **Step 3a: Create `sessions/ownership.py`**
+
+Create `src/elspeth/web/sessions/ownership.py` (L3 peer, no circular dependency risk) with a single `async def verify_session_ownership(session_id: UUID, user: UserIdentity, request: Request) -> None` that reads `session_service` and `settings` from `request.app.state`, calls `session_service.get_session(session_id)` (ValueError → 404), and raises HTTP 404 on user_id or auth_provider mismatch. Returns 404 in all cases (not 403) to avoid leaking session existence (IDOR). The implementation is identical to the `_verify_session_ownership` function currently in `execution/routes.py`.
+
+In the same commit, update `execution/routes.py` to import `verify_session_ownership` from `sessions/ownership.py` and delete its local copy.
+
+- [ ] **Step 3: Implement the routes**
+
+`src/elspeth/web/audit_readiness/routes.py`:
+
+```python
+"""FastAPI router for the audit-readiness endpoints.
+
+GET /api/sessions/{sid}/audit-readiness         → AuditReadinessSnapshot
+GET /api/sessions/{sid}/audit-readiness/explain → AuditReadinessExplain
+
+Both GET, Cache-Control: no-store, auth-required; missing state → 404.
+Layer: L3 (application).
+"""
+
+from __future__ import annotations
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from elspeth.web.audit_readiness.explain import build_narrative
+from elspeth.web.audit_readiness.models import AuditReadinessExplain, AuditReadinessSnapshot
+from elspeth.web.audit_readiness.service import ReadinessService
+from elspeth.web.auth.middleware import get_current_user
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.config import WebSettings
+from elspeth.web.sessions.converters import state_from_record
+from elspeth.web.sessions.ownership import verify_session_ownership
+from elspeth.web.sessions.protocol import SessionServiceProtocol
+
+_NO_STORE = "no-store"
+
+
+def create_audit_readiness_router() -> APIRouter:
+    router = APIRouter(tags=["audit-readiness"])
+
+    @router.get(
+        "/api/sessions/{session_id}/audit-readiness",
+        response_model=AuditReadinessSnapshot,
+    )
+    async def snapshot(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> JSONResponse:
+        await verify_session_ownership(session_id, user, request)
+        service: ReadinessService = request.app.state.readiness_service
+        try:
+            result = await service.compute_snapshot(
+                session_id=str(session_id), user_id=user.user_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return JSONResponse(
+            content=result.model_dump(),
+            headers={"Cache-Control": _NO_STORE},
+        )
+
+    @router.get(
+        "/api/sessions/{session_id}/audit-readiness/explain",
+        response_model=AuditReadinessExplain,
+    )
+    async def explain(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> JSONResponse:
+        await verify_session_ownership(session_id, user, request)
+        # Accepted double-read of session record (deferred optimization; tune if profiling shows need).
+        session_service: SessionServiceProtocol = request.app.state.session_service
+        settings: WebSettings = request.app.state.settings
+        record = await session_service.get_current_state(session_id)
+        if record is None:
+            raise HTTPException(
+                status_code=404, detail="No composition state for this session",
+            )
+        state = state_from_record(record)
+        result = AuditReadinessExplain(
+            session_id=str(session_id),
+            composition_version=state.version,
+            narrative=build_narrative(
+                state, retention_days=settings.payload_store_retention_days,
+            ),
+        )
+        return JSONResponse(
+            content=result.model_dump(),
+            headers={"Cache-Control": _NO_STORE},
+        )
+
+    return router
+```
+
+- [ ] **Step 4: Wire the service + router into the app**
+
+In `src/elspeth/web/app.py`, alongside the existing `catalog_router` inclusion (line 386), add:
+
+```python
+from elspeth.web.audit_readiness.routes import create_audit_readiness_router
+from elspeth.web.audit_readiness.service import ReadinessService
+
+# After execution_service, session_service, secret_service are on app.state:
+app.state.readiness_service = ReadinessService(
+    execution_service=app.state.execution_service,
+    session_service=app.state.session_service,
+    secret_service=app.state.secret_service,  # adapt to actual attr name
+    settings=app.state.settings,
+)
+
+app.include_router(create_audit_readiness_router())
+```
+
+If the secret-service attribute is named differently in `app.py`, use the actual name. Do **not** rename existing attributes.
+
+- [ ] **Step 5: Run tests**
+
+```bash
+.venv/bin/python -m pytest tests/integration/web/test_audit_readiness_routes.py -v
+.venv/bin/python -m pytest tests/integration/web/ -v
+.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
+```
+
+Expected: all three PASS. The layer-import check should accept the new package; `audit_readiness` is L3 and only imports L0/L1/L2/L3 (`composer/state.py`, `execution/schemas.py`, `sessions/converters.py`, `sessions/protocol.py` are all L3 — peer imports are fine).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/elspeth/web/audit_readiness/routes.py src/elspeth/web/app.py tests/integration/web/test_audit_readiness_routes.py
+git commit -m "$(cat <<'EOF'
+feat(web): expose audit-readiness snapshot + explain routes (Phase 2A.5)
+
+GET /api/sessions/{sid}/audit-readiness         → six-row panel snapshot.
+GET /api/sessions/{sid}/audit-readiness/explain → narrative prose.
+Both routes respond with Cache-Control: no-store.
+Session ownership verified via sessions/ownership.py (shared with execution/routes.py).
+Missing composition state returns 404.
+
+See docs/composer/ux-redesign-2026-05/14a-phase-2a-backend.md.
+EOF
+)"
+```
+
+---
+
+## What Phase 2A leaves the backend in
+
+- New `audit_readiness/` package with models, closed-list trust classifier, aggregator service, narrative builder, and two REST routes.
+- The aggregator composes existing validation / catalog / secrets / retention signals — no new validation logic.
+- Narrative is deterministic and system-generated.
+- `WebSettings.payload_store_retention_days` (default 90) backs the Retention row.
+- No frontend changes; Phase 2B picks up.
+
+## Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Plugin-trust allowlist drifts as plugins are renamed | Subset-of-catalog test fails the build. Allowlists are short by design. |
+| `identity_node_advisory` affected_nodes field is absent on old `ValidationCheck` instances | Node ids will be empty, but `status`/`detail` stay correct. The `affected_nodes` field is added alongside this plan's changes — its absence would indicate an upstream schema version mismatch. |
+| LLM-interpretations row stays not_applicable until Phase 5b | By design. Phase 2B hides the row when no LLM transforms are present. |
+| Retention row never moves off not_applicable | By design (load-bearing decision). Future phase flips it when a per-composition retention surface exists. |
+| Aggregator calls `validate_pipeline()` on every panel refresh; validation is expensive | Phase 2B debounces on `compositionState.version`. Cache by `(session_id, composition_version)` only if profiling shows the need — premature caching is forbidden. |
+
+## Review history
+
+**2026-05-15** — Panel findings applied: `state_from_record` collaborator replaces `_state_override`/`getattr` (BLOCKER); structured `error_code`/`affected_nodes` replaces substring matching (CRITICAL); `_verify_session_ownership` extracted to `sessions/ownership.py` (IMPORTANT); POST→GET with `Cache-Control: no-store` (IMPORTANT); `Determinism.EXTERNAL_CALL` completeness test added (IMPORTANT); `list_refs` wrapped in `run_sync_in_worker` (IMPORTANT); deferred-optimization note on `explain` double-read (SUGGESTION).
+
+## Memory references
+
+- `project_composer_personas` — informs the panel-vocabulary mapping.
+- `feedback_no_calendar_shipping_commitments` — no calendar commitments.
+- `feedback_default_is_fix_not_ticket` — observations only for genuinely out-of-scope items.

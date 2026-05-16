@@ -8,6 +8,7 @@ import {
 import { useTheme } from "@/hooks/useTheme";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { UserMenu } from "./UserMenu";
+import { DefaultModeChangedBanner } from "./DefaultModeChangedBanner";
 
 const INSPECTOR_WIDTH_KEY = "elspeth_inspector_width";
 const SIDEBAR_COLLAPSED_KEY = "elspeth_sidebar_collapsed";
@@ -292,6 +293,12 @@ export function Layout({
 
       {/* Chat panel */}
       <div className="layout-chat">
+        {/* Phase 1B — opt-out banner. Mounted inside the chat column so it
+            consumes the same height budget as the chat scrollback rather
+            than adding above-Layout vertical space that the grid wouldn't
+            account for. Self-gates on visibility (returns null when not
+            applicable). */}
+        <DefaultModeChangedBanner />
         {/* Inspector toggle button — visible when inspector is hidden or in overlay mode */}
         {(!inspectorVisible || isOverlayMode) && (
           <button

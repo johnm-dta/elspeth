@@ -27,23 +27,40 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.schema import initialize_session_schema
 
 
-def _make_app(user_id: str | None) -> FastAPI:
-    """Build a minimal FastAPI app wired for preferences tests."""
-    engine = create_session_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    initialize_session_schema(engine)
+def _make_app(
+    user_id: str | None,
+    *,
+    engine: object | None = None,
+    rate_limit: int = 100,
+) -> FastAPI:
+    """Build a minimal FastAPI app wired for preferences tests.
+
+    ``engine``: pass a pre-built engine to share storage across multiple
+    client apps (Panel C3 — cross-user isolation must observe both users
+    on the same DB).
+
+    ``rate_limit``: per-user PATCH rate. Default of 100/min is high enough
+    that ordinary tests don't bump into it; the rate-limit test overrides
+    to a low value.
+    """
+    if engine is None:
+        engine = create_session_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        initialize_session_schema(engine)
     app = FastAPI()
     app.state.preferences_service = PreferencesService(engine)
     app.state.session_engine = engine
+    app.state.rate_limiter = ComposerRateLimiter(limit=rate_limit)
 
     if user_id is not None:
         identity = UserIdentity(user_id=user_id, username=user_id)
@@ -71,6 +88,33 @@ def client_as_alice() -> Iterator[TestClient]:
 @pytest.fixture
 def client_as_bob() -> Iterator[TestClient]:
     yield TestClient(_make_app("bob"))
+
+
+@pytest.fixture
+def shared_engine() -> Iterator[object]:
+    """Panel C3: a single engine shared across multiple TestClients so a
+    same-DB SQL-scoping bug (e.g. forgotten WHERE user_id=...) would actually
+    surface in the cross-user isolation test. The earlier per-client engines
+    made the test tautological — alice and bob were on different SQLite
+    databases, so isolation 'passed' for the wrong reason."""
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    initialize_session_schema(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def cross_user_alice(shared_engine: object) -> Iterator[TestClient]:
+    yield TestClient(_make_app("alice", engine=shared_engine))
+
+
+@pytest.fixture
+def cross_user_bob(shared_engine: object) -> Iterator[TestClient]:
+    yield TestClient(_make_app("bob", engine=shared_engine))
 
 
 @pytest.fixture
@@ -150,30 +194,64 @@ def test_patch_requires_auth(client_anonymous: TestClient) -> None:
 
 
 def test_users_cannot_see_each_others_preferences(
-    client_as_alice: TestClient,
-    client_as_bob: TestClient,
+    cross_user_alice: TestClient,
+    cross_user_bob: TestClient,
 ) -> None:
-    """Route-level cross-user isolation: alice's prefs are invisible to bob.
+    """Route-level cross-user isolation: alice's PATCH must NOT be visible
+    to bob's GET when both clients share the same database engine.
 
-    A service-layer test (``test_users_are_isolated``) also covers this,
-    but a route bug could leak across users while service tests stay green.
+    Panel C3: previously the alice and bob clients held *independent*
+    in-memory SQLite engines, so isolation 'passed' for the wrong reason
+    — bob's GET couldn't see alice's PATCH because bob's engine had no
+    rows for anyone. A real same-DB SQL-scoping bug (e.g. a forgotten
+    ``WHERE user_id=...``) would not have surfaced. The shared_engine
+    fixture below puts both clients on one engine so the test actually
+    exercises route-layer scoping.
     """
-    # Alice sets freeform.
-    resp = client_as_alice.patch(
+    # Alice sets freeform on the shared DB.
+    resp = cross_user_alice.patch(
         "/api/composer-preferences",
         json={"default_mode": "freeform"},
     )
     assert resp.status_code == 200
 
-    # Bob — on a separate engine/app — still sees the guided default.
-    bob_resp = client_as_bob.get("/api/composer-preferences")
+    # Bob on the SAME DB still sees the guided default.
+    bob_resp = cross_user_bob.get("/api/composer-preferences")
     assert bob_resp.status_code == 200
     assert bob_resp.json()["default_mode"] == "guided"
 
 
-def test_db_unavailable_returns_500() -> None:
-    """Infrastructure failure → 500 (not a Tier-1 corruption event)."""
+def test_patch_enforces_rate_limit_returns_429() -> None:
+    """Panel C1: PATCH must call the shared ComposerRateLimiter."""
+    app = _make_app("alice-rate-limit", rate_limit=2)
+    client = TestClient(app)
+
+    # Two PATCHes inside the 60s window succeed.
+    for _ in range(2):
+        ok = client.patch("/api/composer-preferences", json={"default_mode": "freeform"})
+        assert ok.status_code == 200, ok.text
+
+    # Third within the window must 429.
+    over = client.patch("/api/composer-preferences", json={"default_mode": "guided"})
+    assert over.status_code == 429, over.text
+
+
+def test_db_unavailable_returns_503() -> None:
+    """Infrastructure failure → 503 via the app's OperationalError handler.
+
+    Panel U3: the earlier test raised a bare ``Exception`` and asserted
+    500 — a contract the production app does NOT promise. ``app.py:628``
+    installs an ``OperationalError`` exception handler that returns 503
+    with ``error_type=database_unavailable``; that handler is what
+    a real DB outage exercises. The test now mirrors that contract.
+
+    A bare ``Exception`` would bypass the handler and surface as a
+    generic 500; that's a different code path (programmer error / bug),
+    not the DB-down user-visible outcome this test is meant to assert.
+    """
     from unittest.mock import AsyncMock, MagicMock
+
+    from sqlalchemy.exc import OperationalError
 
     app = FastAPI()
     identity = UserIdentity(user_id="alice", username="alice")
@@ -182,11 +260,30 @@ def test_db_unavailable_returns_500() -> None:
         return identity
 
     broken_service: MagicMock = MagicMock()
-    broken_service.get_composer_preferences = AsyncMock(side_effect=Exception("DB connection refused"))
+    db_error = OperationalError("SELECT 1", {}, Exception("connection refused"))
+    broken_service.get_composer_preferences = AsyncMock(side_effect=db_error)
     app.state.preferences_service = broken_service
     app.dependency_overrides[get_current_user] = _mock_user
+
+    # Register the production OperationalError handler — the test app
+    # would otherwise let the exception escape as a generic 500.
+    from sqlalchemy.exc import OperationalError as _OpErr
+
+    @app.exception_handler(_OpErr)
+    async def _db_unavailable_handler(_req: object, _exc: _OpErr) -> object:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Database is currently unavailable. Please retry in a moment.",
+                "error_type": "database_unavailable",
+            },
+        )
+
     app.include_router(create_preferences_router())
 
     client = TestClient(app, raise_server_exceptions=False)
     response = client.get("/api/composer-preferences")
-    assert response.status_code == 500
+    assert response.status_code == 503
+    assert response.json()["error_type"] == "database_unavailable"

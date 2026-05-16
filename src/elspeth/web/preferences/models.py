@@ -41,13 +41,22 @@ ComposerMode = Literal["guided", "freeform"]
 
 
 class ComposerPreferences(BaseModel):
-    """The full preferences payload returned by GET and PATCH."""
+    """The full preferences payload returned by GET and PATCH.
+
+    ``updated_at`` is nullable (Panel U1): when no DB row exists for the
+    user, the response payload represents the in-server *default* — there
+    has been no write event to associate a timestamp with, and fabricating
+    ``self._now()`` here would put a value in the audit-visible field that
+    the system never actually wrote (CLAUDE.md fabrication test). The
+    no-row GET path and the empty-PATCH-on-no-row path both return
+    ``updated_at=None``; every other response returns the real write time.
+    """
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
     default_mode: ComposerMode
     banner_dismissed_at: datetime | None
-    updated_at: datetime
+    updated_at: datetime | None
 
 
 class UpdateComposerPreferencesRequest(BaseModel):

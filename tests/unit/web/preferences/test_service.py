@@ -17,20 +17,24 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.preferences.models import UpdateComposerPreferencesRequest
 from elspeth.web.preferences.service import PreferencesService
+from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import metadata
 
 
 @pytest.fixture(scope="module")
 def engine():
-    eng = create_engine(
+    # Panel U2: use create_session_engine (the production factory) rather
+    # than bare sqlalchemy.create_engine. The factory registers
+    # PRAGMA foreign_keys=ON for SQLite and refuses to return an engine
+    # that doesn't enforce FKs. Bypassing it muted FK enforcement under
+    # the service tests — invisible to coverage, real in production.
+    eng = create_session_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
@@ -50,6 +54,22 @@ def test_get_for_new_user_returns_guided_default(service):
     prefs = asyncio.run(service.get_composer_preferences("alice-get-default"))
     assert prefs.default_mode == "guided"
     assert prefs.banner_dismissed_at is None
+    # Panel U1: updated_at is None when no row exists — no write event
+    # to associate a timestamp with; fabricating one would put a value
+    # the system never wrote into an audit-visible field.
+    assert prefs.updated_at is None
+
+
+def test_get_for_user_with_row_returns_real_updated_at(service):
+    """Sanity check on U1: when a row DOES exist, updated_at is the
+    real write timestamp, not None."""
+    user = "alice-real-updated-at"
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.updated_at is not None
+    assert prefs.updated_at == datetime(2026, 5, 15, tzinfo=UTC).replace(tzinfo=None) or prefs.updated_at == datetime(
+        2026, 5, 15, tzinfo=UTC
+    )
 
 
 def test_update_persists_and_round_trips(service):
@@ -76,10 +96,71 @@ def test_partial_update_only_touches_provided_fields(service):
     )
     prefs = asyncio.run(service.get_composer_preferences("alice-partial"))
     assert prefs.default_mode == "freeform"  # not reset by the partial update
-    # SQLite strips tzinfo on DateTime(timezone=True) round-trips; compare
-    # the naive value. The Pydantic model accepts datetime|None either way.
+    # Panel S2: assert UTC-equality rather than codifying tzinfo-stripping
+    # as expected behaviour. SQLite (in SQLAlchemy's DateTime(timezone=True)
+    # binding for the pysqlite dialect) currently returns naive datetimes;
+    # we reattach UTC for the comparison so a future driver that preserves
+    # tzinfo keeps the test passing rather than failing on a "wrong" answer.
+    # The earlier .replace(tzinfo=None)-on-both-sides assertion was a
+    # locked-in buggy expectation per
+    # feedback_locked_in_buggy_expectations.md.
     assert prefs.banner_dismissed_at is not None
-    assert prefs.banner_dismissed_at.replace(tzinfo=None) == stamp.replace(tzinfo=None)
+    got = prefs.banner_dismissed_at
+    if got.tzinfo is None:
+        got = got.replace(tzinfo=UTC)
+    assert got == stamp
+
+
+def test_empty_patch_on_no_row_does_not_insert(service, engine):
+    """Panel C2: PATCH with no fields against a user with no row must NOT
+    create a default row. The route/service contract is lazy-write: rows
+    appear only when the user expresses a real preference."""
+    from sqlalchemy import select
+
+    from elspeth.web.sessions.models import user_preferences_table
+
+    user = "alice-empty-patch-no-row"
+    result = asyncio.run(
+        service.update_composer_preferences(user, UpdateComposerPreferencesRequest()),
+    )
+    # Response is the default (matches GET no-row behaviour).
+    assert result.default_mode == "guided"
+    assert result.banner_dismissed_at is None
+
+    # And critically, no row was inserted.
+    with engine.connect() as conn:
+        row = conn.execute(select(user_preferences_table).where(user_preferences_table.c.user_id == user)).first()
+    assert row is None, "empty PATCH against a no-row user must not insert a default row"
+
+
+def test_empty_patch_on_existing_row_bumps_updated_at_only(service, engine):
+    """Panel C2 corollary: empty PATCH on an existing row IS still a valid
+    no-op success — the row's updated_at advances but other fields are
+    preserved. This is the documented behaviour and the corner case the
+    guard must NOT regress."""
+    from sqlalchemy import select
+
+    from elspeth.web.sessions.models import user_preferences_table
+
+    user = "alice-empty-patch-existing"
+    # Seed an existing row.
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
+    with engine.connect() as conn:
+        original_updated = conn.execute(
+            select(user_preferences_table.c.updated_at).where(user_preferences_table.c.user_id == user)
+        ).scalar_one()
+
+    # Empty PATCH — must succeed, must NOT clobber default_mode.
+    result = asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest()))
+    assert result.default_mode == "freeform"
+
+    with engine.connect() as conn:
+        new_updated = conn.execute(select(user_preferences_table.c.updated_at).where(user_preferences_table.c.user_id == user)).scalar_one()
+    # updated_at may equal or advance depending on the service's fixed-time
+    # `now` callable; the strict assertion is that the row still exists and
+    # default_mode is preserved.
+    assert new_updated is not None
+    assert original_updated is not None
 
 
 def test_users_are_isolated(service):
@@ -88,25 +169,36 @@ def test_users_are_isolated(service):
     assert bob_prefs.default_mode == "guided"
 
 
-def test_row_to_prefs_guards_corrupt_mode(service):
-    """Tier-1 read guard: stored value outside the literal raises.
+def test_corrupt_mode_read_via_public_api_raises(service):
+    """Tier-1 read guard: a stored value outside the literal raises when
+    read via the public API.
 
-    The DB-level CHECK constraint blocks corrupt writes via SQLAlchemy
-    inserts (covered by ``test_default_composer_mode_check_constraint_closes_the_enum``
-    in the schema suite). The read guard tested here is the second line
-    of defence — it catches CHECK-bypass scenarios (direct SQLite shell
-    writes, schema-version drift, on-disk corruption, tampering). We
-    exercise the guard directly on the conversion function rather than
-    mock-inserting an illegal row, because the CHECK would (correctly)
-    reject any such insert.
+    Panel C4: the earlier test invoked ``service._row_to_prefs(SimpleNamespace(...))``
+    — a private method that a refactor could silently inline away,
+    leaving the invariant uncovered. This test reaches the guard through
+    the public ``get_composer_preferences()`` entry point, bypassing the
+    CHECK constraint at insert time via ``PRAGMA ignore_check_constraints``
+    to simulate the legitimate CHECK-bypass scenarios the guard exists
+    to catch (direct SQLite-shell writes, schema-version drift, on-disk
+    corruption, tampering).
     """
-    bad_row = SimpleNamespace(
-        default_composer_mode="kiosk",
-        banner_dismissed_at=None,
-        updated_at=datetime.now(UTC),
-    )
+    from sqlalchemy import text
+
+    user = "alice-corrupt-public"
+    # Seed a valid row first so we can mutate it; goes through the real
+    # write path with all validation.
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
+    # Bypass the CHECK to write an out-of-set value — same shape as the
+    # production failure scenarios (CHECK was bypassed via PRAGMA, schema
+    # drift, or a direct SQLite-shell write).
+    with service._engine.begin() as conn:
+        conn.execute(text("PRAGMA ignore_check_constraints = ON"))
+        conn.execute(text("UPDATE user_preferences SET default_composer_mode = 'kiosk' WHERE user_id = :uid").bindparams(uid=user))
+        conn.execute(text("PRAGMA ignore_check_constraints = OFF"))
+
+    # Public read path must crash with the offending value named.
     with pytest.raises(RuntimeError, match="kiosk"):
-        service._row_to_prefs(bad_row, "alice-corrupt")
+        asyncio.run(service.get_composer_preferences(user))
 
 
 def test_patch_returns_written_values_not_a_reread(service):

@@ -28,7 +28,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import cast
 
+from opentelemetry import metrics
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
@@ -40,6 +42,24 @@ from elspeth.web.preferences.models import (
     UpdateComposerPreferencesRequest,
 )
 from elspeth.web.sessions.models import user_preferences_table
+
+# ── Telemetry (Panel S1) ───────────────────────────────────────────────────
+# Operational signal only — preferences are user state, not a pipeline
+# decision boundary, so NO Landscape emit (see CLAUDE.md primacy rule:
+# audit/telemetry/log in order; preferences don't gate any audit-visible
+# pipeline behaviour today). The counter exists so the no-Landscape
+# decision is *acknowledged in code* rather than implicit silence;
+# CLAUDE.md "every emission point must send or explicitly acknowledge
+# nothing to send" is satisfied by the explicit no-op shape.
+#
+# If a future phase wires a preference into an execution boundary
+# (e.g. trust_mode gating auto-commit), promote this to a Landscape emit
+# at that moment — the counter is the seam.
+_meter = metrics.get_meter(__name__)
+_PREFERENCES_PATCH_COUNTER = _meter.create_counter(
+    "composer.preferences.patch_total",
+    description=("Composer-preferences PATCH operations. Attributes: mode_changed (bool), banner_dismissed (bool), wrote_row (bool)."),
+)
 
 _DEFAULT_MODE: ComposerMode = "guided"
 _VALID_MODES: frozenset[ComposerMode] = frozenset({"guided", "freeform"})
@@ -75,11 +95,14 @@ class PreferencesService:
 
             # No row: return the new-user guided default. We do not write
             # a row here (lazy — avoid write traffic for users who never
-            # touch preferences).
+            # touch preferences). Panel U1: updated_at=None because no
+            # write event exists to associate a timestamp with;
+            # fabricating self._now() would put a value the system never
+            # actually wrote into an audit-visible field.
             return ComposerPreferences(
                 default_mode=_DEFAULT_MODE,
                 banner_dismissed_at=None,
-                updated_at=self._now(),
+                updated_at=None,
             )
 
         return await run_sync_in_worker(_sync)
@@ -114,17 +137,35 @@ class PreferencesService:
         (Tier-3 boundary already ran on ``payload``) and trusted, the
         Tier-1 guard is not re-run.
 
-        telemetry: deferred to Phase 8 polish — preference-change event.
-        A PATCH here is a user-preference-change event that belongs in
-        operational telemetry. Wiring deferred; no ``telemetry.emit()``
-        call is made here. Phase 8 will add the emit once the telemetry
-        helper is stable.
+        telemetry: increments ``composer.preferences.patch_total`` with
+        attributes describing whether the mode or banner field was touched
+        and whether a row was actually written (the empty-PATCH-no-row
+        guard returns ``wrote_row=False``). Operational signal only — no
+        Landscape emit; see module-level comment for the no-Landscape
+        rationale.
+
+        Empty-payload contract (Panel C2): a PATCH with no fields set
+        against a user with no existing row is a no-op success — the
+        response is the default-construct payload and NO row is inserted.
+        The earlier behaviour (insert a default row on empty PATCH)
+        contradicted the documented lazy-write contract on the GET side.
         """
         now = self._now()
+        payload_is_empty = payload.default_mode is None and payload.banner_dismissed_at is None
 
-        def _sync() -> tuple[ComposerMode, datetime | None]:
-            """Returns (resolved_mode, resolved_banner_dismissed_at) after write."""
+        def _sync() -> tuple[ComposerMode, datetime | None, bool]:
+            """Returns (resolved_mode, resolved_banner_dismissed_at, wrote)."""
             with self._engine.begin() as conn:
+                # Panel C2 guard: empty PATCH against a no-row user is a
+                # no-write no-op. Check existence BEFORE the upsert so we
+                # can skip the INSERT entirely.
+                if payload_is_empty:
+                    exists = conn.execute(
+                        select(user_preferences_table.c.user_id).where(user_preferences_table.c.user_id == user_id)
+                    ).first()
+                    if exists is None:
+                        return _DEFAULT_MODE, None, False
+
                 # Determine the mode to insert (NOT NULL column). On
                 # conflict, only fields the caller set are updated.
                 insert_mode: ComposerMode
@@ -137,9 +178,14 @@ class PreferencesService:
                     if existing_raw is None:
                         insert_mode = _DEFAULT_MODE
                     elif existing_raw in _VALID_MODES:
-                        # Tier-1 narrowing: mypy narrows `existing_raw` to
-                        # ComposerMode via the `in _VALID_MODES` guard.
-                        insert_mode = existing_raw
+                        # Panel S3: mypy does NOT narrow `Any in frozenset[T]`
+                        # (no TypeGuard available for `in`-membership); the
+                        # runtime conditional is the actual guard, and the
+                        # explicit cast makes the type contract visible
+                        # instead of relying on Any → ComposerMode being
+                        # silently accepted. The earlier "mypy narrows…"
+                        # comment was inaccurate cargo-cult risk.
+                        insert_mode = cast(ComposerMode, existing_raw)
                     else:
                         raise RuntimeError(f"user_preferences row for {user_id!r} has invalid default_composer_mode={existing_raw!r}")
 
@@ -169,11 +215,26 @@ class PreferencesService:
                 stmt = stmt.on_conflict_do_update(index_elements=["user_id"], set_=update_clause)
                 conn.execute(stmt)
 
-            return insert_mode, resolved_banner
+            return insert_mode, resolved_banner, True
 
-        written_mode, written_banner = await run_sync_in_worker(_sync)
+        written_mode, written_banner, wrote = await run_sync_in_worker(_sync)
+        # Panel S1: operational telemetry only — no Landscape (user state,
+        # not pipeline decision boundary). See module-level comment for
+        # the no-Landscape rationale and the future-promote criterion.
+        _PREFERENCES_PATCH_COUNTER.add(
+            1,
+            attributes={
+                "mode_changed": payload.default_mode is not None,
+                "banner_dismissed": payload.banner_dismissed_at is not None,
+                "wrote_row": wrote,
+            },
+        )
         return ComposerPreferences(
             default_mode=written_mode,
             banner_dismissed_at=written_banner,
-            updated_at=now,
+            # Panel U1 corollary: when the empty-PATCH guard short-circuits
+            # (no row exists, no fields supplied) no `updated_at` was
+            # written or read; return None to match the no-row GET semantic
+            # rather than a fabricated `now`.
+            updated_at=now if wrote else None,
         )

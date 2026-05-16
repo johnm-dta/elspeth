@@ -1660,10 +1660,11 @@ with multi-session switching the cache grows and stale entries are never reclaim
 
 **Solution:** `stores/subscriptions.ts` — a cross-store subscription module that wires
 `useAuditReadinessStore.clearSession(prevId)` to fire whenever a session id disappears from
-`sessionStore.sessions`. The subscriber seeds `previousSessionIds` at initialization to
-detect removals of sessions that were present before `initStoreSubscriptions()` was called
-(relevant if sessions are pre-populated before app startup, e.g. SSR hydration or test
-fixtures).
+`sessionStore.sessions`. The subscriber seeds `previousSessionIds` at initialization. The
+seed is defensive: in production startup `sessions` is empty and `initStoreSubscriptions()`
+runs synchronously before `loadSessions`, making the pre-seed case unreachable today. The
+seed guards against future changes (persist middleware, SSR hydration, tests that populate
+sessions before `initStoreSubscriptions()` is called) at the cost of one `Set` construction.
 
 **Files added:**
 - `src/elspeth/web/frontend/src/stores/subscriptions.ts` — `initStoreSubscriptions()` and

@@ -148,15 +148,24 @@ The contract: every mock receives the AbortSignal the production code passed and
 
 - [ ] **Step 3: Remove the workaround from `AuditReadinessPanel.tsx`**
 
-Locate the useEffect cleanup that currently both aborts the controller AND synchronously clears `isLoadingBySession`. Remove the `useAuditReadinessStore.setState(...)` line; keep `ctrl.abort()`. The store's production `AbortError` catch arm now fires under test (because the mocks respect the signal) and clears the loading state.
-
-Read the surrounding comment block (Phase 2B left a marker explaining the workaround) and replace it with a one-line comment pointing at this task:
+The current cleanup (lines ~98–125 at the time of writing — verify with `grep -n 'Unmount-during-fetch' src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx`) both aborts the controller AND synchronously calls `useAuditReadinessStore.setState(...)` to clear `isLoadingBySession[activeSessionId]`. Replace the entire cleanup body (including the multi-paragraph comment Phase 2B left to explain the workaround) with the slim form below — the store's `AbortError` catch arm now fires under test (because Step 2 migrated the mocks to respect the signal) and clears the loading state.
 
 ```typescript
-// Cleanup: abort the in-flight fetch. The store's AbortError catch arm
-// clears isLoadingBySession[sessionId] (see issue elspeth-f018ea84c6).
-return () => { ctrl.abort(); };
+    return () => {
+      // Unmount-during-fetch cleanup: abort the in-flight controller for this
+      // session. The store's AbortError catch arm clears
+      // isLoadingBySession[activeSessionId] and preserves cached snapshot/error
+      // (see issue elspeth-f018ea84c6 — the prior synchronous setState here
+      // was a workaround for signal-blind test mocks; Task 4A Step 2 fixed
+      // that at the mock layer).
+      const ctrl = useAuditReadinessStore.getState().abortControllers[activeSessionId];
+      if (ctrl) {
+        ctrl.abort();
+      }
+    };
 ```
+
+Keep the surrounding `useEffect(...)` body, deps array, and the `eslint-disable-next-line react-hooks/exhaustive-deps` comment exactly as they are; this task only rewrites the cleanup closure.
 
 - [ ] **Step 4: Run targeted tests — expect PASS**
 
@@ -222,29 +231,31 @@ Tests should pass unchanged — the user-visible behaviour is identical (the pan
 
 - [ ] **Step 3: Add one regression assertion**
 
-Add a new test to `AuditReadinessPanel.test.tsx`:
+Add a new test to `AuditReadinessPanel.test.tsx`. The existing test file already defines `allGreenSnapshot(version)` and `snapshotWithProvenanceWarning(version)` as helper functions — use those, do NOT introduce new fixture constants.
 
 ```typescript
 it("auto-collapses when a subsequent refetch returns all-green (no sticky expansion)", async () => {
-  // Arrange: render with an actionable snapshot.
-  vi.mocked(fetchAuditReadiness).mockImplementationOnce(
-    ({ signal }) => makeAbortablePromise(WARNING_SNAPSHOT, { signal }),
+  // Arrange: render with an actionable snapshot at version 1.
+  vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+    ({ signal }) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
   );
   const { rerender } = render(<AuditReadinessPanel />);
   await waitFor(() =>
     expect(screen.getByText(/Provenance/)).toBeInTheDocument(),
   );
 
-  // Act: change version, mock returns all-green.
-  vi.mocked(fetchAuditReadiness).mockImplementationOnce(
-    ({ signal }) => makeAbortablePromise(ALL_GREEN_SNAPSHOT, { signal }),
+  // Act: bump version, mock returns all-green for the new version.
+  vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+    ({ signal }) => makeAbortablePromise(allGreenSnapshot(2), { signal }),
   );
   useSessionStore.setState({
-    compositionState: { ...makeComposition(), version: 2 },
+    compositionState: makeComposition(2),
   } as never);
   rerender(<AuditReadinessPanel />);
 
-  // Assert: the panel falls back to collapsed (Provenance row not visible).
+  // Assert: the panel falls back to collapsed (Provenance row not visible)
+  // because `anyActionable` is now false and the user never explicitly
+  // expanded — under the new computed-showExpanded scheme, both must hold.
   await waitFor(() =>
     expect(screen.queryByText(/Provenance/)).not.toBeInTheDocument(),
   );

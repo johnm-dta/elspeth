@@ -823,3 +823,48 @@ export interface SecretInventoryItem {
   source_kind: string;
   reason: SecretUnavailabilityReason | null;
 }
+
+// ── Audit Readiness Panel (Phase 2) ────────────────────────────────────────
+//
+// These types mirror the Pydantic models in
+// src/elspeth/web/audit_readiness/models.py (Phase 2A). If a backend literal
+// is added, the union here must be widened in the same commit and the
+// AuditReadinessPanel's row-renderer switch must add a case — the exhaustive
+// `never` default arm fails the build otherwise.
+
+export type ReadinessRowId =
+  | "validation"
+  | "plugin_trust"
+  | "provenance"
+  | "retention"
+  | "llm_interpretations"
+  | "secrets";
+
+export type ReadinessStatus = "ok" | "warning" | "error" | "not_applicable";
+
+export interface ReadinessRow {
+  id: ReadinessRowId;
+  label: string;
+  status: ReadinessStatus;
+  summary: string;
+  detail: string | null;
+  /**
+   * IDs of components the row implicates. May reference node ids, source,
+   * or sink names. The frontend's click handler resolves these against
+   * CompositionState.nodes for jump-to-component navigation; non-node ids
+   * fall through to a no-op (no error).
+   */
+  component_ids: readonly string[];
+}
+
+export interface AuditReadinessSnapshot {
+  session_id: string;
+  composition_version: number;
+  rows: readonly ReadinessRow[];
+}
+
+export interface AuditReadinessExplain {
+  session_id: string;
+  composition_version: number;
+  narrative: string;
+}

@@ -55,23 +55,231 @@ Same as 14b: reads only data the backend just produced (Tier 1). No new boundary
 
 ## File structure
 
-**New:** none (placeholders from 14b become real implementations, in place).
+**New:**
+- `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.test.tsx` — first tests alongside the real implementation (Task 5).
+- `src/elspeth/web/frontend/src/components/audit/ExplainDialog.test.tsx` — first tests alongside the real implementation (Task 6).
+- `src/elspeth/web/frontend/src/stores/subscriptions.handoff.test.ts` — guard test (Task 8.5) that fails red in CI until Phase 3A Task 8 lands the subscription wiring.
 
 **Modified:**
-- `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx` — replace 14b's placeholder with full implementation.
-- `src/elspeth/web/frontend/src/components/audit/ExplainDialog.tsx` — replace 14b's placeholder with full implementation.
-- `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.test.tsx` — new file alongside the real implementation.
-- `src/elspeth/web/frontend/src/components/audit/ExplainDialog.test.tsx` — new file alongside the real implementation.
-- `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx` — mount `<AuditReadinessPanel />`; remove the standalone Validate button.
+- `src/elspeth/web/frontend/src/test/composerFixtures.ts` — add `makeAbortablePromise()` / signal-aware mock helper (Task 4A; tracks issue `elspeth-f018ea84c6`).
+- `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx` — Task 4A drops the cleanup-effect synchronous `setState` workaround (issue `elspeth-f018ea84c6`); Task 4B replaces the `expanded` useState/useEffect pair with computed `showExpanded = anyActionable || userExpanded` (issue `elspeth-82ef9d5bd0`).
+- `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx` — Task 4A migrates the existing tests to the new signal-aware mock helper so the store's AbortError catch arm exercises in tests.
+- `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx` — replace 14b's placeholder with full implementation (Task 5).
+- `src/elspeth/web/frontend/src/components/audit/ExplainDialog.tsx` — replace 14b's placeholder with full implementation (Task 6).
+- `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx` — mount `<AuditReadinessPanel />`; remove the standalone Validate button (Tasks 7 + 8).
 - `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.test.tsx` — add panel-mount and button-removal assertions; update any tests that directly click the now-removed Validate button (switch them to invoke `handleValidate` directly, since the handler stays wired).
-- `src/elspeth/web/frontend/src/stores/subscriptions.handoff.test.ts` — new guard test (Task 8.5) that fails red in CI until Phase 3A Task 8 lands the subscription wiring.
+
+**Verified-against-reality (load-bearing — DO NOT silently change without re-running the reality-check against `feat/composer-phase-2a-backend` HEAD):**
+- The shared composer fixture module is at `src/elspeth/web/frontend/src/test/composerFixtures.ts` and is imported via the alias `@/test/composerFixtures` (NOT `@/test-utils/composerFixtures`). Confirmed against `AuditReadinessPanel.test.tsx:9`.
+- `NodeSpec` (`types/index.ts:133–134`) requires 7 fields: `id`, `node_type`, `plugin`, `input`, `on_success`, `on_error`, `options`. There is no `config` field on `NodeSpec`.
+- `SourceSpec` (`types/index.ts:94–96`) has fields `plugin` and `options` — NOT `kind` / `config`.
+- The auditReadiness store exposes per-session keyed maps: `snapshotsBySession`, `explainsBySession`, `isLoadingBySession`, `errorBySession`, `isLoadingExplainBySession`, `explainErrorBySession`. There are NO flat `isLoading` / `error` / `isLoadingExplain` / `explainError` fields. Use the exported `getInitialState()` (`auditReadinessStore.ts:55`) to reset; never write a hand-rolled setState literal with `as never` casts.
+
+---
+
+## Task 4A: Signal-aware mock helper + drop AuditReadinessPanel cleanup-effect workaround
+
+> **Issue:** `elspeth-f018ea84c6` (promoted from observation `elspeth-obs-8502e9d4bf`).
+>
+> **Sequencing rationale.** Land this before Tasks 5–6 because Tasks 5–6's tests will use the same mock helper. Doing the cleanup first means Tasks 5–6 inherit the canonical pattern instead of replicating the 2B workaround.
+
+**Files:**
+- Modify: `frontend/src/test/composerFixtures.ts` — add the signal-aware mock helper.
+- Modify: `frontend/src/components/audit/AuditReadinessPanel.tsx` — remove the synchronous `setState` from the useEffect cleanup.
+- Modify: `frontend/src/components/audit/AuditReadinessPanel.test.tsx` — migrate existing mocks to the new helper so the store's `AbortError` catch arm actually fires under test.
+
+### Why this task exists
+
+Phase 2B's `AuditReadinessPanel.tsx` cleanup runs `ctrl.abort()` AND `useAuditReadinessStore.setState(...)` synchronously. The second write papers over a test-mock limitation: `vi.mock`-ed fetch promises don't propagate `AbortError` when their signal aborts, so the store's production `AbortError` catch arm never fires in tests. Without the synchronous `setState`, test 12 (`expect(state.isLoadingBySession[SESSION_ID]).toBe(false)`) would fail.
+
+The correct fix is in test infrastructure, not production code: a fixture helper that returns a Promise rejecting with `{ name: "AbortError" }` when `signal.aborted` flips. That lets the store's production path handle cleanup (as designed) and removes the architecturally-duplicated component-side `setState`.
+
+- [ ] **Step 1: Add the helper to `composerFixtures.ts`**
+
+In `src/elspeth/web/frontend/src/test/composerFixtures.ts`, append:
+
+```typescript
+/**
+ * Returns a Promise that resolves to `value` after `delay` ms — UNLESS the
+ * provided AbortSignal aborts first, in which case it rejects with a
+ * synthetic AbortError matching the shape the production store's catch arm
+ * checks (`err.name === "AbortError"`).
+ *
+ * Use this in tests that exercise the store's abort-stale-in-flight or
+ * clearSession-aborts-controllers contracts; do NOT hand-roll a Promise
+ * that ignores the signal — that forces components to paper over the gap
+ * with synchronous setState (see elspeth-f018ea84c6).
+ */
+export function makeAbortablePromise<T>(
+  value: T,
+  options?: { delay?: number; signal?: AbortSignal },
+): Promise<T> {
+  const { delay = 0, signal } = options ?? {};
+  return new Promise<T>((resolve, reject) => {
+    const reject_with_abort = () => {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      reject(err);
+    };
+    if (signal?.aborted) {
+      reject_with_abort();
+      return;
+    }
+    const timer = setTimeout(() => resolve(value), delay);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject_with_abort();
+    });
+  });
+}
+```
+
+- [ ] **Step 2: Migrate `AuditReadinessPanel.test.tsx`**
+
+In every `vi.mocked(fetchAuditReadiness).mockImplementationOnce(...)` (and the equivalent for `fetchAuditReadinessExplain`) that previously returned a bare `Promise.resolve(...)`, switch to:
+
+```typescript
+vi.mocked(fetchAuditReadiness).mockImplementationOnce(
+  ({ signal }) => makeAbortablePromise(SNAPSHOT, { signal, delay: 10 }),
+);
+```
+
+The contract: every mock receives the AbortSignal the production code passed and respects it. Run the existing 2B tests with `npx vitest run src/components/audit/AuditReadinessPanel.test.tsx` and confirm all pass.
+
+- [ ] **Step 3: Remove the workaround from `AuditReadinessPanel.tsx`**
+
+Locate the useEffect cleanup that currently both aborts the controller AND synchronously clears `isLoadingBySession`. Remove the `useAuditReadinessStore.setState(...)` line; keep `ctrl.abort()`. The store's production `AbortError` catch arm now fires under test (because the mocks respect the signal) and clears the loading state.
+
+Read the surrounding comment block (Phase 2B left a marker explaining the workaround) and replace it with a one-line comment pointing at this task:
+
+```typescript
+// Cleanup: abort the in-flight fetch. The store's AbortError catch arm
+// clears isLoadingBySession[sessionId] (see issue elspeth-f018ea84c6).
+return () => { ctrl.abort(); };
+```
+
+- [ ] **Step 4: Run targeted tests — expect PASS**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run \
+  src/components/audit/AuditReadinessPanel.test.tsx \
+  src/stores/auditReadinessStore.test.ts
+```
+
+All tests pass without the component-side `setState`. If any test fails, the migration in Step 2 missed a mock that doesn't respect `signal`; fix that mock before continuing.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/elspeth/web/frontend/src/test/composerFixtures.ts \
+        src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx \
+        src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx
+git commit -m "refactor(web/frontend): signal-aware mock helper + drop panel cleanup-effect setState workaround (Phase 2C.4A)
+
+Lands elspeth-f018ea84c6. Adds makeAbortablePromise() to composerFixtures
+so vi.mock-ed fetches respect the AbortSignal the production code passes.
+This lets the auditReadinessStore's AbortError catch arm fire under test,
+removing the architecturally-duplicated component-side setState in the
+AuditReadinessPanel cleanup effect."
+```
+
+---
+
+## Task 4B: Refactor AuditReadinessPanel `expanded` to computed `showExpanded`
+
+> **Issue:** `elspeth-82ef9d5bd0` (promoted from observation `elspeth-obs-6b5bb1a476`).
+>
+> **Sequencing rationale.** This refactor stands alone (touches only `AuditReadinessPanel.tsx` and its test file) and can land in any order relative to Task 4A. Keep it before Task 5 to keep all panel-internal cleanups in one cluster of commits.
+
+**Files:**
+- Modify: `frontend/src/components/audit/AuditReadinessPanel.tsx`
+- Modify: `frontend/src/components/audit/AuditReadinessPanel.test.tsx`
+
+### Why this task exists
+
+The 14b plan (lines 1539, 1544–1546) prescribed `expanded` as `useState` with a `useEffect` that forces `setExpanded(true)` whenever `anyActionable` becomes true. This is the React-docs "derived state via effect" antipattern: snapshot → recompute `anyActionable` → effect → `setExpanded` → re-render (an extra cycle, with a brief visible flicker from collapsed to expanded on the first warning snapshot). The effect is also one-way — once expanded, never auto-collapses if a later refetch returns all-green.
+
+Computing `showExpanded = anyActionable || userExpanded` fixes both: no extra render cycle, and natural fall-back to the user's preference when `anyActionable` flips to false.
+
+- [ ] **Step 1: Rewrite the state surface**
+
+In `AuditReadinessPanel.tsx`:
+
+1. Rename `const [expanded, setExpanded] = useState(...)` → `const [userExpanded, setUserExpanded] = useState(false)`.
+2. Delete the `useEffect(() => { if (anyActionable) setExpanded(true); }, [anyActionable])` block entirely.
+3. Add: `const showExpanded = anyActionable || userExpanded;`
+4. Replace every read of `expanded` with `showExpanded`.
+5. Replace every write `setExpanded(value)` with `setUserExpanded(value)`. (The expand-toggle button now writes user intent only; the auto-expansion on warnings is computed by `showExpanded`.)
+
+- [ ] **Step 2: Run the existing panel tests — expect PASS without modification**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run \
+  src/components/audit/AuditReadinessPanel.test.tsx
+```
+
+Tests should pass unchanged — the user-visible behaviour is identical (the panel still expands on warning snapshots, still respects the user's collapse), the computation is just atomic. If a test fails, it was asserting on internal state (`expanded`) rather than rendered DOM (the row content) — fix the assertion to target the DOM, not the variable.
+
+- [ ] **Step 3: Add one regression assertion**
+
+Add a new test to `AuditReadinessPanel.test.tsx`:
+
+```typescript
+it("auto-collapses when a subsequent refetch returns all-green (no sticky expansion)", async () => {
+  // Arrange: render with an actionable snapshot.
+  vi.mocked(fetchAuditReadiness).mockImplementationOnce(
+    ({ signal }) => makeAbortablePromise(WARNING_SNAPSHOT, { signal }),
+  );
+  const { rerender } = render(<AuditReadinessPanel />);
+  await waitFor(() =>
+    expect(screen.getByText(/Provenance/)).toBeInTheDocument(),
+  );
+
+  // Act: change version, mock returns all-green.
+  vi.mocked(fetchAuditReadiness).mockImplementationOnce(
+    ({ signal }) => makeAbortablePromise(ALL_GREEN_SNAPSHOT, { signal }),
+  );
+  useSessionStore.setState({
+    compositionState: { ...makeComposition(), version: 2 },
+  } as never);
+  rerender(<AuditReadinessPanel />);
+
+  // Assert: the panel falls back to collapsed (Provenance row not visible).
+  await waitFor(() =>
+    expect(screen.queryByText(/Provenance/)).not.toBeInTheDocument(),
+  );
+});
+```
+
+This asserts the previous behaviour's bug is fixed: once expanded by an actionable snapshot, the panel should auto-collapse when the next snapshot is all-green (unless the user explicitly clicked Expand).
+
+- [ ] **Step 4: Run tests — expect PASS**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run \
+  src/components/audit/AuditReadinessPanel.test.tsx
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx \
+        src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx
+git commit -m "refactor(web/frontend): compute AuditReadinessPanel showExpanded instead of useState/useEffect sync (Phase 2C.4B)
+
+Lands elspeth-82ef9d5bd0. Renames expanded → userExpanded, computes
+showExpanded = anyActionable || userExpanded, deletes the
+derived-state useEffect. Removes the extra render cycle on warning
+snapshots and the sticky-expansion bug (panel now auto-collapses when
+the next snapshot is all-green unless the user explicitly expanded)."
+```
 
 ---
 
 ## Task 5: `ReadinessRowDetail` — per-row warning detail + jump-to-component
 
 **Files:**
-- Create: `frontend/src/components/audit/ReadinessRowDetail.tsx`
+- Modify: `frontend/src/components/audit/ReadinessRowDetail.tsx` (replaces the 14b placeholder in place).
 - Create: `frontend/src/components/audit/ReadinessRowDetail.test.tsx`
 
 A small drawer/popover. Contents:
@@ -93,7 +301,15 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ReadinessRowDetail } from "./ReadinessRowDetail";
 import { useSessionStore } from "../../stores/sessionStore";
-import type { ReadinessRow, CompositionState } from "../../types/api";
+import { makeComposition } from "@/test/composerFixtures";
+import type { ReadinessRow } from "../../types/api";
+
+// CANONICAL FIXTURE — `makeComposition` lives at
+// `src/elspeth/web/frontend/src/test/composerFixtures.ts` (alias
+// `@/test/composerFixtures`). It already returns the correct `NodeSpec` shape
+// (7 fields: id, node_type, plugin, input, on_success, on_error, options) and
+// `SourceSpec` shape (plugin, options) — do NOT inline a literal here with
+// `as never` casts; that's how drift gets introduced.
 
 const ROW_WITH_NODE: ReadinessRow = {
   id: "provenance",
@@ -122,38 +338,14 @@ const ROW_NO_IDS: ReadinessRow = {
   component_ids: [],
 };
 
-// *** CANONICAL FIXTURE — do NOT redeclare locally ***
-// Import makeComposition from the shared fixture module:
-//
-//   import { makeComposition } from "@/test-utils/composerFixtures";
-//
-// Fixture extraction is prescribed in 14b — see 14b plan for the canonical
-// module definition (frontend/src/test-utils/composerFixtures.ts).  Both
-// 14b's AuditReadinessPanel.test.tsx and this file MUST import from the same
-// module to prevent drift when CompositionState changes.
-//
-// The inline declaration below is the reference shape for the fixture module;
-// it is shown here for context only.  In the actual test file, replace this
-// function with the import above.
-function makeComposition(): CompositionState {
-  return {
-    id: "comp-1",
-    version: 1,
-    source: null,
-    nodes: [
-      { id: "select_columns", node_type: "transform", plugin: "select_columns", config: {} } as never,
-    ],
-    edges: [],
-    outputs: [],
-    metadata: { name: "demo", description: "" },
-  };
-}
-
 describe("ReadinessRowDetail", () => {
   beforeEach(() => {
+    // makeComposition(1) returns a composition with one node id="select_columns",
+    // which the ROW_WITH_NODE fixture above expects to be jumpable. Confirm by
+    // reading composerFixtures.ts before changing the node-id assumption.
     useSessionStore.setState({
       activeSessionId: "s-1",
-      compositionState: makeComposition(),
+      compositionState: makeComposition(1),
       selectNode: vi.fn(),
     } as never);
   });
@@ -328,7 +520,7 @@ git commit -m "feat(web/frontend): add ReadinessRowDetail with jump-to-component
 ## Task 6: `ExplainDialog` — narrative modal
 
 **Files:**
-- Create: `frontend/src/components/audit/ExplainDialog.tsx`
+- Modify: `frontend/src/components/audit/ExplainDialog.tsx` (replaces the 14b placeholder in place).
 - Create: `frontend/src/components/audit/ExplainDialog.test.tsx`
 
 The Explain dialog fetches the narrative on first open (via `useAuditReadinessStore.loadExplain`), caches by composition version, and renders the result with preserved whitespace.
@@ -342,7 +534,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ExplainDialog } from "./ExplainDialog";
-import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
 import * as api from "../../api/auditReadiness";
 
 vi.mock("../../api/auditReadiness");
@@ -351,14 +543,13 @@ const SESSION_ID = "00000000-0000-0000-0000-000000000001";
 
 describe("ExplainDialog", () => {
   beforeEach(() => {
-    useAuditReadinessStore.setState({
-      snapshotsBySession: {},
-      explainsBySession: {},
-      isLoading: false,
-      isLoadingExplain: false,
-      error: null,
-      explainError: null,
-    } as never);
+    // Canonical reset: getInitialState() returns the per-session keyed shape
+    // (snapshotsBySession / explainsBySession / isLoadingBySession /
+    // isLoadingExplainBySession / errorBySession / explainErrorBySession).
+    // DO NOT hand-roll a setState literal with `as never` — the store has no
+    // flat `isLoading` / `error` / `isLoadingExplain` / `explainError` fields,
+    // and `as never` would silently mask the drift.
+    useAuditReadinessStore.setState(getInitialState());
     vi.clearAllMocks();
   });
 
@@ -513,9 +704,18 @@ export function ExplainDialog({
   compositionVersion,
   onClose,
 }: ExplainDialogProps) {
+  // Store fields are per-session-keyed maps, NOT flat. Reading
+  // `s.isLoadingExplain` / `s.explainError` would evaluate to `undefined`
+  // at runtime — the dialog would never show loading or error. The correct
+  // accessors key by sessionId. See "Verified-against-reality" in File
+  // structure above.
   const explain = useAuditReadinessStore((s) => s.explainsBySession[sessionId]);
-  const isLoading = useAuditReadinessStore((s) => s.isLoadingExplain);
-  const error = useAuditReadinessStore((s) => s.explainError);
+  const isLoading = useAuditReadinessStore(
+    (s) => s.isLoadingExplainBySession[sessionId] ?? false,
+  );
+  const error = useAuditReadinessStore(
+    (s) => s.explainErrorBySession[sessionId] ?? null,
+  );
   const loadExplain = useAuditReadinessStore((s) => s.loadExplain);
   const titleId = useId();
 
@@ -596,6 +796,7 @@ Add this test to `frontend/src/components/inspector/InspectorPanel.test.tsx` (a 
 
 ```typescript
 import { fetchAuditReadiness } from "@/api/auditReadiness";
+import { makeComposition } from "@/test/composerFixtures";
 vi.mock("@/api/auditReadiness", () => ({ fetchAuditReadiness: vi.fn(), fetchAuditReadinessExplain: vi.fn() }));
 ```
 
@@ -604,17 +805,13 @@ Then add the new describe block:
 ```typescript
 describe("AuditReadinessPanel mount in InspectorPanel", () => {
   beforeEach(() => {
+    // Use the canonical fixture; pass an overrides map to clear nodes when
+    // the test wants an empty pipeline. SourceSpec is { plugin, options }
+    // (NOT kind/config — that shape never existed; the previous draft of
+    // this plan inherited the drift from a stale memo).
     useSessionStore.setState({
       activeSessionId: "s-1",
-      compositionState: {
-        id: "comp-1",
-        version: 1,
-        source: { kind: "csv_file", config: { path: "x.csv" } } as never,
-        nodes: [],
-        edges: [],
-        outputs: [],
-        metadata: { name: "demo", description: "" },
-      },
+      compositionState: makeComposition(1, { nodes: [] }),
     } as never);
     vi.mocked(fetchAuditReadiness).mockResolvedValue({
       session_id: "s-1",
@@ -709,17 +906,11 @@ In `frontend/src/components/inspector/InspectorPanel.test.tsx`, add:
 ```typescript
 describe("Validate button removal (Phase 2C)", () => {
   beforeEach(() => {
+    // Use the canonical fixture (see Task 7's beforeEach for the rationale
+    // on SourceSpec/NodeSpec shape).
     useSessionStore.setState({
       activeSessionId: "s-1",
-      compositionState: {
-        id: "comp-1",
-        version: 1,
-        source: { kind: "csv_file", config: { path: "x.csv" } } as never,
-        nodes: [],
-        edges: [],
-        outputs: [],
-        metadata: { name: "demo", description: "" },
-      },
+      compositionState: makeComposition(1, { nodes: [] }),
     } as never);
   });
 
@@ -1090,6 +1281,26 @@ Fixes applied to 14c in this revision:
 2. Task 8.5 added — Phase 3A handoff guard test (no `.skip`) that fails red in CI today because Phase 3A's subscription wiring is absent; turns green when Phase 3A Task 8 lands (mechanical gate replacing prose-only constraint)
 
 Strategic adjudication: scope-shrink (preferred path per review C3) over pulling Phase 3A Task 4+8 into the Phase 2 umbrella PR (would inflate umbrella scope and require coordination with the already-committed 15a plans).
+
+### 2026-05-17 — Reality-check vs landed 2A+2B: NEEDS_MAJOR_REWRITE → fixes applied
+
+Reviewer: `axiom-planning:plan-review-reality`, run against `feat/composer-phase-2a-backend` HEAD (2A+2B both landed and green: 56/56 backend unit + 12/12 backend integration + 585/585 frontend tests). Verdict on 14c: **NEEDS_MAJOR_REWRITE** (2 BLOCKER + 3 MAJOR + 1 NIT drifts) — 14a + 14b implementations were APPROVED with zero blockers.
+
+Fixes applied in this revision:
+
+1. **D1 BLOCKER — Task 6 ExplainDialog selector drift (production code).** The dialog read `s.isLoadingExplain` and `s.explainError`; the store has no such flat fields (per-session keyed maps only). Both selectors would evaluate to `undefined` at runtime and the dialog would never render loading or error states. Rewritten to `s.isLoadingExplainBySession[sessionId] ?? false` and `s.explainErrorBySession[sessionId] ?? null`.
+2. **D2 BLOCKER — Task 6 ExplainDialog test beforeEach drift.** The setState literal listed flat fields under `as never`; the cast silently masked the field-name mismatch. Replaced with `useAuditReadinessStore.setState(getInitialState())`, mirroring the pattern 2B already landed in `AuditReadinessPanel.test.tsx:58`.
+3. **D3 MAJOR — fixture import-path drift.** `@/test-utils/composerFixtures` → `@/test/composerFixtures` (the real fixture is at `src/elspeth/web/frontend/src/test/composerFixtures.ts`). Confirmed against 2B's `AuditReadinessPanel.test.tsx:9`.
+4. **D4 MAJOR — Task 5 inline NodeSpec shape drift.** The plan's reference fixture used `{ id, node_type, plugin, config: {} } as never`; `NodeSpec` actually requires 7 fields (`id`, `node_type`, `plugin`, `input`, `on_success`, `on_error`, `options`) and has no `config` field. Inline fixture removed in favour of `import { makeComposition } from "@/test/composerFixtures"`.
+5. **D5 MAJOR — Tasks 7+8 SourceSpec shape drift.** The plan used `source: { kind: "csv_file", config: { path: "x.csv" } } as never`; `SourceSpec` is `{ plugin, options }`. Both setState blocks rewritten to use `makeComposition(1, { nodes: [] })`.
+6. **D6 NIT — File-structure / per-task header inconsistency.** "File structure" header was `Modified:` but bullet text said "new file"; per-task `Files:` blocks said `Create:` for files 14b had already shipped as placeholders. Section restructured into explicit `New:` + `Modified:` subsections, with a load-bearing "Verified-against-reality" anchor block recording the store/type/path facts the next reality-check should re-verify.
+
+Two new tasks absorbed (both promoted from 2B observations explicitly deferred to 14c):
+
+- **Task 4A (new) — Signal-aware mock helper + cleanup-effect removal.** Tracks `elspeth-f018ea84c6` (promoted from `elspeth-obs-8502e9d4bf`). Adds `makeAbortablePromise()` to `composerFixtures.ts`; lets the store's `AbortError` catch arm fire in tests; drops the architecturally-duplicated synchronous `setState` in `AuditReadinessPanel.tsx`'s useEffect cleanup. Sequenced before Tasks 5–6 so they inherit the canonical mock pattern.
+- **Task 4B (new) — Compute `showExpanded` instead of state-sync useEffect.** Tracks `elspeth-82ef9d5bd0` (promoted from `elspeth-obs-6b5bb1a476`). Renames `expanded`→`userExpanded`, computes `showExpanded = anyActionable || userExpanded`, deletes the derived-state effect. Removes the extra render cycle on warning snapshots and the sticky-expansion bug (panel now auto-collapses when a later snapshot returns all-green unless the user explicitly expanded). A new regression test covers the auto-collapse behaviour.
+
+Strategic adjudication: 2C amendment is iterate-don't-rewrite — the plan's task graph, scope boundaries, sequencing claims, and convergence-C3 reasoning are all sound. All edits are localised to (a) the file-structure block, (b) the new Tasks 4A/4B, and (c) spot fixes inside Tasks 5–8's code blocks. No task was added beyond what 2B observations explicitly deferred to 14c; no scope was expanded beyond panel-and-inspector wiring.
 
 ## Memory references
 

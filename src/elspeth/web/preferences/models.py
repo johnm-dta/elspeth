@@ -65,7 +65,24 @@ class UpdateComposerPreferencesRequest(BaseModel):
     Every field is independently optional; the service writes only the
     fields the caller actually set. An empty PATCH is a no-op (the
     request succeeds; ``updated_at`` is bumped if any row already
-    exists).
+    exists; if no row exists, none is created — see PreferencesService
+    Panel C2 guard for the no-insert contract).
+
+    ``banner_dismissed_at`` semantics — IMPORTANT for callers:
+
+      - Field absent from JSON OR JSON ``null`` → "not set in this
+        PATCH" — the field is unchanged.
+      - ISO-8601 datetime string → set to that value (one-way
+        dismissal; see spec 12 §"Banner lifecycle").
+
+    Both "absent" and "explicit null" collapse to the same wire shape
+    because Pydantic v2 cannot distinguish JSON-missing from JSON-null
+    without a sentinel. The user-visible spec is one-way dismissal —
+    there is no "un-dismiss" affordance — so the no-clear contract
+    matches user-visible behaviour. If a future spec adds an
+    un-dismiss surface, the model must grow a sentinel (e.g.
+    ``Annotated[datetime | None | UnsetType]``) and the service must
+    branch on it; the current code does not branch on null.
     """
 
     model_config = ConfigDict(extra="forbid")

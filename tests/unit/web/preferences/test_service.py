@@ -19,12 +19,16 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select, text
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.preferences.models import UpdateComposerPreferencesRequest
-from elspeth.web.preferences.service import PreferencesService
+from elspeth.web.preferences.service import (
+    CorruptPreferencesError,
+    PreferencesService,
+)
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import metadata
+from elspeth.web.sessions.models import metadata, user_preferences_table
 
 
 @pytest.fixture(scope="module")
@@ -115,10 +119,6 @@ def test_empty_patch_on_no_row_does_not_insert(service, engine):
     """Panel C2: PATCH with no fields against a user with no row must NOT
     create a default row. The route/service contract is lazy-write: rows
     appear only when the user expresses a real preference."""
-    from sqlalchemy import select
-
-    from elspeth.web.sessions.models import user_preferences_table
-
     user = "alice-empty-patch-no-row"
     result = asyncio.run(
         service.update_composer_preferences(user, UpdateComposerPreferencesRequest()),
@@ -138,10 +138,6 @@ def test_empty_patch_on_existing_row_bumps_updated_at_only(service, engine):
     no-op success — the row's updated_at advances but other fields are
     preserved. This is the documented behaviour and the corner case the
     guard must NOT regress."""
-    from sqlalchemy import select
-
-    from elspeth.web.sessions.models import user_preferences_table
-
     user = "alice-empty-patch-existing"
     # Seed an existing row.
     asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
@@ -182,8 +178,6 @@ def test_corrupt_mode_read_via_public_api_raises(service):
     to catch (direct SQLite-shell writes, schema-version drift, on-disk
     corruption, tampering).
     """
-    from sqlalchemy import text
-
     user = "alice-corrupt-public"
     # Seed a valid row first so we can mutate it; goes through the real
     # write path with all validation.
@@ -196,9 +190,13 @@ def test_corrupt_mode_read_via_public_api_raises(service):
         conn.execute(text("UPDATE user_preferences SET default_composer_mode = 'kiosk' WHERE user_id = :uid").bindparams(uid=user))
         conn.execute(text("PRAGMA ignore_check_constraints = OFF"))
 
-    # Public read path must crash with the offending value named.
-    with pytest.raises(RuntimeError, match="kiosk"):
+    # Public read path must crash with the offending value named, via the
+    # named CorruptPreferencesError (not bare RuntimeError) so the app
+    # exception handler can branch on type rather than message text.
+    with pytest.raises(CorruptPreferencesError, match="kiosk") as exc_info:
         asyncio.run(service.get_composer_preferences(user))
+    assert exc_info.value.user_id == user
+    assert exc_info.value.bad_value == "kiosk"
 
 
 def test_patch_returns_written_values_not_a_reread(service):
@@ -223,8 +221,6 @@ def test_patch_returns_written_values_not_a_reread(service):
     # Then mutate the stored mode to a corrupt value (CHECK bypass via
     # PRAGMA — simulates the out-of-band corruption the guard exists to
     # catch).
-    from sqlalchemy import text
-
     with service._engine.begin() as conn:
         conn.execute(text("PRAGMA ignore_check_constraints = ON"))
         conn.execute(text("UPDATE user_preferences SET default_composer_mode = 'kiosk' WHERE user_id = :uid").bindparams(uid=user))
@@ -234,3 +230,70 @@ def test_patch_returns_written_values_not_a_reread(service):
     # written value rather than crashing on a re-read of the corrupt row.
     result = asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="guided")))
     assert result.default_mode == "guided"
+
+
+def test_corrupt_mode_blocks_partial_patch_that_does_not_set_mode(service):
+    """Tier-1 read guard parity (Phase 1A panel asymmetric-guard finding).
+
+    When PATCH does NOT supply ``default_mode`` and the existing row's
+    stored mode is corrupt, the upsert path's read of ``existing_raw``
+    must raise ``CorruptPreferencesError`` rather than silently
+    coercing/preserving the invalid value. This is parity with the GET
+    path's ``_row_to_prefs`` guard — both reads of a corrupt mode raise
+    the same named exception, with the same shape, so the application
+    handler can branch on type for either read site.
+
+    Contrast with ``test_patch_returns_written_values_not_a_reread``:
+    that test confirms the PATCH succeeds when the caller SUPPLIES a
+    valid mode (the corrupt read is not exercised because we have a
+    new value to write). This test exercises the read path that IS hit
+    when the caller does NOT supply a mode and the upsert must consult
+    the existing row to know what mode to INSERT.
+    """
+    user = "alice-partial-corrupt"
+    # Seed a valid row.
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
+    # Corrupt the stored mode (CHECK bypass via PRAGMA, simulates the
+    # out-of-band corruption scenario).
+    with service._engine.begin() as conn:
+        conn.execute(text("PRAGMA ignore_check_constraints = ON"))
+        conn.execute(text("UPDATE user_preferences SET default_composer_mode = 'kiosk' WHERE user_id = :uid").bindparams(uid=user))
+        conn.execute(text("PRAGMA ignore_check_constraints = OFF"))
+
+    # PATCH only banner_dismissed_at — forces the upsert to read the
+    # existing mode to know what to INSERT. Must raise on the corrupt
+    # read with the offending value named.
+    stamp = datetime(2026, 5, 16, tzinfo=UTC)
+    with pytest.raises(CorruptPreferencesError, match="kiosk") as exc_info:
+        asyncio.run(
+            service.update_composer_preferences(
+                user,
+                UpdateComposerPreferencesRequest(banner_dismissed_at=stamp),
+            )
+        )
+    assert exc_info.value.user_id == user
+    assert exc_info.value.bad_value == "kiosk"
+
+
+def test_empty_user_id_rejected_by_check_constraint(engine):
+    """Phase 1A panel minor: ``user_preferences_table`` rejects empty
+    ``user_id`` at the schema layer via
+    ``ck_user_preferences_user_id_non_empty``.
+
+    The constraint exists because an empty-string user_id would silently
+    key a "shared" preferences row that any unauthenticated principal
+    could write to if upstream auth ever regressed. The route layer
+    sources ``user_id`` from the authenticated identity (no client
+    surface for empty), but the schema constraint is defence in depth.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError, match="ck_user_preferences_user_id_non_empty"), engine.begin() as conn:
+        conn.execute(
+            user_preferences_table.insert().values(
+                user_id="",
+                default_composer_mode="guided",
+                banner_dismissed_at=None,
+                updated_at=datetime(2026, 5, 16, tzinfo=UTC),
+            )
+        )

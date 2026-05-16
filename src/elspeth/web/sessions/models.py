@@ -613,6 +613,16 @@ user_preferences_table = Table(
         "default_composer_mode IN ('guided', 'freeform')",
         name="ck_user_preferences_default_composer_mode",
     ),
+    # Empty-string user_id would silently key a "shared" preferences row
+    # that any unauthenticated principal could write to if upstream auth
+    # ever regressed. SQLite's PRIMARY KEY accepts '' as a distinct
+    # value, so the only defence at the schema layer is an explicit
+    # length check. Mirrors the empty-string guards on other
+    # principal-keyed tables.
+    CheckConstraint(
+        "length(user_id) > 0",
+        name="ck_user_preferences_user_id_non_empty",
+    ),
 )
 
 # ``audit_access_log`` — INERT IN PHASE 1A.

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from opentelemetry import metrics
 from sqlalchemy import select
@@ -42,6 +42,32 @@ from elspeth.web.preferences.models import (
     UpdateComposerPreferencesRequest,
 )
 from elspeth.web.sessions.models import user_preferences_table
+
+
+class CorruptPreferencesError(RuntimeError):
+    """Raised when the sessions DB returns a preferences row that violates
+    a closed-list invariant (Tier-1 read guard).
+
+    Carrying a named type rather than bare ``RuntimeError`` lets the
+    application's exception handlers (``app.py``) match this specific
+    failure mode for incident response without string-grepping the
+    message. Subclasses ``RuntimeError`` so existing
+    ``except RuntimeError`` callers continue to catch it during the
+    transition — there are no such callers today; this is forward-fit
+    headroom for the explain/diagnose surface in mcp/.
+
+    Attributes:
+      user_id: the row's primary key, included so the operator can
+        locate it.
+      bad_value: the offending value, named exactly as stored, so the
+        operator can confirm the corruption rather than re-derive it.
+    """
+
+    def __init__(self, user_id: str, bad_value: object) -> None:
+        super().__init__(f"user_preferences row for {user_id!r} has invalid default_composer_mode={bad_value!r}")
+        self.user_id = user_id
+        self.bad_value = bad_value
+
 
 # ── Telemetry (Panel S1) ───────────────────────────────────────────────────
 # Operational signal only — preferences are user state, not a pipeline
@@ -107,20 +133,26 @@ class PreferencesService:
 
         return await run_sync_in_worker(_sync)
 
-    def _row_to_prefs(self, row: object, user_id: str) -> ComposerPreferences:
+    def _row_to_prefs(self, row: Any, user_id: str) -> ComposerPreferences:
         """Convert a DB row to the response model with a Tier-1 read guard.
 
         A stored mode outside the validated set is a fault we caused
         (bug, tampering, or DB corruption). Crash with the offending
         value named so the operator can diagnose.
+
+        ``row: Any`` matches the established sessions/service.py
+        convention (see lines 326, 346, 1945, 2836) and avoids
+        ``type: ignore[attr-defined]`` noise on every column access.
+        SQLAlchemy ``Row`` objects don't have a useful static type for
+        the column attributes the engine exposes via dot access.
         """
-        mode = row.default_composer_mode  # type: ignore[attr-defined]
+        mode = row.default_composer_mode
         if mode not in _VALID_MODES:
-            raise RuntimeError(f"user_preferences row for {user_id!r} has invalid default_composer_mode={mode!r}")
+            raise CorruptPreferencesError(user_id, mode)
         return ComposerPreferences(
             default_mode=mode,
-            banner_dismissed_at=row.banner_dismissed_at,  # type: ignore[attr-defined]
-            updated_at=row.updated_at,  # type: ignore[attr-defined]
+            banner_dismissed_at=row.banner_dismissed_at,
+            updated_at=row.updated_at,
         )
 
     async def update_composer_preferences(self, user_id: str, payload: UpdateComposerPreferencesRequest) -> ComposerPreferences:
@@ -154,11 +186,43 @@ class PreferencesService:
         payload_is_empty = payload.default_mode is None and payload.banner_dismissed_at is None
 
         def _sync() -> tuple[ComposerMode, datetime | None, bool]:
-            """Returns (resolved_mode, resolved_banner_dismissed_at, wrote)."""
+            """Returns (resolved_mode, resolved_banner_dismissed_at, wrote).
+
+            Race window — TRACKED, not fixed in this commit. The
+            read-then-decide-to-upsert structure has a TOCTOU window:
+            between the empty-PATCH existence check (and the read of
+            existing_raw/resolved_banner below) and the INSERT...ON
+            CONFLICT, another writer on a concurrent connection could
+            interpose. The race outcomes are *benign at the DB layer*
+            because the ON CONFLICT update_clause only includes fields
+            the caller actually set, so concurrent writes don't clobber
+            each other's mode/banner values. The only observable effect
+            is that an HTTP response may carry momentarily-stale
+            resolved_banner from another writer's interleaved write —
+            the next GET returns the correct row.
+
+            The robust fix (single-statement upsert with COALESCE +
+            BEGIN IMMEDIATE for the no-row existence check) is
+            explicitly coupled with the deferred sessions/engine.py
+            PRAGMA work (journal_mode=WAL, busy_timeout,
+            synchronous=NORMAL) per the Phase 1A panel's MAJOR 4
+            finding — both land together when PRAGMA discipline is
+            scheduled. Filing a tracked filigree issue under
+            sessions/engine.py rather than landing a half-fix here
+            (SQLAlchemy's SQLite dialect rejects isolation_level=
+            "IMMEDIATE" via execution_options; the per-engine
+            ``do_begin`` event listener is the correct mechanism but
+            affects every write transaction on the sessions DB, not
+            just preferences — that warrants its own commit and
+            review).
+            """
             with self._engine.begin() as conn:
                 # Panel C2 guard: empty PATCH against a no-row user is a
                 # no-write no-op. Check existence BEFORE the upsert so we
-                # can skip the INSERT entirely.
+                # can skip the INSERT entirely. Benign race documented
+                # above: a concurrent writer interposing between this
+                # check and a downstream PATCH affects only response
+                # staleness, not DB integrity.
                 if payload_is_empty:
                     exists = conn.execute(
                         select(user_preferences_table.c.user_id).where(user_preferences_table.c.user_id == user_id)
@@ -187,7 +251,12 @@ class PreferencesService:
                         # comment was inaccurate cargo-cult risk.
                         insert_mode = cast(ComposerMode, existing_raw)
                     else:
-                        raise RuntimeError(f"user_preferences row for {user_id!r} has invalid default_composer_mode={existing_raw!r}")
+                        # Tier-1 read guard parity with _row_to_prefs:
+                        # both read paths raise the same named exception
+                        # on corruption. The earlier bare RuntimeError
+                        # was asymmetric (the GET path raised; this PATCH
+                        # read path raised a less-informative type).
+                        raise CorruptPreferencesError(user_id, existing_raw)
 
                 # If the caller did not set banner_dismissed_at, preserve
                 # the existing value (read in the same transaction so the

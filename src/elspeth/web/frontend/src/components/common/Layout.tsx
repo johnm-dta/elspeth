@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useTheme } from "@/hooks/useTheme";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { UserMenu } from "./UserMenu";
 
 const INSPECTOR_WIDTH_KEY = "elspeth_inspector_width";
 const SIDEBAR_COLLAPSED_KEY = "elspeth_sidebar_collapsed";
@@ -49,6 +50,11 @@ interface LayoutProps {
   sidebar: ReactNode;
   chat: ReactNode;
   inspector: ReactNode;
+  /** Phase 1B — UserMenu callbacks. Threaded through Layout so the menu
+   *  can mount in the existing sidebar toolbar without adding a new header
+   *  row (which would change the calc(100vh - ...) height budget). */
+  onOpenSettings: () => void;
+  onSignOut: () => void;
 }
 
 /**
@@ -66,7 +72,13 @@ interface LayoutProps {
  *   - Inspector becomes a slide-over overlay sheet with backdrop
  *   - Toggle button appears in the chat header area
  */
-export function Layout({ sidebar, chat, inspector }: LayoutProps) {
+export function Layout({
+  sidebar,
+  chat,
+  inspector,
+  onOpenSettings,
+  onSignOut,
+}: LayoutProps) {
   const [inspectorWidth, setInspectorWidth] = useState(() =>
     loadPersistedNumber(INSPECTOR_WIDTH_KEY, defaultInspectorWidth())
   );
@@ -261,6 +273,12 @@ export function Layout({ sidebar, chat, inspector }: LayoutProps) {
             {/* Sun for light theme, moon for dark */}
             {resolvedTheme === "dark" ? "\u2600" : "\u263E"}
           </button>
+
+          {/* Phase 1B: account menu, right-aligned via margin-left:auto so it
+              sits at the far end of the toolbar's flex row. */}
+          <div style={{ marginLeft: "auto" }}>
+            <UserMenu onOpenSettings={onOpenSettings} onSignOut={onSignOut} />
+          </div>
         </div>
         {/* Sidebar content — hidden when collapsed */}
         <div

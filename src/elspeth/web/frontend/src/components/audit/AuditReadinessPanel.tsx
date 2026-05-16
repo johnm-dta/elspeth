@@ -97,30 +97,14 @@ export function AuditReadinessPanel() {
     void loadSnapshot(activeSessionId, compositionState.version);
     return () => {
       // Unmount-during-fetch cleanup: abort the in-flight controller for this
-      // session WITHOUT clearing cached data. The store's AbortError catch
-      // arm clears isLoadingBySession[sessionId] but preserves any prior
-      // snapshot and error — important when the panel re-mounts (e.g.,
-      // toggling a layout flag) on the same session: the cached snapshot
-      // remains, only the orphaned fetch is killed.
-      //
-      // clearSession would be too aggressive — it removes cached snapshots
-      // too. The B4 subscription handles real session removal; this cleanup
-      // handles unmount-while-session-still-active.
-      //
-      // Note: the cleanup also clears isLoadingBySession synchronously so
-      // that the component leaves no dangling "loading" indicator when it
-      // unmounts mid-fetch. In production the store's AbortError catch arm
-      // would eventually do the same (idempotent), but in tests a vi-mocked
-      // Promise does not propagate AbortError, so the synchronous clear here
-      // is the only path that clears the flag. Both paths converge on
-      // isLoadingBySession[sessionId] = false; neither touches the snapshot
-      // nor the error caches.
+      // session. The store's AbortError catch arm clears
+      // isLoadingBySession[activeSessionId] and preserves cached snapshot/error
+      // (see issue elspeth-f018ea84c6 — the prior synchronous setState here
+      // was a workaround for signal-blind test mocks; Task 4A Step 2 fixed
+      // that at the mock layer).
       const ctrl = useAuditReadinessStore.getState().abortControllers[activeSessionId];
       if (ctrl) {
         ctrl.abort();
-        useAuditReadinessStore.setState((state) => ({
-          isLoadingBySession: { ...state.isLoadingBySession, [activeSessionId]: false },
-        }));
       }
     };
   // Intentional: `compositionState?.version` is the dep, not the compositionState reference.

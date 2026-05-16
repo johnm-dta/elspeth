@@ -6,7 +6,7 @@ import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
 import * as api from "../../api/auditReadiness";
 import type { AuditReadinessSnapshot } from "../../types/api";
-import { makeComposition } from "@/test/composerFixtures";
+import { makeComposition, makeAbortablePromise } from "@/test/composerFixtures";
 
 vi.mock("../../api/auditReadiness");
 
@@ -60,7 +60,9 @@ describe("AuditReadinessPanel", () => {
   });
 
   it("auto-fetches on mount using compositionState.version", async () => {
-    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+    );
     render(<AuditReadinessPanel />);
     await waitFor(() => {
       expect(api.fetchAuditReadiness).toHaveBeenCalledWith(
@@ -71,7 +73,9 @@ describe("AuditReadinessPanel", () => {
   });
 
   it("collapses to a single 'Audit ready' summary when all rows are ok/not_applicable", async () => {
-    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+    );
     render(<AuditReadinessPanel />);
     expect(await screen.findByText(/Audit ready/i)).toBeInTheDocument();
     // Six row labels are not all rendered up-front in collapsed mode.
@@ -79,7 +83,9 @@ describe("AuditReadinessPanel", () => {
   });
 
   it("expands to all rows when the summary is clicked", async () => {
-    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+    );
     const user = userEvent.setup();
     render(<AuditReadinessPanel />);
     const summary = await screen.findByRole("button", { name: /Audit ready/i });
@@ -91,7 +97,9 @@ describe("AuditReadinessPanel", () => {
   });
 
   it("shows all rows by default when any row has warning or error status", async () => {
-    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(snapshotWithProvenanceWarning(1));
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
     render(<AuditReadinessPanel />);
     await waitFor(() => {
       expect(screen.getByText("Validation")).toBeInTheDocument();
@@ -113,7 +121,9 @@ describe("AuditReadinessPanel", () => {
         { id: "secrets", label: "Secrets", status: "error", summary: "Missing required secret", detail: "secret 'OPENAI_API_KEY' is not declared.", component_ids: [] },
       ],
     };
-    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(everyRowActionable);
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(everyRowActionable, { signal }),
+    );
     render(<AuditReadinessPanel />);
     await waitFor(() => {
       expect(screen.getByText("Validation")).toBeInTheDocument();
@@ -131,8 +141,12 @@ describe("AuditReadinessPanel", () => {
 
   it("refetches when compositionState.version advances", async () => {
     vi.mocked(api.fetchAuditReadiness)
-      .mockResolvedValueOnce(allGreenSnapshot(1))
-      .mockResolvedValueOnce(allGreenSnapshot(2));
+      .mockImplementationOnce(
+        (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+      )
+      .mockImplementationOnce(
+        (_sid, signal) => makeAbortablePromise(allGreenSnapshot(2), { signal }),
+      );
     const { rerender } = render(<AuditReadinessPanel />);
     await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1));
 
@@ -167,15 +181,23 @@ describe("AuditReadinessPanel", () => {
   });
 
   it("mounts the Explain dialog when Explain → is clicked (narrative content asserted in 14c)", async () => {
-    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+    );
     // The placeholder ExplainDialog still calls loadExplain on mount, so mock
     // the response to keep the store happy. The narrative content is NOT
     // asserted here — that belongs to 14c's ExplainDialog.test.tsx.
-    vi.mocked(api.fetchAuditReadinessExplain).mockResolvedValueOnce({
-      session_id: SESSION_ID,
-      composition_version: 1,
-      narrative: "stub for placeholder mount; content assertion lives in 14c",
-    });
+    vi.mocked(api.fetchAuditReadinessExplain).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(
+          {
+            session_id: SESSION_ID,
+            composition_version: 1,
+            narrative: "stub for placeholder mount; content assertion lives in 14c",
+          },
+          { signal },
+        ),
+    );
     const user = userEvent.setup();
     render(<AuditReadinessPanel />);
     const summary = await screen.findByRole("button", { name: /Audit ready/i });
@@ -224,13 +246,12 @@ describe("AuditReadinessPanel", () => {
       compositionState: makeComposition(2),
     });
 
-    // Never-resolving fetch (until we resolve it below) — the cleanup will
-    // abort the controller before that happens.
-    let resolveLate!: (s: AuditReadinessSnapshot) => void;
-    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
-      new Promise<AuditReadinessSnapshot>((r) => {
-        resolveLate = r;
-      }),
+    // Signal-aware mock with a delay long enough that the cleanup runs first.
+    // makeAbortablePromise rejects with AbortError when the signal aborts, so
+    // the store's AbortError catch arm fires under test (production parity).
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(allGreenSnapshot(2), { signal, delay: 10_000 }),
     );
 
     const { unmount } = render(<AuditReadinessPanel />);
@@ -247,29 +268,25 @@ describe("AuditReadinessPanel", () => {
     unmount();
     expect(capturedCtrl!.signal.aborted).toBe(true);
 
+    // Let the AbortError microtask run through the store's catch arm.
+    await waitFor(() => {
+      expect(
+        useAuditReadinessStore.getState().isLoadingBySession[SESSION_ID],
+      ).toBe(false);
+    });
+
     // The seeded snapshot must still be cached — cleanup must NOT have called
-    // clearSession (which would have removed snapshotsBySession[SESSION_ID]).
+    // clearSession (which would have removed snapshotsBySession[SESSION_ID]),
+    // and the AbortError catch arm preserves cached snapshot/error.
     expect(
       useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID],
     ).toEqual(seeded);
 
-    // The AbortError catch arm should have cleared the per-session loading flag.
-    expect(
-      useAuditReadinessStore.getState().isLoadingBySession[SESSION_ID],
-    ).toBe(false);
-
-    // Belt-and-suspenders: even if the aborted fetch later resolves with a
-    // newer snapshot, the monotonic write guard accepts v2 (≥ v1) and the
-    // success arm may still write. This is documented expected behaviour —
-    // the cleanup's job is to abort the in-flight network call, not to roll
-    // back a response that races past the unmount. If a stricter "post-abort
-    // write guard" is ever added to the success arm, update this assertion.
-    resolveLate(allGreenSnapshot(2));
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(
-      useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]
-        ?.composition_version,
-    ).toBe(2); // ratchet: monotonic guard accepts v2 ≥ v1; see comment above.
+    // Note: the prior 2B form of this test asserted a "late-resolve ratchet"
+    // — that an aborted fetch which later resolves still writes via the
+    // monotonic guard. With signal-aware mocks (Phase 2C.4A) and production
+    // fetch semantics, an aborted call never reaches the success arm, so the
+    // race that assertion described is unreachable. The store-level
+    // monotonic-guard behaviour is covered by auditReadinessStore.test.ts.
   });
 });

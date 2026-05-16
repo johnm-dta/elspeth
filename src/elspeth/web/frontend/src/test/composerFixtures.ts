@@ -38,3 +38,37 @@ export function makeComposition(
     ...overrides,
   };
 }
+
+/**
+ * Returns a Promise that resolves to `value` after `delay` ms — UNLESS the
+ * provided AbortSignal aborts first, in which case it rejects with a
+ * synthetic AbortError matching the shape the production store's catch arm
+ * checks (`err.name === "AbortError"`).
+ *
+ * Use this in tests that exercise the store's abort-stale-in-flight or
+ * clearSession-aborts-controllers contracts; do NOT hand-roll a Promise
+ * that ignores the signal — that forces components to paper over the gap
+ * with synchronous setState (see elspeth-f018ea84c6).
+ */
+export function makeAbortablePromise<T>(
+  value: T,
+  options?: { delay?: number; signal?: AbortSignal },
+): Promise<T> {
+  const { delay = 0, signal } = options ?? {};
+  return new Promise<T>((resolve, reject) => {
+    const reject_with_abort = () => {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      reject(err);
+    };
+    if (signal?.aborted) {
+      reject_with_abort();
+      return;
+    }
+    const timer = setTimeout(() => resolve(value), delay);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject_with_abort();
+    });
+  });
+}

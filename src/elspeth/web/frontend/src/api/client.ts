@@ -1004,3 +1004,8 @@ export async function deleteSecret(name: string): Promise<void> {
     await parseResponse<never>(response);
   }
 }
+
+export {
+  fetchAuditReadiness,
+  fetchAuditReadinessExplain,
+} from "./auditReadiness";

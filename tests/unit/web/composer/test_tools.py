@@ -7247,6 +7247,7 @@ class TestPreviewPipeline:
                         name="settings_load",
                         passed=False,
                         detail="Forbidden name: 'end_of_source'",
+                        affected_nodes=(),
                     )
                 ],
                 errors=[
@@ -7255,6 +7256,7 @@ class TestPreviewPipeline:
                         component_type="aggregation",
                         message="Forbidden name: 'end_of_source'",
                         suggestion="Omit trigger for end-of-source-only aggregation.",
+                        error_code=None,
                     )
                 ],
             )

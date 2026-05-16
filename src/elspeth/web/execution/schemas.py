@@ -53,6 +53,11 @@ class ValidationCheck(_StrictResponse):
     name: str
     passed: bool
     detail: str
+    # Structured field: node ids affected by this check (e.g. identity-node
+    # advisories). Populated by the producer (validation.py) in the same
+    # commit that adds this field — no compat-shim default per CLAUDE.md
+    # No-Legacy policy.
+    affected_nodes: tuple[str, ...]
 
 
 class ValidationError(_StrictResponse):
@@ -62,6 +67,11 @@ class ValidationError(_StrictResponse):
     component_type: str | None
     message: str
     suggestion: str | None
+    # Structured discriminant for semantic error routing (e.g.
+    # "missing_secret_ref", "fabricated_secret"). Populated at every
+    # construction site — no compat-shim default per CLAUDE.md No-Legacy
+    # policy. Sites that have no semantic code pass None explicitly.
+    error_code: str | None
 
 
 class SemanticEdgeContractResponse(_StrictResponse):

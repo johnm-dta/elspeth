@@ -1068,13 +1068,14 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
     )
     return ValidationResult(
         is_valid=False,
-        checks=[ValidationCheck(name="state_exists", passed=False, detail=detail)],
+        checks=[ValidationCheck(name="state_exists", passed=False, detail=detail, affected_nodes=())],
         errors=[
             ValidationError(
                 component_id=None,
                 component_type=None,
                 message=detail,
                 suggestion=suggestion,
+                error_code=None,
             )
         ],
     )

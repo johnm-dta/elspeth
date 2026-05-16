@@ -658,6 +658,7 @@ class ExecutionServiceImpl:
                         name="state_exists",
                         passed=False,
                         detail="No composition state exists for this session",
+                        affected_nodes=(),
                     )
                 ],
                 errors=[
@@ -666,6 +667,7 @@ class ExecutionServiceImpl:
                         component_type=None,
                         message="No composition state exists for this session",
                         suggestion="Use the composer to build a pipeline first.",
+                        error_code=None,
                     )
                 ],
             )

@@ -3769,6 +3769,7 @@ class TestYamlEndpoint:
                         component_type="source",
                         message="runtime preflight failed for captured state",
                         suggestion=None,
+                        error_code=None,
                     )
                 ],
             )
@@ -3829,7 +3830,7 @@ class TestYamlEndpoint:
         failure = ValidationResult(
             is_valid=False,
             checks=[],
-            errors=[ValidationError(component_id=None, component_type=None, message="bad runtime", suggestion=None)],
+            errors=[ValidationError(component_id=None, component_type=None, message="bad runtime", suggestion=None, error_code=None)],
         )
 
         async def fail_preflight(state, *, settings, secret_service, user_id):
@@ -5220,6 +5221,7 @@ def test_runtime_preflight_errors_are_used_for_composition_state_persistence() -
                 name="plugin_instantiation",
                 passed=False,
                 detail="Invalid configuration for transform 'batch_stats'",
+                affected_nodes=(),
             )
         ],
         errors=[
@@ -5228,6 +5230,7 @@ def test_runtime_preflight_errors_are_used_for_composition_state_persistence() -
                 component_type="transform",
                 message="Invalid configuration for transform 'batch_stats'",
                 suggestion="Remove required_input_fields from batch-aware transform options.",
+                error_code=None,
             )
         ],
     )
@@ -5553,6 +5556,7 @@ def _runtime_preflight_failed_result(message: str = "runtime preflight blocked e
                 name="plugin_instantiation",
                 passed=False,
                 detail=message,
+                affected_nodes=(),
             )
         ],
         errors=[
@@ -5561,6 +5565,7 @@ def _runtime_preflight_failed_result(message: str = "runtime preflight blocked e
                 component_type=None,
                 message=message,
                 suggestion=None,
+                error_code=None,
             )
         ],
     )
@@ -6357,6 +6362,7 @@ def test_assistant_raw_content_is_persisted_but_not_returned(tmp_path) -> None:
                     component_type=None,
                     message="bad config",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         ),

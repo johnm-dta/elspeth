@@ -368,6 +368,7 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                     name=name,
                     passed=False,
                     detail=f"Skipped: {from_check} failed",
+                    affected_nodes=(),
                 )
             )
     return result
@@ -586,6 +587,7 @@ def validate_pipeline(
                             name=_CHECK_PATH_ALLOWLIST,
                             passed=False,
                             detail=f"Source {key} '{value}' is outside allowed source directories",
+                            affected_nodes=(),
                         ),
                         *_skipped_checks(_CHECK_PATH_ALLOWLIST),
                     ],
@@ -595,6 +597,7 @@ def validate_pipeline(
                             component_type="source",
                             message=f"Path traversal blocked: {key}='{value}' resolves outside allowed directories",
                             suggestion="Use a file within the blobs directory.",
+                            error_code=None,
                         ),
                     ],
                 )
@@ -614,6 +617,7 @@ def validate_pipeline(
                                 name=_CHECK_PATH_ALLOWLIST,
                                 passed=False,
                                 detail=f"Sink '{output.name}' {key} '{value}' is outside allowed output directories",
+                                affected_nodes=(),
                             ),
                             *_skipped_checks(_CHECK_PATH_ALLOWLIST),
                         ],
@@ -623,6 +627,7 @@ def validate_pipeline(
                                 component_type="sink",
                                 message=f"Path traversal blocked: sink '{output.name}' {key}='{value}' resolves outside allowed directories",
                                 suggestion="Use a path within the outputs or blobs directory.",
+                                error_code=None,
                             ),
                         ],
                     )
@@ -634,6 +639,7 @@ def validate_pipeline(
                 name=_CHECK_PATH_ALLOWLIST,
                 passed=True,
                 detail="All paths within allowed directories",
+                affected_nodes=(),
             )
         )
     else:
@@ -642,6 +648,7 @@ def validate_pipeline(
                 name=_CHECK_PATH_ALLOWLIST,
                 passed=True,
                 detail="No path option — check skipped",
+                affected_nodes=(),
             )
         )
 
@@ -717,6 +724,7 @@ def validate_pipeline(
                         component_type=None,
                         message=f"Cannot resolve secret references: {names}",
                         suggestion="Add the missing secrets via the Secrets panel before executing.",
+                        error_code="missing_secret_ref",
                     )
                 )
             if fabricated_components:
@@ -737,6 +745,7 @@ def validate_pipeline(
                                 "(produces a {secret_ref: NAME} marker) instead of typing "
                                 "the value directly."
                             ),
+                            error_code="fabricated_secret",
                         )
                     )
             if disallowed_secret_ref_components:
@@ -758,6 +767,7 @@ def validate_pipeline(
                                     "Move the secret_ref marker to an actual credential field, or use a literal "
                                     "non-secret value for wire-visible identity/configuration fields."
                                 ),
+                                error_code="disallowed_secret_ref",
                             )
                         )
             checks.append(
@@ -765,6 +775,7 @@ def validate_pipeline(
                     name=_CHECK_SECRET_REFS,
                     passed=False,
                     detail="; ".join(detail_parts),
+                    affected_nodes=(),
                 )
             )
             checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
@@ -774,6 +785,7 @@ def validate_pipeline(
                 name=_CHECK_SECRET_REFS,
                 passed=True,
                 detail=f"All {len(all_refs)} secret reference(s) resolved" if all_refs else "No secret references found",
+                affected_nodes=(),
             )
         )
     else:
@@ -782,6 +794,7 @@ def validate_pipeline(
                 name=_CHECK_SECRET_REFS,
                 passed=True,
                 detail="No secret service — check skipped",
+                affected_nodes=(),
             )
         )
 
@@ -792,6 +805,7 @@ def validate_pipeline(
                 name=_CHECK_SEMANTIC_CONTRACTS,
                 passed=False,
                 detail="Semantic contract check failed",
+                affected_nodes=(),
             )
         )
         for entry in semantic_errors:
@@ -803,6 +817,7 @@ def validate_pipeline(
                     component_type="transform",
                     message=entry.message,
                     suggestion=assistance_suggestion_for(entry, semantic_contracts),
+                    error_code=None,
                 )
             )
         checks.extend(_skipped_checks(_CHECK_SEMANTIC_CONTRACTS))
@@ -820,6 +835,7 @@ def validate_pipeline(
             detail=(
                 f"All {len(semantic_contracts)} semantic contract(s) satisfied" if semantic_contracts else "No semantic contracts to check"
             ),
+            affected_nodes=(),
         )
     )
 
@@ -840,6 +856,7 @@ def validate_pipeline(
                 name=_CHECK_BATCH_TRANSFORM_OPTIONS,
                 passed=False,
                 detail="Batch-aware transform option check failed",
+                affected_nodes=(),
             )
         )
         for node_id, message in batch_option_errors:
@@ -852,6 +869,7 @@ def validate_pipeline(
                         "Use node_type='aggregation' for batch-aware plugins; remove required_input_fields from batch-aware transform "
                         "options and use schema.required_fields for batch input validation."
                     ),
+                    error_code=None,
                 )
             )
         checks.extend(_skipped_checks(_CHECK_BATCH_TRANSFORM_OPTIONS))
@@ -866,6 +884,7 @@ def validate_pipeline(
             name=_CHECK_BATCH_TRANSFORM_OPTIONS,
             passed=True,
             detail="Batch-aware transform options are compatible with ADR-013",
+            affected_nodes=(),
         )
     )
 
@@ -908,6 +927,7 @@ def validate_pipeline(
                 name=_CHECK_SETTINGS,
                 passed=True,
                 detail="Settings loaded successfully",
+                affected_nodes=(),
             )
         )
     except (PydanticValidationError, ValueError, TypeError) as exc:
@@ -916,6 +936,7 @@ def validate_pipeline(
                 name=_CHECK_SETTINGS,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
             )
         )
         errors.append(
@@ -924,6 +945,7 @@ def validate_pipeline(
                 component_type=None,
                 message=str(exc),
                 suggestion=None,
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_SETTINGS))
@@ -956,6 +978,7 @@ def validate_pipeline(
                 name=_CHECK_PLUGINS,
                 passed=True,
                 detail="All plugins instantiated",
+                affected_nodes=(),
             )
         )
         checks.append(
@@ -963,6 +986,7 @@ def validate_pipeline(
                 name=_CHECK_VALUE_SOURCE_COMPLIANCE,
                 passed=True,
                 detail="All declared value sources satisfied",
+                affected_nodes=(),
             )
         )
     except ValueSourceValidationError as exc:
@@ -974,6 +998,7 @@ def validate_pipeline(
                 name=_CHECK_PLUGINS,
                 passed=True,
                 detail="All plugins instantiated",
+                affected_nodes=(),
             )
         )
         checks.append(
@@ -981,6 +1006,7 @@ def validate_pipeline(
                 name=_CHECK_VALUE_SOURCE_COMPLIANCE,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
             )
         )
         # Each finding names a single ``component_id`` field-violation —
@@ -999,6 +1025,7 @@ def validate_pipeline(
                         "model identifier; for Azure transforms, leave 'model' "
                         "empty so it inherits from 'deployment_name'."
                     ),
+                    error_code=None,
                 )
             )
         checks.extend(_skipped_checks(_CHECK_VALUE_SOURCE_COMPLIANCE))
@@ -1022,6 +1049,7 @@ def validate_pipeline(
                 name=_CHECK_PLUGINS,
                 passed=False,
                 detail=detail,
+                affected_nodes=(),
             )
         )
         errors.append(
@@ -1030,6 +1058,7 @@ def validate_pipeline(
                 component_type=comp_type,
                 message=detail,
                 suggestion=None,
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_PLUGINS))
@@ -1064,6 +1093,7 @@ def validate_pipeline(
                 name=_CHECK_PLUGINS,
                 passed=False,
                 detail=detail,
+                affected_nodes=(),
             )
         )
         errors.append(
@@ -1072,6 +1102,7 @@ def validate_pipeline(
                 component_type="sink",
                 message=detail,
                 suggestion=("Set collision_policy='auto_increment' to pick a free sibling path automatically, or choose a different path."),
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_PLUGINS))
@@ -1091,6 +1122,7 @@ def validate_pipeline(
                 name=_CHECK_GRAPH,
                 passed=True,
                 detail="Graph structure is valid",
+                affected_nodes=(),
             )
         )
     except GraphValidationError as exc:
@@ -1099,6 +1131,7 @@ def validate_pipeline(
                 name=_CHECK_GRAPH,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
             )
         )
         errors.append(
@@ -1107,6 +1140,7 @@ def validate_pipeline(
                 component_type=exc.component_type,
                 message=str(exc),
                 suggestion=None,
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_GRAPH))
@@ -1147,6 +1181,7 @@ def validate_pipeline(
                 name=_CHECK_ROUTE_TARGETS,
                 passed=True,
                 detail="All route targets resolve to existing sinks",
+                affected_nodes=(),
             )
         )
     except RouteValidationError as exc:
@@ -1155,6 +1190,7 @@ def validate_pipeline(
                 name=_CHECK_ROUTE_TARGETS,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
             )
         )
         errors.append(
@@ -1163,6 +1199,7 @@ def validate_pipeline(
                 component_type=None,
                 message=str(exc),
                 suggestion=("Use 'discard' to drop rows without routing, or wire the destination to an existing sink."),
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_ROUTE_TARGETS))
@@ -1181,6 +1218,7 @@ def validate_pipeline(
                 name=_CHECK_SCHEMA,
                 passed=True,
                 detail="All edge schemas compatible",
+                affected_nodes=(),
             )
         )
     except GraphValidationError as exc:
@@ -1194,6 +1232,7 @@ def validate_pipeline(
                 name=_CHECK_SCHEMA,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
             )
         )
         if isinstance(exc, EdgeContractError):
@@ -1210,6 +1249,7 @@ def validate_pipeline(
                     component_type=consumer_target.component_type,
                     message=edge_message,
                     suggestion=edge_suggestion,
+                    error_code=None,
                 )
             )
         else:
@@ -1219,6 +1259,7 @@ def validate_pipeline(
                     component_type=exc.component_type,
                     message=str(exc),
                     suggestion=None,
+                    error_code=None,
                 )
             )
         return ValidationResult(
@@ -1251,6 +1292,10 @@ def validate_pipeline(
                     f"Consider removing it and wiring '{identity_finding.upstream_id}'.on_success "
                     f"directly to '{identity_finding.sink_name}'."
                 ),
+                # Structured node attribution for the audit-readiness panel's
+                # provenance row (see docs/composer/ux-redesign-2026-05/14a
+                # §"Six rows — projection mapping").
+                affected_nodes=(identity_finding.node_id,),
             )
         )
 

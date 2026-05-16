@@ -4269,6 +4269,7 @@ class TestComposerRuntimePreflightFinalGate:
                     name="settings_load",
                     passed=False,
                     detail="Forbidden name: 'end_of_source'",
+                    affected_nodes=(),
                 )
             ],
             errors=[
@@ -4277,6 +4278,7 @@ class TestComposerRuntimePreflightFinalGate:
                     component_type="aggregation",
                     message="Forbidden name: 'end_of_source'",
                     suggestion="Omit trigger for end-of-source-only aggregation.",
+                    error_code=None,
                 )
             ],
         )
@@ -4335,6 +4337,7 @@ class TestComposerRuntimePreflightFinalGate:
                     name="settings_load",
                     passed=False,
                     detail="Forbidden name: 'end_of_source'",
+                    affected_nodes=(),
                 )
             ],
             errors=[
@@ -4343,6 +4346,7 @@ class TestComposerRuntimePreflightFinalGate:
                     component_type="aggregation",
                     message="Forbidden name: 'end_of_source'",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         )
@@ -4791,6 +4795,7 @@ class TestEmptyStateFinalizePassthrough:
                     name="settings_load",
                     passed=False,
                     detail="Pipeline state is empty",
+                    affected_nodes=(),
                 )
             ],
             errors=[
@@ -4799,6 +4804,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type=None,
                     message="2 validation errors for ElspethSettings — source: Field required, sinks: Field required",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         )
@@ -4852,6 +4858,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type=None,
                     message="Pipeline empty",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         )
@@ -4918,6 +4925,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type="transform",
                     message="Forbidden name: 'end_of_source'",
                     suggestion="Omit trigger for end-of-source-only aggregation.",
+                    error_code=None,
                 )
             ],
         )
@@ -4995,6 +5003,7 @@ class TestEmptyStateFinalizePassthrough:
                     component_type="transform",
                     message="Forbidden name: 'end_of_source'",
                     suggestion="Omit trigger for end-of-source-only aggregation.",
+                    error_code=None,
                 )
             ],
         )

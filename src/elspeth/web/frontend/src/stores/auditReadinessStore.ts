@@ -36,10 +36,15 @@ export interface AuditReadinessState {
    *  does not cancel a concurrent snapshot fetch for the same session.
    *  clearSession aborts both controllers. */
   explainAbortControllers: Record<string, AbortController>;
-  isLoading: boolean;
-  isLoadingExplain: boolean;
-  error: string | null;
-  explainError: string | null;
+  /** Per-session loading and error state. Global scalars would contaminate
+   *  cross-session UI — switching from a failing session A to a healthy
+   *  session B would render A's error banner on B. Keyed-by-sessionId mirrors
+   *  the data fields (snapshotsBySession etc.) and makes the store's contract
+   *  internally consistent. */
+  isLoadingBySession: Record<string, boolean>;
+  isLoadingExplainBySession: Record<string, boolean>;
+  errorBySession: Record<string, string | null>;
+  explainErrorBySession: Record<string, string | null>;
 
   loadSnapshot: (sessionId: string, compositionVersion: number) => Promise<void>;
   loadExplain: (sessionId: string, compositionVersion: number) => Promise<void>;
@@ -52,10 +57,10 @@ export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "l
   explainsBySession: {},
   abortControllers: {},
   explainAbortControllers: {},
-  isLoading: false,
-  isLoadingExplain: false,
-  error: null,
-  explainError: null,
+  isLoadingBySession: {},
+  isLoadingExplainBySession: {},
+  errorBySession: {},
+  explainErrorBySession: {},
 });
 
 export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => ({
@@ -73,8 +78,8 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
     const controller = new AbortController();
     set((state) => ({
       abortControllers: { ...state.abortControllers, [sessionId]: controller },
-      isLoading: true,
-      error: null,
+      isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: true },
+      errorBySession: { ...state.errorBySession, [sessionId]: null },
     }));
 
     try {
@@ -84,27 +89,54 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
       set((state) => {
         const current = state.snapshotsBySession[sessionId];
         if (current && current.composition_version > snapshot.composition_version) {
-          return { isLoading: false };
+          // Stale response arrived after a newer one was already cached —
+          // discard, but still clear our session's loading flag so the UI
+          // does not hang.
+          return {
+            isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          };
         }
         const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
         return {
           snapshotsBySession: { ...state.snapshotsBySession, [sessionId]: snapshot },
           abortControllers: restCtrl,
-          isLoading: false,
+          isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          // Clear any prior error for this session — a successful fetch
+          // supersedes the previous failure.
+          errorBySession: { ...state.errorBySession, [sessionId]: null },
         };
       });
     } catch (err) {
       // AbortError is the expected path for an aborted-by-newer-fetch scenario;
       // the loading indicator must clear because no successor fetch may arrive
-      // (e.g., session navigation away). isLoading is global, not per-session.
+      // (e.g., session navigation away). Per-session: only this session's
+      // flag clears.
+      //
+      // Controller-identity guard: if our controller is no longer the tracked
+      // one for this session, clearSession or a newer fetch has taken over —
+      // do not resurrect per-session state we no longer own.
       if ((err as { name?: string }).name === "AbortError") {
-        set({ isLoading: false });
+        set((state) => {
+          if (state.abortControllers[sessionId] !== controller) {
+            return state;
+          }
+          return {
+            isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          };
+        });
         return;
       }
       const apiErr = err as ApiError;
-      set({
-        isLoading: false,
-        error: apiErr.detail ?? "Failed to load audit readiness.",
+      set((state) => {
+        const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
+        return {
+          abortControllers: restCtrl,
+          isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
+          errorBySession: {
+            ...state.errorBySession,
+            [sessionId]: apiErr.detail ?? "Failed to load audit readiness.",
+          },
+        };
       });
     }
   },
@@ -123,8 +155,8 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
     const explainController = new AbortController();
     set((state) => ({
       explainAbortControllers: { ...state.explainAbortControllers, [sessionId]: explainController },
-      isLoadingExplain: true,
-      explainError: null,
+      isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: true },
+      explainErrorBySession: { ...state.explainErrorBySession, [sessionId]: null },
     }));
 
     try {
@@ -137,20 +169,42 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
             [sessionId]: explain,
           },
           explainAbortControllers: restCtrl,
-          isLoadingExplain: false,
+          isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: false },
+          // Clear any prior explain error for this session — a successful
+          // fetch supersedes the previous failure.
+          explainErrorBySession: { ...state.explainErrorBySession, [sessionId]: null },
         };
       });
     } catch (err) {
       // Mirror the snapshot AbortError pattern: clear isLoadingExplain so the
-      // UI does not hang on "Loading explain…" after navigation away.
+      // UI does not hang on "Loading explain…" after navigation away. Per-
+      // session: only this session's flag clears.
+      //
+      // Controller-identity guard: if our explainController is no longer the
+      // tracked one for this session, clearSession or a newer fetch has taken
+      // over — do not resurrect per-session state we no longer own.
       if ((err as { name?: string }).name === "AbortError") {
-        set({ isLoadingExplain: false });
+        set((state) => {
+          if (state.explainAbortControllers[sessionId] !== explainController) {
+            return state;
+          }
+          return {
+            isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: false },
+          };
+        });
         return;
       }
       const apiErr = err as ApiError;
-      set({
-        isLoadingExplain: false,
-        explainError: apiErr.detail ?? "Failed to load the explain narrative.",
+      set((state) => {
+        const { [sessionId]: _ctrl, ...restCtrl } = state.explainAbortControllers;
+        return {
+          explainAbortControllers: restCtrl,
+          isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: false },
+          explainErrorBySession: {
+            ...state.explainErrorBySession,
+            [sessionId]: apiErr.detail ?? "Failed to load the explain narrative.",
+          },
+        };
       });
     }
   },
@@ -166,13 +220,19 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
       const { [sessionId]: _expl, ...restExpl } = state.explainsBySession;
       const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
       const { [sessionId]: _eCtrl, ...restECtrl } = state.explainAbortControllers;
+      const { [sessionId]: _il, ...restIL } = state.isLoadingBySession;
+      const { [sessionId]: _ilx, ...restILX } = state.isLoadingExplainBySession;
+      const { [sessionId]: _err, ...restErr } = state.errorBySession;
+      const { [sessionId]: _errx, ...restErrX } = state.explainErrorBySession;
       return {
         snapshotsBySession: restSnap,
         explainsBySession: restExpl,
         abortControllers: restCtrl,
         explainAbortControllers: restECtrl,
-        isLoading: false,
-        isLoadingExplain: false,
+        isLoadingBySession: restIL,
+        isLoadingExplainBySession: restILX,
+        errorBySession: restErr,
+        explainErrorBySession: restErrX,
       };
     });
   },

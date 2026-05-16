@@ -35,8 +35,8 @@ describe("useAuditReadinessStore", () => {
 
     const state = useAuditReadinessStore.getState();
     expect(state.snapshotsBySession[SESSION_ID]?.composition_version).toBe(1);
-    expect(state.isLoading).toBe(false);
-    expect(state.error).toBeNull();
+    expect(state.isLoadingBySession[SESSION_ID]).toBe(false);
+    expect(state.errorBySession[SESSION_ID]).toBeNull();
   });
 
   it("loadSnapshot is a no-op when the cached snapshot's version matches", async () => {
@@ -72,7 +72,7 @@ describe("useAuditReadinessStore", () => {
     await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
 
     const state = useAuditReadinessStore.getState();
-    expect(state.error).toContain("No composition state");
+    expect(state.errorBySession[SESSION_ID]).toContain("No composition state");
     expect(state.snapshotsBySession[SESSION_ID]).toBeUndefined();
   });
 
@@ -124,6 +124,34 @@ describe("useAuditReadinessStore", () => {
     expect(state.explainsBySession[SESSION_ID]).toBeUndefined();
   });
 
+  it("clearSession during in-flight fetch aborts the request and resets per-session loading", async () => {
+    let reject!: (err: unknown) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((_, rej) => {
+        reject = rej;
+      }),
+    );
+
+    // Start the fetch but do not await it — leaves the AbortController in-flight.
+    const inFlight = useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+    const ctrl = useAuditReadinessStore.getState().abortControllers[SESSION_ID];
+    expect(ctrl).toBeDefined();
+
+    // clearSession must abort the controller, remove all per-session entries.
+    useAuditReadinessStore.getState().clearSession(SESSION_ID);
+    expect(ctrl?.signal.aborted).toBe(true);
+
+    // Simulate the native fetch surfacing AbortError after abort.
+    reject(Object.assign(new Error("AbortError"), { name: "AbortError" }));
+    await inFlight;
+
+    const state = useAuditReadinessStore.getState();
+    expect(state.snapshotsBySession[SESSION_ID]).toBeUndefined();
+    expect(state.abortControllers[SESSION_ID]).toBeUndefined();
+    expect(state.isLoadingBySession[SESSION_ID]).toBeUndefined();
+    expect(state.errorBySession[SESSION_ID]).toBeUndefined();
+  });
+
   // --- Monotonic write-guard contract ---
   // This test exercises the version monotonicity guard (loadSnapshot discards
   // a response whose composition_version is lower than what's already cached).
@@ -161,12 +189,14 @@ describe("useAuditReadinessStore", () => {
   // --- AbortController cancellation contract ---
   // This test exercises the abort path: when a second loadSnapshot call starts
   // while the first is still in-flight, the store must abort the first fetch's
-  // AbortController and clear isLoading after the second completes.
+  // AbortController and clear isLoadingBySession after the second completes.
   // It is CONCURRENT: both fetches are in-flight simultaneously. It covers a
   // different contract from the monotonic-guard test above — both are required.
-  it("abort-cancellation: second in-flight fetch aborts the first; isLoading resets cleanly", async () => {
+  it("abort-cancellation: second in-flight fetch aborts the first; isLoadingBySession resets cleanly", async () => {
+    let resolveFirst!: (s: AuditReadinessSnapshot) => void;
     let rejectFirst!: (err: unknown) => void;
-    const firstFetch = new Promise<AuditReadinessSnapshot>((_res, rej) => {
+    const firstFetch = new Promise<AuditReadinessSnapshot>((res, rej) => {
+      resolveFirst = res;
       rejectFirst = rej;
     });
 
@@ -193,11 +223,14 @@ describe("useAuditReadinessStore", () => {
     // Complete the second fetch.
     await secondPromise;
 
-    // isLoading must be false — the abort arm must have cleared it.
-    expect(useAuditReadinessStore.getState().isLoading).toBe(false);
+    // isLoadingBySession[SESSION_ID] must be false — the abort arm must have cleared it.
+    expect(useAuditReadinessStore.getState().isLoadingBySession[SESSION_ID]).toBe(false);
     // Second fetch's result must be stored.
     expect(
       useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
     ).toBe(2);
+
+    // Suppress unused-variable warning from the unused resolve binding.
+    void resolveFirst;
   });
 });

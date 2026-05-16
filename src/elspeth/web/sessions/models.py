@@ -578,6 +578,43 @@ user_secrets_table = Table(
 )
 Index("ix_user_secrets_user_provider", user_secrets_table.c.user_id, user_secrets_table.c.auth_provider_type)
 
+# ``user_preferences`` — per-user composer settings.
+#
+# One row per user holding (a) the user's chosen default composer mode for
+# NEW sessions and (b) the dismissal timestamp for the one-time "we changed
+# the default" banner. Per-session mode toggles live in chat panel state
+# and do NOT touch this row; this is exclusively the account-level default.
+#
+# ``user_id`` is opaque and matches ``sessions_table.user_id``. No FK is
+# declared because auth providers vary across deployments and there is no
+# canonical users table in the session DB to reference.
+#
+# CLOSED-LIST default_composer_mode. Permitted values are exactly
+# {"guided", "freeform"} — enforced at the Tier-3 boundary by Pydantic
+# Literal and at Tier-1 read time by the PreferencesService read guard
+# (any stored value outside this set crashes the read with the offending
+# value named). Extending the set requires (a) a Pydantic ``ComposerMode``
+# Literal amendment, (b) a service read-guard amendment, and (c) a UI
+# affordance for the new mode — do not extend silently here.
+user_preferences_table = Table(
+    "user_preferences",
+    metadata,
+    Column("user_id", String, primary_key=True),
+    Column(
+        "default_composer_mode",
+        String,
+        nullable=False,
+        server_default="guided",
+    ),
+    # NULL = banner not yet dismissed; non-NULL = dismissed-at timestamp.
+    Column("banner_dismissed_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "default_composer_mode IN ('guided', 'freeform')",
+        name="ck_user_preferences_default_composer_mode",
+    ),
+)
+
 # ``audit_access_log`` — INERT IN PHASE 1A.
 #
 # This table records who viewed audit-grade message data (the eventual

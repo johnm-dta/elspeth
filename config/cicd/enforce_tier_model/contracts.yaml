@@ -167,7 +167,7 @@ allow_hits:
   owner: bugfix
   reason: vars(item) raises TypeError on non-object Pydantic metadata (plain strings, ints); skipping is correct since only object metadata can carry allow_inf_nan
   safety: Only catches TypeError from vars(); attribute access on the result uses direct dict lookup, not hasattr
-  expires: '2026-05-15'
+  expires: '2026-08-15'  # Renewed 2026-05-16: contracts/data.py:141 _get_allow_inf_nan unchanged; fingerprint still matches; safety justification still applies.
 - key: contracts/contract_builder.py:R6:ContractBuilder:process_first_row:fp=4d3f0bdcf6fdd56f
   owner: bugfix
   reason: TypeError from normalize_type_for_contract for unsupported types (dict, list, Decimal) — maps to object

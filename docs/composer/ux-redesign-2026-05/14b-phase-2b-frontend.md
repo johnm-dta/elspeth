@@ -438,10 +438,11 @@ export async function fetchAuditReadiness(
 
 export async function fetchAuditReadinessExplain(
   sessionId: string,
+  signal?: AbortSignal,
 ): Promise<AuditReadinessExplain> {
   const response = await fetch(
     `/api/sessions/${sessionId}/audit-readiness/explain`,
-    { method: "GET", headers: authHeaders() },
+    { method: "GET", headers: authHeaders(), signal },
   );
   return parseResponse<AuditReadinessExplain>(response);
 }
@@ -613,7 +614,12 @@ describe("useAuditReadinessStore", () => {
     expect(state.explainsBySession[SESSION_ID]).toBeUndefined();
   });
 
-  it("loadSnapshot monotonic guard: fast-v2 + slow-v1 interleaved — v2 payload wins", async () => {
+  // --- Monotonic write-guard contract ---
+  // This test exercises the version monotonicity guard (loadSnapshot discards
+  // a response whose composition_version is lower than what's already cached).
+  // It is SEQUENTIAL: v2 completes before v1 starts. It does NOT exercise the
+  // AbortController cancellation path — see the abort-cancellation test below.
+  it("monotonic write guard — sequential ordering: fast-v2 + slow-v1 interleaved — v2 payload wins", async () => {
     // Deferred resolver pattern: v2 starts first and resolves first; v1
     // starts after v2 but resolves last (simulating a slow in-flight v1 that
     // was superseded by a version bump).
@@ -624,7 +630,7 @@ describe("useAuditReadinessStore", () => {
       .mockReturnValueOnce(Promise.resolve(snapshot(2)))   // fast v2
       .mockReturnValueOnce(slowV1);                        // slow v1
 
-    // Kick off v2 fetch first.
+    // Kick off v2 fetch first — await it fully before starting v1.
     await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
     expect(
       useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
@@ -637,6 +643,51 @@ describe("useAuditReadinessStore", () => {
     await v1Promise;
 
     // Monotonic guard must have discarded v1 — v2 still wins.
+    expect(
+      useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
+    ).toBe(2);
+  });
+
+  // --- AbortController cancellation contract ---
+  // This test exercises the abort path: when a second loadSnapshot call starts
+  // while the first is still in-flight, the store must abort the first fetch's
+  // AbortController and clear isLoading after the second completes.
+  // It is CONCURRENT: both fetches are in-flight simultaneously. It covers a
+  // different contract from the monotonic-guard test above — both are required.
+  it("abort-cancellation: second in-flight fetch aborts the first; isLoading resets cleanly", async () => {
+    let resolveFirst!: (s: AuditReadinessSnapshot) => void;
+    let rejectFirst!: (err: unknown) => void;
+    const firstFetch = new Promise<AuditReadinessSnapshot>((res, rej) => {
+      resolveFirst = res;
+      rejectFirst = rej;
+    });
+
+    vi.mocked(api.fetchAuditReadiness)
+      .mockReturnValueOnce(firstFetch)                          // slow first fetch
+      .mockReturnValueOnce(Promise.resolve(snapshot(2)));       // fast second fetch
+
+    // Start BOTH fetches without awaiting the first — they are concurrently in-flight.
+    // Capture the first controller (from store state) before the second call overwrites it.
+    // (loadSnapshot sets abortControllers[sessionId] synchronously inside its set() call.)
+    const firstPromise = useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+    const storedCtrl = useAuditReadinessStore.getState().abortControllers[SESSION_ID];
+
+    // Now start the second fetch — this aborts the first controller.
+    const secondPromise = useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
+
+    // The first fetch's AbortController must have been aborted.
+    expect(storedCtrl?.signal.aborted).toBe(true);
+
+    // Reject the first fetch with an AbortError (simulating native fetch abort).
+    rejectFirst(Object.assign(new Error("AbortError"), { name: "AbortError" }));
+    await firstPromise;
+
+    // Complete the second fetch.
+    await secondPromise;
+
+    // isLoading must be false — the abort arm must have cleared it.
+    expect(useAuditReadinessStore.getState().isLoading).toBe(false);
+    // Second fetch's result must be stored.
     expect(
       useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
     ).toBe(2);
@@ -685,11 +736,16 @@ import type {
 export interface AuditReadinessState {
   snapshotsBySession: Record<string, AuditReadinessSnapshot>;
   explainsBySession: Record<string, AuditReadinessExplain>;
-  /** In-flight AbortController keyed by sessionId. loadSnapshot aborts the
-   *  previous controller before starting a new fetch, preventing stale
-   *  responses from overwriting a more recent result. clearSession also
-   *  aborts any in-flight request for the cleared session. */
+  /** In-flight AbortController keyed by sessionId for snapshot fetches.
+   *  loadSnapshot aborts the previous controller before starting a new fetch,
+   *  preventing stale responses from overwriting a more recent result.
+   *  clearSession also aborts any in-flight request for the cleared session. */
   abortControllers: Record<string, AbortController>;
+  /** In-flight AbortController keyed by sessionId for explain fetches.
+   *  Parallel to abortControllers — kept separate so aborting an explain fetch
+   *  does not cancel a concurrent snapshot fetch for the same session.
+   *  clearSession aborts both controllers. */
+  explainAbortControllers: Record<string, AbortController>;
   isLoading: boolean;
   isLoadingExplain: boolean;
   error: string | null;
@@ -705,6 +761,7 @@ export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "l
   snapshotsBySession: {},
   explainsBySession: {},
   abortControllers: {},
+  explainAbortControllers: {},
   isLoading: false,
   isLoadingExplain: false,
   error: null,
@@ -747,7 +804,13 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
         };
       });
     } catch (err) {
-      if ((err as { name?: string }).name === "AbortError") return;
+      // AbortError is the expected path for an aborted-by-newer-fetch scenario;
+      // the loading indicator must clear because no successor fetch may arrive
+      // (e.g., session navigation away). isLoading is global, not per-session.
+      if ((err as { name?: string }).name === "AbortError") {
+        set({ isLoading: false });
+        return;
+      }
       const apiErr = err as ApiError;
       set({
         isLoading: false,
@@ -761,17 +824,39 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
     if (cached && cached.composition_version === compositionVersion) {
       return;
     }
-    set({ isLoadingExplain: true, explainError: null });
+
+    // Abort any in-flight explain fetch for this session before starting a new
+    // one. Uses a parallel controller dict (explainAbortControllers) so that
+    // aborting an explain fetch does not cancel a concurrent snapshot fetch.
+    const prevExplain = get().explainAbortControllers[sessionId];
+    if (prevExplain) prevExplain.abort();
+    const explainController = new AbortController();
+    set((state) => ({
+      explainAbortControllers: { ...state.explainAbortControllers, [sessionId]: explainController },
+      isLoadingExplain: true,
+      explainError: null,
+    }));
+
     try {
-      const explain = await fetchAuditReadinessExplain(sessionId);
-      set((state) => ({
-        explainsBySession: {
-          ...state.explainsBySession,
-          [sessionId]: explain,
-        },
-        isLoadingExplain: false,
-      }));
+      const explain = await fetchAuditReadinessExplain(sessionId, explainController.signal);
+      set((state) => {
+        const { [sessionId]: _ctrl, ...restCtrl } = state.explainAbortControllers;
+        return {
+          explainsBySession: {
+            ...state.explainsBySession,
+            [sessionId]: explain,
+          },
+          explainAbortControllers: restCtrl,
+          isLoadingExplain: false,
+        };
+      });
     } catch (err) {
+      // Mirror the snapshot AbortError pattern: clear isLoadingExplain so the
+      // UI does not hang on "Loading explain…" after navigation away.
+      if ((err as { name?: string }).name === "AbortError") {
+        set({ isLoadingExplain: false });
+        return;
+      }
       const apiErr = err as ApiError;
       set({
         isLoadingExplain: false,
@@ -781,17 +866,23 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
   },
 
   clearSession(sessionId: string) {
-    // Abort any in-flight snapshot fetch for this session.
+    // Abort any in-flight snapshot and explain fetches for this session.
     const ctrl = get().abortControllers[sessionId];
     if (ctrl) ctrl.abort();
+    const explainCtrl = get().explainAbortControllers[sessionId];
+    if (explainCtrl) explainCtrl.abort();
     set((state) => {
       const { [sessionId]: _snap, ...restSnap } = state.snapshotsBySession;
       const { [sessionId]: _expl, ...restExpl } = state.explainsBySession;
       const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
+      const { [sessionId]: _eCtrl, ...restECtrl } = state.explainAbortControllers;
       return {
         snapshotsBySession: restSnap,
         explainsBySession: restExpl,
         abortControllers: restCtrl,
+        explainAbortControllers: restECtrl,
+        isLoading: false,
+        isLoadingExplain: false,
       };
     });
   },
@@ -802,7 +893,21 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
 }));
 ```
 
-> `getInitialState` is exported as a named const (not via an ad-hoc cast), so tests can import it directly. The `reset()` action calls `set(getInitialState())` — same pattern used by `executionStore`. Verify the import with `grep -n "getInitialState" src/elspeth/web/frontend/src/stores/` to confirm the naming convention is consistent.
+> `getInitialState` is exported as a named const (not via an ad-hoc cast), so tests can import it directly. The `reset()` action calls `set(getInitialState())` — similar shape to `executionStore`'s `reset()` pattern (`executionStore` uses a module-internal `initialExecutionState` const, not an exported `getInitialState`; the public surface is the same `reset()` verb). Verify the import with `grep -n "getInitialState" src/elspeth/web/frontend/src/stores/` to confirm the naming convention is consistent.
+
+> **Operator/architect decision — R2-W9 `loadExplain` AbortController asymmetry:**
+>
+> The prescription above implements **option (a)**: `loadExplain` mirrors `loadSnapshot`'s AbortController pattern via a parallel `explainAbortControllers` field. `clearSession` aborts both controllers. This is the recommended approach for consistency.
+>
+> **Option (b) — document the asymmetry as deliberate:** If the team accepts stale-cache risk for explain fetches, skip `explainAbortControllers` entirely and add a comment in `loadExplain`:
+> ```ts
+> // No AbortController: explain fetches are lazy and user-triggered.
+> // Stale-cache collision (navigation mid-fetch writes to old sessionId's
+> // explainsBySession) is rare; the narrative is explanatory, not load-bearing.
+> // Operator decision: accept the asymmetry; revisit if stale cache becomes
+> // observable in production (composition_version guard prevents data corruption).
+> ```
+> Option (b) tradeoffs: lower implementation complexity; `clearSession` stays simpler; but navigation during an in-flight explain leaves `isLoadingExplain: true` (mirroring the R2-W2 symptom) and writes a stale narrative to the old session's cache. If the cached `composition_version` matches on re-entry, the stale narrative is served without a reload. Option (a) eliminates both failure modes at the cost of a second controller dict.
 
 - [ ] **Step 4: Run tests — expect PASS**
 
@@ -810,7 +915,7 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
 cd src/elspeth/web/frontend && npx vitest run src/stores/auditReadinessStore.test.ts
 ```
 
-Expected: 8/8 pass (includes the concurrent-fetch monotonic-guard test added in this revision).
+Expected: 9/9 pass (includes the monotonic-write-guard test and the true-concurrency abort-cancellation test added in this revision — these cover distinct contracts and must both be present).
 
 - [ ] **Step 5: Commit**
 
@@ -836,6 +941,54 @@ The panel:
 - Clicking any row opens `ReadinessRowDetail` (Task 5).
 - Includes an "Explain →" button that opens `ExplainDialog` (Task 6).
 
+> **Fixture extraction (R2-W6):** `makeComposition()` must NOT be defined locally in this test file. Create the canonical fixture module first:
+>
+> **`frontend/src/test-utils/composerFixtures.ts`** (new file):
+> ```typescript
+> import type { CompositionState } from "../types/api";
+>
+> /**
+>  * Canonical test fixture for CompositionState.
+>  *
+>  * NodeSpec arity (frontend `types/index.ts`):
+>  *   Required (7): id, node_type, plugin, input, on_success, on_error, options
+>  *   Optional (6): condition, routes, fork_to, branches, policy, merge
+>  * This is the frontend contract the fixture mirrors. The Python backend has 13
+>  * fields but the TypeScript interface marks 6 of them as optional — no `as never`
+>  * cast is needed once all required fields are supplied.
+>  *
+>  * Import from here in all test files that need CompositionState scaffolding.
+>  * Do NOT duplicate this fixture in individual test files.
+>  */
+> export function makeComposition(
+>   version: number,
+>   overrides?: Partial<CompositionState>,
+> ): CompositionState {
+>   return {
+>     id: "comp-1",
+>     version,
+>     source: { kind: "csv_file", config: { path: "x.csv" } } as never,
+>     nodes: [
+>       {
+>         id: "select_columns",
+>         node_type: "transform",
+>         plugin: "select_columns",
+>         input: "source",
+>         on_success: null,
+>         on_error: null,
+>         options: {},
+>       },
+>     ],
+>     edges: [],
+>     outputs: [],
+>     metadata: { name: "demo", description: "" },
+>     ...overrides,
+>   };
+> }
+> ```
+>
+> `AuditReadinessPanel.test.tsx` imports it via `import { makeComposition } from "@/test-utils/composerFixtures"` (path alias `@/` → `src/`). 14c's `ReadinessRowDetail.test.tsx` imports from the same module — do not duplicate. See 14c plan for the matching import note.
+
 - [ ] **Step 1: Confirm the mount strategy**
 
 The panel is rendered from `InspectorPanel.tsx` (Task 7). For this task, render it directly with mocked stores; the mount wiring is Task 7's concern.
@@ -852,43 +1005,12 @@ import { AuditReadinessPanel } from "./AuditReadinessPanel";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
 import * as api from "../../api/auditReadiness";
-import type { AuditReadinessSnapshot, CompositionState } from "../../types/api";
+import type { AuditReadinessSnapshot } from "../../types/api";
+import { makeComposition } from "@/test-utils/composerFixtures";
 
 vi.mock("../../api/auditReadiness");
 
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
-
-/**
- * Constructs a minimal CompositionState for test scaffolding.
- *
- * NodeSpec arity (frontend `types/index.ts`):
- *   Required (7): id, node_type, plugin, input, on_success, on_error, options
- *   Optional (6): condition, routes, fork_to, branches, policy, merge
- * This is the frontend contract the fixture mirrors. The Python backend has 13
- * fields but the TypeScript interface marks 6 of them as optional — no `as never`
- * cast is needed once all required fields are supplied.
- */
-function makeComposition(version: number): CompositionState {
-  return {
-    id: "comp-1",
-    version,
-    source: { kind: "csv_file", config: { path: "x.csv" } } as never,
-    nodes: [
-      {
-        id: "select_columns",
-        node_type: "transform",
-        plugin: "select_columns",
-        input: "source",
-        on_success: null,
-        on_error: null,
-        options: {},
-      },
-    ],
-    edges: [],
-    outputs: [],
-    metadata: { name: "demo", description: "" },
-  };
-}
 
 function allGreenSnapshot(version: number): AuditReadinessSnapshot {
   return {
@@ -1438,7 +1560,7 @@ git commit -m "feat(web/frontend): add AuditReadinessPanel + placeholder subcomp
 |---|---|
 | Backend wire-shape drift breaks the renderer | The discriminated-union `never` arm fails the build; Phase 2A's `_StrictResponse` fails at server-side construction. No silent path. |
 | 14c lands before 14b and the placeholders are overwritten mid-flight | Per the sequencing in §"Sequencing and dependencies", 14b lands first. If the working branch is shared between 14b and 14c, the 14c PR's diff against 14b's placeholders is reviewable; the placeholder comments explicitly say "DO NOT extend". |
-| Concurrent `loadSnapshot` calls resolve out of order (stale-fetch race) | Addressed in this revision: `loadSnapshot` stores the in-flight `AbortController` in store state and aborts the previous request before starting a new one on `composition_version` change or `clearSession`. The resolution arm applies a monotonic write guard — if the arriving response's `composition_version` is lower than the version already cached, the response is silently discarded. A concurrent-fetch test (fast-v2 / slow-v1 interleaved resolve order) is included in the store test suite. |
+| Concurrent `loadSnapshot` calls resolve out of order (stale-fetch race) | Addressed in this revision: `loadSnapshot` stores the in-flight `AbortController` in store state and aborts the previous request before starting a new one on `composition_version` change or `clearSession`. The resolution arm applies a monotonic write guard — if the arriving response's `composition_version` is lower than the version already cached, the response is silently discarded. Two tests cover distinct contracts: (1) a sequential monotonic-write-guard test (fast-v2 completes before slow-v1 resolves) and (2) a true-concurrency abort-cancellation test (both fetches in-flight simultaneously; asserts `AbortController.signal.aborted` and `isLoading` reset). |
 | Per-row "Jump to component" is missing in 14b | 14b's panel still emits the row click; 14b's placeholder `ReadinessRowDetail` lacks the jump button. 14c restores it. The user-visible UX gap exists for the duration of the 14b→14c gap; the design spec's persona table tolerates a partial first cut because Linda's primary trust mechanism (visibility of the row status) is already present. |
 | Telemetry can't be added later without rewriting the panel | The row-click handlers are isolated functions in `AuditReadinessPanel`. Phase 8 telemetry adds one line per handler. |
 
@@ -1459,6 +1581,19 @@ Fixes applied to 14b in this revision:
 3. Phantom api/preferences.ts citation replaced with verified client.ts:403–424 location (review reality blocker)
 4. makeComposition test fixture covers full NodeSpec arity (review B1, frontend mirror)
 5. tsc + lint added to every Task commit checklist (quality REC)
+
+### 2026-05-16 — Round-2 panel verdict CHANGES_REQUESTED → fixes applied
+
+Reviewers: reality, architecture, quality, systems (full report:
+`14-phase-2-audit-readiness-panel.review-r2.json`). All 11 prior blockers confirmed
+resolved; fixes below address the round-2 warnings that affect this file.
+
+Fixes applied to 14b in this revision:
+1. R2-W2 — AbortError catch arm now resets `isLoading: false` before returning (was: bare `return`, leaving panel stuck at "Checking audit readiness…" after session navigation during in-flight fetch). `clearSession` set() payload updated with `isLoading: false` as belt-and-suspenders.
+2. R2-W3 — Existing sequential test re-labelled "monotonic write guard — sequential ordering" (correctly exercises the version monotonicity guard). New true-concurrency abort-cancellation test added: starts both fetches without awaiting the first, delays mock fetch, asserts `AbortController.signal.aborted === true` after the second starts, and asserts `isLoading` resets to false cleanly. Two distinct contracts, two distinct tests.
+3. R2-W6 — `makeComposition()` fixture extraction prescribed: canonical location `frontend/src/test-utils/composerFixtures.ts`; `AuditReadinessPanel.test.tsx` imports from there. 14c will import from the same module.
+4. R2-W9 — `loadExplain` AbortController asymmetry addressed: option (a) prescribed (mirror the abort-controller pattern via a parallel `explainAbortControllers` field; `clearSession` aborts both controllers). Option (b) documented as the operator/architect alternative.
+5. carry-W2 — Prose claim "same pattern used by `executionStore`" corrected to "similar shape to `executionStore`'s `reset()` pattern": `executionStore` uses a module-internal `initialExecutionState` const (not an exported `getInitialState`).
 
 ## Memory references
 

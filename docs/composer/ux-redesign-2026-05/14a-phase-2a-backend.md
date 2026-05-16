@@ -392,19 +392,84 @@ commit. Do not defer any call site to a later task.
 
 - [ ] **Step 3: Commit**
 
+The No-Legacy grep audit in Step 2b will surface call sites beyond the
+models and schemas files. The full authoritative list of files requiring
+co-update is:
+
+```
+# Sources
+src/elspeth/web/audit_readiness/__init__.py
+src/elspeth/web/audit_readiness/models.py
+src/elspeth/web/config.py
+src/elspeth/web/execution/schemas.py
+src/elspeth/web/execution/validation.py        # identity_node_advisory site — pass affected_nodes=(identity_finding.node_id,)
+src/elspeth/web/validation.py                  # identity_node_advisory site — load-bearing for provenance row
+src/elspeth/web/execution/service.py           # ~lines 657, 664
+src/elspeth/web/composer/service.py            # ~lines 1071, 1073-1079
+
+# Tests
+tests/unit/web/audit_readiness/__init__.py
+tests/unit/web/audit_readiness/test_models.py
+tests/unit/web/execution/test_schemas.py       # 9+ sites
+tests/unit/web/execution/test_routes.py        # 2 sites
+tests/unit/web/composer/test_service.py        # 5+ sites
+tests/unit/web/composer/test_tools.py          # ValidationCheck at line 7246, ValidationError at line 7253
+tests/unit/web/sessions/test_routes.py         # 4 sites
+tests/unit/web/composer/test_route_integration.py  # 1 site
+```
+
+> **Attention bias warning:** reviewing `validation.py` will make
+> `composer/service.py:1073` and `execution/service.py:664` easy to
+> overlook — both are in the list above and must be updated in this commit.
+
+Run mypy **before** `git add` — it is the only mechanical discriminant for
+missing no-default required fields that tests may not exercise:
+
 ```bash
-git add src/elspeth/web/audit_readiness/__init__.py \
-        src/elspeth/web/audit_readiness/models.py \
-        src/elspeth/web/config.py \
-        src/elspeth/web/execution/schemas.py \
-        src/elspeth/web/execution/validation.py \
-        tests/unit/web/audit_readiness/__init__.py \
-        tests/unit/web/audit_readiness/test_models.py
-mypy src/elspeth/web/audit_readiness/ src/elspeth/web/execution/schemas.py src/elspeth/web/config.py
+mypy src/elspeth/web/audit_readiness/ \
+     src/elspeth/web/execution/ \
+     src/elspeth/web/composer/ \
+     src/elspeth/web/config.py \
+     src/elspeth/web/validation.py \
+     tests/unit/web/audit_readiness/ \
+     tests/unit/web/execution/ \
+     tests/unit/web/composer/ \
+     tests/unit/web/sessions/
 ruff check src/elspeth/web/audit_readiness/ src/elspeth/web/execution/schemas.py src/elspeth/web/config.py
 ruff format --check src/elspeth/web/audit_readiness/ src/elspeth/web/execution/schemas.py src/elspeth/web/config.py
+```
+
+Stage files using the actual edit footprint after the grep-and-update pass:
+
+```bash
+git add $(git diff --name-only)
+```
+
+Verify the staged set matches the authoritative list above before committing.
+
+```bash
 git commit -m "feat(web): add audit-readiness response models + schema co-update (Phase 2A.1)"
 ```
+
+### Schema rollout coordination (R2-W5)
+
+`error_code` and `affected_nodes` are added without Python defaults. Every
+call site must be updated in the same commit (CLAUDE.md No-Legacy).
+This creates a deployment ordering constraint:
+
+- **Backend (Phase 2A) MUST ship before frontend (Phase 2B) widens types**,
+  OR both phases co-ship in a single deploy. Do not ship Phase 2B ahead of
+  Phase 2A.
+- **Operator must delete the sessions DB on staging** before deploying Phase
+  2A. Project DB migration policy is: no Alembic, no migration scripts —
+  the operator deletes the old DB. See project memory
+  `project_db_migration_policy.md`.
+- **Why a wipe is required:** `guided/audit.py:249` persists
+  `dict(validation_result)`. Old persisted records lack `error_code` and
+  `affected_nodes` fields; reading them back produces `KeyError` or
+  deserialization failures. The wipe removes all stale records.
+- **Cross-reference:** see `14-phase-2-audit-readiness-panel.md` (umbrella
+  plan) for the unified rollout note shared across phases.
 
 ## Task 2: Plugin-trust classifier (closed allowlists)
 
@@ -580,6 +645,12 @@ Two-tier rationale:
     Document any future additions to this tier with an explicit comment.
 
 Layer: L3 (application).
+
+Phase 7 deletion commitment (required verbatim — do not paraphrase):
+When Phase 7 adds `data_trust_tier: ClassVar` to plugin base classes,
+delete this module entirely and replace `classify_plugin()` callers with
+direct attribute lookup. CLAUDE.md No-Legacy requires same-commit
+replacement.
 """
 
 from __future__ import annotations
@@ -645,6 +716,8 @@ def classify_plugin(kind: PluginKind, name: str) -> PluginTrust:
 ```
 
 Run tests → PASS. If the subset-of-catalog tests fail, drop the offending entries from the allowlists and re-run the Step 2 greps to find the correct names.
+
+> **R2-W8 — Phase 7 deletion commitment:** The "Phase 7 deletion commitment" paragraph in the docstring above is **required verbatim — do not paraphrase**. A filigree dependency must link Phase 7A backend → this deletion before Phase 7 implementation begins; file it when Phase 7 is scoped.
 
 - [ ] **Step 4: Commit**
 
@@ -1194,27 +1267,33 @@ Run tests → PASS.
 
 - [ ] **Step 2b: Integration test — validate_pipeline path + secret resolver (Fix C1, C4)**
 
-Add these integration tests to `tests/integration/web/audit_readiness/test_readiness_service_integration.py`
-(or colocate in `tests/integration/web/test_audit_readiness_routes.py` if the
-route integration tests already cover a session with state):
+Add these integration tests to `tests/integration/web/test_audit_readiness_routes.py`
+(same file as Task 5 — the route integration tests cover sessions with state,
+so these guard tests colocate naturally there rather than in a separate file).
+
+**Prerequisite:** Task 5 Step 2.0 scaffolds the integration fixtures
+(`audit_readiness_test_client`, `audit_readiness_client_with_state`, etc.) in
+`tests/integration/web/conftest.py`. If running tasks in order, complete Task 5
+Step 2.0 before writing these tests. The existing `composer_test_client` fixture
+in that conftest is NOT sufficient — it sets `execution_service=None` and
+`scoped_secret_resolver=None`, both of which are required by the audit-readiness
+routes. Do not use `composer_test_client` directly for these tests.
 
 ```python
-"""Integration tests for ReadinessService using the real validate_pipeline path."""
-
-import pytest
+"""C1/C4 guard tests — colocated in test_audit_readiness_routes.py."""
 
 
-def test_provenance_row_component_ids_populated_via_real_validate_pipeline(client_with_session):
+def test_provenance_row_component_ids_populated_via_real_validate_pipeline(
+    audit_readiness_client_with_state,
+):
     """C1 guard: affected_nodes wired in validation.py must propagate to component_ids.
 
     If validation.py:1248 ValidationCheck(name='identity_node_advisory', ...)
     does not pass affected_nodes, this assertion will fail even if the unit
     test passes (because the unit test supplies affected_nodes manually).
     """
-    client, session_id = client_with_session
-    # Set up a composition with an identity-shaped passthrough (triggers the advisory).
-    # This requires the test to create a session with a passthrough node between
-    # source and sink — adapt to the session-setup fixture API.
+    client, session_id = audit_readiness_client_with_state
+    # The session fixture must include a passthrough node (triggers the advisory).
     response = client.get(f"/api/sessions/{session_id}/audit-readiness")
     assert response.status_code == 200
     rows = {r["id"]: r for r in response.json()["rows"]}
@@ -1226,13 +1305,16 @@ def test_provenance_row_component_ids_populated_via_real_validate_pipeline(clien
         )
 
 
-def test_secrets_row_uses_scoped_resolver(client_with_session_with_secret_ref):
+def test_secrets_row_uses_scoped_resolver(audit_readiness_client_with_state):
     """C4 guard: ReadinessService must call list_refs via scoped_secret_resolver.
 
     If wired to the raw secret_service (which requires auth_provider_type),
     this will TypeError at runtime rather than in unit tests.
     """
-    client, session_id = client_with_session_with_secret_ref
+    client, session_id = audit_readiness_client_with_state
+    # A session whose composition references a secret ref exercises the resolver.
+    # Wire the secret ref into the session fixture's CompositionState, or add
+    # a separate fixture variant with a secret ref pre-populated.
     response = client.get(f"/api/sessions/{session_id}/audit-readiness")
     assert response.status_code == 200
     rows = {r["id"]: r for r in response.json()["rows"]}
@@ -1240,12 +1322,6 @@ def test_secrets_row_uses_scoped_resolver(client_with_session_with_secret_ref):
     # Either is acceptable; what must NOT happen is a 500 from a TypeError.
     assert rows["secrets"]["status"] in ("ok", "error", "not_applicable")
 ```
-
-Add `client_with_session_with_secret_ref` to the integration `conftest.py`. It
-creates a session whose composition references at least one secret ref, and
-the test user's secret inventory contains a matching entry. Model on the
-existing `client_with_session` fixture — extend it by registering a secret ref
-via the test secret store before returning.
 
 - [ ] **Step 3: Commit**
 
@@ -1492,19 +1568,53 @@ The router wiring lives in `src/elspeth/web/app.py` around line 386 (`catalog_ro
 - `app.state.secret_service` — confirm via `grep -n "secret_service\b" src/elspeth/web/app.py`. If the attribute is named differently (e.g., `secret_resolver`), use the actual name; do not rename.
 - `app.state.settings`.
 
+- [ ] **Step 2.0 (prerequisite): Verify or scaffold integration fixtures**
+
+Before writing the route tests, grep for the actual fixtures in the integration
+conftest:
+
+```bash
+grep -rn "^def " tests/integration/web/conftest.py
+```
+
+The integration conftest (`tests/integration/web/conftest.py`) currently
+provides `composer_test_client` (a minimal app with `session_service` wired;
+`execution_service`, `composer_service`, and `scoped_secret_resolver` are all
+set to `None`). The audit-readiness routes need all four on `app.state`.
+
+If the following fixtures do **not** exist in the integration conftest, scaffold
+them there before writing the route tests. **Do not adapt-rename phantom names
+— scaffold properly.** The model is `tests/integration/web/conftest.py`'s
+existing `composer_test_client` fixture.
+
+Fixtures needed and their contracts:
+
+| Fixture | Contract |
+|---------|----------|
+| `audit_readiness_test_client` | Full app with `execution_service`, `session_service`, `scoped_secret_resolver`, `settings` on `app.state`; auth bypassed to a test `UserIdentity`. |
+| `audit_readiness_client_with_state` | `audit_readiness_test_client` + a session with a valid `CompositionState` persisted for the test user. Returns `(client, session_id)`. |
+| `audit_readiness_client_without_state` | `audit_readiness_test_client` + a session with no composition state. Returns `(client, session_id)`. |
+| `audit_readiness_client_anonymous` | `audit_readiness_test_client` with auth override raising `HTTPException(401)`. |
+| `audit_readiness_other_user_session_id` | A session_id owned by a different user than the test `UserIdentity`. Used for IDOR tests. |
+
+For IDOR test shape, model on `tests/integration/web/test_preferences_routes.py`
+which uses a local `client_anonymous` fixture.
+
 - [ ] **Step 2: Write the failing route test**
 
-Read `tests/integration/web/conftest.py` and the existing `test_execution_routes.py` first to pick up the auth-bypass / session-creation fixtures. Adapt fixture names below.
+Read `tests/integration/web/conftest.py` first to confirm which fixtures are
+available, then adapt the stubs below to the real fixture names from Step 2.0.
 
 ```python
 """Integration tests for /api/sessions/{sid}/audit-readiness routes."""
 
-# Fixture names below match conventions used by test_execution_routes.py.
-# Adapt to whatever conftest.py actually exposes.
+# Adapt fixture names to whatever Step 2.0 scaffolded in
+# tests/integration/web/conftest.py.  The names below use the recommended
+# scaffold names from Task 5 Step 2.0.
 
 
-def test_snapshot_returns_six_canonical_rows(client_with_session):
-    client, session_id = client_with_session
+def test_snapshot_returns_six_canonical_rows(audit_readiness_client_with_state):
+    client, session_id = audit_readiness_client_with_state
     response = client.get(f"/api/sessions/{session_id}/audit-readiness")
     assert response.status_code == 200
     body = response.json()
@@ -1516,29 +1626,30 @@ def test_snapshot_returns_six_canonical_rows(client_with_session):
     }
 
 
-def test_snapshot_404_when_no_state(client_with_session_without_state):
-    client, session_id = client_with_session_without_state
+def test_snapshot_404_when_no_state(audit_readiness_client_without_state):
+    client, session_id = audit_readiness_client_without_state
     response = client.get(f"/api/sessions/{session_id}/audit-readiness")
     assert response.status_code == 404
 
 
-def test_snapshot_404_on_cross_user_access(client_with_user, other_users_session_id):
-    client, _user = client_with_user
-    response = client.get(
-        f"/api/sessions/{other_users_session_id}/audit-readiness"
+def test_snapshot_404_on_cross_user_access(audit_readiness_test_client, audit_readiness_other_user_session_id):
+    response = audit_readiness_test_client.get(
+        f"/api/sessions/{audit_readiness_other_user_session_id}/audit-readiness"
     )
     assert response.status_code == 404
 
 
-def test_snapshot_requires_auth(client_anonymous, any_session_id):
-    response = client_anonymous.get(
+def test_snapshot_requires_auth(audit_readiness_client_anonymous):
+    import uuid
+    any_session_id = uuid.uuid4()
+    response = audit_readiness_client_anonymous.get(
         f"/api/sessions/{any_session_id}/audit-readiness"
     )
     assert response.status_code == 401
 
 
-def test_explain_returns_narrative(client_with_session):
-    client, session_id = client_with_session
+def test_explain_returns_narrative(audit_readiness_client_with_state):
+    client, session_id = audit_readiness_client_with_state
     response = client.get(
         f"/api/sessions/{session_id}/audit-readiness/explain"
     )
@@ -1549,35 +1660,36 @@ def test_explain_returns_narrative(client_with_session):
     )
 
 
-def test_explain_404_when_no_state(client_with_session_without_state):
-    client, session_id = client_with_session_without_state
+def test_explain_404_when_no_state(audit_readiness_client_without_state):
+    client, session_id = audit_readiness_client_without_state
     response = client.get(
         f"/api/sessions/{session_id}/audit-readiness/explain"
     )
     assert response.status_code == 404
 
 
-def test_explain_requires_auth(client_anonymous, any_session_id):
-    response = client_anonymous.get(
+def test_explain_requires_auth(audit_readiness_client_anonymous):
+    import uuid
+    any_session_id = uuid.uuid4()
+    response = audit_readiness_client_anonymous.get(
         f"/api/sessions/{any_session_id}/audit-readiness/explain"
     )
     assert response.status_code == 401
 
 
-def test_snapshot_includes_no_store_cache_header(client_with_session):
-    client, session_id = client_with_session
+def test_snapshot_includes_no_store_cache_header(audit_readiness_client_with_state):
+    client, session_id = audit_readiness_client_with_state
     response = client.get(f"/api/sessions/{session_id}/audit-readiness")
     assert response.status_code == 200
     assert response.headers.get("cache-control") == "no-store"
 
 
-def test_rejects_malformed_session_id(client_with_user):
-    client, _user = client_with_user
-    response = client.get("/api/sessions/not-a-uuid/audit-readiness")
+def test_rejects_malformed_session_id(audit_readiness_test_client):
+    response = audit_readiness_test_client.get("/api/sessions/not-a-uuid/audit-readiness")
     assert response.status_code == 422
 ```
 
-If `client_with_session_without_state` isn't already a fixture, create one that creates a session and skips composition persistence. Model `other_users_session_id` on the IDOR test in `test_execution_routes.py`.
+Run → FAIL.
 
 Run → FAIL.
 

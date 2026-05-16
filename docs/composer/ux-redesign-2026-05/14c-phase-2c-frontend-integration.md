@@ -64,7 +64,7 @@ Same as 14b: reads only data the backend just produced (Tier 1). No new boundary
 - `src/elspeth/web/frontend/src/components/audit/ExplainDialog.test.tsx` — new file alongside the real implementation.
 - `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx` — mount `<AuditReadinessPanel />`; remove the standalone Validate button.
 - `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.test.tsx` — add panel-mount and button-removal assertions; update any tests that directly click the now-removed Validate button (switch them to invoke `handleValidate` directly, since the handler stays wired).
-- `src/elspeth/web/frontend/src/stores/subscriptions.handoff.test.ts` — new guard test (Task 8.5) that is `.skip`-marked until Phase 3A Task 8 lands.
+- `src/elspeth/web/frontend/src/stores/subscriptions.handoff.test.ts` — new guard test (Task 8.5) that fails red in CI until Phase 3A Task 8 lands the subscription wiring.
 
 ---
 
@@ -122,6 +122,19 @@ const ROW_NO_IDS: ReadinessRow = {
   component_ids: [],
 };
 
+// *** CANONICAL FIXTURE — do NOT redeclare locally ***
+// Import makeComposition from the shared fixture module:
+//
+//   import { makeComposition } from "@/test-utils/composerFixtures";
+//
+// Fixture extraction is prescribed in 14b — see 14b plan for the canonical
+// module definition (frontend/src/test-utils/composerFixtures.ts).  Both
+// 14b's AuditReadinessPanel.test.tsx and this file MUST import from the same
+// module to prevent drift when CompositionState changes.
+//
+// The inline declaration below is the reference shape for the fixture module;
+// it is shown here for context only.  In the actual test file, replace this
+// function with the import above.
 function makeComposition(): CompositionState {
   return {
     id: "comp-1",
@@ -778,9 +791,9 @@ In `InspectorPanel.tsx`, find the block:
 
 Delete the entire button block (including the comment). Keep the surrounding Catalog and Execute buttons untouched.
 
-**Do NOT delete `handleValidate`, `canValidate`, `isValidating`, `injectSystemMessage`, or `sendValidationFeedback`.** These remain live in `InspectorPanel.tsx`; their deletion is Phase 3A Task 8's responsibility, where it is atomic with the relocation into `subscriptions.ts`. See "Why this task is scope-limited" above and convergence C3.
+**Do NOT delete `handleValidate`, `injectSystemMessage`, or `sendValidationFeedback`.** These remain live in `InspectorPanel.tsx`; their deletion is Phase 3A Task 8's responsibility, where it is atomic with the relocation into `subscriptions.ts`. See "Why this task is scope-limited" above and convergence C3.
 
-If `canValidate` or `isValidating` become unused after the button is removed (because nothing else references them), leave them in place as dead code temporarily — Phase 3A's cleanup will remove them. Do **not** clean them up here; cleanup in a separate task creates the same two-step race condition that motivated the scope-shrink.
+`canValidate` and `isValidating` are local derived variables whose only consumer is the now-deleted button. If they have no other references after the deletion, delete them here (Step 5 below covers the tool-chain check). Unlike the three handlers above, `canValidate` and `isValidating` are not shared logic that Phase 3A relocates — they exist solely to populate the button's `disabled` and `aria-label` props. Deleting them is clean, not premature.
 
 - [ ] **Step 4: Run tests — expect PASS**
 
@@ -790,13 +803,37 @@ cd src/elspeth/web/frontend && npx vitest run src/components/inspector/Inspector
 
 Expected: all assertions pass, including the new negative tests.
 
-- [ ] **Step 5: Quick lint check**
+- [ ] **Step 5: Toolchain check (tsc + eslint)**
+
+First, check whether the project has `noUnusedLocals` enabled:
 
 ```bash
-cd src/elspeth/web/frontend && npx eslint src/components/inspector/InspectorPanel.tsx
+grep -E "noUnusedLocals|noUnusedParameters" \
+  src/elspeth/web/frontend/tsconfig.json \
+  src/elspeth/web/frontend/tsconfig.app.json \
+  src/elspeth/web/frontend/tsconfig.*.json 2>/dev/null
 ```
 
-If `canValidate` or `isValidating` are now unused (because the button was their only consumer), lint will warn. Suppress those specific warnings with a `// eslint-disable-next-line @typescript-eslint/no-unused-vars` comment paired with a TODO comment: `// TODO Phase 3A Task 8 — remove with handleValidate when relocation lands`. This is the correct narrow exception: the variables are intentionally retained to avoid the regression window documented in the scope note above. Do **not** use `eslint-disable` for any other warning.
+If `noUnusedLocals: true` (or `noUnusedParameters: true`) is present anywhere in the tsconfig chain, `tsc` will fail on `canValidate` and `isValidating` regardless of eslint suppression. The eslint gate and the tsc gate are separate; eslint-disable does nothing for tsc. (As of 2026-05-16 verification, ALL four tsconfig files in this project enable both flags — `tsconfig.json`, `tsconfig.app.json`, `tsconfig.test.json`, and `tsconfig.e2e.json`.)
+
+**Regardless of the grep result, the primary recommendation below applies.** Deletion is correct whether or not `noUnusedLocals` is enabled, because the deleted variables have no remaining consumer once the standalone Validate button is removed. The grep is a discovery step (to explain *why* eslint-disable isn't sufficient), not a gate on whether to act.
+
+**Primary recommendation — delete `canValidate` and `isValidating` outright.** These are local memoized variables whose only consumer is the deleted button. They are not shared logic that Phase 3A relocates (unlike `handleValidate`/`injectSystemMessage`/`sendValidationFeedback`). Deletion is clean: remove their `const` declarations and any `useMemo`/`useCallback` wrapping. If other callers remain (check with `grep -n "canValidate\|isValidating" src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx`), those callers justify retention — pick option (b) or (c) below instead.
+
+If deletion is not straightforward (callers remain, or the variable is part of a shared hook), pick one alternative:
+
+- **(b) Underscore-prefix**: rename to `_canValidate` / `_isValidating` — TypeScript treats underscore-prefixed variables as intentionally unused and does not emit `noUnusedLocals` errors. Note this in a comment: `// _canValidate: retained for Phase 3A Task 8 wiring — delete after relocation.`
+- **(c) `@ts-expect-error`**: add `// @ts-expect-error: unused until Phase 3A Task 8 wires it — see filigree #<issue>` immediately above the declaration.
+
+**Phase 3A cleanup contract.** Whichever choice is made, Phase 3A Task 8 MUST either restore `canValidate`/`isValidating` to live use (if the subscription wiring needs them) OR delete them outright. Do not leave underscore-prefix or `@ts-expect-error` in place after Phase 3A lands.
+
+After resolving any unused-variable issues, run the full check:
+
+```bash
+cd src/elspeth/web/frontend && npx tsc --noEmit && npx eslint src/components/inspector/InspectorPanel.tsx
+```
+
+Both must pass before committing. Do **not** use `eslint-disable` for warnings unrelated to the intentional retention described above.
 
 - [ ] **Step 6: Commit**
 
@@ -814,12 +851,12 @@ where the two operations are atomic."
 
 ## Task 8.5: Phase 3A handoff guard test
 
-**Why this task exists.** Task 8 above retains `handleValidate`, `injectSystemMessage`, and `sendValidationFeedback` in `InspectorPanel.tsx`. Their deletion is deferred to Phase 3A Task 8 (`15a2-phase-3a-removals-part-2.md`), where the relocation into `subscriptions.ts` is atomic with their removal. Phase 2 merges before Phase 3A, so Phase 2 cannot rely on Phase 3A's work. This task plants a mechanical CI gate — a `.skip`-marked test that documents the handoff contract in code and fails if Phase 3A's PR omits the relocation (by requiring the PR author to unskip the test, at which point it must pass).
+**Why this task exists.** Task 8 above retains `handleValidate`, `injectSystemMessage`, and `sendValidationFeedback` in `InspectorPanel.tsx`. Their deletion is deferred to Phase 3A Task 8 (`15a2-phase-3a-removals-part-2.md`), where the relocation into `subscriptions.ts` is atomic with their removal. Phase 2 merges before Phase 3A, so Phase 2 cannot rely on Phase 3A's work. This task plants a mechanical CI gate — a failing test (not skipped) that asserts Phase 3A's subscription wiring is present. Because Phase 3A's wiring does not exist yet, the test fails red in CI today. Phase 3A cannot merge while CI is red; the Phase 3A PR must make this test pass (green) before merging, which happens automatically when the relocation is correct.
 
 **Files:**
 - Create: `src/elspeth/web/frontend/src/stores/subscriptions.handoff.test.ts`
 
-> **Scope note (convergence C3).** The guard test is co-located with `subscriptions.ts` because that is the canonical relocation target. When Phase 3A Task 8 lands the relocation, the PR author unskips this test; a passing green build is the merge gate for the relocation. Do not move this test file without updating the TODO comment and Phase 3A Task 8's Step 4 commit message.
+> **Scope note (convergence C3).** The guard test is co-located with `subscriptions.ts` because that is the canonical relocation target. The test fails red today (Phase 3A's subscription wiring is absent) and turns green when Phase 3A Task 8 lands the relocation — that green build is the merge gate. Do not skip, xfail, or move this test file without updating the TODO comment and Phase 3A Task 8's Step 4 commit message.
 
 - [ ] **Step 1: Create the guard test file**
 
@@ -845,23 +882,25 @@ where the two operations are atomic."
  *
  * GATE CONTRACT
  * -------------
- * When Phase 3A Task 8 lands the relocation into subscriptions.ts, the
- * PR author MUST unskip this test (remove the `.skip`) and verify that
- * the full test passes on green CI before merging.  The unskip is the
- * merge gate for the relocation: a test that imports from subscriptions.ts
- * and asserts injectSystemMessage fires on validation failure, driven
- * through the subscription path.
+ * This test is NOT skipped.  It fails red today because Phase 3A Task 8's
+ * relocation of injectSystemMessage/sendValidationFeedback into
+ * subscriptions.ts has not yet landed.  When Phase 3A Task 8 lands the
+ * relocation, this test turns green — that green build is the merge gate
+ * for the relocation.  CI remains red until then; that is the mechanical
+ * enforcement mechanism.
  *
- * TODO Phase 3A Task 8 — when the relocation into subscriptions.ts lands,
- * unskip this test.  It should pass immediately if the relocation is correct.
+ * Do not skip, xfail, or remove this test in any intermediate PR.
+ *
+ * TODO Phase 3A Task 8 — verify this test passes (green) before merging
+ * the Phase 3A PR.  It should pass immediately if the subscription wiring
+ * is correct.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useSessionStore } from "./sessionStore";
 import { useExecutionStore } from "./executionStore";
 
-// TODO Phase 3A Task 8 — unskip this test when the relocation lands.
-describe.skip("subscriptions.ts — Phase 3A handoff: injectSystemMessage fires on validation failure", () => {
+describe("subscriptions.ts — Phase 3A handoff: injectSystemMessage fires on validation failure", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -931,13 +970,15 @@ describe.skip("subscriptions.ts — Phase 3A handoff: injectSystemMessage fires 
 });
 ```
 
-- [ ] **Step 2: Run the guard test — verify it is SKIPPED (not failed)**
+- [ ] **Step 2: Run the guard test — verify it FAILS RED (not skipped)**
 
 ```bash
 cd src/elspeth/web/frontend && npx vitest run src/stores/subscriptions.handoff.test.ts
 ```
 
-Expected output: `1 skipped` — the test is registered and skipped correctly; it does NOT fail red in this state. If the test errors (not skips), check the import paths and fix them before committing.
+Expected output: `1 FAILED` — this is the intended state. The test fails red today because Phase 3A's subscription wiring (`injectSystemMessage`/`sendValidationFeedback` in `subscriptions.ts`) is not yet present. The test will turn green when Phase 3A Task 8 lands that wiring.
+
+> **Operator note.** CI will be RED on this test until Phase 3A Task 8 lands. This is by design — it is the failing assertion that prevents Phase 3A from merging without re-wiring. Do not skip, xfail, or remove this test in any intermediate PR. If the test errors on import rather than failing on the assertion, check that `./subscriptions` resolves and that `initStoreSubscriptions` is exported; fix the import before committing.
 
 - [ ] **Step 3: Commit the guard test**
 
@@ -945,10 +986,11 @@ Expected output: `1 skipped` — the test is registered and skipped correctly; i
 git add src/elspeth/web/frontend/src/stores/subscriptions.handoff.test.ts
 git commit -m "test(web/frontend): add Phase 3A handoff guard test for subscriptions.ts (Phase 2C.8.5)
 
-Skipped test that documents the Phase 3A Task 8 handoff contract:
-when injectSystemMessage/sendValidationFeedback are relocated from
-InspectorPanel.tsx into subscriptions.ts, the Phase 3A PR author
-unskips this test as the merge gate.
+Failing test (not skipped) that enforces the Phase 3A Task 8 handoff
+contract: the test fails red today because Phase 3A's subscription
+wiring (injectSystemMessage/sendValidationFeedback in subscriptions.ts)
+is not yet present; it turns green when Phase 3A Task 8 lands the
+relocation. CI will remain red on this test until Phase 3A merges.
 
 Convergence finding C3 — 14-phase-2-audit-readiness-panel.review.json."
 ```
@@ -990,7 +1032,15 @@ sudo systemctl restart elspeth-web.service
 
 1. Look at the inspector header. There must be **no** Validate button — only Catalog and Execute.
 2. Verify Execute is disabled until the panel's Validation row shows `✓`.
-3. Verify the existing keyboard shortcut for Validate (if any — `grep -n "Validate" src/elspeth/web/frontend/src/components/common/ShortcutsHelp.tsx` to confirm) either still works (re-routing through the panel's auto-fetch) or is documented as removed. If documented as removed, file the spec amendment as a comment on the umbrella PR.
+3. Verify the existing keyboard shortcut for Validate (if any):
+   ```bash
+   grep -n "Validate" src/elspeth/web/frontend/src/components/common/ShortcutsHelp.tsx
+   ```
+   **If the grep returns NON-empty:** the shortcut still invokes `handleValidate`. The original plan stands — verify the shortcut still works (re-routing through the panel's auto-fetch) or is documented as removed. If removed, file the spec amendment as a comment on the umbrella PR.
+
+   **If the grep returns EMPTY:** `handleValidate`, `injectSystemMessage`, and `sendValidationFeedback` have no UI trigger. Do NOT ship Phase 2C in this state — the handlers are operationally orphaned, which is worse than the regression C3 was avoiding because they become hidden code-paths with no exercise surface. Before merging Phase 2C, pick one of:
+   - **(a)** Rewire `handleValidate` to the panel's Validation row trigger (e.g. make clicking the Validation row call `handleValidate` in addition to opening the detail drawer). This preserves the user-visible affordance via a different entry point.
+   - **(b)** Pull Phase 3A Task 8 into this PR (closes the gap permanently in one merge).
 
 - [ ] **Step 5: Smoke — error path**
 
@@ -1019,7 +1069,7 @@ If all five smoke steps pass, mark Phase 2 complete and merge the umbrella PR. I
 | Risk | Mitigation |
 |---|---|
 | Panel auto-fetch races a still-mutating composition | Auto-fetch is keyed on `composition_version` (integer, monotonic). The store short-circuits when the version matches; a mid-mutation render reuses the cached value, and the next render after the version advances triggers a fresh fetch. |
-| Phase 3A Task 8 deletes `handleValidate`/`injectSystemMessage`/`sendValidationFeedback` from the inspector in a different PR; that deletion lands atomically with the relocation into `subscriptions.ts` | Task 8.5's `.skip` guard test fails red if Phase 3A's PR omits the relocation. The Phase 3A PR author must unskip the guard test and verify it passes before merging. |
+| Phase 3A Task 8 deletes `handleValidate`/`injectSystemMessage`/`sendValidationFeedback` from the inspector in a different PR; that deletion lands atomically with the relocation into `subscriptions.ts` | Task 8.5's guard test fails red in CI today (because Phase 3A's subscription wiring is not yet present) and turns green when Phase 3A Task 8 lands the relocation. Phase 3A cannot merge while the test is red — that is the mechanical gate. |
 | Phase 3 changes the inspector layout and the panel breaks | The panel component is layout-agnostic. Phase 3 only changes the mount point. Phase 2's tests assert the panel's behaviour, not its DOM order; Phase 3's tests re-assert ordering at the new mount site. |
 | Per-row "Jump to component" fails when `component_ids` references a source or sink (not a node) | Step 3 of Task 5 renders unresolvable ids as plain text rather than a non-functional button. The user can grep the YAML. Phase 3's side-rail reshape (if it surfaces sources/sinks as selectable) is the place to make those clickable. |
 | Backend wire-shape drift breaks the renderer | The discriminated-union `never` arm fails the build; Phase 2A's `_StrictResponse` fails at server-side construction. No silent path. |
@@ -1037,7 +1087,7 @@ Reviewers: reality, architecture, quality, systems (full report:
 
 Fixes applied to 14c in this revision:
 1. Task 8 scope-shrink — remove only the standalone Validate button UI; defer handleValidate/injectSystemMessage/sendValidationFeedback deletion to Phase 3A Task 8 where the relocation into subscriptions.ts is atomic (convergence C3)
-2. Task 8.5 added — Phase 3A handoff guard test that fails red until the relocation lands (mechanical gate replacing prose-only constraint)
+2. Task 8.5 added — Phase 3A handoff guard test (no `.skip`) that fails red in CI today because Phase 3A's subscription wiring is absent; turns green when Phase 3A Task 8 lands (mechanical gate replacing prose-only constraint)
 
 Strategic adjudication: scope-shrink (preferred path per review C3) over pulling Phase 3A Task 4+8 into the Phase 2 umbrella PR (would inflate umbrella scope and require coordination with the already-committed 15a plans).
 

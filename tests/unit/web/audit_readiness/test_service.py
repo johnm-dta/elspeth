@@ -334,6 +334,65 @@ def test_secrets_error_on_missing_refs():
     assert _row(snap, "secrets").status == "error"
 
 
+# The three values in service.py:262 _SECRET_ERROR_CODES are
+# "missing_secret_ref", "fabricated_secret", and "disallowed_secret_ref" — the
+# producer error codes from web/execution/validation.py:727/748/770. Only
+# "missing_secret_ref" had explicit coverage; without per-code tests, a
+# producer-side rename would silently demote the secrets row to ok/n_a and the
+# audit panel would no longer surface the failure. One test per code keeps
+# every membership entry load-bearing.
+
+
+def test_secrets_error_on_fabricated_secret():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Fabricated secret reference: openai_key",
+                suggestion="Define this secret before referencing it.",
+                error_code="fabricated_secret",
+            )
+        ],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    assert _row(snap, "secrets").status == "error"
+
+
+def test_secrets_error_on_disallowed_secret_ref():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Disallowed secret reference: ELSPETH_FINGERPRINT_KEY",
+                suggestion="Choose a non-reserved secret name.",
+                error_code="disallowed_secret_ref",
+            )
+        ],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    assert _row(snap, "secrets").status == "error"
+
+
 def test_snapshot_raises_when_no_state():
     exec_svc = MagicMock()
     exec_svc.validate = AsyncMock(return_value=_OK)

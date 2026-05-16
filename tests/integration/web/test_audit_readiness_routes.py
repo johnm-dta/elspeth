@@ -74,6 +74,25 @@ def test_snapshot_404_on_cross_user_access(
     assert response.status_code == 404
 
 
+def test_snapshot_404_on_auth_provider_type_mismatch(
+    audit_readiness_test_client: TestClient,
+    audit_readiness_mismatched_provider_session_id: UUID,
+) -> None:
+    """IDOR guard: ``auth_provider_type`` mismatch returns 404, NOT 403.
+
+    ``verify_session_ownership`` rejects when EITHER ``user_id`` OR
+    ``auth_provider_type`` differs (sessions/ownership.py:49). Only the
+    ``user_id`` branch had explicit coverage above; this test exercises
+    the second comparator so a future refactor cannot collapse it (e.g.
+    by dropping the right-hand-side of the ``or``) without a test
+    failure. The session is owned by the authenticated user but bound
+    to ``auth_provider_type="oidc"`` while ``settings.auth_provider``
+    is ``"local"``, isolating the second comparator.
+    """
+    response = audit_readiness_test_client.get(f"/api/sessions/{audit_readiness_mismatched_provider_session_id}/audit-readiness")
+    assert response.status_code == 404
+
+
 def test_snapshot_requires_auth(
     audit_readiness_client_anonymous: TestClient,
 ) -> None:

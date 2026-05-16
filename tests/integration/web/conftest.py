@@ -431,6 +431,70 @@ def audit_readiness_other_user_session_id(
     )
 
 
+def _seed_session_with_mismatched_auth_provider(
+    client: TestClient,
+    *,
+    user_id: str,
+    auth_provider_type: str,
+) -> UUID:
+    """Seed a session whose ``auth_provider_type`` differs from
+    ``settings.auth_provider``.
+
+    Used by the second-comparator IDOR test. The session is owned by
+    ``user_id`` (typically the authenticated user) so the user_id
+    branch of the ownership check passes — only the
+    ``auth_provider_type`` branch flips, isolating that comparator.
+    """
+    session_service = client.app.state.session_service
+    settings: WebSettings = client.app.state.settings
+    (settings.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
+
+    async def _seed() -> UUID:
+        record = await session_service.create_session(
+            user_id=user_id,
+            title="audit-readiness mismatched-provider fixture",
+            auth_provider_type=auth_provider_type,  # type: ignore[arg-type]
+        )
+        state = _passthrough_composition_state(settings.data_dir)
+        state_d = state.to_dict()
+        await session_service.save_composition_state(
+            record.id,
+            CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=True,
+                validation_errors=None,
+            ),
+            provenance="session_seed",
+        )
+        return record.id
+
+    return asyncio.run(_seed())
+
+
+@pytest.fixture
+def audit_readiness_mismatched_provider_session_id(
+    audit_readiness_test_client: TestClient,
+) -> UUID:
+    """A session owned by ``alice`` but bound to ``auth_provider_type="oidc"``.
+
+    The test client authenticates as ``alice`` with
+    ``settings.auth_provider == "local"`` (the default). The user_id
+    branch of ``verify_session_ownership`` passes; only the
+    ``auth_provider_type`` branch flips the access decision, isolating
+    that comparator for an IDOR-branch regression test.
+    """
+    return _seed_session_with_mismatched_auth_provider(
+        audit_readiness_test_client,
+        user_id=_TEST_AUTHED_USER_ID,
+        auth_provider_type="oidc",
+    )
+
+
 @pytest.fixture
 def inject_commit_OperationalError() -> object:
     """Integration-scope one-shot SQLAlchemy COMMIT failure hook."""

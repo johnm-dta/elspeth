@@ -12,31 +12,43 @@ describe("auditReadiness API client", () => {
   });
 
   it("fetchAuditReadiness GETs the right URL with auth header", async () => {
-    const body = {
-      session_id: SESSION_ID,
-      composition_version: 3,
-      rows: [
-        { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
-        { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
-        { id: "provenance", label: "Provenance", status: "warning", summary: "Identity passthrough detected", detail: "Identity passthrough — provenance gap on transform 'select_columns'.", component_ids: ["select_columns"] },
-        { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
-        { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms in this pipeline", detail: null, component_ids: [] },
-        { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secret references in this pipeline", detail: null, component_ids: [] },
-      ],
-    };
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
-    );
+    // Pre-seed a token so authHeaders() emits the Authorization header. Without
+    // this, getToken() returns null and the assertion below would fail because
+    // the test environment has no persistent localStorage state.
+    localStorage.setItem("auth_token", "test-token-xyz");
+    try {
+      const body = {
+        session_id: SESSION_ID,
+        composition_version: 3,
+        rows: [
+          { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
+          { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
+          { id: "provenance", label: "Provenance", status: "warning", summary: "Identity passthrough detected", detail: "Identity passthrough — provenance gap on transform 'select_columns'.", component_ids: ["select_columns"] },
+          { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
+          { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms in this pipeline", detail: null, component_ids: [] },
+          { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secret references in this pipeline", detail: null, component_ids: [] },
+        ],
+      };
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+      );
 
-    const snapshot = await fetchAuditReadiness(SESSION_ID);
-    expect(snapshot.composition_version).toBe(3);
-    expect(snapshot.rows).toHaveLength(6);
-    expect(snapshot.rows[2].status).toBe("warning");
+      const snapshot = await fetchAuditReadiness(SESSION_ID);
+      expect(snapshot.composition_version).toBe(3);
+      expect(snapshot.rows).toHaveLength(6);
+      expect(snapshot.rows[2].status).toBe("warning");
 
-    const mock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    const [url, init] = mock.mock.calls[0];
-    expect(url).toBe(`/api/sessions/${SESSION_ID}/audit-readiness`);
-    expect(init?.method).toBe("GET");
+      const mock = globalThis.fetch as ReturnType<typeof vi.fn>;
+      const [url, init] = mock.mock.calls[0];
+      expect(url).toBe(`/api/sessions/${SESSION_ID}/audit-readiness`);
+      expect(init?.method).toBe("GET");
+      // Verify the Authorization header propagated. authHeaders() puts the
+      // bearer token here when getToken() returns a non-null string.
+      const headers = init?.headers as Record<string, string> | undefined;
+      expect(headers?.Authorization).toBe("Bearer test-token-xyz");
+    } finally {
+      localStorage.removeItem("auth_token");
+    }
   });
 
   it("fetchAuditReadiness throws on non-2xx", async () => {

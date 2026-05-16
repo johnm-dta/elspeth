@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -140,7 +141,7 @@ def test_validation_row_ok_when_no_errors():
     svc = _make_service(_state(transforms=(("t", "passthrough"),)), _OK)
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -165,7 +166,7 @@ def test_validation_row_error_lists_component_ids():
     svc = _make_service(_state(), result)
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -184,7 +185,7 @@ def test_plugin_trust_row_ok_summary_when_boundary_plugins_present():
     )
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -209,7 +210,7 @@ def test_plugin_trust_row_ok_summary_when_no_boundary_plugins():
     )
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -229,7 +230,7 @@ def test_plugin_trust_row_error_on_unknown_plugin():
     )
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -256,7 +257,7 @@ def test_provenance_warning_on_identity_advisory():
     svc = _make_service(_state(transforms=(("pass", "passthrough"),)), result)
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -270,7 +271,7 @@ def test_retention_row_reports_system_value():
     svc = _make_service(_state(), _OK)
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -283,7 +284,7 @@ def test_llm_interpretations_always_not_applicable_in_phase_2a():
     svc = _make_service(_state(transforms=(("j", "llm"),)), _OK)
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -294,7 +295,7 @@ def test_secrets_not_applicable_when_no_refs():
     svc = _make_service(_state(), _OK, inventory=())
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -326,7 +327,7 @@ def test_secrets_error_on_missing_refs():
     svc = _make_service(_state(), result)
     snap = asyncio.run(
         svc.compute_snapshot(
-            session_id="11111111-1111-1111-1111-111111111111",
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
             user_id="alice",
         )
     )
@@ -350,7 +351,7 @@ def test_snapshot_raises_when_no_state():
     with pytest.raises(LookupError, match="no composition state"):
         asyncio.run(
             svc.compute_snapshot(
-                session_id="11111111-1111-1111-1111-111111111111",
+                session_id=UUID("11111111-1111-1111-1111-111111111111"),
                 user_id="alice",
             )
         )

@@ -1383,6 +1383,13 @@ class TestIDORCoverageDrift:
         }
     )
 
+    EXPECTED_AUDIT_READINESS_OWNERSHIP_ENDPOINTS: frozenset[str] = frozenset(
+        {
+            "snapshot",
+            "explain",
+        }
+    )
+
     @staticmethod
     def _assert_inventory(router_label: str, helper_name: str, expected: frozenset[str], found: set[str]) -> None:
         """Render the drift-diagnostic message and assert set-equality."""
@@ -1415,19 +1422,22 @@ class TestIDORCoverageDrift:
         )
 
     def test_execution_routes_session_ownership_call_sites(self) -> None:
-        """execution/routes.py — _verify_session_ownership inventory.
+        """execution/routes.py — verify_session_ownership inventory.
 
-        Independent from the sessions/ inventory because the two
-        helpers — while presently sharing a name — are file-local
-        symbols.  A symbol rename in one router must not silently
-        pass because the other router still uses the old name.
+        Phase 2A.5 extracted the session-ownership helper into
+        ``elspeth.web.sessions.ownership.verify_session_ownership`` so
+        ``execution/routes.py`` and ``audit_readiness/routes.py`` share a
+        single IDOR-safe implementation.  ``execution/routes.py`` no
+        longer hosts a file-local ``_verify_session_ownership`` symbol;
+        the drift guard now walks calls to the imported
+        ``verify_session_ownership`` name.
         """
         from elspeth.web.execution import routes
 
-        found = _collect_ownership_call_site_identities(routes, "_verify_session_ownership")
+        found = _collect_ownership_call_site_identities(routes, "verify_session_ownership")
         self._assert_inventory(
             "execution/routes.py",
-            "_verify_session_ownership",
+            "verify_session_ownership",
             self.EXPECTED_EXECUTION_SESSION_OWNERSHIP_ENDPOINTS,
             found,
         )
@@ -1470,6 +1480,29 @@ class TestIDORCoverageDrift:
             "blobs/routes.py",
             "_verify_session_and_get_blob_service",
             self.EXPECTED_BLOBS_OWNERSHIP_ENDPOINTS,
+            found,
+        )
+
+    def test_audit_readiness_routes_session_ownership_call_sites(self) -> None:
+        """audit_readiness/routes.py — verify_session_ownership inventory.
+
+        Both audit-readiness endpoints (snapshot + explain) are
+        session-scoped under ``/api/sessions/{session_id}/audit-readiness``
+        and depend on the shared ``verify_session_ownership`` helper
+        from ``web/sessions/ownership.py`` for IDOR safety.  Any new
+        endpoint added to this router must call the helper AND be
+        added to the inventory above.
+        """
+        # The router-factory closure is defined inside
+        # ``create_audit_readiness_router``; the AST walker needs the
+        # module source, which it loads from the module's __file__.
+        from elspeth.web.audit_readiness import routes
+
+        found = _collect_ownership_call_site_identities(routes, "verify_session_ownership")
+        self._assert_inventory(
+            "audit_readiness/routes.py",
+            "verify_session_ownership",
+            self.EXPECTED_AUDIT_READINESS_OWNERSHIP_ENDPOINTS,
             found,
         )
 

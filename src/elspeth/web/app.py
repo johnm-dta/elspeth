@@ -26,6 +26,8 @@ from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
+from elspeth.web.audit_readiness.routes import create_audit_readiness_router
+from elspeth.web.audit_readiness.service import ReadinessService
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
@@ -232,6 +234,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         secret_service=app.state.scoped_secret_resolver,
     )
     app.state.execution_service = execution_service
+
+    # ReadinessService aggregates validation / catalog / secrets / retention
+    # signals for the audit-readiness panel.  It depends on
+    # ``execution_service`` (for ``validate``) so it is constructed here in
+    # lifespan rather than in ``create_app``.  ``scoped_secret_resolver``
+    # (NOT ``secret_service``) is the correct collaborator — it has
+    # ``auth_provider_type`` baked in at construction (app.py:470), matching
+    # the precedent set by ExecutionService above.
+    app.state.readiness_service = ReadinessService(
+        execution_service=execution_service,
+        session_service=session_service,
+        secret_service=app.state.scoped_secret_resolver,
+        settings=settings,
+    )
 
     # Periodic orphan cleanup — catches runs orphaned by SIGKILL/OOM
     # between restarts. Startup cleanup (above) handles the bulk case;
@@ -536,6 +552,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.include_router(create_blobs_router())
     app.include_router(create_secrets_router())
     app.include_router(create_execution_router())
+    app.include_router(create_audit_readiness_router())
 
     # --- Seam contract D: RunAlreadyActiveError -> 409 with error_type ---
     @app.exception_handler(RunAlreadyActiveError)

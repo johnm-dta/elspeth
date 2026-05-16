@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any, Protocol
+from uuid import UUID
 
 from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.web.async_workers import run_sync_in_worker
@@ -30,11 +31,14 @@ _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
 
 
 class _ExecutionServiceLike(Protocol):
-    async def validate(self, session_id: str, *, user_id: str | None = None) -> ValidationResult: ...
+    # session_id is UUID to match ExecutionServiceImpl.validate (web/execution/service.py:638);
+    # the route layer constructs it from the FastAPI path-param parser.
+    async def validate(self, session_id: UUID, *, user_id: str | None = None) -> ValidationResult: ...
 
 
 class _SessionServiceLike(Protocol):
-    async def get_current_state(self, session_id: str) -> Any: ...
+    # session_id is UUID to match SessionServiceImpl.get_current_state (web/sessions/service.py:1884).
+    async def get_current_state(self, session_id: UUID) -> Any: ...
 
 
 class _SecretServiceLike(Protocol):
@@ -46,7 +50,12 @@ class _SecretServiceLike(Protocol):
 
 
 class _SettingsLike(Protocol):
-    payload_store_retention_days: int
+    # ``WebSettings`` declares this as a Pydantic ``Field`` with a default
+    # (web/config.py:107), which mypy sees as a read-only ``int`` attribute
+    # on the model class.  Mirror the read-only declaration so the Protocol
+    # accepts the model without a write-vs-read variance complaint.
+    @property
+    def payload_store_retention_days(self) -> int: ...
 
 
 class ReadinessService:
@@ -69,7 +78,7 @@ class ReadinessService:
             state_from_record if state_from_record is not None else _default_state_from_record
         )
 
-    async def compute_snapshot(self, *, session_id: str, user_id: str) -> AuditReadinessSnapshot:
+    async def compute_snapshot(self, *, session_id: UUID, user_id: str) -> AuditReadinessSnapshot:
         """Return the six-row snapshot.
 
         Raises:
@@ -93,8 +102,11 @@ class ReadinessService:
             _build_llm_interpretations_row(state),
             _build_secrets_row(validation, inventory),
         )
+        # ``session_id`` is rendered as ``str`` in the JSON envelope; the
+        # model's pydantic ``Field(min_length=1)`` accepts the canonical
+        # 36-char UUID representation.
         return AuditReadinessSnapshot(
-            session_id=session_id,
+            session_id=str(session_id),
             composition_version=state.version,
             rows=rows,
         )

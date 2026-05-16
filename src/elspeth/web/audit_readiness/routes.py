@@ -1,0 +1,106 @@
+"""FastAPI router for the audit-readiness endpoints.
+
+GET /api/sessions/{sid}/audit-readiness         → AuditReadinessSnapshot
+GET /api/sessions/{sid}/audit-readiness/explain → AuditReadinessExplain
+
+Both routes are GET-only, return ``Cache-Control: no-store`` (the panel
+must reflect the current composition_version on every render), require
+authentication, and translate the service's ``LookupError`` /
+``record is None`` outcomes into HTTP 404.
+
+Layer: L3 (application). Imports only L3 peers (sessions, execution
+schemas, composer state, auth).
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from elspeth.web.audit_readiness.explain import build_narrative
+from elspeth.web.audit_readiness.models import (
+    AuditReadinessExplain,
+    AuditReadinessSnapshot,
+)
+from elspeth.web.audit_readiness.service import ReadinessService
+from elspeth.web.auth.middleware import get_current_user
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.config import WebSettings
+from elspeth.web.sessions.converters import state_from_record
+from elspeth.web.sessions.ownership import verify_session_ownership
+from elspeth.web.sessions.protocol import SessionServiceProtocol
+
+_NO_STORE = "no-store"
+
+
+def create_audit_readiness_router() -> APIRouter:
+    """Create the audit-readiness router (snapshot + explain endpoints)."""
+    router = APIRouter(tags=["audit-readiness"])
+
+    @router.get(
+        "/api/sessions/{session_id}/audit-readiness",
+        response_model=AuditReadinessSnapshot,
+    )
+    async def snapshot(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> JSONResponse:
+        """Return the six-row audit-readiness snapshot for ``session_id``."""
+        await verify_session_ownership(session_id, user, request)
+        service: ReadinessService = request.app.state.readiness_service
+        try:
+            result = await service.compute_snapshot(
+                session_id=session_id,
+                user_id=user.user_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        return JSONResponse(
+            content=result.model_dump(),
+            headers={"Cache-Control": _NO_STORE},
+        )
+
+    @router.get(
+        "/api/sessions/{session_id}/audit-readiness/explain",
+        response_model=AuditReadinessExplain,
+    )
+    async def explain(
+        session_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> JSONResponse:
+        """Return the narrative prose form for the Explain detail view.
+
+        Accepted double-read of the composition state record (the
+        snapshot route already calls ``get_current_state`` through
+        ``ReadinessService``; here we re-read it to build the
+        narrative). Tune if profiling shows the cost; the simpler
+        contract is worth the second read until then.
+        """
+        await verify_session_ownership(session_id, user, request)
+        session_service: SessionServiceProtocol = request.app.state.session_service
+        settings: WebSettings = request.app.state.settings
+        record = await session_service.get_current_state(session_id)
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No composition state for this session",
+            )
+        state = state_from_record(record)
+        result = AuditReadinessExplain(
+            session_id=str(session_id),
+            composition_version=state.version,
+            narrative=build_narrative(
+                state,
+                retention_days=settings.payload_store_retention_days,
+            ),
+        )
+        return JSONResponse(
+            content=result.model_dump(),
+            headers={"Cache-Control": _NO_STORE},
+        )
+
+    return router

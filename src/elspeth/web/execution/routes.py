@@ -63,6 +63,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.paths import allowed_sink_directories
+from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     RunRecord,
@@ -85,23 +86,11 @@ async def _get_session_service(request: Request) -> SessionServiceProtocol:
 
 
 # ── Ownership verification helpers ────────────────────────────────────
-
-
-async def _verify_session_ownership(session_id: UUID, user: UserIdentity, request: Request) -> None:
-    """Verify the session exists and belongs to the current user.
-
-    Returns 404 (not 403) to avoid leaking session existence (IDOR).
-    Matches the pattern in sessions/routes.py.
-    """
-    session_service: SessionServiceProtocol = request.app.state.session_service
-    settings: WebSettings = request.app.state.settings
-    try:
-        session = await session_service.get_session(session_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Session not found") from None
-
-    if session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
-        raise HTTPException(status_code=404, detail="Session not found")
+#
+# Session-ownership verification lives in ``web/sessions/ownership.py`` as
+# ``verify_session_ownership`` so ``execution/routes.py`` and
+# ``audit_readiness/routes.py`` share a single IDOR-safe implementation.
+# Run-ownership verification remains here — only execution/ runs care.
 
 
 async def _verify_run_ownership(run_id: UUID, user: UserIdentity, request: Request) -> None:
@@ -419,7 +408,7 @@ def create_execution_router() -> APIRouter:
         service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
     ) -> ValidationResult:
         """Dry-run validation using real engine code paths."""
-        await _verify_session_ownership(session_id, user, request)
+        await verify_session_ownership(session_id, user, request)
         result = await service.validate(session_id, user_id=user.user_id)
         return result
 
@@ -441,7 +430,7 @@ def create_execution_router() -> APIRouter:
         (Seam Contract D) which returns the canonical 409 envelope:
         {"detail": str(exc), "error_type": "run_already_active"}.
         """
-        await _verify_session_ownership(session_id, user, request)
+        await verify_session_ownership(session_id, user, request)
         settings: WebSettings = request.app.state.settings
         fanout_ack_token = execute_request.fanout_ack_token if execute_request is not None else None
         try:

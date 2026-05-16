@@ -98,10 +98,7 @@ export function AuditReadinessPanel() {
     return () => {
       // Unmount-during-fetch cleanup: abort the in-flight controller for this
       // session. The store's AbortError catch arm clears
-      // isLoadingBySession[activeSessionId] and preserves cached snapshot/error
-      // (see issue elspeth-f018ea84c6 — the prior synchronous setState here
-      // was a workaround for signal-blind test mocks; Task 4A Step 2 fixed
-      // that at the mock layer).
+      // isLoadingBySession[activeSessionId] and preserves cached snapshot/error.
       const ctrl = useAuditReadinessStore.getState().abortControllers[activeSessionId];
       if (ctrl) {
         ctrl.abort();
@@ -119,11 +116,11 @@ export function AuditReadinessPanel() {
   );
 
   // Tracks the user's explicit expand/collapse intent. Auto-expansion on
-  // actionable snapshots is computed from `anyActionable || userExpanded`
-  // (see `showExpanded` below) rather than synced through a useEffect — this
-  // removes the extra render cycle the prior derived-state form caused, and
-  // makes the panel auto-collapse when a later snapshot returns all-green
-  // (unless the user explicitly clicked Expand). See elspeth-82ef9d5bd0.
+  // actionable snapshots is computed atomically as `anyActionable ||
+  // userExpanded` rather than synced through a useEffect — this avoids the
+  // extra render cycle a derived-state effect would cause, and makes the
+  // panel auto-collapse when a later snapshot returns all-green (unless the
+  // user explicitly clicked Expand).
   const [userExpanded, setUserExpanded] = useState(false);
   const [selectedRowId, setSelectedRowId] = useState<ReadinessRowId | null>(null);
   const [explainOpen, setExplainOpen] = useState(false);

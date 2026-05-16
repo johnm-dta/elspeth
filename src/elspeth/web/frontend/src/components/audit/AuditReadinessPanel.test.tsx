@@ -282,12 +282,15 @@ describe("AuditReadinessPanel", () => {
       useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID],
     ).toEqual(seeded);
 
-    // Note: the prior 2B form of this test asserted a "late-resolve ratchet"
+    // Note: the prior form of this test asserted a "late-resolve ratchet"
     // — that an aborted fetch which later resolves still writes via the
-    // monotonic guard. With signal-aware mocks (Phase 2C.4A) and production
-    // fetch semantics, an aborted call never reaches the success arm, so the
-    // race that assertion described is unreachable. The store-level
-    // monotonic-guard behaviour is covered by auditReadinessStore.test.ts.
+    // monotonic guard. That race is production-unreachable: real fetch
+    // rejects with AbortError when its signal aborts, so the success arm
+    // never fires for an aborted call. Signal-aware test mocks match that
+    // production semantic, which is why the sub-assertion is not preserved
+    // here. The store's monotonic-guard property itself (later snapshot for
+    // a higher version overwrites an earlier one) is covered by the
+    // version-advances tests in auditReadinessStore.test.ts.
   });
 
   it("auto-collapses when a subsequent refetch returns all-green (no sticky expansion)", async () => {

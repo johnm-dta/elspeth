@@ -118,14 +118,17 @@ export function AuditReadinessPanel() {
     [snapshot],
   );
 
-  const [expanded, setExpanded] = useState(false);
+  // Tracks the user's explicit expand/collapse intent. Auto-expansion on
+  // actionable snapshots is computed from `anyActionable || userExpanded`
+  // (see `showExpanded` below) rather than synced through a useEffect — this
+  // removes the extra render cycle the prior derived-state form caused, and
+  // makes the panel auto-collapse when a later snapshot returns all-green
+  // (unless the user explicitly clicked Expand). See elspeth-82ef9d5bd0.
+  const [userExpanded, setUserExpanded] = useState(false);
   const [selectedRowId, setSelectedRowId] = useState<ReadinessRowId | null>(null);
   const [explainOpen, setExplainOpen] = useState(false);
 
-  // When the snapshot changes and contains a warning/error, force expansion.
-  useEffect(() => {
-    if (anyActionable) setExpanded(true);
-  }, [anyActionable]);
+  const showExpanded = anyActionable || userExpanded;
 
   if (!activeSessionId || !hasCompositionContent) {
     return null;
@@ -162,7 +165,7 @@ export function AuditReadinessPanel() {
   }
 
   // Collapsed view — single summary line when nothing is actionable.
-  if (!expanded && !anyActionable) {
+  if (!showExpanded) {
     return (
       <section
         aria-label="Audit readiness"
@@ -171,7 +174,7 @@ export function AuditReadinessPanel() {
         <button
           type="button"
           className="audit-readiness-summary"
-          onClick={() => setExpanded(true)}
+          onClick={() => setUserExpanded(true)}
           aria-label="Audit ready. Show details."
         >
           <span aria-hidden="true">{"✓"}</span> Audit ready
@@ -198,7 +201,7 @@ export function AuditReadinessPanel() {
               <button
                 type="button"
                 className="btn audit-readiness-action-btn audit-readiness-action-btn--ghost"
-                onClick={() => setExpanded(false)}
+                onClick={() => setUserExpanded(false)}
                 aria-label="Collapse audit readiness"
               >
                 Collapse

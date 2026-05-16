@@ -289,4 +289,34 @@ describe("AuditReadinessPanel", () => {
     // race that assertion described is unreachable. The store-level
     // monotonic-guard behaviour is covered by auditReadinessStore.test.ts.
   });
+
+  it("auto-collapses when a subsequent refetch returns all-green (no sticky expansion)", async () => {
+    // Arrange: render with an actionable snapshot at version 1; the panel
+    // auto-expands because anyActionable is true.
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+    const { rerender } = render(<AuditReadinessPanel />);
+    await waitFor(() =>
+      expect(screen.getByText(/Provenance/)).toBeInTheDocument(),
+    );
+
+    // Act: bump version; mock returns an all-green snapshot for v2.
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(2), { signal }),
+    );
+    useSessionStore.setState({ compositionState: makeComposition(2) });
+    rerender(<AuditReadinessPanel />);
+
+    // Assert: panel falls back to the collapsed "Audit ready" summary —
+    // anyActionable is now false and the user never explicitly expanded, so
+    // showExpanded = anyActionable || userExpanded = false. This is the
+    // sticky-expansion regression that elspeth-82ef9d5bd0 fixed: the prior
+    // useState+useEffect form set `expanded = true` permanently on the first
+    // warning snapshot, leaving the panel stuck open even after all-green.
+    await waitFor(() =>
+      expect(screen.queryByText(/Provenance/)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /Audit ready/i })).toBeInTheDocument();
+  });
 });

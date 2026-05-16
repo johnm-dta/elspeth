@@ -46,9 +46,7 @@ def build_narrative(state: CompositionState, *, retention_days: int) -> str:
     return "\n".join(lines)
 
 
-def _describe_source(plugin: str | None) -> str:
-    if plugin is None:
-        return "- Source — plugin not yet selected. Once chosen, each row read from the source will be hashed and recorded."
+def _describe_source(plugin: str) -> str:
     if plugin == "csv":
         return "- Source data — each row from the CSV input. SHA-256 hash recorded for the source file and for each row."
     if plugin == "json":
@@ -60,7 +58,11 @@ def _describe_source(plugin: str | None) -> str:
 
 def _describe_transform(node: NodeSpec) -> str:
     name = node.id
-    plugin = node.plugin or "unknown"
+    # Callers filter to node_type == "transform"; per NodeSpec contract
+    # (state.py docstring, line 113), `plugin` is None only for gates and
+    # coalesces. If None ever appears here, that's a Tier-1 invariant breach.
+    plugin = node.plugin
+    assert plugin is not None, f"transform node {name!r} has plugin=None — Tier-1 invariant breach"
     if plugin == "llm":
         return (
             f"- {name} (LLM transform) — for each row: the full prompt "
@@ -92,7 +94,8 @@ def _describe_transform(node: NodeSpec) -> str:
 
 
 def _describe_output(output: OutputSpec) -> str:
-    plugin = output.plugin or "unknown"
+    # OutputSpec.plugin is a non-nullable str per state.py line 256.
+    plugin = output.plugin
     if plugin in ("csv", "json"):
         return (
             f"- {output.name} ({plugin} file) — written to your session "

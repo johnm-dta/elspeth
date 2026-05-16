@@ -23,6 +23,7 @@ import * as api from "@/api/client";
 import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
+import { usePreferencesStore } from "./preferencesStore";
 
 function getExecutionStore() {
   return useExecutionStore.getState();
@@ -264,32 +265,56 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   async createSession() {
+    // Phase 1B Panel M1: the session-create and prefs-resolve calls live in
+    // SEPARATE try blocks so a preferences-bootstrap failure does NOT mask
+    // a successful session creation. The earlier single-try shape attributed
+    // a prefs-bootstrap rejection to "Failed to create session", which lied
+    // to the user: the session was created and is now their active session,
+    // but they were told it wasn't. We now surface a prefs-specific error
+    // for the second branch so the message matches the actual failure.
+    let session;
     try {
-      const session = await api.createSession();
-      clearComposerProgressPollTimer();
-      set((state) => ({
-        sessions: [session, ...state.sessions],
-        activeSessionId: session.id,
-        messages: [],
-        compositionState: null,
-        compositionProposals: [],
-        composerPreferences: null,
-        staleProposalIds: [],
-        proposalActionPendingIds: [],
-        composerProgress: null,
-        stateVersions: [],
-        error: null,
-        selectedNodeId: null, // Clear selection for new session
-        ...clearedGuidedState(),
-        ...clearedRecoveryState(),
-      }));
-      // Default-freeform: new sessions surface the freeform chat, with a
-      // "Switch to guided" affordance in the freeform body that activates
-      // guided mode on demand via enterGuided().  No GET /guided fetch
-      // here means no audit pollution / persisted guided state for users
-      // who stay in freeform.
+      session = await api.createSession();
     } catch {
       set({ error: "Failed to create session. Please try again." });
+      return;
+    }
+    clearComposerProgressPollTimer();
+    set((state) => ({
+      sessions: [session, ...state.sessions],
+      activeSessionId: session.id,
+      messages: [],
+      compositionState: null,
+      compositionProposals: [],
+      composerPreferences: null,
+      staleProposalIds: [],
+      proposalActionPendingIds: [],
+      composerProgress: null,
+      stateVersions: [],
+      error: null,
+      selectedNodeId: null, // Clear selection for new session
+      ...clearedGuidedState(),
+      ...clearedRecoveryState(),
+    }));
+    // Phase 1B — honour the account-level default-mode preference.
+    // resolveDefaultMode() awaits the preferences bootstrap if it
+    // hasn't completed yet (Ctrl+N race: user hits "new session" before
+    // App.tsx's bootstrap effect has resolved). Guided users enter via
+    // the same enterGuided() the manual "Switch to guided" button uses.
+    // A failure here surfaces a *prefs-specific* error; the session is
+    // already live and usable in freeform, so the message reflects only
+    // the secondary failure (couldn't honour your guided default).
+    try {
+      const mode = await usePreferencesStore.getState().resolveDefaultMode();
+      if (mode === "guided") {
+        await get().enterGuided();
+      }
+    } catch {
+      set({
+        error:
+          "Session created, but couldn't apply your default mode. " +
+          "You're in freeform; switch to guided from the header if you want.",
+      });
     }
   },
 

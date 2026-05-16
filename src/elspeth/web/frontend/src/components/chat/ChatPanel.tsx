@@ -10,6 +10,7 @@ import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
 import { CompletionSummary } from "./guided/CompletionSummary";
 import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
+import { InlineOptOutCheckbox } from "./guided/InlineOptOutCheckbox";
 import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
@@ -39,6 +40,13 @@ const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
 
 interface ChatPanelProps {
   onOpenSecrets?: () => void;
+  // Phase 1B Panel UX-M3: the freeform-mode header surfaces a small
+  // "Change my default" link beside "Switch to guided" — the third
+  // opt-out/opt-in surface spec 05 enumerates (alongside the inline
+  // checkbox in the guided body and the Composer-preferences pane in
+  // the account menu). The link opens the same modal the account menu
+  // does; threaded as a prop from App.tsx for parity with onOpenSecrets.
+  onOpenComposerPreferences?: () => void;
 }
 
 /**
@@ -47,7 +55,10 @@ interface ChatPanelProps {
  * Auto-scrolls to the bottom on new messages unless the user has scrolled up.
  * Focus returns to the ChatInput textarea after the assistant response arrives.
  */
-export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
+export function ChatPanel({
+  onOpenSecrets,
+  onOpenComposerPreferences,
+}: ChatPanelProps) {
   const messages = useSessionStore((s) => s.messages);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
@@ -320,6 +331,10 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
           )}
         </section>
         <ExitToFreeformButton />
+        {/* Phase 1B inline opt-out: footer-weight affordance to flip the
+            account-level default-mode preference from guided→freeform (or
+            back). Same backend row as the Settings → Composer pane. */}
+        <InlineOptOutCheckbox />
         {/*
           Per-step conversational chat input (Phase A slice 4).
 
@@ -365,20 +380,54 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
       {/* Session title header.  The "Switch to guided" affordance lives in
           the header so it's always visible without competing with the chat
           input for vertical real-estate.  Symmetric with the "Exit to
-          freeform" button rendered by the guided branch above. */}
+          freeform" button rendered by the guided branch above.
+
+          "Change my default" link (Phase 1B Panel UX-M3): the third
+          opt-out/opt-in surface spec 05 enumerates. "Switch to guided"
+          is a one-session toggle; this link opens the preferences panel
+          where the user can change the *future-default* without
+          flipping the current session. Rendered only when a handler is
+          wired (App.tsx always wires it; tests that mount ChatPanel in
+          isolation may omit it). */}
       <div className="chat-panel-header">
         {activeSessionTitle ? (
           <h2 className="chat-panel-header-title">{activeSessionTitle}</h2>
         ) : (
           <span aria-hidden="true" />
         )}
-        <button
-          type="button"
-          className="chat-panel-switch-to-guided"
-          onClick={() => void enterGuided()}
+        <div
+          className="chat-panel-header-actions"
+          style={{ display: "inline-flex", gap: 8, alignItems: "center" }}
         >
-          Switch to guided
-        </button>
+          <button
+            type="button"
+            className="chat-panel-switch-to-guided"
+            onClick={() => void enterGuided()}
+          >
+            Switch to guided
+          </button>
+          {onOpenComposerPreferences && (
+            <button
+              type="button"
+              onClick={onOpenComposerPreferences}
+              className="chat-panel-change-default"
+              title="Change which mode new sessions start in"
+              style={{
+                background: "transparent",
+                border: 0,
+                padding: "4px 6px",
+                font: "inherit",
+                fontSize: 12,
+                textDecoration: "underline",
+                cursor: "pointer",
+                minHeight: 24,
+                color: "var(--color-text-muted, #555)",
+              }}
+            >
+              Change my default
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Error banner. Renders the primary error message plus, when

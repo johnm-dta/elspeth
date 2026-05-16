@@ -43,3 +43,26 @@ export type {
   FailedTurn,
   RecoveryTranscriptRow,
 } from "./recovery";
+
+// ── Account-level composer preferences (Phase 1B) ──────────────────────────
+// Account-scoped row; distinct from the per-session `ComposerPreferences`
+// (trust_mode / density_default) re-exported above. The name disambiguator is
+// the `User*` prefix — see plan 13 Task 1 review history for the rationale.
+
+export type ComposerMode = "guided" | "freeform";
+
+export interface UserComposerPreferencesPayload {
+  default_mode: ComposerMode;
+  banner_dismissed_at: string | null;
+  // Nullable to mirror the backend Panel-U1 contract: when no DB row
+  // exists for the user, the GET response represents the in-server
+  // default and updated_at is null (no write event has occurred to
+  // associate a timestamp with). Every other response carries the real
+  // write time. See src/elspeth/web/preferences/models.py.
+  updated_at: string | null;
+}
+
+export interface UpdateUserComposerPreferencesPayload {
+  default_mode?: ComposerMode;
+  banner_dismissed_at?: string | null;
+}

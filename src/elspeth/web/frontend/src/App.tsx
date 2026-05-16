@@ -11,10 +11,14 @@ import { ChatPanel } from "./components/chat/ChatPanel";
 import { InspectorPanel, OPEN_CATALOG_EVENT } from "./components/inspector/InspectorPanel";
 import { RecoveryPanel } from "./components/recovery/RecoveryPanel";
 import { SecretsPanel } from "./components/settings/SecretsPanel";
+import { ComposerPreferencesPanel } from "./components/settings/ComposerPreferencesPanel";
+import { useAuthStore } from "./stores/authStore";
 import { initStoreSubscriptions } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
 import { useExecutionStore } from "./stores/executionStore";
+import { usePreferencesStore } from "./stores/preferencesStore";
 import { useHashRouter } from "./hooks/useHashRouter";
+import { useAuth } from "./hooks/useAuth";
 import { SWITCH_TAB_EVENT } from "./components/common/CommandPalette";
 import type { SystemStatus } from "./types/index";
 
@@ -39,6 +43,16 @@ function App() {
   const [showSecrets, setShowSecrets] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showComposerSettings, setShowComposerSettings] = useState(false);
+  const logout = useAuthStore((s) => s.logout);
+  const openComposerSettings = useCallback(
+    () => setShowComposerSettings(true),
+    [],
+  );
+  const closeComposerSettings = useCallback(
+    () => setShowComposerSettings(false),
+    [],
+  );
   const healthCheckRef = useRef<number | null>(null);
 
   // Sync URL hash ↔ session/tab state for deep linking & back/forward
@@ -51,6 +65,19 @@ function App() {
   const applyRecoveredState = useSessionStore((s) => s.applyRecoveredState);
   const discardRecovery = useSessionStore((s) => s.discardRecovery);
   const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
+  const { isAuthenticated } = useAuth();
+  const bootstrapPrefs = usePreferencesStore((s) => s.bootstrap);
+
+  // Phase 1B: load account-level composer preferences once authenticated.
+  // Failure is non-fatal — the store stays at its initial state (guided,
+  // not-dismissed) so the UI degrades to the default behaviour rather than
+  // blocking the user from creating sessions.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    bootstrapPrefs().catch((err) => {
+      console.error("[preferences] bootstrap failed:", err);
+    });
+  }, [isAuthenticated, bootstrapPrefs]);
 
   const openSecrets = useCallback(() => setShowSecrets(true), []);
   const closeSecrets = useCallback(() => setShowSecrets(false), []);
@@ -242,12 +269,22 @@ function App() {
         <div className="app-main" role="main">
           <Layout
             sidebar={<SessionSidebar />}
-            chat={<ChatPanel onOpenSecrets={openSecrets} />}
+            chat={
+              <ChatPanel
+                onOpenSecrets={openSecrets}
+                onOpenComposerPreferences={openComposerSettings}
+              />
+            }
             inspector={<InspectorPanel />}
+            onOpenSettings={openComposerSettings}
+            onSignOut={logout}
           />
         </div>
 
         {showSecrets && <SecretsPanel onClose={closeSecrets} />}
+        {showComposerSettings && (
+          <ComposerPreferencesPanel onClose={closeComposerSettings} />
+        )}
         <CommandPalette isOpen={showPalette} onClose={closePalette} />
         {showShortcuts && (
           <ShortcutsHelp onClose={() => setShowShortcuts(false)} />

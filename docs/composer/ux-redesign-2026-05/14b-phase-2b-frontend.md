@@ -188,6 +188,7 @@ Expected: clean. Types are unused so far but the build must accept them.
 - [ ] **Step 5: Commit**
 
 ```bash
+cd src/elspeth/web/frontend && npm run typecheck && npm run lint
 git add src/elspeth/web/frontend/src/types/index.ts src/elspeth/web/frontend/src/types/api.ts
 git commit -m "feat(web/frontend): add audit-readiness response types (Phase 2B.1)"
 ```
@@ -216,7 +217,7 @@ Both take no body. Both return the strict Pydantic payload with `Cache-Control: 
 grep -n "parseResponse\|authHeaders" src/elspeth/web/frontend/src/api/client.ts | head -5
 ```
 
-Expected: both exist but are **not** exported. The convention is to inline the same idiom in sibling modules. The Phase 1B preferences client is the precedent (`api/preferences.ts`). Mirror that file's structure.
+Expected: both exist but are **not** exported. The convention is to inline the same idiom in sibling modules. The Phase 1B account-level preferences client is the precedent (`api/client.ts:403–424`, the `fetchUserComposerPreferences` / `updateUserComposerPreferences` block). Mirror that block's structure.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -380,9 +381,10 @@ Expected: `Cannot find module './auditReadiness'`.
  * the auth/parse pattern used by api/client.ts::validatePipeline.
  *
  * Technical debt: getToken/authHeaders/parseResponse are duplicated from
- * api/preferences.ts. Phase 8 cleanup task: consolidate these helpers as
- * exports from client.ts. Currently three API modules carry duplicates
- * (preferences, auditReadiness, future ones).
+ * api/client.ts (see client.ts:403–424, the account-level preferences block).
+ * Phase 8 cleanup task: consolidate these helpers as exported utilities from
+ * client.ts. Currently at least two API modules carry the duplicates
+ * (client.ts inline + auditReadiness.ts).
  */
 import type {
   AuditReadinessSnapshot,
@@ -425,10 +427,11 @@ async function parseResponse<T>(response: Response): Promise<T> {
 
 export async function fetchAuditReadiness(
   sessionId: string,
+  signal?: AbortSignal,
 ): Promise<AuditReadinessSnapshot> {
   const response = await fetch(
     `/api/sessions/${sessionId}/audit-readiness`,
-    { method: "GET", headers: authHeaders() },
+    { method: "GET", headers: authHeaders(), signal },
   );
   return parseResponse<AuditReadinessSnapshot>(response);
 }
@@ -464,6 +467,7 @@ Expected: 5/5 pass.
 - [ ] **Step 6: Commit**
 
 ```bash
+cd src/elspeth/web/frontend && npm run typecheck && npm run lint
 git add src/elspeth/web/frontend/src/api/auditReadiness.ts src/elspeth/web/frontend/src/api/auditReadiness.test.ts src/elspeth/web/frontend/src/api/client.ts
 git commit -m "feat(web/frontend): add audit-readiness API client (Phase 2B.2)"
 ```
@@ -608,6 +612,35 @@ describe("useAuditReadinessStore", () => {
     expect(state.snapshotsBySession[SESSION_ID]).toBeUndefined();
     expect(state.explainsBySession[SESSION_ID]).toBeUndefined();
   });
+
+  it("loadSnapshot monotonic guard: fast-v2 + slow-v1 interleaved — v2 payload wins", async () => {
+    // Deferred resolver pattern: v2 starts first and resolves first; v1
+    // starts after v2 but resolves last (simulating a slow in-flight v1 that
+    // was superseded by a version bump).
+    let resolveV1!: (s: AuditReadinessSnapshot) => void;
+    const slowV1 = new Promise<AuditReadinessSnapshot>((res) => { resolveV1 = res; });
+
+    vi.mocked(api.fetchAuditReadiness)
+      .mockReturnValueOnce(Promise.resolve(snapshot(2)))   // fast v2
+      .mockReturnValueOnce(slowV1);                        // slow v1
+
+    // Kick off v2 fetch first.
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
+    expect(
+      useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
+    ).toBe(2);
+
+    // Start v1 fetch (simulates a race from a component that received an
+    // older compositionVersion).
+    const v1Promise = useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+    resolveV1(snapshot(1)); // now the slow v1 resolve arrives
+    await v1Promise;
+
+    // Monotonic guard must have discarded v1 — v2 still wins.
+    expect(
+      useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
+    ).toBe(2);
+  });
 });
 ```
 
@@ -652,6 +685,11 @@ import type {
 export interface AuditReadinessState {
   snapshotsBySession: Record<string, AuditReadinessSnapshot>;
   explainsBySession: Record<string, AuditReadinessExplain>;
+  /** In-flight AbortController keyed by sessionId. loadSnapshot aborts the
+   *  previous controller before starting a new fetch, preventing stale
+   *  responses from overwriting a more recent result. clearSession also
+   *  aborts any in-flight request for the cleared session. */
+  abortControllers: Record<string, AbortController>;
   isLoading: boolean;
   isLoadingExplain: boolean;
   error: string | null;
@@ -666,6 +704,7 @@ export interface AuditReadinessState {
 export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "loadExplain" | "clearSession" | "reset"> => ({
   snapshotsBySession: {},
   explainsBySession: {},
+  abortControllers: {},
   isLoading: false,
   isLoadingExplain: false,
   error: null,
@@ -680,17 +719,35 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
     if (cached && cached.composition_version === compositionVersion) {
       return;
     }
-    set({ isLoading: true, error: null });
+
+    // Abort any in-flight request for this session before starting a new one.
+    const prev = get().abortControllers[sessionId];
+    if (prev) prev.abort();
+    const controller = new AbortController();
+    set((state) => ({
+      abortControllers: { ...state.abortControllers, [sessionId]: controller },
+      isLoading: true,
+      error: null,
+    }));
+
     try {
-      const snapshot = await fetchAuditReadiness(sessionId);
-      set((state) => ({
-        snapshotsBySession: {
-          ...state.snapshotsBySession,
-          [sessionId]: snapshot,
-        },
-        isLoading: false,
-      }));
+      const snapshot = await fetchAuditReadiness(sessionId, controller.signal);
+      // Monotonic write guard: discard the response if a newer version has
+      // already been stored while this fetch was in flight.
+      set((state) => {
+        const current = state.snapshotsBySession[sessionId];
+        if (current && current.composition_version > snapshot.composition_version) {
+          return { isLoading: false };
+        }
+        const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
+        return {
+          snapshotsBySession: { ...state.snapshotsBySession, [sessionId]: snapshot },
+          abortControllers: restCtrl,
+          isLoading: false,
+        };
+      });
     } catch (err) {
+      if ((err as { name?: string }).name === "AbortError") return;
       const apiErr = err as ApiError;
       set({
         isLoading: false,
@@ -724,10 +781,18 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
   },
 
   clearSession(sessionId: string) {
+    // Abort any in-flight snapshot fetch for this session.
+    const ctrl = get().abortControllers[sessionId];
+    if (ctrl) ctrl.abort();
     set((state) => {
       const { [sessionId]: _snap, ...restSnap } = state.snapshotsBySession;
       const { [sessionId]: _expl, ...restExpl } = state.explainsBySession;
-      return { snapshotsBySession: restSnap, explainsBySession: restExpl };
+      const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
+      return {
+        snapshotsBySession: restSnap,
+        explainsBySession: restExpl,
+        abortControllers: restCtrl,
+      };
     });
   },
 
@@ -745,11 +810,12 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
 cd src/elspeth/web/frontend && npx vitest run src/stores/auditReadinessStore.test.ts
 ```
 
-Expected: 7/7 pass.
+Expected: 8/8 pass (includes the concurrent-fetch monotonic-guard test added in this revision).
 
 - [ ] **Step 5: Commit**
 
 ```bash
+cd src/elspeth/web/frontend && npm run typecheck && npm run lint
 git add src/elspeth/web/frontend/src/stores/auditReadinessStore.ts src/elspeth/web/frontend/src/stores/auditReadinessStore.test.ts
 git commit -m "feat(web/frontend): add auditReadinessStore with version-keyed cache (Phase 2B.3)"
 ```
@@ -792,13 +858,31 @@ vi.mock("../../api/auditReadiness");
 
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
 
+/**
+ * Constructs a minimal CompositionState for test scaffolding.
+ *
+ * NodeSpec arity (frontend `types/index.ts`):
+ *   Required (7): id, node_type, plugin, input, on_success, on_error, options
+ *   Optional (6): condition, routes, fork_to, branches, policy, merge
+ * This is the frontend contract the fixture mirrors. The Python backend has 13
+ * fields but the TypeScript interface marks 6 of them as optional — no `as never`
+ * cast is needed once all required fields are supplied.
+ */
 function makeComposition(version: number): CompositionState {
   return {
     id: "comp-1",
     version,
     source: { kind: "csv_file", config: { path: "x.csv" } } as never,
     nodes: [
-      { id: "select_columns", node_type: "transform", plugin: "select_columns", config: {} } as never,
+      {
+        id: "select_columns",
+        node_type: "transform",
+        plugin: "select_columns",
+        input: "source",
+        on_success: null,
+        on_error: null,
+        options: {},
+      },
     ],
     edges: [],
     outputs: [],
@@ -1331,6 +1415,7 @@ Expected: 10/10 pass. The placeholders satisfy the panel's imports; the tests st
 - [ ] **Step 7: Commit**
 
 ```bash
+cd src/elspeth/web/frontend && npm run typecheck && npm run lint
 git add src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx src/elspeth/web/frontend/src/components/audit/ExplainDialog.tsx
 git commit -m "feat(web/frontend): add AuditReadinessPanel + placeholder subcomponents (Phase 2B.4)"
 ```
@@ -1353,13 +1438,27 @@ git commit -m "feat(web/frontend): add AuditReadinessPanel + placeholder subcomp
 |---|---|
 | Backend wire-shape drift breaks the renderer | The discriminated-union `never` arm fails the build; Phase 2A's `_StrictResponse` fails at server-side construction. No silent path. |
 | 14c lands before 14b and the placeholders are overwritten mid-flight | Per the sequencing in §"Sequencing and dependencies", 14b lands first. If the working branch is shared between 14b and 14c, the 14c PR's diff against 14b's placeholders is reviewable; the placeholder comments explicitly say "DO NOT extend". |
-| Auto-fetch races a still-mutating composition | Auto-fetch is keyed on `composition_version` (integer, monotonic). The store short-circuits when the version matches; a mid-mutation render reuses the cached value, and the next render after the version advances triggers a fresh fetch. |
+| Concurrent `loadSnapshot` calls resolve out of order (stale-fetch race) | Addressed in this revision: `loadSnapshot` stores the in-flight `AbortController` in store state and aborts the previous request before starting a new one on `composition_version` change or `clearSession`. The resolution arm applies a monotonic write guard — if the arriving response's `composition_version` is lower than the version already cached, the response is silently discarded. A concurrent-fetch test (fast-v2 / slow-v1 interleaved resolve order) is included in the store test suite. |
 | Per-row "Jump to component" is missing in 14b | 14b's panel still emits the row click; 14b's placeholder `ReadinessRowDetail` lacks the jump button. 14c restores it. The user-visible UX gap exists for the duration of the 14b→14c gap; the design spec's persona table tolerates a partial first cut because Linda's primary trust mechanism (visibility of the row status) is already present. |
 | Telemetry can't be added later without rewriting the panel | The row-click handlers are isolated functions in `AuditReadinessPanel`. Phase 8 telemetry adds one line per handler. |
 
 ## Review history
 
-**2026-05-15** — Panel findings applied: replaced ad-hoc `getInitialState` cast with exported top-level const + `reset()` action (CRITICAL); acknowledged `authHeaders`/`parseResponse` duplication with Phase 8 cleanup note in module JSDoc (IMPORTANT); cascaded 14a POST→GET change through client implementation and all test method assertions.
+### 2026-05-15 — Panel findings applied
+
+Replaced ad-hoc `getInitialState` cast with exported top-level const + `reset()` action (CRITICAL); acknowledged `authHeaders`/`parseResponse` duplication with Phase 8 cleanup note in module JSDoc (IMPORTANT); cascaded 14a POST→GET change through client implementation and all test method assertions.
+
+### 2026-05-16 — 4-reviewer panel verdict CHANGES_REQUESTED → fixes applied
+
+Reviewers: reality, architecture, quality, systems (full report:
+`14-phase-2-audit-readiness-panel.review.json`).
+
+Fixes applied to 14b in this revision:
+1. loadSnapshot stale-fetch race — monotonic write guard + AbortController + concurrent-fetch test (convergence C2)
+2. Frontend wire shape matches scoped_secret_resolver backend decision — no auth_provider_type field (C4 verified clean — no `auth_provider_type` field was present in 14b)
+3. Phantom api/preferences.ts citation replaced with verified client.ts:403–424 location (review reality blocker)
+4. makeComposition test fixture covers full NodeSpec arity (review B1, frontend mirror)
+5. tsc + lint added to every Task commit checklist (quality REC)
 
 ## Memory references
 

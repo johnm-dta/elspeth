@@ -57,4 +57,21 @@ describe("subscriptions — auditReadiness clearSession on session removal", () 
     expect(clearSpy).toHaveBeenCalledWith(SESSION_A);
     expect(clearSpy).toHaveBeenCalledWith(SESSION_B);
   });
+
+  it("clears audit readiness for sessions already present when init is called", () => {
+    // Production startup is empty-first, but persist middleware or SSR
+    // hydration would seed sessionStore before init. Verify the seed in
+    // initStoreSubscriptions catches that case.
+    _resetSubscriptionsForTesting();
+    useSessionStore.setState({
+      sessions: [{ id: SESSION_A, title: "A", created_at: "", updated_at: "" } as Session],
+    });
+    initStoreSubscriptions();
+    const clearSpy = vi.spyOn(useAuditReadinessStore.getState(), "clearSession");
+
+    // Now remove the session that was already present at init time.
+    useSessionStore.setState({ sessions: [] });
+
+    expect(clearSpy).toHaveBeenCalledWith(SESSION_A);
+  });
 });

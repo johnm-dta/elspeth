@@ -28,6 +28,16 @@ export function initStoreSubscriptions(): void {
   if (initialized) return;
   initialized = true;
 
+  // Seed previousSessionIds from the current store state. Otherwise the first
+  // removal of any session that was already in sessionStore before
+  // initStoreSubscriptions() was called would silently no-op (the empty
+  // previousSessionIds set has no ids to detect as "removed"). Production
+  // startup order makes this unreachable today (sessions starts empty and
+  // init runs synchronously before loadSessions), but adding persist
+  // middleware, SSR hydration, or a test that seeds sessions before init
+  // would expose the gap. The seed costs one set construction.
+  previousSessionIds = new Set(useSessionStore.getState().sessions.map((s) => s.id));
+
   unsubscribe = useSessionStore.subscribe((state) => {
     // Version-change clears validation.
     const currentVersion = state.compositionState?.version ?? null;

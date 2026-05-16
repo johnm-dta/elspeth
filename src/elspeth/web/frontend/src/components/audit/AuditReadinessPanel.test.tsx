@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AuditReadinessPanel } from "./AuditReadinessPanel";
 import { useSessionStore } from "../../stores/sessionStore";
-import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
 import * as api from "../../api/auditReadiness";
 import type { AuditReadinessSnapshot } from "../../types/api";
 import { makeComposition } from "@/test/composerFixtures";
@@ -51,14 +51,11 @@ describe("AuditReadinessPanel", () => {
       activeSessionId: SESSION_ID,
       compositionState: makeComposition(1),
     });
-    useAuditReadinessStore.setState({
-      snapshotsBySession: {},
-      explainsBySession: {},
-      isLoadingBySession: {},
-      isLoadingExplainBySession: {},
-      errorBySession: {},
-      explainErrorBySession: {},
-    });
+    // Use the canonical reset factory so every per-session dict resets,
+    // including abortControllers/explainAbortControllers — matches the
+    // pattern in auditReadinessStore.test.ts:27 and survives store-shape
+    // extensions automatically.
+    useAuditReadinessStore.setState(getInitialState());
     vi.clearAllMocks();
   });
 

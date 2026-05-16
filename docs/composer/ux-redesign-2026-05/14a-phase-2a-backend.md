@@ -359,8 +359,10 @@ class ValidationError(_StrictResponse):
     error_code: str | None
 ```
 
-In `src/elspeth/web/execution/validation.py` around line 1248, update the
-`identity_node_advisory` `ValidationCheck` constructor to pass `affected_nodes`:
+In `src/elspeth/web/execution/validation.py`, locate the `_CHECK_IDENTITY_NODE_ADVISORY`
+site (grep for `name=_CHECK_IDENTITY_NODE_ADVISORY`) and update the `ValidationCheck`
+constructor to pass `affected_nodes`. (14a-1: line number removed — use the constant name
+`_CHECK_IDENTITY_NODE_ADVISORY` as the stable locator.)
 
 ```python
 checks.append(
@@ -404,8 +406,8 @@ src/elspeth/web/config.py
 src/elspeth/web/execution/schemas.py
 src/elspeth/web/execution/validation.py        # identity_node_advisory site — pass affected_nodes=(identity_finding.node_id,)
 src/elspeth/web/validation.py                  # identity_node_advisory site — load-bearing for provenance row
-src/elspeth/web/execution/service.py           # ~lines 657, 664
-src/elspeth/web/composer/service.py            # ~lines 1071, 1073-1079
+src/elspeth/web/execution/service.py           # ValidationCheck/ValidationError construction sites (14a-1: cite _CHECK_IDENTITY_NODE_ADVISORY, not line numbers)
+src/elspeth/web/composer/service.py            # ValidationCheck/ValidationError construction sites
 
 # Tests
 tests/unit/web/audit_readiness/__init__.py
@@ -418,9 +420,11 @@ tests/unit/web/sessions/test_routes.py         # 4 sites
 tests/unit/web/composer/test_route_integration.py  # 1 site
 ```
 
-> **Attention bias warning:** reviewing `validation.py` will make
-> `composer/service.py:1073` and `execution/service.py:664` easy to
-> overlook — both are in the list above and must be updated in this commit.
+> **Attention bias warning:** reviewing `validation.py` will make the
+> `ValidationCheck`/`ValidationError` sites in `composer/service.py` and
+> `execution/service.py` easy to overlook — both are in the list above and
+> must be updated in this commit. (14a-1: line numbers removed; grep the files
+> for `ValidationCheck(` and `ValidationError(` to locate the sites.)
 
 Run mypy **before** `git add` — it is the only mechanical discriminant for
 missing no-default required fields that tests may not exercise:
@@ -1013,11 +1017,16 @@ _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
 
 
 class _ExecutionServiceLike(Protocol):
-    async def validate(self, session_id, *, user_id: str | None = None) -> ValidationResult: ...
+    # session_id is UUID to match ExecutionServiceImpl.validate (web/execution/service.py:638);
+    # the route layer constructs it from the FastAPI path-param parser.
+    # Amendment 14a-2 (backend-006): tightened from str to UUID in landed code.
+    async def validate(self, session_id: UUID, *, user_id: str | None = None) -> ValidationResult: ...
 
 
 class _SessionServiceLike(Protocol):
-    async def get_current_state(self, session_id): ...
+    # session_id is UUID to match SessionServiceImpl.get_current_state (web/sessions/service.py:1884).
+    # Amendment 14a-2 (backend-006): tightened from untyped to UUID in landed code.
+    async def get_current_state(self, session_id: UUID) -> Any: ...
 
 
 class _SecretServiceLike(Protocol):
@@ -1053,7 +1062,7 @@ class ReadinessService:
         )
 
     async def compute_snapshot(
-        self, *, session_id: str, user_id: str,
+        self, *, session_id: UUID, user_id: str,  # Amendment 14a-2: str→UUID (backend-006)
     ) -> AuditReadinessSnapshot:
         """Return the six-row snapshot.
 
@@ -1078,8 +1087,10 @@ class ReadinessService:
             _build_llm_interpretations_row(state),
             _build_secrets_row(validation, inventory),
         )
+        # Amendment 14a-2 (backend-006): session_id is UUID; model's Field(min_length=1)
+        # accepts the canonical 36-char UUID string representation.
         return AuditReadinessSnapshot(
-            session_id=session_id,
+            session_id=str(session_id),
             composition_version=state.version,
             rows=rows,
         )
@@ -1288,7 +1299,7 @@ def test_provenance_row_component_ids_populated_via_real_validate_pipeline(
 ):
     """C1 guard: affected_nodes wired in validation.py must propagate to component_ids.
 
-    If validation.py:1248 ValidationCheck(name='identity_node_advisory', ...)
+    If the `_CHECK_IDENTITY_NODE_ADVISORY` ValidationCheck site in validation.py
     does not pass affected_nodes, this assertion will fail even if the unit
     test passes (because the unit test supplies affected_nodes manually).
     """
@@ -1301,7 +1312,8 @@ def test_provenance_row_component_ids_populated_via_real_validate_pipeline(
     if rows["provenance"]["status"] == "warning":
         assert rows["provenance"]["component_ids"], (
             "provenance row status is 'warning' but component_ids is empty — "
-            "validation.py:1248 must pass affected_nodes=(node_id,) to ValidationCheck"
+            "the _CHECK_IDENTITY_NODE_ADVISORY site in validation.py must pass "
+            "affected_nodes=(node_id,) to ValidationCheck"
         )
 
 
@@ -1864,7 +1876,7 @@ EOF
 | Risk | Mitigation |
 |---|---|
 | Plugin-trust allowlist drifts as plugins are renamed | Subset-of-catalog test fails the build. Allowlists are short by design. |
-| `identity_node_advisory` affected_nodes field not wired in validation.py | No longer a risk: Task 1 Step 2b co-updates validation.py:1248 in the same commit as the schema change. The integration test in Task 3 Step 2b asserts `component_ids` is non-empty when `status == "warning"`. |
+| `identity_node_advisory` affected_nodes field not wired in validation.py | No longer a risk: Task 1 Step 2b co-updates the `_CHECK_IDENTITY_NODE_ADVISORY` site in `validation.py` in the same commit as the schema change. The integration test in Task 3 Step 2b asserts `component_ids` is non-empty when `status == "warning"`. |
 | LLM-interpretations row stays not_applicable until Phase 5b | By design. Phase 2B hides the row when no LLM transforms are present. |
 | Retention row never moves off not_applicable | By design (load-bearing decision). Future phase flips it when a per-composition retention surface exists. |
 | Aggregator calls `validate_pipeline()` on every panel refresh; validation is expensive | Phase 2B debounces on `compositionState.version`. Cache by `(session_id, composition_version)` only if profiling shows the need — premature caching is forbidden. |
@@ -1891,6 +1903,23 @@ Strategic adjudications baked in:
 - secret service: scoped_secret_resolver (matches established precedent)
 - No compat-shim defaults (CLAUDE.md No-Legacy)
 - Phase 2C Task 8 scope-shrink handled separately in 14c review fix-up
+
+### 2026-05-17 — Post-landing audit reconciliation (elspeth-a615f8c418)
+
+Source findings: backend-005, backend-006.
+
+**backend-005 (14a-1):** Stale line citations replaced with self-locating constant and
+symbol references throughout the plan. Previous citations (`execution/service.py:657,664`,
+`composer/service.py:1071,1073–1079`, `validation.py:1248`) have drifted from the landed
+code; future edits should cite `_CHECK_IDENTITY_NODE_ADVISORY` and surrounding function
+names rather than line numbers. Note: the integration test docstring in
+`tests/integration/web/test_audit_readiness_routes.py` (the `test_provenance_row_component_ids_populated_via_real_validate_pipeline` function) still references `validation.py:1248` — the programmer agent's commit should update that docstring in the same pass.
+
+**backend-006 (14a-2):** `compute_snapshot` signature was tightened from `session_id: str`
+(prescribed) to `session_id: UUID` (landed) for type safety end-to-end. The
+`_ExecutionServiceLike` and `_SessionServiceLike` Protocols are correspondingly UUID-typed.
+Stringification (`session_id=str(session_id)`) happens at the `AuditReadinessSnapshot`
+construction boundary. This is an authorised deviation — see amendment note added to Task 3.
 
 ## Memory references
 

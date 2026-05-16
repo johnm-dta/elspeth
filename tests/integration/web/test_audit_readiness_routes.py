@@ -171,10 +171,11 @@ def test_provenance_row_component_ids_populated_via_real_validate_pipeline(
 ) -> None:
     """C1 guard: affected_nodes wired in execution/validation.py must propagate to component_ids.
 
-    If execution/validation.py:1248 ValidationCheck(name='identity_node_advisory', ...)
-    does not pass affected_nodes, this assertion will fail even if the
-    unit test passes (because the unit test supplies affected_nodes
-    manually). The fixture's passthrough node triggers the advisory.
+    If the _CHECK_IDENTITY_NODE_ADVISORY site in execution/validation.py
+    (grep for ``name=_CHECK_IDENTITY_NODE_ADVISORY``) does not pass
+    ``affected_nodes``, this assertion will fail even if the unit test
+    passes (because the unit test supplies affected_nodes manually). The
+    fixture's passthrough node triggers the advisory.
     """
     client, session_id = audit_readiness_client_with_state
     response = client.get(f"/api/sessions/{session_id}/audit-readiness")

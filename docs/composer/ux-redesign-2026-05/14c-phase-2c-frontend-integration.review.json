@@ -1,0 +1,274 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "summary": "All four reviewers (Reality, Architecture, Quality, Systems) returned NO-GO. Seven distinct blockers identified. Most critical: Task 8's Validate-button removal silently orphans handleValidate's side effects (injectSystemMessage, sendValidationFeedback), creating a one-way regression in ELSPETH's SDA loop — the LLM agent will stop receiving validation-failure signals while UI shows green status. Tasks 4A and 4B are already landed in HEAD, inverting TDD gates. Pulling Phase 3A Task 8 into this PR collapses three of the seven blockers in one move.",
+  "plan_file": "/home/john/elspeth/.worktrees/phase-2a-backend/docs/composer/ux-redesign-2026-05/14c-phase-2c-frontend-integration.md",
+  "reviewed_at": "2026-05-17T00:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "title": "handleValidate side-effects orphaning — silent SDA-loop regression",
+      "sources": ["architecture", "systems"],
+      "convergence": "Architecture(BLOCKER) + Systems(BLOCKER) independently identified",
+      "issue": "Plan's Convergence-C3 reasoning (lines 911, 1263) asserts handleValidate, injectSystemMessage, sendValidationFeedback remain wired after Task 8 button removal. Codebase contradicts: App.tsx:177 (Ctrl+Shift+V), CommandPalette.tsx:88-93, CompletionSummary.tsx:78-80 all call useExecutionStore.validate() directly, bypassing handleValidate. The InspectorPanel button is the ONLY caller. After Phase 2C: LLM agent receives no validation-failure signal; injectSystemMessage and sendValidationFeedback are dead.",
+      "second_order_effect": "Panel shows 'Validation ✓' (aggregator status) while LLM agent has received no signal. Two checks decouple. User sees green; agent is blind. Failure mode is silent and the audit trail records validation events with no corresponding agent response.",
+      "priority_score": 36,
+      "severity": "Critical",
+      "likelihood": "Certain",
+      "reversibility": "Difficult",
+      "resolution": "Preferred: pull Phase 3A Task 8 (auto-validate subscription) into Phase 2C PR. Alternative: lift handleValidate orchestration into App.tsx Ctrl+Shift+V handler before deleting the button. The 'deliberate retention for Phase 3A' path doesn't preserve any user-visible behaviour."
+    },
+    {
+      "id": "B2",
+      "title": "Tasks 4A and 4B are already landed in HEAD — TDD gates inverted",
+      "sources": ["reality", "quality"],
+      "convergence": "Reality(BLOCKER) + Quality(BLOCKER) — independent disk-state verification",
+      "issue": "Git commits 7ba9bc49e (Phase 2C.4A) and b8fb6b23f (Phase 2C.4B) are on current branch HEAD. makeAbortablePromise exists at composerFixtures.ts:53-74 byte-identical to plan's 'append' instruction. AuditReadinessPanel.tsx:98-109 already has slim cleanup with past-tense comment 'Task 4A Step 2 fixed that at the mock layer'. showExpanded/userExpanded refactor live at AuditReadinessPanel.tsx:127,131. Auto-collapse regression test at AuditReadinessPanel.test.tsx:293.",
+      "impact": "Mechanical follower hits 'expect FAIL' that PASSes (duplicate-export error or test already green). TDD gate contract inverted. Scope-accuracy blocker.",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "resolution": "Remove Tasks 4A and 4B from the plan, OR collapse them to a 'VERIFY ALREADY LANDED' gate before Task 5."
+    },
+    {
+      "id": "B3",
+      "title": "ExplainDialog ships aria-modal=true without focus-management contract",
+      "sources": ["architecture", "quality"],
+      "convergence": "Architecture(MAJOR) + Quality(BLOCKER) — severity escalated to BLOCKER per accessibility rule",
+      "issue": "Task 6 (plan lines 679, 740, 744) sets role='dialog' aria-modal='true' with no useFocusTrap import, no Escape handler, no initial focus, no focus restoration, no backdrop. Project has established useFocusTrap pattern across all 5 other modal dialogs (RecoveryPanel, CommandPalette, ComposerPreferencesPanel, ShortcutsHelp, SecretsPanel). aria-modal=true is a binding WAI-ARIA contract — screen readers restrict virtual cursor to dialog subtree; without focus management, keyboard-only and AT users cannot reach content or dismiss by keyboard.",
+      "priority_score": 24,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "resolution": "Add useFocusTrap, Escape handler, initial focus, focus restoration to ExplainDialog per established 5-dialog pattern. Three-line addition collapses 14b W2 regression-prevention contract."
+    },
+    {
+      "id": "B4",
+      "title": "Task 8.5 guard test cannot enforce its contract — module-state bleed",
+      "sources": ["architecture", "quality", "systems"],
+      "convergence": "Architecture(MAJOR) + Quality(MAJOR) + Systems(BLOCKER) — three reviewers; escalated per Systems' severity",
+      "issue": "subscriptions.ts uses module-level `initialized` flag with short-circuit `if (initialized) return`. Helper `_resetSubscriptionsForTesting()` exported at line 66. Plan's guard test has NO beforeEach reset. If any earlier test in same vitest worker called initStoreSubscriptions(), the guard's call returns immediately as no-op. Test may pass spuriously OR fail spuriously based on execution order. After Phase 3A lands, same isolation problem persists — gate contract 'turns green when Phase 3A Task 8 lands' is not guaranteed.",
+      "audit_implication": "An unreliable test that can pass or fail based on vitest order is worse than skipped — creates false confidence in merge gate. In auditability-first project, persistently-red CI also has audit implications.",
+      "priority_score": 18,
+      "severity": "High",
+      "likelihood": "Likely",
+      "reversibility": "Easy",
+      "resolution": "Import _resetSubscriptionsForTesting in guard test beforeEach + add vi.clearAllMocks. Canonical pattern at subscriptions.test.ts:11-13. Collapses if B1 resolution pulls Phase 3A Task 8 in."
+    },
+    {
+      "id": "B5",
+      "title": "Task 8 Step 5 internally contradictory under noUnusedLocals",
+      "sources": ["architecture"],
+      "convergence": "Architecture(BLOCKER) standalone — others did not run the full tsc chain",
+      "issue": "tsconfig.json:13-14 and tsconfig.app.json:16-17 set noUnusedLocals: true. Chain: handleValidate (L387) references canValidate (L388, L424); canValidate (L381) references isValidating; button (L558) is only caller of handleValidate. After button deletion, handleValidate becomes unused; Step 5's deletion of canValidate would cause `Cannot find name 'canValidate'` in handleValidate's body. The actually-orphaned local is handleValidate itself, which Step 5 does not enumerate.",
+      "priority_score": 18,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "resolution": "Auto-resolves if B1 resolves (deletion of handleValidate/injectSystemMessage/sendValidationFeedback eliminates the chain). Otherwise enumerate handleValidate in Step 5."
+    },
+    {
+      "id": "B6",
+      "title": "Mock signature `({ signal })` is wrong — destructures from string sessionId",
+      "sources": ["reality", "quality"],
+      "convergence": "Reality(MAJOR) + Quality(BLOCKER) — escalated; teaching defect risk",
+      "issue": "Plan lines 142-144, 240, 249 show `({ signal }) => makeAbortablePromise(...)`. Actual API: `fetchAuditReadiness(sessionId: string, signal?: AbortSignal)` — two positional args. Destructuring `{ signal }` from string sessionId yields undefined; abort contract not exercised. Already-landed implementation correctly uses `(_sid, signal)`.",
+      "teaching_defect": "Task 4A is the canonical pattern Tasks 5-6 will inherit. Wrong signature propagates.",
+      "priority_score": 12,
+      "severity": "High",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "resolution": "Auto-resolves if B2 resolves (Tasks 4A/4B removed since already landed correctly). Otherwise correct to `(_sid, signal)` in plan lines 142-144, 240, 249."
+    },
+    {
+      "id": "B7",
+      "title": "Anchor block NodeSpec line-number drift (133-134 → 105)",
+      "sources": ["reality"],
+      "convergence": "Reality(BLOCKER) standalone",
+      "issue": "Plan line 74 claims NodeSpec at `types/index.ts:133-134`. Actual: `types/index.ts:105`. The anchor block is marked 'load-bearing — DO NOT silently change without re-running reality-check.' A stale line number INSIDE the anchor block is exactly the failure mode the block exists to guard against.",
+      "priority_score": 12,
+      "severity": "Medium",
+      "likelihood": "Certain",
+      "reversibility": "Easy",
+      "resolution": "Update plan line 74: change `types/index.ts:133-134` to `types/index.ts:105`. The 7-field list is correct; only the line range is stale."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "W1",
+      "title": "Persistent intentional CI red creates 'cry wolf' environment",
+      "sources": ["architecture", "systems"],
+      "convergence": "Architecture(MAJOR) + Systems(MAJOR)",
+      "issue": "Task 8.5 lands red CI for unbounded window (until Phase 3A lands). Engineers learn red is normal; genuine failures harder to distinguish. Matches normalised-deviance pattern. In auditability-first project, persistently-red CI has audit implications — 'CI was passing at time T' becomes ambiguous.",
+      "priority_score": 12,
+      "recommendation": "Use FIXME marker + dedicated warning step, OR separate phase3a-gate CI job (expected yellow), OR filigree issue with blocks-merge label. Auto-resolves if B1 pulls Phase 3A Task 8 in."
+    },
+    {
+      "id": "W2",
+      "title": "Task 9 Step 4 grep is false gate — cannot detect B1 regression",
+      "sources": ["systems", "reality"],
+      "convergence": "Systems(MAJOR) + Reality(MINOR) — escalated; this is the operator's primary B1 detection",
+      "issue": "Step 4 greps ShortcutsHelp.tsx for `Ctrl+Shift+V`. That file is a documentation string table; grep returns non-empty regardless of side-effect status. Operator faithfully following Step 4 sees non-empty, presses Ctrl+Shift+V, sees panel update (validate() called), concludes working — missing the silent injectSystemMessage/sendValidationFeedback regression.",
+      "priority_score": 9,
+      "recommendation": "Replace with `grep -r handleValidate App.tsx` AND assertion that side-effect handlers are wired to a non-test caller."
+    },
+    {
+      "id": "W3",
+      "title": "userExpanded local state silently reset during Phase 3B relocation",
+      "sources": ["systems"],
+      "issue": "Phase 2C stores expand-preference in userExpanded (useState in AuditReadinessPanel). Phase 3B Task 9 relocates panel from InspectorPanel to App.tsx SideRail.auditReadinessSlot. Remount destroys component tree, resets userExpanded. Store-cached snapshot survives (zustand keyed by sessionId) but user's preference is silently discarded after Phase 3B deploy.",
+      "priority_score": 6,
+      "recommendation": "Move userExpanded to auditReadinessStore keyed by sessionId."
+    },
+    {
+      "id": "W4",
+      "title": "Task 4B framed as refactor but adds new behaviour (auto-collapse)",
+      "sources": ["architecture"],
+      "issue": "Step 2 says 'user-visible behaviour is identical' while Step 3 adds regression test for auto-collapse when subsequent refetch returns all-green — behaviour that did not exist before.",
+      "priority_score": 4,
+      "recommendation": "Characterise 4B as behaviour change (bug fix), not refactor. Auto-resolves with B2."
+    },
+    {
+      "id": "W5",
+      "title": "ExplainDialog cache-hit test missing await on resolve() settling",
+      "sources": ["quality"],
+      "issue": "Loading-state test calls resolve() at line 624; assertion fires without subsequent waitFor. Risk of flake under microtask scheduling.",
+      "priority_score": 4,
+      "recommendation": "Add waitFor after resolve() before assertion."
+    },
+    {
+      "id": "W6",
+      "title": "Test coverage gaps in Tasks 5, 6, 7",
+      "sources": ["quality"],
+      "issue": "Task 5 missing: mixed resolvable/unresolvable rows, Escape key, component_ids=null guard. Task 6 missing: focus moves on open, Escape closes, backdrop closes, compositionVersion change refetch. Task 7 missing: panel across all tabs, null compositionState guard.",
+      "priority_score": 4,
+      "recommendation": "Expand assertion sets per reviewer list. Several entries collapse with B3 (focus-management additions cover Escape and initial focus)."
+    }
+  ],
+  "minor_and_nit": [
+    {
+      "id": "N1",
+      "title": "Commit messages for Tasks 5/6/7 say 'Phase 2B' not 'Phase 2C'",
+      "sources": ["architecture", "quality", "systems"],
+      "convergence": "Three reviewers flagged; collides with existing 084b8c34b 'Phase 2B.5' commit on branch",
+      "priority_score": 2,
+      "recommendation": "Update plan lines 526, 785, 892 to use Phase 2C prefix."
+    },
+    {
+      "id": "N2",
+      "title": "Task 4B regression test uses unnecessary `as never` cast",
+      "sources": ["reality", "quality", "systems"],
+      "convergence": "Three reviewers flagged; violates plan's own policy",
+      "priority_score": 2,
+      "recommendation": "Remove cast; inconsistent with sibling tests."
+    },
+    {
+      "id": "N3",
+      "title": "compareDocumentPosition uses strict equality instead of bitmask",
+      "sources": ["architecture"],
+      "issue": "`=== Node.DOCUMENT_POSITION_FOLLOWING` fails for nested containers (returns 4|16=20).",
+      "priority_score": 2,
+      "recommendation": "Use bitmask `& Node.DOCUMENT_POSITION_FOLLOWING`."
+    },
+    {
+      "id": "N4",
+      "title": "Risk table incomplete",
+      "sources": ["architecture"],
+      "issue": "Missing: validation-chat orphaning, noUnusedLocals interaction, ExplainDialog accessibility, CI-pollution from guard test.",
+      "priority_score": 2,
+      "recommendation": "Add the four risks."
+    },
+    {
+      "id": "N5",
+      "title": "ROW_NO_IDS fixture naming confusion",
+      "sources": ["quality"],
+      "issue": "Refers to empty component_ids, not null detail. Risk of test author confusion.",
+      "priority_score": 1,
+      "recommendation": "Rename to ROW_EMPTY_IDS."
+    },
+    {
+      "id": "N6",
+      "title": "ExplainDialog no unmount cleanup for explain fetch",
+      "sources": ["architecture"],
+      "issue": "Inconsistent with AuditReadinessPanel cleanup pattern.",
+      "priority_score": 2,
+      "recommendation": "Add useEffect cleanup mirroring panel pattern."
+    },
+    {
+      "id": "N7",
+      "title": "Task 8 Step 1 dead instruction",
+      "sources": ["reality"],
+      "issue": "'Locate existing tests that assert Validate button exists' — zero references in codebase.",
+      "priority_score": 1,
+      "recommendation": "Strike the search instruction or rephrase as 'confirm no such tests exist.'"
+    }
+  ],
+  "conflicts_resolved": [
+    {
+      "issue": "ExplainDialog focus management severity",
+      "architecture_view": "MAJOR",
+      "quality_view": "BLOCKER",
+      "resolution": "Escalated to BLOCKER (B3). Per project policy, accessibility regressions in auditability-first project warrant blocker status. aria-modal=true without focus management is a binding WAI-ARIA contract violation."
+    },
+    {
+      "issue": "Task 8.5 guard test isolation severity",
+      "architecture_view": "MAJOR",
+      "quality_view": "MAJOR",
+      "systems_view": "BLOCKER",
+      "resolution": "Escalated to BLOCKER (B4). Systems' analysis is correct: a test that can pass OR fail based on vitest execution order cannot enforce a merge gate. Auditability implications of unreliable CI compound this."
+    },
+    {
+      "issue": "Mock signature wrong severity",
+      "reality_view": "MAJOR",
+      "quality_view": "BLOCKER",
+      "resolution": "Escalated to BLOCKER (B6). Quality's teaching-defect framing decides — Task 4A is the canonical pattern Tasks 5-6 inherit, so error propagation is certain."
+    },
+    {
+      "issue": "Task 9 Step 4 grep gate severity",
+      "systems_view": "MAJOR",
+      "reality_view": "MINOR",
+      "resolution": "Escalated to MAJOR (W2). Systems' analysis is correct: this is the operator's primary diagnostic for detecting B1 regression. Reality reviewer treated it as a logic error in isolation; Systems showed it's a load-bearing gate."
+    }
+  ],
+  "one_fix_resolves_many": {
+    "fix": "Pull Phase 3A Task 8 (auto-validate subscription) into the Phase 2C PR",
+    "resolves": ["B1", "B4", "B5", "B6 (partial)", "W1", "W2 (partial)"],
+    "rationale": "B1's preferred resolution is exactly this move. B5 auto-collapses because the noUnusedLocals chain disappears with handleValidate/injectSystemMessage/sendValidationFeedback deletion. B4 collapses because the guard test becomes unnecessary if Phase 3A is in the same PR. W1 (persistent red CI) disappears entirely. The Architecture reviewer explicitly identified this path: 'Fastest path: pull Phase 3A Task 8 in, add useFocusTrap to ExplainDialog. Collapses B1, B2, M1 in one move; fixes M2 with three lines.'",
+    "additional_required_fix": "Add useFocusTrap to ExplainDialog (resolves B3, ~3 lines)",
+    "still_required_after_one_fix": ["B2 (remove already-landed Tasks 4A/4B)", "B3 (focus trap)", "B7 (NodeSpec line number)"]
+  },
+  "reviewer_summaries": {
+    "reality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 3,
+      "verdict": "CHANGES_REQUESTED"
+    },
+    "architecture": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 4,
+      "verdict": "NO-GO / CHANGES_REQUESTED"
+    },
+    "quality": {
+      "status": "ISSUES_FOUND",
+      "blocking": 3,
+      "warnings": 4,
+      "verdict": "NO-GO"
+    },
+    "systems": {
+      "status": "ISSUES_FOUND",
+      "blocking": 2,
+      "warnings": 4,
+      "verdict": "NO-GO"
+    }
+  },
+  "next_steps": [
+    "Decision point: pull Phase 3A Task 8 into Phase 2C PR (collapses B1, B4, B5, W1, partial B6/W2) — strongly recommended.",
+    "Required regardless of above: remove already-landed Tasks 4A/4B (B2), add useFocusTrap to ExplainDialog (B3), correct NodeSpec line number in anchor block (B7).",
+    "If Phase 3A NOT pulled in: also resolve B1 via alternative path (lift handleValidate into App.tsx Ctrl+Shift+V handler), fix B4 guard test isolation, fix B5 Step 5 enumeration, fix B6 mock signature, replace W2 grep gate.",
+    "Address W3-W6 and N1-N7 as plan revisions before re-review.",
+    "Re-run /review-plan after plan updates land."
+  ]
+}

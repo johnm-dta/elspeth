@@ -1290,7 +1290,7 @@ def _collect_ownership_call_site_identities(module: ModuleType, helper_name: str
 
 
 class TestIDORCoverageDrift:
-    """Drift guard: every session-scoped endpoint across all three routers must invoke an ownership check.
+    """Drift guard: every session-scoped endpoint across all four routers must invoke an ownership check.
 
     ``TestIDORProtection.test_idor_session_crud`` walks one
     cross-session request for each session-scoped endpoint.  The risk
@@ -1299,26 +1299,33 @@ class TestIDORCoverageDrift:
     ownership primitive is in place, but its coverage in this suite
     silently rots.
 
-    Session-scoped endpoints live in three routers, each with its
+    Session-scoped endpoints live in four routers, each with its
     own ownership-check helper:
 
     * ``sessions/routes.py`` via ``_verify_session_ownership`` — the
       chat-and-state endpoints (``GET``/``DELETE``/``POST`` under
-      ``/api/sessions/{id}``).
-    * ``execution/routes.py`` via ``_verify_session_ownership`` —
-      ``/validate`` and ``/execute``.  Also hosts run-scoped endpoints
-      which use ``_verify_run_ownership`` (not a session-ownership
-      helper, but the same drift risk for run identities; covered by
-      a separate inventory).
+      ``/api/sessions/{id}``).  This router still hosts a file-local
+      helper; the shared extraction landed only for the routers that
+      were rewritten in Task 5.
+    * ``execution/routes.py`` via ``verify_session_ownership`` —
+      ``/validate`` and ``/execute``.  Calls the shared helper
+      extracted to ``elspeth.web.sessions.ownership``.  Also hosts
+      run-scoped endpoints which use ``_verify_run_ownership`` (not a
+      session-ownership helper, but the same drift risk for run
+      identities; covered by a separate inventory).
     * ``blobs/routes.py`` via ``_verify_session_and_get_blob_service``
       — blob upload/list/metadata/download/delete.  This helper is
       dual-role (checks ownership AND returns the service); both
       branches of its callers depend on the ownership check for
       IDOR safety.
+    * ``audit_readiness/routes.py`` via ``verify_session_ownership``
+      — snapshot and explain endpoints under
+      ``/api/sessions/{id}/audit-readiness``.  Uses the shared helper
+      from ``elspeth.web.sessions.ownership``.
 
     Each (module, helper, inventory) tuple is pinned independently so
     a failure message names exactly which router's audit drifted.  A
-    pure count across all three would satisfy ``{add endpoint X in
+    pure count across all four would satisfy ``{add endpoint X in
     router A, drop endpoint Y in router B}`` — the count stays
     constant while the audit silently swaps a covered endpoint for an
     uncovered one in a different router.

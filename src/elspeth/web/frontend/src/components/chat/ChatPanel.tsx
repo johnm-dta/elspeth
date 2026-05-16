@@ -10,6 +10,7 @@ import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
 import { CompletionSummary } from "./guided/CompletionSummary";
 import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
+import { InlineOptOutCheckbox } from "./guided/InlineOptOutCheckbox";
 import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
@@ -320,6 +321,10 @@ export function ChatPanel({ onOpenSecrets }: ChatPanelProps) {
           )}
         </section>
         <ExitToFreeformButton />
+        {/* Phase 1B inline opt-out: footer-weight affordance to flip the
+            account-level default-mode preference from guided→freeform (or
+            back). Same backend row as the Settings → Composer pane. */}
+        <InlineOptOutCheckbox />
         {/*
           Per-step conversational chat input (Phase A slice 4).
 

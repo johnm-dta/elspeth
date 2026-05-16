@@ -90,9 +90,13 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
         const current = state.snapshotsBySession[sessionId];
         if (current && current.composition_version > snapshot.composition_version) {
           // Stale response arrived after a newer one was already cached —
-          // discard, but still clear our session's loading flag so the UI
-          // does not hang.
+          // discard. Also drop our resolved controller from abortControllers
+          // (the invariant is "abortControllers holds only in-flight
+          // controllers"). Clear our session's loading flag so the UI does
+          // not hang.
+          const { [sessionId]: _staleCtrl, ...restStaleCtrl } = state.abortControllers;
           return {
+            abortControllers: restStaleCtrl,
             isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
           };
         }

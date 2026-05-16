@@ -184,6 +184,12 @@ describe("useAuditReadinessStore", () => {
     expect(
       useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]?.composition_version,
     ).toBe(2);
+    // Invariant: abortControllers holds only in-flight controllers. The
+    // resolved-and-discarded v1 controller must not linger after the guard
+    // arm fires.
+    expect(
+      useAuditReadinessStore.getState().abortControllers[SESSION_ID],
+    ).toBeUndefined();
   });
 
   // --- AbortController cancellation contract ---

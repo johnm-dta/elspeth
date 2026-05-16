@@ -54,7 +54,12 @@ export type ComposerMode = "guided" | "freeform";
 export interface UserComposerPreferencesPayload {
   default_mode: ComposerMode;
   banner_dismissed_at: string | null;
-  updated_at: string;
+  // Nullable to mirror the backend Panel-U1 contract: when no DB row
+  // exists for the user, the GET response represents the in-server
+  // default and updated_at is null (no write event has occurred to
+  // associate a timestamp with). Every other response carries the real
+  // write time. See src/elspeth/web/preferences/models.py.
+  updated_at: string | null;
 }
 
 export interface UpdateUserComposerPreferencesPayload {

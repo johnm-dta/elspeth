@@ -172,6 +172,7 @@ export function AuditReadinessPanel() {
           type="button"
           className="audit-readiness-summary"
           onClick={() => setUserExpanded(true)}
+          aria-expanded={false}
           aria-label="Audit ready. Show details."
         >
           <span aria-hidden="true">{"✓"}</span> Audit ready

@@ -80,6 +80,12 @@ describe("AuditReadinessPanel", () => {
     expect(await screen.findByText(/Audit ready/i)).toBeInTheDocument();
     // Six row labels are not all rendered up-front in collapsed mode.
     expect(screen.queryByText("Plugin trust")).not.toBeInTheDocument();
+    // The collapsed summary is a disclosure button: screen-reader users
+    // must learn from aria-expanded that it can be opened. aria-controls
+    // is intentionally NOT set — the rows list is not in the DOM while
+    // collapsed, so pointing at a missing id would be incorrect.
+    const summary = screen.getByRole("button", { name: /Audit ready/i });
+    expect(summary).toHaveAttribute("aria-expanded", "false");
   });
 
   it("expands to all rows when the summary is clicked", async () => {

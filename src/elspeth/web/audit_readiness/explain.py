@@ -108,4 +108,12 @@ def _describe_output(output: OutputSpec) -> str:
             f"container. Content hash and remote path recorded; the "
             f"local emit is hashed before transit."
         )
+    if plugin == "dataverse":
+        return (
+            f"- {output.name} (Dataverse sink — external boundary) — for "
+            f"each record: the insert/upsert outcome and the remote write "
+            f"request are recorded with a content hash. The local emit is "
+            f"hashed before transit to the configured Dataverse instance, "
+            f"so the call is recorded as an external operation."
+        )
     return f"- {output.name} ({plugin} sink) — write outcome and output hash recorded for each row."

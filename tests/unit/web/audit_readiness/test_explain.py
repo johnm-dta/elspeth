@@ -96,3 +96,16 @@ def test_no_source_explains_incomplete():
 def test_closes_with_evidence_promise():
     text = build_narrative(_state(), retention_days=90)
     assert "evidence" in text.lower() or "answer" in text.lower()
+
+
+def test_calls_out_dataverse_sink_as_boundary():
+    """Dataverse is the only BOUNDARY sink in the registered catalog
+    (EXTERNAL_BOUNDARY_SINKS = {"dataverse"} in trust.py). The Explain
+    narrative MUST name the boundary crossing — falling back to the
+    generic per-row hash sentence silently omits that the write leaves
+    ELSPETH for an external Microsoft system.
+    """
+    text = build_narrative(_state(sinks=(("primary", "dataverse"),)), retention_days=90)
+    assert "Dataverse" in text
+    assert "external boundary" in text.lower()
+    assert "Dataverse instance" in text

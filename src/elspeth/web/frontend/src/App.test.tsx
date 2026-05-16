@@ -114,6 +114,15 @@ vi.mock("./api/client", () => ({
   sendMessage: vi.fn(),
   recompose: vi.fn(),
   fetchMessages: vi.fn(),
+  // Phase 1B: account-level composer preferences. The real preferencesStore
+  // module imports these from @/api/client and would receive `undefined`
+  // (throwing at first call) without the mock entries.
+  fetchUserComposerPreferences: vi.fn().mockResolvedValue({
+    default_mode: "guided",
+    banner_dismissed_at: null,
+    updated_at: "2026-05-15T00:00:00Z",
+  }),
+  updateUserComposerPreferences: vi.fn(),
 }));
 
 // ── Store subscriptions ──────────────────────────────────────────────────────
@@ -363,5 +372,40 @@ describe("App composer recovery panel", () => {
     await waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(useSessionStore.getState().compositionState?.version).toBe(2);
+  });
+});
+
+// ── Phase 1B: preferences bootstrap on auth-success ──────────────────────
+describe("App preferences bootstrap (Phase 1B)", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    // Reset the preferences store so the bootstrap spy fires on a clean
+    // module-singleton state — without this, an earlier test in the same
+    // worker that touched usePreferencesStore would leak `loaded: true`
+    // and the new bootstrap call would still fire (we assert it does)
+    // but the test intent is fragile to ordering. Mirrors the Phase 1A
+    // finding-7 pattern noted in the plan.
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    resetStore(usePreferencesStore);
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    });
+  });
+
+  it("calls preferencesStore.bootstrap once authenticated", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    const bootstrap = vi
+      .spyOn(usePreferencesStore.getState(), "bootstrap")
+      .mockResolvedValueOnce(undefined);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(bootstrap).toHaveBeenCalled();
+    });
   });
 });

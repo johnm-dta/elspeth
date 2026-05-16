@@ -14,7 +14,9 @@ import { SecretsPanel } from "./components/settings/SecretsPanel";
 import { initStoreSubscriptions } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
 import { useExecutionStore } from "./stores/executionStore";
+import { usePreferencesStore } from "./stores/preferencesStore";
 import { useHashRouter } from "./hooks/useHashRouter";
+import { useAuth } from "./hooks/useAuth";
 import { SWITCH_TAB_EVENT } from "./components/common/CommandPalette";
 import type { SystemStatus } from "./types/index";
 
@@ -51,6 +53,19 @@ function App() {
   const applyRecoveredState = useSessionStore((s) => s.applyRecoveredState);
   const discardRecovery = useSessionStore((s) => s.discardRecovery);
   const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
+  const { isAuthenticated } = useAuth();
+  const bootstrapPrefs = usePreferencesStore((s) => s.bootstrap);
+
+  // Phase 1B: load account-level composer preferences once authenticated.
+  // Failure is non-fatal — the store stays at its initial state (guided,
+  // not-dismissed) so the UI degrades to the default behaviour rather than
+  // blocking the user from creating sessions.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    bootstrapPrefs().catch((err) => {
+      console.error("[preferences] bootstrap failed:", err);
+    });
+  }, [isAuthenticated, bootstrapPrefs]);
 
   const openSecrets = useCallback(() => setShowSecrets(true), []);
   const closeSecrets = useCallback(() => setShowSecrets(false), []);

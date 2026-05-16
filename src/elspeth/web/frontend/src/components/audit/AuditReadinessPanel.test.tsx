@@ -1,0 +1,278 @@
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { AuditReadinessPanel } from "./AuditReadinessPanel";
+import { useSessionStore } from "../../stores/sessionStore";
+import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import * as api from "../../api/auditReadiness";
+import type { AuditReadinessSnapshot } from "../../types/api";
+import { makeComposition } from "@/test/composerFixtures";
+
+vi.mock("../../api/auditReadiness");
+
+const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+
+function allGreenSnapshot(version: number): AuditReadinessSnapshot {
+  return {
+    session_id: SESSION_ID,
+    composition_version: version,
+    rows: [
+      { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
+      { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
+      { id: "provenance", label: "Provenance", status: "ok", summary: "Complete lineage", detail: null, component_ids: [] },
+      { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
+      { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
+      { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secrets", detail: null, component_ids: [] },
+    ],
+  };
+}
+
+function snapshotWithProvenanceWarning(version: number): AuditReadinessSnapshot {
+  const base = allGreenSnapshot(version);
+  return {
+    ...base,
+    rows: base.rows.map((r) =>
+      r.id === "provenance"
+        ? {
+            ...r,
+            status: "warning",
+            summary: "Identity passthrough detected",
+            detail: "Identity passthrough — provenance gap on 'select_columns'.",
+            component_ids: ["select_columns"],
+          }
+        : r,
+    ),
+  };
+}
+
+describe("AuditReadinessPanel", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(1),
+    });
+    useAuditReadinessStore.setState({
+      snapshotsBySession: {},
+      explainsBySession: {},
+      isLoadingBySession: {},
+      isLoadingExplainBySession: {},
+      errorBySession: {},
+      explainErrorBySession: {},
+    });
+    vi.clearAllMocks();
+  });
+
+  it("auto-fetches on mount using compositionState.version", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    render(<AuditReadinessPanel />);
+    await waitFor(() => {
+      expect(api.fetchAuditReadiness).toHaveBeenCalledWith(
+        SESSION_ID,
+        expect.any(AbortSignal),
+      );
+    });
+  });
+
+  it("collapses to a single 'Audit ready' summary when all rows are ok/not_applicable", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    render(<AuditReadinessPanel />);
+    expect(await screen.findByText(/Audit ready/i)).toBeInTheDocument();
+    // Six row labels are not all rendered up-front in collapsed mode.
+    expect(screen.queryByText("Plugin trust")).not.toBeInTheDocument();
+  });
+
+  it("expands to all rows when the summary is clicked", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    const summary = await screen.findByRole("button", { name: /Audit ready/i });
+    await user.click(summary);
+    expect(screen.getByText("Validation")).toBeInTheDocument();
+    expect(screen.getByText("Plugin trust")).toBeInTheDocument();
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText("Retention")).toBeInTheDocument();
+  });
+
+  it("shows all rows by default when any row has warning or error status", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(snapshotWithProvenanceWarning(1));
+    render(<AuditReadinessPanel />);
+    await waitFor(() => {
+      expect(screen.getByText("Validation")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText("Identity passthrough detected")).toBeInTheDocument();
+  });
+
+  it("renders all six rows when every row is warning or error (no collapse path)", async () => {
+    const everyRowActionable: AuditReadinessSnapshot = {
+      session_id: SESSION_ID,
+      composition_version: 1,
+      rows: [
+        { id: "validation", label: "Validation", status: "error", summary: "Two errors", detail: "Missing source plugin.", component_ids: ["source"] },
+        { id: "plugin_trust", label: "Plugin trust", status: "warning", summary: "One Tier 3 plugin", detail: null, component_ids: ["web_scrape"] },
+        { id: "provenance", label: "Provenance", status: "warning", summary: "Identity passthrough", detail: null, component_ids: ["select_columns"] },
+        { id: "retention", label: "Retention", status: "warning", summary: "Retention shorter than expected", detail: null, component_ids: [] },
+        { id: "llm_interpretations", label: "LLM interpretations", status: "warning", summary: "Untracked LLM output", detail: null, component_ids: ["classify"] },
+        { id: "secrets", label: "Secrets", status: "error", summary: "Missing required secret", detail: "secret 'OPENAI_API_KEY' is not declared.", component_ids: [] },
+      ],
+    };
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(everyRowActionable);
+    render(<AuditReadinessPanel />);
+    await waitFor(() => {
+      expect(screen.getByText("Validation")).toBeInTheDocument();
+    });
+    // All six row labels must appear — no all-green collapse can apply.
+    expect(screen.getByText("Plugin trust")).toBeInTheDocument();
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText("Retention")).toBeInTheDocument();
+    expect(screen.getByText("LLM interpretations")).toBeInTheDocument();
+    expect(screen.getByText("Secrets")).toBeInTheDocument();
+    // Each summary string should be present (sanity check on row-rendering loop).
+    expect(screen.getByText("Two errors")).toBeInTheDocument();
+    expect(screen.getByText(/Missing required secret/)).toBeInTheDocument();
+  });
+
+  it("refetches when compositionState.version advances", async () => {
+    vi.mocked(api.fetchAuditReadiness)
+      .mockResolvedValueOnce(allGreenSnapshot(1))
+      .mockResolvedValueOnce(allGreenSnapshot(2));
+    const { rerender } = render(<AuditReadinessPanel />);
+    await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1));
+
+    useSessionStore.setState({ compositionState: makeComposition(2) });
+    rerender(<AuditReadinessPanel />);
+
+    await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(2));
+  });
+
+  it("renders a loading state on first fetch", async () => {
+    let resolve!: (s: AuditReadinessSnapshot) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((r) => {
+        resolve = r;
+      }),
+    );
+    render(<AuditReadinessPanel />);
+    expect(screen.getByText(/Checking audit readiness/i)).toBeInTheDocument();
+    resolve(allGreenSnapshot(1));
+    await waitFor(() => {
+      expect(screen.queryByText(/Checking audit readiness/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it("renders an error message on fetch failure", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockRejectedValueOnce({
+      status: 500,
+      detail: "Internal server error",
+    });
+    render(<AuditReadinessPanel />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Internal server error/);
+  });
+
+  it("mounts the Explain dialog when Explain → is clicked (narrative content asserted in 14c)", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    // The placeholder ExplainDialog still calls loadExplain on mount, so mock
+    // the response to keep the store happy. The narrative content is NOT
+    // asserted here — that belongs to 14c's ExplainDialog.test.tsx.
+    vi.mocked(api.fetchAuditReadinessExplain).mockResolvedValueOnce({
+      session_id: SESSION_ID,
+      composition_version: 1,
+      narrative: "stub for placeholder mount; content assertion lives in 14c",
+    });
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    const summary = await screen.findByRole("button", { name: /Audit ready/i });
+    await user.click(summary); // expand
+    const explainBtn = screen.getByRole("button", { name: /Explain/i });
+    await user.click(explainBtn);
+    // 14b asserts mount only — the placeholder's data-testid was added by the
+    // W2 a11y fix (role="dialog" removed; proper dialog semantics are 14c's
+    // responsibility). When 14c replaces the placeholder, this assertion must
+    // change to findByRole("dialog") to validate the real modal contract.
+    expect(
+      await screen.findByTestId("explaindialog-placeholder"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders nothing when there is no active session", () => {
+    useSessionStore.setState({ activeSessionId: null, compositionState: null });
+    const { container } = render(<AuditReadinessPanel />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders nothing when the composition is empty (no source, no nodes, no outputs)", () => {
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: {
+        ...makeComposition(1),
+        source: null,
+        nodes: [],
+        outputs: [],
+      },
+    });
+    const { container } = render(<AuditReadinessPanel />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("aborts the in-flight fetch on unmount without clearing cached data", async () => {
+    // Seed a prior cached snapshot for SESSION_ID so we can verify the cleanup
+    // does NOT call clearSession (which would wipe this entry).
+    const seeded = allGreenSnapshot(1);
+    useAuditReadinessStore.setState({
+      snapshotsBySession: { [SESSION_ID]: seeded },
+    });
+    // Force the auto-fetch to fire by activating composition version 2 (≠ 1).
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(2),
+    });
+
+    // Never-resolving fetch (until we resolve it below) — the cleanup will
+    // abort the controller before that happens.
+    let resolveLate!: (s: AuditReadinessSnapshot) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((r) => {
+        resolveLate = r;
+      }),
+    );
+
+    const { unmount } = render(<AuditReadinessPanel />);
+
+    // Wait for loadSnapshot to start and store the AbortController.
+    let capturedCtrl: AbortController | undefined;
+    await waitFor(() => {
+      capturedCtrl =
+        useAuditReadinessStore.getState().abortControllers[SESSION_ID];
+      expect(capturedCtrl).toBeDefined();
+    });
+
+    // The cleanup must abort this controller on unmount.
+    unmount();
+    expect(capturedCtrl!.signal.aborted).toBe(true);
+
+    // The seeded snapshot must still be cached — cleanup must NOT have called
+    // clearSession (which would have removed snapshotsBySession[SESSION_ID]).
+    expect(
+      useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID],
+    ).toEqual(seeded);
+
+    // The AbortError catch arm should have cleared the per-session loading flag.
+    expect(
+      useAuditReadinessStore.getState().isLoadingBySession[SESSION_ID],
+    ).toBe(false);
+
+    // Belt-and-suspenders: even if the aborted fetch later resolves with a
+    // newer snapshot, the monotonic write guard accepts v2 (≥ v1) and the
+    // success arm may still write. This is documented expected behaviour —
+    // the cleanup's job is to abort the in-flight network call, not to roll
+    // back a response that races past the unmount. If a stricter "post-abort
+    // write guard" is ever added to the success arm, update this assertion.
+    resolveLate(allGreenSnapshot(2));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]
+        ?.composition_version,
+    ).toBe(2); // ratchet: monotonic guard accepts v2 ≥ v1; see comment above.
+  });
+});

@@ -131,7 +131,10 @@ def test_default_session_preferences_are_inserted_by_database(engine) -> None:
             ).where(sessions_table.c.id == session_id)
         ).one()
 
-    assert row.trust_mode == "explicit_approve"
+    # Default trust_mode is auto_commit (commit c4e2f69cd reverted the
+    # explicit_approve default — see the comment block on
+    # sessions_table.trust_mode in models.py for the rationale).
+    assert row.trust_mode == "auto_commit"
     assert row.density_default == "high"
 
 

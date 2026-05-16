@@ -464,7 +464,9 @@ def test_get_composer_preferences_returns_defaults(test_client) -> None:
     response = test_client.get(f"/api/sessions/{session['id']}/composer/preferences")
 
     assert response.status_code == 200
-    assert response.json()["trust_mode"] == "explicit_approve"
+    # Default trust_mode is auto_commit (commit c4e2f69cd reverted from
+    # explicit_approve — see sessions_table.trust_mode comment in models.py).
+    assert response.json()["trust_mode"] == "auto_commit"
     assert response.json()["density_default"] == "high"
 
 

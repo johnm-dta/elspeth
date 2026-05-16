@@ -43,3 +43,21 @@ export type {
   FailedTurn,
   RecoveryTranscriptRow,
 } from "./recovery";
+
+// ── Account-level composer preferences (Phase 1B) ──────────────────────────
+// Account-scoped row; distinct from the per-session `ComposerPreferences`
+// (trust_mode / density_default) re-exported above. The name disambiguator is
+// the `User*` prefix — see plan 13 Task 1 review history for the rationale.
+
+export type ComposerMode = "guided" | "freeform";
+
+export interface UserComposerPreferencesPayload {
+  default_mode: ComposerMode;
+  banner_dismissed_at: string | null;
+  updated_at: string;
+}
+
+export interface UpdateUserComposerPreferencesPayload {
+  default_mode?: ComposerMode;
+  banner_dismissed_at?: string | null;
+}

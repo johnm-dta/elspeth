@@ -42,6 +42,10 @@ import type {
   GuidedRespondResponse,
 } from "@/types/guided";
 import type { RecoveryTranscriptRow } from "@/types/recovery";
+import type {
+  UserComposerPreferencesPayload,
+  UpdateUserComposerPreferencesPayload,
+} from "@/types/api";
 
 // ── Token Management ────────────────────────────────────────────────────────
 
@@ -394,6 +398,30 @@ export async function updateComposerPreferences(
     },
   );
   return parseResponse<ComposerPreferences>(response);
+}
+
+// ── Account-level composer preferences (Phase 1B) ──────────────────────────
+// Account-scoped row keyed by user_id. Distinct from the per-session
+// helpers above (trust_mode / density_default).
+
+/** Get the user's account-level composer preferences. */
+export async function fetchUserComposerPreferences(): Promise<UserComposerPreferencesPayload> {
+  const response = await fetch("/api/composer-preferences", {
+    headers: authHeaders(),
+  });
+  return parseResponse<UserComposerPreferencesPayload>(response);
+}
+
+/** Partial-update the user's account-level composer preferences. */
+export async function updateUserComposerPreferences(
+  payload: UpdateUserComposerPreferencesPayload,
+): Promise<UserComposerPreferencesPayload> {
+  const response = await fetch("/api/composer-preferences", {
+    method: "PATCH",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(payload),
+  });
+  return parseResponse<UserComposerPreferencesPayload>(response);
 }
 
 /** List composition proposals for a session. */

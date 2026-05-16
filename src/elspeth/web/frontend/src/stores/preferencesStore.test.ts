@@ -22,6 +22,10 @@ import {
 vi.mock("@/api/client", () => ({
   fetchUserComposerPreferences: vi.fn(),
   updateUserComposerPreferences: vi.fn(),
+  // Phase 1B Task 4.5 — the integration test below drives the real
+  // sessionStore.createSession, which calls api.createSession; mock here so
+  // the module-load wiring for that test resolves cleanly.
+  createSession: vi.fn(),
 }));
 
 const mockFetch = vi.mocked(fetchUserComposerPreferences);
@@ -169,5 +173,44 @@ describe("preferencesStore", () => {
     expect(mode).toBe("freeform");
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(usePreferencesStore.getState().loaded).toBe(true);
+  });
+});
+
+// ── Phase 1B Task 4.5: preferences → session integration ───────────────────
+// Both real stores. Only the API layer is mocked (and enterGuided is stubbed
+// to avoid pulling in the GET /guided machinery). Proves the inter-store
+// contract — sessionStore.createSession actually consults the live
+// preferencesStore via resolveDefaultMode() rather than reading a stale
+// closure or its own state.
+describe("preferences → session integration (real stores, API mocked)", () => {
+  beforeEach(async () => {
+    resetStore(usePreferencesStore);
+    const { useSessionStore } = await import("@/stores/sessionStore");
+    resetStore(useSessionStore);
+    vi.clearAllMocks();
+  });
+
+  it("createSession enters guided when the live preference is guided", async () => {
+    const { useSessionStore } = await import("@/stores/sessionStore");
+    const api = await import("@/api/client");
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      bannerDismissedAt: null,
+      writing: false,
+    });
+    (api.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: "sess-int",
+      title: "untitled",
+      created_at: "2026-05-15T00:00:00Z",
+      updated_at: "2026-05-15T00:00:00Z",
+    });
+    const enterGuided = vi
+      .spyOn(useSessionStore.getState(), "enterGuided")
+      .mockResolvedValue();
+
+    await useSessionStore.getState().createSession();
+
+    expect(enterGuided).toHaveBeenCalledTimes(1);
   });
 });

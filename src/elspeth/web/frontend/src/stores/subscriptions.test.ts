@@ -371,6 +371,41 @@ describe("auto-validate on composition-state version change", () => {
     expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
   });
 
+  it("does not cache the failed version: a re-fired identical version retries instead of short-circuiting", async () => {
+    // validate() returning false signals the catch path (backend 500 / network
+    // error). The cache must stay empty so that re-firing the *same* version
+    // triggers a second validate call.
+    //
+    // Discrimination:
+    //   Fix:  cache empty after false → subscription re-runs on new object ref →
+    //         lastValidatedVersionBySession.get('sess-1') === 1 is undefined===1
+    //         → false → loop continues → validate called twice.
+    //   Bug:  cache holds 1 → subscription re-runs → 1===1 → short-circuits →
+    //         validate called only once. waitFor times out.
+    const validate = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+
+    // Re-fire version 1 with a new object reference so the zustand subscription
+    // callback re-runs. The cache check (line 151) is what discriminates:
+    // under the fix, cache is empty and validate fires again; under the bug,
+    // cache holds 1 and the subscription short-circuits.
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
+  });
+
   it("does not inject system message when the user switched sessions mid-validate (cross-session guard)", async () => {
     const injectSystemMessageSpy = vi.fn();
     const staleValidationResult = {

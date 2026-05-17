@@ -83,12 +83,14 @@ describe("executionStore.validate", () => {
       detail: "Internal server error",
     });
 
-    await useExecutionStore.getState().validate("session-1");
+    const result = await useExecutionStore.getState().validate("session-1");
 
     const state = useExecutionStore.getState();
     expect(state.validationResult).toBeNull();
     expect(state.isValidating).toBe(false);
     expect(state.error).toContain("internal error");
+    // Catch path must return false so the caller does not cache this version.
+    expect(result).toBe(false);
   });
 
   it("does not store a validation result that resolves after the user switches sessions", async () => {

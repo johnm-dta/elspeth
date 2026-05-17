@@ -309,7 +309,8 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         isValidating: false,
         error: message,
       });
-      return true;
+      // false = caller must not record this version as validated.
+      return false;
     }
   },
 

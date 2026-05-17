@@ -1,89 +1,94 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { act, render, renderHook, screen } from "@testing-library/react";
+import { createElement } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
+import { GraphModal } from "@/components/sidebar/GraphModal";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "@/lib/composer-events";
 import { resetStore } from "@/test/store-helpers";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useHashRouter } from "./useHashRouter";
 
-const REDIRECT_TOAST_DISMISSED_KEY = "elspeth_redirect_toast_dismissed";
+vi.mock("@/components/inspector/GraphView", () => ({
+  GraphView: () => createElement("div", { "data-testid": "graph-view-stub" }),
+}));
 
-describe("useHashRouter removed tab redirects", () => {
+describe("useHashRouter Phase 3B fragment migration", () => {
   beforeEach(() => {
     resetStore(useSessionStore);
-    localStorage.clear();
-    window.history.replaceState(null, "", "/");
+    window.history.replaceState(null, "", window.location.pathname);
+    useSessionStore.setState({
+      sessions: [{ id: "sess-1", title: "Session 1" } as never],
+      activeSessionId: null,
+      selectSession: vi.fn(),
+    } as never);
   });
 
-  it("redirects stale Runs hashes to Graph and exposes a migration toast", async () => {
-    useSessionStore.setState({ activeSessionId: "session-1" });
-    window.history.replaceState(null, "", "#/session-1/runs");
-    const tabRequests: string[] = [];
-    const recordTabRequest = (event: Event) => {
-      tabRequests.push((event as CustomEvent<string>).detail);
-    };
-    window.addEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+  it("rewrites #/{id}/spec to #/{id}", () => {
+    window.history.replaceState(null, "", "#/sess-1/spec");
 
-    try {
-      const { result } = renderHook(() => useHashRouter());
+    renderHook(() => useHashRouter());
 
-      await waitFor(() => {
-        expect(tabRequests).toEqual(["graph"]);
-      });
-      expect(window.location.hash).toBe("#/session-1/graph");
-      await waitFor(() => {
-        expect(result.current.redirectToast?.message).toMatch(/Runs tab was removed/i);
-      });
-    } finally {
-      window.removeEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+    expect(window.location.hash).toBe("#/sess-1");
+  });
+
+  it("rewrites #/{id}/runs to #/{id}", () => {
+    window.history.replaceState(null, "", "#/sess-1/runs");
+
+    renderHook(() => useHashRouter());
+
+    expect(window.location.hash).toBe("#/sess-1");
+  });
+
+  it("opens the graph modal event and rewrites #/{id}/graph", async () => {
+    const handler = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
+    window.history.replaceState(null, "", "#/sess-1/graph");
+
+    renderHook(() => useHashRouter());
+    await act(async () => {});
+
+    expect(handler).toHaveBeenCalled();
+    expect(window.location.hash).toBe("#/sess-1");
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
+  });
+
+  it("opens the yaml modal event and rewrites #/{id}/yaml", async () => {
+    const handler = vi.fn();
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
+    window.history.replaceState(null, "", "#/sess-1/yaml");
+
+    renderHook(() => useHashRouter());
+    await act(async () => {});
+
+    expect(handler).toHaveBeenCalled();
+    expect(window.location.hash).toBe("#/sess-1");
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
+  });
+
+  it("strips any unrecognized verb", () => {
+    window.history.replaceState(null, "", "#/sess-1/nonsense");
+
+    renderHook(() => useHashRouter());
+
+    expect(window.location.hash).toBe("#/sess-1");
+  });
+
+  it("cold-loads the graph modal when the graph hash exists before mount", async () => {
+    window.history.replaceState(null, "", "#/sess-1/graph");
+
+    function HarnessTree() {
+      useHashRouter();
+      return createElement(GraphModal);
     }
-  });
 
-  it("redirects stale Spec hashes to Graph and exposes a migration toast", async () => {
-    useSessionStore.setState({ activeSessionId: "session-1" });
-    window.history.replaceState(null, "", "#/session-1/spec");
-    const tabRequests: string[] = [];
-    const recordTabRequest = (event: Event) => {
-      tabRequests.push((event as CustomEvent<string>).detail);
-    };
-    window.addEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+    render(createElement(HarnessTree));
+    await act(async () => {});
 
-    try {
-      const { result } = renderHook(() => useHashRouter());
-
-      await waitFor(() => {
-        expect(tabRequests).toEqual(["graph"]);
-      });
-      expect(window.location.hash).toBe("#/session-1/graph");
-      await waitFor(() => {
-        expect(result.current.redirectToast?.message).toMatch(/Spec tab was removed/i);
-      });
-    } finally {
-      window.removeEventListener(SWITCH_TAB_EVENT, recordTabRequest);
-    }
-  });
-
-  it("does not show the removed-tab toast after the user dismisses it", async () => {
-    useSessionStore.setState({ activeSessionId: "session-1" });
-    window.history.replaceState(null, "", "#/session-1/runs");
-    const { result, unmount } = renderHook(() => useHashRouter());
-
-    await waitFor(() => {
-      expect(result.current.redirectToast).not.toBeNull();
-    });
-
-    act(() => {
-      result.current.redirectToast?.dismiss();
-    });
-
-    expect(localStorage.getItem(REDIRECT_TOAST_DISMISSED_KEY)).toBe("1");
-    expect(result.current.redirectToast).toBeNull();
-
-    unmount();
-    const second = renderHook(() => useHashRouter());
-
-    await waitFor(() => {
-      expect(second.result.current.redirectToast).toBeNull();
-    });
+    expect(
+      screen.getByRole("dialog", { name: /pipeline graph/i }),
+    ).toBeInTheDocument();
   });
 });

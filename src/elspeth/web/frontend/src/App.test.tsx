@@ -187,27 +187,28 @@ describe("App banner roles", () => {
     expect(root!.getAttribute("role")).toBe("status");
   });
 
-  it("surfaces the stale Runs hash redirect toast", async () => {
+  it("silently canonicalizes stale Runs hashes", async () => {
     useSessionStore.setState({ activeSessionId: "session-1" });
     window.history.replaceState(null, "", "#/session-1/runs");
 
     render(<App />);
 
-    expect(
-      await screen.findByText(/Runs tab was removed/i),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent(/Runs tab was removed/i);
+    await waitFor(() => {
+      expect(window.location.hash).toBe("#/session-1");
+    });
+    expect(screen.queryByText(/Runs tab was removed/i)).toBeNull();
   });
 
-  it("surfaces the stale Spec hash redirect toast", async () => {
+  it("silently canonicalizes stale Spec hashes", async () => {
     useSessionStore.setState({ activeSessionId: "session-1" });
     window.history.replaceState(null, "", "#/session-1/spec");
 
     render(<App />);
 
-    expect(
-      await screen.findByText(/Spec tab was removed/i),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.location.hash).toBe("#/session-1");
+    });
+    expect(screen.queryByText(/Spec tab was removed/i)).toBeNull();
   });
 
   it("does not mount the retired sessions sidebar", async () => {

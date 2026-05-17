@@ -15,7 +15,6 @@ import { useState, useCallback, useEffect, useId, useRef } from "react";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
-import { TAB_CHANGED_EVENT } from "@/hooks/useHashRouter";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { GraphView } from "./GraphView";
@@ -324,13 +323,6 @@ export function InspectorPanel() {
     window.addEventListener(SWITCH_TAB_EVENT, handleSwitchTab);
     return () => window.removeEventListener(SWITCH_TAB_EVENT, handleSwitchTab);
   }, []);
-
-  // Notify hash router when tab changes (for URL sync).
-  useEffect(() => {
-    window.dispatchEvent(
-      new CustomEvent(TAB_CHANGED_EVENT, { detail: activeTab }),
-    );
-  }, [activeTab]);
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const compositionState = useSessionStore((s) => s.compositionState);

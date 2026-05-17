@@ -4,24 +4,10 @@ import {
   KNOWN_AUDIT_FLAGS,
 } from "./auditCharacteristics";
 
-// Source of truth: src/elspeth/contracts/enums.py AuditCharacteristic
-// StrEnum (the 13 string-valued members). When the backend vocabulary
-// grows, update this expected set AND add metadata entries to
-// AUDIT_CHARACTERISTICS for the new flags.
-const EXPECTED_VOCABULARY = [
-  "io_read", "io_write", "external_call",
-  "deterministic", "seeded", "non_deterministic",
-  "provenance", "retention", "quarantine", "coerce",
-  "signed", "network", "credentials",
-] as const;
-
-describe("audit-characteristic vocabulary parity", () => {
-  it("KNOWN_AUDIT_FLAGS covers every member of 16a's AuditCharacteristic enum", () => {
-    const known = new Set(KNOWN_AUDIT_FLAGS);
-    const missing = EXPECTED_VOCABULARY.filter((flag) => !known.has(flag));
-    expect(missing).toEqual([]);
-  });
-});
+// Bidirectional vocabulary parity (Python AuditCharacteristic ↔ this file's
+// AUDIT_CHARACTERISTICS) is enforced on the Python side at
+// tests/unit/web/catalog/test_audit_characteristic_vocabulary_parity.py
+// so adding a member in either language without the other fails CI.
 
 describe("auditCharacteristics metadata", () => {
   it("exposes a metadata entry for io_read", () => {

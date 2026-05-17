@@ -1,0 +1,310 @@
+{
+  "review_metadata": {
+    "plan": "16c-phase-7c-frontend-integration.md",
+    "reviewer": "plan-review-reality-agent",
+    "date": "2026-05-17",
+    "verdict": "NO-GO",
+    "blocker_count": 4,
+    "major_count": 3,
+    "minor_count": 3,
+    "nit_count": 1
+  },
+
+  "symbols": [
+    {
+      "symbol": "DataTrustTier (type)",
+      "plan_references": ["FilterChipStrip.tsx line (import from @/types/index)", "CatalogDrawer.tsx integration (import type { DataTrustTier } from '@/types/index')"],
+      "status": "NOT FOUND",
+      "severity": "BLOCKER",
+      "evidence": "src/elspeth/web/frontend/src/types/index.ts — PluginSummary at line 277 has no DataTrustTier; grep for 'DataTrustTier' returns 0 hits in all of src/. This type is created by plan 16b (Task 1, line 266 of 16b). 16c cannot compile until 16b ships.",
+      "note": "The plan correctly states '16C cannot land before 7B' in the Risks table, but does not flag this as a compilation blocker for every task."
+    },
+    {
+      "symbol": "PluginSummary.capability_tags, .audit_characteristics, .data_trust_tier, .usage_when_to_use, .usage_when_not_to_use, .example_use",
+      "plan_references": ["CatalogDrawer.tsx integration Step 3 (matchesFilters, scorePlugin, available* memos)", "CatalogDrawer.test.tsx fixtures (csv.capability_tags, azure.audit_characteristics, etc.)"],
+      "status": "NOT FOUND",
+      "severity": "BLOCKER",
+      "evidence": "src/elspeth/web/frontend/src/types/index.ts:277-282 — current PluginSummary has only: name, plugin_type, description, config_fields. None of the 6 new fields from 16a/16b exist. Added by 16b Task 1.",
+      "note": "All filter logic, extended scorePlugin, matchesFilters, and available* memos in Task 3 reference these fields and will fail tsc until 16b is merged."
+    },
+    {
+      "symbol": "lookupAuditCharacteristic (function)",
+      "plan_references": ["FilterChipStrip.tsx Step 3 (import { lookupAuditCharacteristic } from './auditCharacteristics')", "CatalogDrawer.tsx integration"],
+      "status": "NOT FOUND",
+      "severity": "BLOCKER",
+      "evidence": "File src/elspeth/web/frontend/src/components/catalog/auditCharacteristics.ts does not exist. Confirmed by find and grep. Created by 16b Task 2. 16c's FilterChipStrip.tsx imports from this file.",
+      "note": "The plan is aware of this dependency but the file must be present for Task 1 to compile, not just Task 3."
+    },
+    {
+      "symbol": "ACTION_SHORTCUTS entry { keys: 'Alt+1-4', action: 'Switch inspector tab (Spec/Graph/YAML/Runs)' }",
+      "plan_references": ["ShortcutsHelp.tsx rewrite, Task 4 Step 3, plan line 1023"],
+      "status": "CONTRADICTION",
+      "severity": "BLOCKER",
+      "evidence": "src/elspeth/web/frontend/src/components/common/ShortcutsHelp.test.tsx:37 asserts 'screen.queryByText(/Switch inspector tab/i)).toBeNull()'. This is a passing regression guard: the shortcut was previously removed. The plan's ShortcutsHelp rewrite re-introduces { keys: 'Alt+1-4', action: 'Switch inspector tab (Spec/Graph/YAML/Runs)' } in ACTION_SHORTCUTS (plan line 1023), which will directly fail the existing test at ShortcutsHelp.test.tsx:36-37 unless the plan also replaces that test. The plan says to 'Replace' the test file content — but the incoming test suite does NOT include a 'does not list retired inspector tab shortcuts' assertion nor a negation of the Alt+1-4 entry. The shortcut is functionally dead (no keydown handler in any .tsx file wires Alt+1-4 to any inspector navigation) — listing it in ShortcutsHelp would be documenting a non-existent shortcut.",
+      "recommendation": "Remove the Alt+1-4 entry from ACTION_SHORTCUTS, or verify the shortcut is actually wired and the existing test's 'does not list inspector tab shortcuts' assertion needs updating."
+    },
+    {
+      "symbol": "scorePlugin (function)",
+      "plan_references": ["CatalogDrawer.tsx Task 3 Step 3 — 'extend scorePlugin'"],
+      "status": "EXISTS",
+      "severity": null,
+      "evidence": "src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx:43-51. Current signature: function scorePlugin(query: string, plugin: PluginSummary): number. Target string currently 'plugin.name + plugin.description'. Plan extends it to also include usage_when_to_use, usage_when_not_to_use, and capability_tags.join(' '). The function exists and can be extended as described — no fabrication."
+    },
+    {
+      "symbol": "PREFILL_CHAT_INPUT_EVENT",
+      "plan_references": ["InlineChatSourceEntry.tsx (import from './PluginCard')", "InlineChatSourceEntry.test.tsx (import from './PluginCard')"],
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx:17 — 'export const PREFILL_CHAT_INPUT_EVENT = \"composer:prefill-chat-input\"'. Confirmed. ChatInput.tsx also imports it. The plan's import path './PluginCard' is correct."
+    },
+    {
+      "symbol": "useFocusTrap (hook)",
+      "plan_references": ["ShortcutsHelp.tsx rewrite (import { useFocusTrap } from '@/hooks/useFocusTrap')"],
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/hooks/useFocusTrap.ts:17 — 'export function useFocusTrap(containerRef, active = true, initialFocusSelector?)'. Plan calls useFocusTrap(dialogRef) with one arg; active defaults to true. Signature compatible.",
+      "note": "CatalogDrawer calls useFocusTrap(drawerRef, isOpen) — two args. ShortcutsHelp currently calls useFocusTrap(dialogRef) — one arg. Plan rewrite keeps one-arg form. All compatible."
+    },
+    {
+      "symbol": "CatalogTab (type)",
+      "plan_references": ["filtersByTab state: Record<CatalogTab, CatalogFilters>"],
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx:33 — 'type CatalogTab = \"sources\" | \"transforms\" | \"sinks\"'. Local to CatalogDrawer.tsx. Plan's filtersByTab Record key matches."
+    },
+    {
+      "symbol": "listSources, listTransforms, listSinks, getPluginSchema (API functions)",
+      "plan_references": ["CatalogDrawer.test.tsx mock: vi.mock('@/api/client', ...)"],
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/api/client.ts:682,690,698,710. All four functions are exported. The vi.mock path '@/api/client' matches the existing CatalogDrawer.tsx import at line 19-23."
+    },
+    {
+      "symbol": "AuditCharacteristicIcon (component)",
+      "plan_references": ["Implied dependency through 16b; 16c does not directly import it but FilterChipStrip references auditCharacteristics metadata"],
+      "status": "NOT FOUND",
+      "evidence": "File src/elspeth/web/frontend/src/components/catalog/AuditCharacteristicIcon.tsx does not exist. Created by 16b. 16c does not import it directly — FilterChipStrip uses lookupAuditCharacteristic from auditCharacteristics.ts for the label only, not AuditCharacteristicIcon. Not a blocker for 16c specifically, but confirms 16b has not shipped.",
+      "severity": "INFO"
+    },
+    {
+      "symbol": "TrustTierBadge (component)",
+      "plan_references": ["Listed in 16b file structure; 16c does not directly import it"],
+      "status": "NOT FOUND",
+      "evidence": "File src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.tsx does not exist. 16c does not import it directly. Not a direct blocker for 16c's own code, but confirms 16b has not shipped.",
+      "severity": "INFO"
+    },
+    {
+      "symbol": "fuzzyMatch, confidenceFromScore, MIN_FUZZY_CONFIDENCE",
+      "plan_references": ["CatalogDrawer.tsx extended scorePlugin"],
+      "status": "EXISTS",
+      "evidence": "src/elspeth/web/frontend/src/utils/fuzzyScore.ts — all three are imported by the current CatalogDrawer.tsx (lines 29-31). The plan's extended scorePlugin continues to import from the same path."
+    }
+  ],
+
+  "audit_characteristic_flag_alignment": {
+    "description": "Cross-check of 16a VALID_AUDIT_CHARACTERISTICS (13 members) vs 16b AUDIT_CHARACTERISTICS table (11 entries) and 16c fixture usage.",
+    "16a_valid_set": [
+      "io_read", "io_write", "external_call", "deterministic", "seeded",
+      "non_deterministic", "provenance", "retention", "quarantine", "coerce",
+      "signed", "network", "credentials"
+    ],
+    "16b_frontend_flags": [
+      "deterministic", "seeded", "io_read", "io_write", "external_call",
+      "non_deterministic", "quarantine", "coerce", "emits_provenance",
+      "signed", "credentials"
+    ],
+    "findings": [
+      {
+        "issue": "16a uses 'provenance', 16b uses 'emits_provenance'",
+        "severity": "MAJOR",
+        "detail": "16a VALID_AUDIT_CHARACTERISTICS (line 1190) has 'provenance'. 16b's AUDIT_CHARACTERISTICS table (line 563) has flag: 'emits_provenance'. The backend will emit 'provenance' strings (via author-declared frozenset); the frontend's lookupAuditCharacteristic('provenance') will return null (unknown flag) and fall back to displaying the raw flag string. This is a pre-existing cross-plan mismatch that 16c inherits. The 16a test fixture at plan line 945 declares audit_characteristics = frozenset({'provenance', 'quarantine'}) — so real plugins can emit 'provenance', which the frontend has no metadata entry for.",
+        "note": "16a's round-2 hardening note (line 2323) references a corrected 'emits_provenance' -> 'provenance' fix, but the backend VALID_AUDIT_CHARACTERISTICS still contains 'provenance' (not 'emits_provenance'). The 16b test at line 407 checks lookupAuditCharacteristic('emits_provenance') — a flag the backend will never emit. These plans are not aligned on the flag name."
+      },
+      {
+        "issue": "16a has 'retention' and 'network'; 16b has neither",
+        "severity": "MAJOR",
+        "detail": "16a's VALID_AUDIT_CHARACTERISTICS includes 'retention' (line 1191) and 'network' (line 1195) as author-declarable flags. 16b's AUDIT_CHARACTERISTICS table has no entries for 'retention' or 'network'. If a plugin author declares audit_characteristics = frozenset({'retention'}) or frozenset({'network'}), the backend passes validation (both are in VALID_AUDIT_CHARACTERISTICS) and the API will return those strings. The frontend's lookupAuditCharacteristic('retention') and lookupAuditCharacteristic('network') both return null, resulting in the raw flag string being shown in chips/cards with no metadata. This is not a 16c-introduced problem — it is a pre-existing gap between 16a and 16b that 16c will silently expose.",
+        "note": "16a plan narrative (line 221) lists 'network' as a manually declarable trait. 16b removed 'network' as a distinct flag because EXTERNAL_CALL.value maps to 'external_call'. But 'network' remains in VALID_AUDIT_CHARACTERISTICS as a distinct declarable string separate from 'external_call'. An author can declare both."
+      },
+      {
+        "issue": "16c fixture values are internally consistent with 16a wire format",
+        "severity": "OK",
+        "detail": "16c's CatalogDrawer test fixtures use audit_characteristics: ['io_read', 'quarantine'] for csv and ['io_read', 'external_call'] for azure. Both 'io_read', 'quarantine', and 'external_call' exist in both 16a VALID_AUDIT_CHARACTERISTICS and 16b AUDIT_CHARACTERISTICS table. The 'network' chip filter test clicks { name: /network/i } which will match the 'Network call' label of the 'external_call' entry in lookupAuditCharacteristic. This is consistent."
+      }
+    ]
+  },
+
+  "paths": [
+    {
+      "path": "src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx",
+      "status": "EXISTS",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx"
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.test.tsx",
+      "status": "EXISTS",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.test.tsx"
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx",
+      "status": "EXISTS",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx:17 exports PREFILL_CHAT_INPUT_EVENT"
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/catalog/FilterChipStrip.tsx",
+      "status": "DOES NOT EXIST (to be created)",
+      "evidence": "No file found. Plan creates it. Correct — plan marks as 'Created'."
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/catalog/InlineChatSourceEntry.tsx",
+      "status": "DOES NOT EXIST (to be created)",
+      "evidence": "No file found. Plan creates it. Correct — plan marks as 'Created'."
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/catalog/auditCharacteristics.ts",
+      "status": "DOES NOT EXIST — 16b prerequisite",
+      "evidence": "No file found. This is a 16b artifact that must exist before 16c's FilterChipStrip.tsx can compile."
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/common/ShortcutsHelp.tsx",
+      "status": "EXISTS",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/src/components/common/ShortcutsHelp.tsx — 67 lines, flat SHORTCUTS array with 10 entries, no subheadings."
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/components/common/ShortcutsHelp.test.tsx",
+      "status": "EXISTS",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/src/components/common/ShortcutsHelp.test.tsx — 39 lines; 3 tests. Tests currently pass for 'Open plugin catalog', 'Open graph view', 'Export YAML'. Test at line 36-37 asserts /Switch inspector tab/i is NOT present."
+    },
+    {
+      "path": "src/elspeth/web/frontend/tests/e2e/llm-provider-schema.spec.ts",
+      "status": "EXISTS — entirely fixme'd",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/tests/e2e/llm-provider-schema.spec.ts. test.fixme(true, ...) wraps the entire describe block. Both tests are empty stubs. Plan does not reference this file directly — no issue."
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/hooks/useFocusTrap.ts",
+      "status": "EXISTS",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/src/hooks/useFocusTrap.ts:17"
+    },
+    {
+      "path": "src/elspeth/web/frontend/src/utils/fuzzyScore.ts",
+      "status": "EXISTS",
+      "evidence": "Confirmed at /home/john/elspeth/src/elspeth/web/frontend/src/utils/fuzzyScore.ts"
+    }
+  ],
+
+  "shortcutshelp_diff_reality_check": {
+    "current_entries": [
+      "Ctrl+K — Command palette",
+      "Ctrl/Cmd+Shift+P — Open plugin catalog",
+      "Ctrl/Cmd+Shift+G — Open graph view",
+      "Ctrl/Cmd+Shift+Y — Export YAML",
+      "Ctrl+N — New session",
+      "Ctrl+/ — Focus chat input",
+      "Ctrl+Shift+V — Validate pipeline",
+      "Ctrl+E — Execute pipeline",
+      "? — Keyboard shortcuts",
+      "Escape — Close dialog or drawer"
+    ],
+    "plan_action_shortcuts": [
+      "Ctrl+K — Command palette",
+      "Ctrl+N — New session",
+      "Ctrl+/ — Focus chat input",
+      "Ctrl+Shift+V — Validate pipeline",
+      "Ctrl+E — Execute pipeline",
+      "Alt+1-4 — Switch inspector tab (Spec/Graph/YAML/Runs)",
+      "Escape — Close dialog or drawer"
+    ],
+    "plan_reference_shortcuts": [
+      "Ctrl/Cmd+Shift+P — Open plugin catalog",
+      "? — Keyboard shortcuts"
+    ],
+    "dropped_entries": [
+      "Ctrl/Cmd+Shift+G — Open graph view",
+      "Ctrl/Cmd+Shift+Y — Export YAML"
+    ],
+    "finding": {
+      "severity": "MAJOR",
+      "detail": "The plan's ShortcutsHelp rewrite drops 'Ctrl/Cmd+Shift+G — Open graph view' and 'Ctrl/Cmd+Shift+Y — Export YAML' from the shortcuts list. These shortcuts are currently wired: CommandPalette.tsx:143 ('Open graph view') and CommandPalette.tsx:154 ('Export YAML') dispatch them. The existing ShortcutsHelp.test.tsx tests at lines 18-30 assert both entries exist and will fail against the rewritten component. The plan says to 'Replace' the test file content — the incoming test suite does not include assertions for graph-view or YAML-export shortcuts, which means the replacement test file DELETES coverage for live, wired shortcuts. This is either intentional scope-creep removal of those shortcuts (not stated in plan scope) or an omission."
+    }
+  },
+
+  "search_placeholder_test_match": {
+    "current_placeholder": "Search plugins... (press /)",
+    "test_query": "getByPlaceholderText(/search plugins/i)",
+    "status": "OK",
+    "detail": "Partial regex match with case-insensitive flag will match the current placeholder text."
+  },
+
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "severity": "BLOCKER",
+      "title": "16b prerequisites not shipped — DataTrustTier, extended PluginSummary, auditCharacteristics.ts all absent from codebase",
+      "detail": "DataTrustTier is not in src/elspeth/web/frontend/src/types/index.ts. PluginSummary lacks capability_tags, audit_characteristics, data_trust_tier, usage_when_to_use, usage_when_not_to_use. auditCharacteristics.ts does not exist. 16c's FilterChipStrip.tsx imports DataTrustTier from '@/types/index' and lookupAuditCharacteristic from './auditCharacteristics' — both will throw ImportError / tsc error. Tasks 1, 2, and 3 ALL fail to compile until 16b is merged.",
+      "required_action": "Merge 16b to the target branch before beginning 16c. Verify all 16b files exist: auditCharacteristics.ts, AuditCharacteristicIcon.tsx, TrustTierBadge.tsx, updated types/index.ts with DataTrustTier and extended PluginSummary."
+    },
+    {
+      "id": "B2",
+      "severity": "BLOCKER",
+      "title": "Alt+1-4 / 'Switch inspector tab' shortcut reintroduced — contradicts existing passing regression guard",
+      "detail": "ShortcutsHelp.test.tsx:36-37 (currently passing) asserts queryByText(/Switch inspector tab/i) is null. The plan's Task 4 ACTION_SHORTCUTS array includes { keys: 'Alt+1-4', action: 'Switch inspector tab (Spec/Graph/YAML/Runs)' }. Even though the plan replaces the test file, the new test file omits a negation for this entry. More critically: Alt+1-4 is not wired anywhere in the frontend — there is no keydown handler for this shortcut. Documenting an unwired shortcut in the help dialog is a user-facing lie.",
+      "required_action": "Remove the Alt+1-4 entry from ACTION_SHORTCUTS. If the plan intends to wire this shortcut, that belongs in a separate task with a wiring implementation — it is out of scope for 16c."
+    },
+    {
+      "id": "B3",
+      "severity": "BLOCKER",
+      "title": "Task 4 drops live wired shortcuts from ShortcutsHelp without wiring removal",
+      "detail": "The plan's ShortcutsHelp rewrite removes Ctrl/Cmd+Shift+G ('Open graph view') and Ctrl/Cmd+Shift+Y ('Export YAML') from the flat list and does not place them in either ACTION_SHORTCUTS or REFERENCE_SHORTCUTS. These shortcuts are wired in CommandPalette.tsx (lines 143, 154) and have passing tests in ShortcutsHelp.test.tsx (lines 18-30). Dropping them from ShortcutsHelp without removing the keyboard wiring creates an undocumented-but-live shortcut situation.",
+      "required_action": "Either (a) add Ctrl/Cmd+Shift+G and Ctrl/Cmd+Shift+Y to REFERENCE_SHORTCUTS or ACTION_SHORTCUTS in the plan's rewrite, or (b) explicitly remove those keyboard bindings from CommandPalette.tsx as part of this task and update the plan scope accordingly."
+    },
+    {
+      "id": "B4",
+      "severity": "BLOCKER",
+      "title": "16a 'provenance' vs 16b 'emits_provenance' flag name mismatch causes silent frontend display degradation at runtime",
+      "detail": "16a's VALID_AUDIT_CHARACTERISTICS contains 'provenance'. 16b's AUDIT_CHARACTERISTICS table uses flag: 'emits_provenance'. When a plugin declares audit_characteristics = frozenset({'provenance'}) (as in 16a's own test fixture at line 945), the API returns 'provenance'. The frontend's lookupAuditCharacteristic('provenance') returns null — the chip and any card display will show the raw string 'provenance' with no label, glyph, or tone. This misalignment is pre-existing between 16a and 16b but 16c will be the first surface to exercise it visually. The 16a round-2 note (line 2323) references a fixture fix but the backend VALID_AUDIT_CHARACTERISTICS and author-declaration mechanism still use 'provenance', not 'emits_provenance'.",
+      "required_action": "Align the flag name before shipping 16c. Either: (a) rename 'emits_provenance' to 'provenance' in 16b's auditCharacteristics.ts and all tests that reference 'emits_provenance'; or (b) rename 'provenance' to 'emits_provenance' in 16a's VALID_AUDIT_CHARACTERISTICS and all backend plugin declarations. Verify the 16a and 16b plans agree on a single canonical string."
+    }
+  ],
+
+  "warnings": [
+    {
+      "id": "W1",
+      "severity": "MAJOR",
+      "title": "'retention' and 'network' in VALID_AUDIT_CHARACTERISTICS have no frontend metadata entries",
+      "detail": "16a's VALID_AUDIT_CHARACTERISTICS includes 'retention' (line 1191) and 'network' (line 1195) as author-declarable traits. 16b's AUDIT_CHARACTERISTICS table has no entries for either. A plugin author declaring these traits will produce API output that renders as raw unknown strings in the filter chip strip and PluginCard. This is an incomplete mapping that should be resolved in 16b before 16c lands.",
+      "required_action": "Add 'retention' and 'network' entries to 16b's AUDIT_CHARACTERISTICS array, or remove them from 16a's VALID_AUDIT_CHARACTERISTICS. The latter is preferable if 'network' was intentionally superseded by 'external_call'."
+    },
+    {
+      "id": "W2",
+      "severity": "MINOR",
+      "title": "Task 4 test file replacement discards passing ShortcutsHelp.test.tsx assertions",
+      "detail": "Current ShortcutsHelp.test.tsx has 3 passing tests: 'lists the plugin catalog shortcut', 'lists graph and YAML modal shortcuts', 'does not list retired inspector tab shortcuts'. The plan replaces the file content entirely with 4 new tests that omit the 'lists graph and YAML modal shortcuts' test (which tests live wired shortcuts). If those shortcuts are retained in the rewrite (per W1 / B3 fix), the test coverage must be preserved.",
+      "required_action": "After resolving B3, ensure the replacement test file includes assertions for any shortcuts that remain in the component."
+    },
+    {
+      "id": "W3",
+      "severity": "MINOR",
+      "title": "CatalogDrawer.test.tsx mock override in Phase 7B reshape describe block uses beforeEach with vi.mocked() but the module-level mock uses inline mockResolvedValue",
+      "detail": "The existing CatalogDrawer.test.tsx (lines 7-25) wires mock values at the vi.mock() factory level (no vi.fn() — direct mockResolvedValue). The plan's new test suite uses vi.mocked(api.listSources).mockResolvedValue(...) in a beforeEach — this requires vi.clearAllMocks() between tests and the existing beforeEach does call vi.clearAllMocks(). However, the existing describe block's module-level mock factory returns mockResolvedValue without vi.fn() wrapping, meaning vi.mocked() may not work on those specific references. The plan adds a separate describe block so isolation is maintained, but if both describe blocks run together, the module-level factory mock will override the per-test mock in the new block. The plan should use a self-contained vi.mock factory within the new describe or ensure the import is from the same mocked module.",
+      "required_action": "Verify the combined test file (both existing + new describe blocks) passes when run together. If the new describe block's beforeEach vi.mocked() overrides clash with the module-level factory, restructure using vi.resetModules() or a dedicated mock file."
+    }
+  ],
+
+  "nits": [
+    {
+      "id": "N1",
+      "severity": "NIT",
+      "title": "scorePlugin extended implementation does not include example_use in the target string",
+      "detail": "16a ships example_use: str | None as one of the 6 new fields. The plan's extended scorePlugin at Task 3 Step 3 fuzzy-matches: plugin.name, plugin.description, plugin.usage_when_to_use, plugin.usage_when_not_to_use, plugin.capability_tags.join(' '). It does not include plugin.example_use. This may be intentional (example_use is a code snippet, not prose a user searches for) but is not explained.",
+      "required_action": "Document the omission with a comment in the scorePlugin implementation, or add example_use to the target string if users are expected to search by example content."
+    }
+  ],
+
+  "summary": {
+    "hallucinations_found": 0,
+    "fabricated_symbols": 0,
+    "missing_prerequisites": 3,
+    "path_issues": 0,
+    "convention_violations": 0,
+    "inter_plan_mismatches": 2,
+    "plan_internal_contradictions": 2,
+    "verdict": "NO-GO",
+    "verdict_rationale": "16c is internally coherent and well-specified. The plan correctly describes the intended diff against CatalogDrawer.tsx, ShortcutsHelp.tsx, and the two new components. There are no hallucinated symbols or fabricated APIs. However, four blocking issues prevent execution: (B1) 16b has not shipped — three type/file dependencies are absent from the codebase and will cause tsc failures in Tasks 1 and 3; (B2) Alt+1-4 is reintroduced as a documented shortcut but is not wired anywhere, contradicting an existing passing regression guard; (B3) two live wired shortcuts (graph view, YAML export) are silently dropped from ShortcutsHelp without removing their bindings; (B4) the 'provenance' vs 'emits_provenance' flag name mismatch between 16a and 16b will cause silent runtime degradation for any plugin that declares the 'provenance' audit characteristic. All four must be resolved before execution."
+  }
+}

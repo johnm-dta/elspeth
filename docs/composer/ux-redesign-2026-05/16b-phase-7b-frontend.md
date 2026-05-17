@@ -7,8 +7,8 @@
 
 **Goal:** Land the frontend primitives for Phase 7's catalog reshape —
 extend `PluginSummary` types with the fields shipped by Phase 7A, build
-the small leaf components (`AuditCharacteristicIcon`, `TrustTierBadge`)
-and their centralised metadata table (`auditCharacteristics.ts`), and
+the small leaf component (`AuditCharacteristicIcon`) and its centralised
+metadata table (`auditCharacteristics.ts`), and
 rewrite `PluginCard.tsx` to render the new reference-card layout from
 design doc 08 (removing the "Use in pipeline" toolkit affordance in the
 process). Drawer integration (filter chips, synthetic chat-source
@@ -17,7 +17,7 @@ entry, shortcuts regroup) is in the companion plan,
 
 **Architecture:** Frontend-only. The catalog API surface already returns
 the new fields after Phase 7A; this plan consumes them, falling back to
-graceful defaults for unfilled plugins. The five tasks here build the
+graceful defaults for unfilled plugins. The four tasks here build the
 **primitives** that 16c then composes inside the drawer. The
 `PREFILL_CHAT_INPUT_EVENT` export on `PluginCard.tsx` survives the
 rewrite because 16c's `InlineChatSourceEntry` dispatches it and
@@ -38,6 +38,41 @@ rewrite because 16c's `InlineChatSourceEntry` dispatches it and
 [00-implementation-roadmap.md](00-implementation-roadmap.md). Design doc:
 [08-catalog-reshape.md](08-catalog-reshape.md).
 
+## Implementation worktree (batched with 16a + 16c)
+
+Phase 7 ships as a single batched PR covering 16a + 16b + 16c. All work
+goes in one worktree. If 16a kicked off first the worktree already
+exists; otherwise create it now:
+
+```bash
+git -C /home/john/elspeth worktree add .worktrees/phase-7-catalog -b feat/phase-7-catalog
+cd /home/john/elspeth/.worktrees/phase-7-catalog
+python3.13 -m venv .venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+cd src/elspeth/web/frontend && npm install
+```
+
+If the worktree already exists, `cd
+/home/john/elspeth/.worktrees/phase-7-catalog && source .venv/bin/activate`
+and proceed. The frontend `npm install` is required for the vitest /
+playwright steps in this plan.
+
+**Order:** This plan (16b) runs after 16a's API surface has landed. The
+TypeScript types reference fields that 16a adds to `PluginSummary`;
+without 16a in place, `tsc --noEmit` and the vitest fixtures fail.
+16c depends on 16b's primitives — do not start 16c until 16b's Task 4
+is green.
+
+**Discipline (operator-known gotchas):** activate `.venv` before any
+`uv pip install`; keep Python at 3.13 to match main; when delegating
+to subagents prefix prompts with absolute paths and CWD discipline
+(subagents silently misread the worktree path otherwise); prefer
+`mcp__filigree__*` over the `filigree` CLI from inside the worktree.
+
+**Final PR shape:** single PR from `feat/phase-7-catalog` → `RC5.2` once
+all three plans land. See [16-phase-7-catalog-reshape.md](16-phase-7-catalog-reshape.md#implementation-worktree-batched)
+for the full batch protocol.
+
 ---
 
 ## Scope boundaries
@@ -54,11 +89,10 @@ rewrite because 16c's `InlineChatSourceEntry` dispatches it and
   tooltip, tone).
 - New `AuditCharacteristicIcon.tsx` — single-flag renderer used by the
   card and (in 16c) the filter chip strip.
-- New `TrustTierBadge.tsx` — tier-badge renderer.
 - Rewrite `PluginCard.tsx` to render the new card layout from design
-  doc 08-§"Plugin card content design" (trust-tier badge,
-  audit-characteristic icons, "When you'd use this" / "When you
-  wouldn't" / "Example use" / "Schema →" disclosure).
+  doc 08-§"Plugin card content design" (audit-characteristic icons,
+  "When you'd use this" / "When you wouldn't" / "Example use" /
+  "Schema →" disclosure).
 - Remove the "Use in pipeline" button and supporting machinery
   (`buildInsertionPrompt`, `handleUseInPipeline`, the `onCloseDrawer`
   prop on `PluginCard`). The `PREFILL_CHAT_INPUT_EVENT` **export**
@@ -70,8 +104,8 @@ rewrite because 16c's `InlineChatSourceEntry` dispatches it and
 - **CSS styling for the new class names.** This plan introduces several
   new class names (`plugin-card-prose-fallback`, `plugin-card-audit-strip`,
   `plugin-card-prose-section`, `plugin-card-example-code`,
-  `trust-tier-badge-{1,2,3}`, `audit-icon-positive`,
-  `audit-icon-attention`, `audit-icon-unknown`, etc.) used by the
+  `audit-icon-positive`, `audit-icon-attention`,
+  `audit-icon-informational`, `audit-icon-unknown`, etc.) used by the
   Vitest assertions for structural correctness. Visual styling for
   these is a follow-up CSS pass that should land before staging-smoke
   verification in 16c Task 5. The Vitest tests pass on class presence
@@ -111,11 +145,18 @@ exactly. New `PluginSummary` fields are typed at the boundary:
 - `audit_characteristics: string[]`
 - `data_trust_tier: 1 | 2 | 3 | null`
 
-The `data_trust_tier` field is a **union of three literals** plus
-`null`, not `number`. This matches the Pydantic `int | None` with
-`ge=1, le=3` constraint on the backend. TypeScript-side, this forces a
-discriminator read at render time so future tier additions surface as
-type errors rather than silent fallbacks.
+Trust tier is a property of plugin **kind**, not per-plugin: sources
+introduce Tier-3 external data; transforms work with Tier-2 pipeline
+data; sinks work with Tier-2 internally on a Tier-3 boundary interface.
+It is a categorical characteristic of the kind, not something individual
+plugin authors choose. The catalog UI therefore has nothing per-plugin
+about trust tier to surface — exposing 1/2/3 ordinals would imply a
+per-plugin distinction that does not exist, and would risk the "tier 3 =
+bad" misread among non-technical personas (Linda). The `data_trust_tier`
+field remains on the wire-format `PluginSummary` for backend
+compatibility with 16a's trust.py discharge, but no frontend code reads
+it. 16c will remove the trust-tier filter chip group consistent with
+this scope cut.
 
 The synthetic "Inline data from chat" entry is **not** a `PluginSummary`.
 It is a separate type (`InlineChatSourceEntry`) with its own shape.
@@ -133,9 +174,22 @@ entry as a sibling at the top of the Sources tab.
 - `src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx` —
   Major rewrite: new card layout, remove "Use in pipeline" machinery.
 - `src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx`
-  — Update tests for the new layout; remove the "Use in pipeline" tests
-  and the nested-interactive structural-invariant test (it ceases to
-  apply once the action button is gone).
+  — Surgical edits only: remove the "Use in pipeline action" describe
+  block (4 tests); update `makePlugin` factory with new required fields;
+  update 13 aria-label query strings to match the new disclosure button;
+  add Phase 7B layout tests. Retained: 12 regression-guard tests for
+  bug `elspeth-dcf12c061b` (flat + discriminated-union + error/loading).
+- `src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx` —
+  Remove the `onCloseDrawer={onClose}` JSX prop from the `<PluginCard>`
+  render site; the prop no longer exists on `PluginCardProps` after the
+  rewrite. Required to keep `tsc --noEmit` clean.
+- `src/elspeth/web/frontend/src/App.css` — Delete the dead
+  `.plugin-card-use-btn` rule block (base rule, hover/focus selector,
+  touch media query). Per CLAUDE.md "No Legacy Code Policy": dead CSS
+  for a deleted component ships in the same commit.
+- `src/elspeth/web/frontend/src/components/chat/ChatInput.tsx` — Update
+  the stale comment at line 63 that references "PluginCard 'Use in
+  pipeline' action" to name the correct post-7B+7C dispatcher.
 
 **Created:**
 
@@ -143,14 +197,9 @@ entry as a sibling at the top of the Sources tab.
 - `src/elspeth/web/frontend/src/components/catalog/auditCharacteristics.test.ts`
 - `src/elspeth/web/frontend/src/components/catalog/AuditCharacteristicIcon.tsx`
 - `src/elspeth/web/frontend/src/components/catalog/AuditCharacteristicIcon.test.tsx`
-- `src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.tsx`
-- `src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.test.tsx`
 
 **Not modified:**
 
-- `src/elspeth/web/frontend/src/components/chat/ChatInput.tsx` — Keeps
-  its `PREFILL_CHAT_INPUT_EVENT` listener. The 16c synthetic entry
-  dispatches the same event with a tailored prompt.
 - `src/elspeth/web/frontend/src/api/client.ts` — No new endpoints; the
   existing wrappers continue to work. The TypeScript types they return
   get richer via the `types/index.ts` extension.
@@ -347,7 +396,7 @@ reconnaissance against current `main`):**
 - `src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx`
   — every `makePlugin(...)` factory / inline `PluginSummary` literal
   needs the same default expansion. This file is largely rewritten in
-  Task 5 of this plan, but the Task-1 compile must pass first.
+  Task 4 of this plan, but the Task-1 compile must pass first.
 
 If `npx tsc --noEmit` surfaces any other fixture file constructing
 `PluginSummary` literally, treat the same way; do not narrow the type
@@ -399,15 +448,30 @@ describe("auditCharacteristics metadata", () => {
 
   it("exposes a metadata entry for external_call with attention tone", () => {
     const meta = lookupAuditCharacteristic("external_call");
+    expect(meta).not.toBeNull();
     expect(meta?.tone).toBe("attention");
     expect(meta?.tooltip).toMatch(/external|network/i);
   });
 
   it("exposes provenance / retention / quarantine / coerce / signed", () => {
-    expect(lookupAuditCharacteristic("emits_provenance")).not.toBeNull();
+    expect(lookupAuditCharacteristic("provenance")).not.toBeNull();
+    expect(lookupAuditCharacteristic("retention")).not.toBeNull();
     expect(lookupAuditCharacteristic("quarantine")).not.toBeNull();
     expect(lookupAuditCharacteristic("coerce")).not.toBeNull();
     expect(lookupAuditCharacteristic("signed")).not.toBeNull();
+  });
+
+  it("exposes network flag with attention tone", () => {
+    const meta = lookupAuditCharacteristic("network");
+    expect(meta).not.toBeNull();
+    expect(meta?.tone).toBe("attention");
+    expect(meta?.tooltip).toMatch(/network|external/i);
+  });
+
+  it("io_write has informational tone (not attention)", () => {
+    const meta = lookupAuditCharacteristic("io_write");
+    expect(meta).not.toBeNull();
+    expect(meta?.tone).toBe("informational");
   });
 
   it("returns null for an unknown flag rather than crashing", () => {
@@ -461,8 +525,11 @@ Create
 // for flags added on the backend without a corresponding frontend update.
 // ============================================================================
 
-/** Visual tone for an audit-characteristic chip / icon. */
-export type AuditCharacteristicTone = "positive" | "attention";
+/** Visual tone for an audit-characteristic chip / icon.
+ *  "positive"      — green checkmark-style chip (safe / good news)
+ *  "attention"     — yellow warning-style chip (operator should be aware)
+ *  "informational" — neutral blue-style chip (factual, neither good nor bad) */
+export type AuditCharacteristicTone = "positive" | "attention" | "informational";
 
 /** Display metadata for one audit-characteristic flag. */
 export interface AuditCharacteristicMeta {
@@ -475,7 +542,8 @@ export interface AuditCharacteristicMeta {
   /** Plain-language tooltip explaining the flag to a non-developer. */
   tooltip: string;
   /** Visual tone — "positive" renders as a green checkmark-style chip;
-   *  "attention" renders as a yellow warning-style chip. */
+   *  "attention" renders as a yellow warning-style chip;
+   *  "informational" renders as a neutral blue chip. */
   tone: AuditCharacteristicTone;
 }
 
@@ -515,7 +583,7 @@ export const AUDIT_CHARACTERISTICS: AuditCharacteristicMeta[] = [
     tooltip:
       "Plugin writes to a file, environment, or local filesystem. Be " +
       "careful — replay re-applies the side effects.",
-    tone: "attention",
+    tone: "informational",
   },
   {
     flag: "external_call",
@@ -557,10 +625,20 @@ export const AUDIT_CHARACTERISTICS: AuditCharacteristicMeta[] = [
       "fabrication is not. See CLAUDE.md \"Data Manifesto\" for the rule.",
     tone: "positive",
   },
+  {
+    flag: "retention",
+    label: "retention-aware",
+    glyph: "🗄",
+    tooltip:
+      "Plugin respects the configured retention policy — data emitted or " +
+      "stored by this plugin will be purged according to the pipeline's " +
+      "retention settings.",
+    tone: "positive",
+  },
 
   // ── Authored characteristics ──────────────────────────────────────────
   {
-    flag: "emits_provenance",
+    flag: "provenance",
     label: "extra provenance",
     glyph: "🔍",
     tooltip:
@@ -587,6 +665,17 @@ export const AUDIT_CHARACTERISTICS: AuditCharacteristicMeta[] = [
       "pipeline config.",
     tone: "attention",
   },
+  {
+    flag: "network",
+    label: "network call",
+    glyph: "📡",
+    tooltip:
+      "Plugin reaches an external system over the network. This is the " +
+      "authored variant of the determinism-derived external_call flag — " +
+      "plugin authors set it explicitly when the call is not captured by " +
+      "the determinism derivation rules.",
+    tone: "attention",
+  },
 ];
 
 const _byFlag = new Map<string, AuditCharacteristicMeta>(
@@ -610,9 +699,48 @@ export function lookupAuditCharacteristic(
 cd src/elspeth/web/frontend && npx vitest run src/components/catalog/auditCharacteristics.test.ts
 ```
 
-Expected: PASS — all six tests green.
+Expected: PASS — all nine tests green.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add parity gate**
+
+Extend `auditCharacteristics.test.ts` with a second `describe` block
+asserting that `KNOWN_AUDIT_FLAGS` covers every member of 16a's
+`VALID_AUDIT_CHARACTERISTICS` set. This is a regression gate, not a
+red→green TDD step — the metadata table already contains all 13 flags
+after Step 3, so this test passes immediately on first run. Add it
+anyway: it will go red the moment a future backend engineer adds a flag
+to 16a without a corresponding frontend metadata entry.
+
+```typescript
+import { describe, it, expect } from "vitest";
+import { KNOWN_AUDIT_FLAGS } from "./auditCharacteristics";
+
+// Source of truth: 16a-phase-7a-backend.md VALID_AUDIT_CHARACTERISTICS.
+// When the backend vocabulary grows, update this expected set AND add
+// metadata entries to AUDIT_CHARACTERISTICS for the new flags.
+const EXPECTED_VOCABULARY = [
+  "io_read", "io_write", "external_call",
+  "deterministic", "seeded", "non_deterministic",
+  "provenance", "retention", "quarantine", "coerce",
+  "signed", "network", "credentials",
+] as const;
+
+describe("audit-characteristic vocabulary parity", () => {
+  it("KNOWN_AUDIT_FLAGS covers every member of 16a's VALID_AUDIT_CHARACTERISTICS", () => {
+    const known = new Set(KNOWN_AUDIT_FLAGS);
+    const missing = EXPECTED_VOCABULARY.filter((flag) => !known.has(flag));
+    expect(missing).toEqual([]);
+  });
+});
+```
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run src/components/catalog/auditCharacteristics.test.ts
+```
+
+Expected: PASS — parity test green on first run (metadata table is complete).
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/catalog/auditCharacteristics.ts \
@@ -740,139 +868,7 @@ git add src/elspeth/web/frontend/src/components/catalog/AuditCharacteristicIcon.
 git commit -m "feat(frontend): AuditCharacteristicIcon component (Phase 7B.3)"
 ```
 
-## Task 4: `TrustTierBadge.tsx` — tier badge renderer
-
-**Files:**
-
-- Create:
-  `src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.tsx`
-- Create:
-  `src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.test.tsx`
-
-- [ ] **Step 1: Write the failing test**
-
-```typescript
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { TrustTierBadge } from "./TrustTierBadge";
-
-describe("TrustTierBadge", () => {
-  it("renders 'Tier 1' for tier=1", () => {
-    render(<TrustTierBadge tier={1} />);
-    expect(screen.getByText("Tier 1")).toBeInTheDocument();
-  });
-
-  it("renders 'Tier 2' for tier=2", () => {
-    render(<TrustTierBadge tier={2} />);
-    expect(screen.getByText("Tier 2")).toBeInTheDocument();
-  });
-
-  it("renders 'Tier 3' for tier=3", () => {
-    render(<TrustTierBadge tier={3} />);
-    expect(screen.getByText("Tier 3")).toBeInTheDocument();
-  });
-
-  it("renders 'tier unspecified' for tier=null", () => {
-    render(<TrustTierBadge tier={null} />);
-    expect(screen.getByText(/unspecified/i)).toBeInTheDocument();
-  });
-
-  it("includes a tooltip explaining each tier", () => {
-    render(<TrustTierBadge tier={3} />);
-    const badge = screen.getByText("Tier 3");
-    // Tier-3 tooltip references external data.
-    expect(badge.closest("[title]")?.getAttribute("title")).toMatch(/external/i);
-  });
-
-  it("applies a per-tier class", () => {
-    const { container, rerender } = render(<TrustTierBadge tier={1} />);
-    expect(container.firstChild).toHaveClass("trust-tier-badge-1");
-    rerender(<TrustTierBadge tier={2} />);
-    expect(container.firstChild).toHaveClass("trust-tier-badge-2");
-    rerender(<TrustTierBadge tier={3} />);
-    expect(container.firstChild).toHaveClass("trust-tier-badge-3");
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-```bash
-cd src/elspeth/web/frontend && npx vitest run src/components/catalog/TrustTierBadge.test.tsx
-```
-
-Expected: FAIL — component doesn't exist.
-
-- [ ] **Step 3: Implement the component**
-
-```typescript
-// ============================================================================
-// TrustTierBadge
-//
-// Small badge rendering the data trust tier surfaced at a plugin's
-// boundary. NOT a measure of plugin trust ("all plugins are Tier 1
-// system code" per CLAUDE.md plugin-ownership policy); rather, a
-// measure of *what tier of data* this plugin handles at the seam.
-// Tooltips explain the tier in plain language; the per-tier class
-// drives the colour scheme.
-// ============================================================================
-
-import type { DataTrustTier } from "@/types/index";
-
-interface TrustTierBadgeProps {
-  tier: DataTrustTier | null;
-}
-
-const TIER_TOOLTIPS: Record<1 | 2 | 3, string> = {
-  1: "Tier 1: Our own data (audit trail, checkpoints). Fully trusted. " +
-    "Plugins that handle Tier-1 data crash on any anomaly.",
-  2: "Tier 2: Pipeline data after the source boundary. Types are " +
-    "trustworthy; values may still cause operation failures. Plugins do " +
-    "not coerce — type errors are upstream plugin bugs.",
-  3: "Tier 3: External data crossing into the pipeline (source input, " +
-    "external-call response). Zero trust. The plugin validates and " +
-    "coerces at the boundary; malformed rows are quarantined.",
-};
-
-export function TrustTierBadge({ tier }: TrustTierBadgeProps) {
-  if (tier === null) {
-    return (
-      <span
-        className="trust-tier-badge trust-tier-badge-unspecified"
-        title="The plugin author has not declared the data trust tier."
-      >
-        tier unspecified
-      </span>
-    );
-  }
-  return (
-    <span
-      className={`trust-tier-badge trust-tier-badge-${tier}`}
-      title={TIER_TOOLTIPS[tier]}
-    >
-      Tier {tier}
-    </span>
-  );
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-```bash
-cd src/elspeth/web/frontend && npx vitest run src/components/catalog/TrustTierBadge.test.tsx
-```
-
-Expected: PASS — all six tests green.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.tsx \
-  src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.test.tsx
-git commit -m "feat(frontend): TrustTierBadge component (Phase 7B.4)"
-```
-
-## Task 5: Rewrite `PluginCard.tsx`
+## Task 4: Rewrite `PluginCard.tsx`
 
 This is the load-bearing change for "reference, not toolkit." The card
 now renders the reference content shipped by Phase 7A; the "Use in
@@ -884,130 +880,258 @@ layout follows design doc 08-§"Plugin card content design."
 - Modify:
   `src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx`.
 - Modify:
-  `src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx`.
+  `src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx` —
+  surgical edits only (see Step 1).
+- Modify:
+  `src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx` —
+  remove the `onCloseDrawer={onClose}` JSX prop from the `<PluginCard>`
+  render site; the prop no longer exists on `PluginCardProps` after the
+  rewrite.
+- Modify:
+  `src/elspeth/web/frontend/src/App.css` — delete the dead
+  `.plugin-card-use-btn` rule block whose consumer (the "Use in pipeline"
+  button) is removed in this task.
+- Modify:
+  `src/elspeth/web/frontend/src/components/chat/ChatInput.tsx` — update
+  the stale comment at line 63 that references "PluginCard 'Use in
+  pipeline' action" to name the correct post-7B+7C dispatcher.
 
 The `PREFILL_CHAT_INPUT_EVENT` export stays — `ChatInput.tsx` listens
 for it, and 16c's `InlineChatSourceEntry` (Task 2 in 16c) dispatches it.
 The `buildInsertionPrompt` / `handleUseInPipeline` / "Use in pipeline"
 JSX go away.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Update `PluginCard.test.tsx` — surgical edits only**
 
-Replace
-`src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx`
-content (preserving its imports and basic setup) with the new layout
-expectations. The complete test file (rewriting the existing one):
+  **Context:** `PluginCard.test.tsx` carries the header comment:
 
-```typescript
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { PluginCard } from "./PluginCard";
-import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
+  ```
+  // PluginCard — rendering regression coverage for bug elspeth-dcf12c061b.
+  // Pins the two JSON-Schema shapes the card renders: flat and discriminated union.
+  ```
 
-function makePlugin(overrides: Partial<PluginSummary> = {}): PluginSummary {
-  return {
-    name: "csv",
-    plugin_type: "source",
-    description: "Read rows from a CSV file.",
-    config_fields: [],
-    usage_when_to_use: "When you have a CSV file already.",
-    usage_when_not_to_use: "When the data is inline; use chat instead.",
-    example_use: "source:\n  plugin: csv",
-    capability_tags: ["csv", "file"],
-    audit_characteristics: ["io_read", "quarantine", "coerce"],
-    data_trust_tier: 3,
-    ...overrides,
-  };
-}
+  Do NOT replace this file wholesale. It contains 12 regression-guard tests that
+  must survive the rewrite unchanged: 1 collapsed-header test, 7 discriminated-union
+  tests, 3 error/loading-state tests, and 1 flat-schema test. These cover production
+  rendering paths that are unaffected by removing the "Use in pipeline" button.
+  Wholesale replacement silently drops the `elspeth-dcf12c061b` regression guard.
 
-describe("PluginCard — Phase 7B reshape", () => {
-  it("renders the plugin name and one-line description", () => {
-    render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
-    expect(screen.getByText("csv")).toBeInTheDocument();
-    expect(screen.getByText(/Read rows from a CSV file/i)).toBeInTheDocument();
+  Make only the following surgical changes to `PluginCard.test.tsx`:
+
+  **(a). Delete the "Use in pipeline action" describe block** (the block headed
+  `describe("PluginCard — Use in pipeline action", ...)` and all four tests
+  inside it). This is the `onCloseDrawer`-dependent and action-button-dependent
+  block. Do not delete any other describe block.
+
+  **(b). Update the `makePlugin` factory** to provide the six new `PluginSummary`
+  fields (required by the Task-1 type extension) with appropriate defaults:
+
+  ```typescript
+  function makePlugin(overrides: Partial<PluginSummary> = {}): PluginSummary {
+    return {
+      name: "example",
+      plugin_type: "transform",
+      description: "An example plugin",
+      config_fields: [],
+      usage_when_to_use: null,
+      usage_when_not_to_use: null,
+      example_use: null,
+      capability_tags: [],
+      audit_characteristics: [],
+      data_trust_tier: null,
+      ...overrides,
+    };
+  }
+  ```
+
+  **(c). Update aria-label query strings in the 11 retained tests that use
+  `getByRole("button", { name: "... plugin details" })`.** The new PluginCard
+  uses `aria-label=\`Schema for ${plugin.name}\`` on its disclosure button
+  (replacing the old `aria-label=\`${name} plugin details\``). There are 13
+  such query strings across the 11 retained tests (the "calls onExpand exactly
+  once" test queries the button three times on lines 335-337 of the current
+  file). Change every `getByRole("button", { name: "X plugin details" })` to
+  `getByRole("button", { name: /schema for X/i })` (or the equivalent regex
+  pattern). Verify by running:
+
+  ```bash
+  cd src/elspeth/web/frontend && grep -c "plugin details" src/components/catalog/PluginCard.test.tsx
+  ```
+
+  Expected output: `0` after the update.
+
+  **(d). Add the new Phase 7B layout tests** as a new `describe` block at the
+  bottom of the file (after the retained tests):
+
+  ```typescript
+  describe("PluginCard — Phase 7B reshape", () => {
+    it("renders the plugin name and one-line description", () => {
+      render(<PluginCard plugin={makePlugin({ name: "csv", description: "Read rows from a CSV file." })} schema={null} onExpand={() => {}} />);
+      expect(screen.getByText("csv")).toBeInTheDocument();
+      expect(screen.getByText(/Read rows from a CSV file/i)).toBeInTheDocument();
+    });
+
+    it("renders one audit-characteristic icon per flag", () => {
+      render(
+        <PluginCard
+          plugin={makePlugin({ audit_characteristics: ["io_read", "quarantine"] })}
+          schema={null}
+          onExpand={() => {}}
+        />,
+      );
+      expect(screen.getByText(/reads i\/?o/i)).toBeInTheDocument();
+      expect(screen.getByText(/quarantines/i)).toBeInTheDocument();
+    });
+
+    it("renders the 'When you'd use this' prose", () => {
+      render(<PluginCard plugin={makePlugin({ usage_when_to_use: "When you have a CSV file already." })} schema={null} onExpand={() => {}} />);
+      expect(screen.getByText(/when you'd use this/i)).toBeInTheDocument();
+      expect(screen.getByText(/when you have a csv file/i)).toBeInTheDocument();
+    });
+
+    it("renders the 'When you wouldn't' prose", () => {
+      render(<PluginCard plugin={makePlugin({ usage_when_not_to_use: "When the data is inline." })} schema={null} onExpand={() => {}} />);
+      expect(screen.getByText(/when you wouldn't/i)).toBeInTheDocument();
+    });
+
+    it("renders the example use as a code block preserving whitespace", () => {
+      render(<PluginCard plugin={makePlugin({ example_use: "source:\n  plugin: csv" })} schema={null} onExpand={() => {}} />);
+      const codeBlock = screen.getByText(/plugin: csv/);
+      expect(codeBlock.tagName.toLowerCase()).toBe("pre");
+    });
+
+    it("falls back to a generic message when prose fields are null", () => {
+      render(
+        <PluginCard
+          plugin={makePlugin({ usage_when_to_use: null, usage_when_not_to_use: null, example_use: null })}
+          schema={null}
+          onExpand={() => {}}
+        />,
+      );
+      // Per design doc 08-§Risks: "Empty entries fall back to a generic
+      // 'see the technical description' message rather than blocking display."
+      expect(screen.getByText(/see the technical description/i)).toBeInTheDocument();
+    });
+
+    it("does NOT render a 'Use in pipeline' button (toolkit affordance removed)", () => {
+      render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
+      expect(screen.queryByRole("button", { name: /use in pipeline/i })).not.toBeInTheDocument();
+    });
+
+    it("calls onExpand when the 'Schema →' disclosure is activated", async () => {
+      const onExpand = vi.fn();
+      render(<PluginCard plugin={makePlugin({ name: "csv" })} schema={null} onExpand={onExpand} />);
+      const disclosure = screen.getByRole("button", { name: /schema for csv/i });
+      await userEvent.click(disclosure);
+      expect(onExpand).toHaveBeenCalled();
+    });
+
+    it("renders the expanded schema after onExpand resolves and schema arrives", () => {
+      const schema: PluginSchemaInfo = {
+        name: "csv",
+        plugin_type: "source",
+        description: "Read CSV files.",
+        json_schema: {
+          properties: { path: { type: "string", description: "Path to file" } },
+          required: ["path"],
+        },
+      } as unknown as PluginSchemaInfo;
+      render(<PluginCard plugin={makePlugin({ name: "csv" })} schema={schema} onExpand={() => {}} initialExpanded />);
+      expect(screen.getByText("path")).toBeInTheDocument();
+    });
   });
+  ```
 
-  it("renders the trust-tier badge", () => {
-    render(<PluginCard plugin={makePlugin({ data_trust_tier: 3 })} schema={null} onExpand={() => {}} />);
-    expect(screen.getByText("Tier 3")).toBeInTheDocument();
-  });
+  Note: the `initialExpanded` prop must be added to `PluginCardProps` in the
+  rewritten `PluginCard.tsx` (it is already present in the Step 3 implementation
+  below).
 
-  it("renders one audit-characteristic icon per flag", () => {
-    render(
-      <PluginCard
-        plugin={makePlugin({ audit_characteristics: ["io_read", "quarantine"] })}
-        schema={null}
-        onExpand={() => {}}
-      />,
-    );
-    expect(screen.getByText(/reads i\/?o/i)).toBeInTheDocument();
-    expect(screen.getByText(/quarantines/i)).toBeInTheDocument();
-  });
+- [ ] **Step 1a: Update `CatalogDrawer.tsx` — remove stale `onCloseDrawer` prop**
 
-  it("renders the 'When you'd use this' prose", () => {
-    render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
-    expect(screen.getByText(/when you'd use this/i)).toBeInTheDocument();
-    expect(screen.getByText(/when you have a csv file/i)).toBeInTheDocument();
-  });
+  Open `src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx`.
+  Locate the `<PluginCard>` render site (currently line 359) and remove the
+  `onCloseDrawer={onClose}` JSX prop. After the rewrite `PluginCardProps` no
+  longer declares `onCloseDrawer`; leaving it in place causes `tsc --noEmit` to
+  fail with a type error at the call site.
 
-  it("renders the 'When you wouldn't' prose", () => {
-    render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
-    expect(screen.getByText(/when you wouldn't/i)).toBeInTheDocument();
-  });
+  Verify the removal:
 
-  it("renders the example use as a code block preserving whitespace", () => {
-    render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
-    const codeBlock = screen.getByText(/plugin: csv/);
-    expect(codeBlock.tagName.toLowerCase()).toBe("pre");
-  });
+  ```bash
+  grep -c "onCloseDrawer" src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx
+  ```
 
-  it("falls back to a generic message when prose fields are null", () => {
-    render(
-      <PluginCard
-        plugin={makePlugin({ usage_when_to_use: null, usage_when_not_to_use: null, example_use: null })}
-        schema={null}
-        onExpand={() => {}}
-      />,
-    );
-    // Per design doc 08-§Risks: "Empty entries fall back to a generic
-    // 'see the technical description' message rather than blocking display."
-    expect(screen.getByText(/see the technical description/i)).toBeInTheDocument();
-  });
+  Expected output: `0`.
 
-  it("does NOT render a 'Use in pipeline' button (toolkit affordance removed)", () => {
-    render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
-    expect(screen.queryByRole("button", { name: /use in pipeline/i })).not.toBeInTheDocument();
-  });
+- [ ] **Step 1b: Delete dead CSS — `.plugin-card-use-btn` rule block**
 
-  it("calls onExpand when the 'Schema →' disclosure is activated", async () => {
-    const onExpand = vi.fn();
-    render(<PluginCard plugin={makePlugin()} schema={null} onExpand={onExpand} />);
-    const disclosure = screen.getByRole("button", { name: /schema/i });
-    await userEvent.click(disclosure);
-    expect(onExpand).toHaveBeenCalled();
-  });
+  Open `src/elspeth/web/frontend/src/App.css`. Delete the entire
+  `.plugin-card-use-btn` rule block — this spans the comment header, the base
+  rule, the hover/focus selector, and the touch-device media query. The block
+  to delete is approximately:
 
-  it("renders the expanded schema after onExpand resolves and schema arrives", () => {
-    const schema: PluginSchemaInfo = {
-      name: "csv",
-      plugin_type: "source",
-      description: "Read CSV files.",
-      json_schema: {
-        properties: { path: { type: "string", description: "Path to file" } },
-        required: ["path"],
-      },
-    } as unknown as PluginSchemaInfo;
-    render(<PluginCard plugin={makePlugin()} schema={schema} onExpand={() => {}} initialExpanded />);
-    expect(screen.getByText("path")).toBeInTheDocument();
-  });
-});
-```
+  ```css
+  /* "Use in pipeline" action — hidden at rest, revealed on card hover or
+     keyboard focus.  Mirrors the .code-block-copy pattern so the catalog
+     matches the chat code-block ergonomics.  Always reachable by keyboard
+     navigation via :focus-visible; never invisible to AT (the button still
+     exists in the DOM and accessibility tree, just visually hidden). */
+  .plugin-card-use-btn {
+    align-self: flex-start;
+    margin-top: var(--space-xs);
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+  }
 
-Note: the test introduces an `initialExpanded` prop (or equivalent) for
-the schema-render assertion. If you'd prefer to keep the toggle entirely
-internal, replace that test with: click the disclosure, await
-`onExpand`, then assert the field appears. Either works.
+  .plugin-card:hover .plugin-card-use-btn,
+  .plugin-card:focus-within .plugin-card-use-btn,
+  .plugin-card-use-btn:focus-visible {
+    opacity: 1;
+  }
+
+  /* Touch devices have no hover — fall back to always-visible there so the
+     feature remains discoverable on mobile/tablet. */
+  @media (hover: none), (pointer: coarse) {
+    .plugin-card-use-btn {
+      opacity: 1;
+    }
+  }
+  ```
+
+  Per CLAUDE.md "No Legacy Code Policy": dead CSS rules for a deleted component
+  must be removed in the same commit that removes the component, not deferred.
+  This does NOT conflict with the out-of-scope CSS-pass for new class names
+  (`plugin-card-prose-fallback`, `plugin-card-audit-strip`, etc.) — those are
+  new names being added (deferred styling is fine); `.plugin-card-use-btn` is
+  an existing name for a deleted component (dead code, delete now).
+
+  Verify the deletion:
+
+  ```bash
+  grep -c "plugin-card-use-btn" src/elspeth/web/frontend/src/App.css
+  ```
+
+  Expected output: `0`.
+
+- [ ] **Step 1c: Update stale comment in `ChatInput.tsx`**
+
+  Open `src/elspeth/web/frontend/src/components/chat/ChatInput.tsx`. The comment
+  at line 63 currently reads:
+
+  ```typescript
+  // Listen for prefill events dispatched by PluginCard "Use in pipeline" action.
+  ```
+
+  Replace it with:
+
+  ```typescript
+  // Listen for prefill events dispatched by InlineChatSourceEntry (catalog
+  // Sources tab, Phase 7C). After Phase 7B the PluginCard no longer dispatches
+  // this event; after Phase 7C InlineChatSourceEntry is the sole dispatcher.
+  ```
+
+  Comments are load-bearing institutional memory (CLAUDE.md). This comment is
+  the only documentation of who dispatches `PREFILL_CHAT_INPUT_EVENT`; letting
+  it reference a deleted code path would mislead the next implementer on 16c.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1031,7 +1155,7 @@ Replace the full content of
 // 08-§"Plugin card content design":
 //
 //   ┌──────────────────────────────────────────────────┐
-//   │  csv                                Tier 3       │
+//   │  csv                                             │
 //   │  Read rows from a CSV file. ...                  │
 //   │                                                  │
 //   │  Audit: ✓ reads I/O  ✓ quarantines  ✓ coerces   │
@@ -1051,7 +1175,6 @@ Replace the full content of
 
 import { useState, type MouseEvent } from "react";
 import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
-import { TrustTierBadge } from "./TrustTierBadge";
 import { AuditCharacteristicIcon } from "./AuditCharacteristicIcon";
 
 /** Event name dispatched by InlineChatSourceEntry and consumed by
@@ -1155,10 +1278,9 @@ export function PluginCard({
 
   return (
     <div className="plugin-card">
-      {/* Header row: name + tier badge */}
+      {/* Header row: plugin name */}
       <div className="plugin-card-header-row">
         <span className="plugin-card-name">{plugin.name}</span>
-        <TrustTierBadge tier={plugin.data_trust_tier} />
       </div>
 
       {/* Short technical description */}
@@ -1260,7 +1382,8 @@ function ProseSection({ label, body }: { label: string; body: string | null }) {
 cd src/elspeth/web/frontend && npx vitest run src/components/catalog/PluginCard.test.tsx
 ```
 
-Expected: PASS — all 10 tests green.
+Expected: PASS — all new Phase 7B reshape tests green plus all 12
+retained regression-guard tests green.
 
 - [ ] **Step 5: Run the rest of the catalog and chat suites for regressions**
 
@@ -1273,21 +1396,55 @@ Expected: PASS. `ChatInput.test.tsx` still imports
 export at `PluginCard.tsx:17` preserves that contract (no new
 re-export module is introduced).
 
+- [ ] **Step 5a: TypeScript type-check — verify no call-site breakage**
+
+```bash
+cd src/elspeth/web/frontend && npx tsc --noEmit
+```
+
+Expected: clean exit (no errors). This confirms that removing
+`onCloseDrawer` from `PluginCardProps` (Step 3) and removing its JSX
+usage in `CatalogDrawer.tsx` (Step 1a) are in sync. If `tsc` reports
+any remaining `onCloseDrawer` usage, find and remove it before
+committing.
+
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/catalog/PluginCard.tsx \
-  src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx
+  src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx \
+  src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx \
+  src/elspeth/web/frontend/src/App.css \
+  src/elspeth/web/frontend/src/components/chat/ChatInput.tsx
 git commit -m "$(cat <<'EOF'
 refactor(frontend): rewrite PluginCard as reference, not toolkit
 
-Phase 7B.5 of composer UX redesign. Implements design doc 08's "Plugin
-card content design" layout: trust-tier badge, audit-characteristic icon
-strip, persona-facing prose ("When you'd use this" / "When you wouldn't"
+Phase 7B.4 of composer UX redesign. Implements design doc 08's "Plugin
+card content design" layout: audit-characteristic icon strip,
+persona-facing prose ("When you'd use this" / "When you wouldn't"
 / "Example use"), and a "Schema →" disclosure. Removes the "Use in
 pipeline" button and its supporting buildInsertionPrompt /
 handleUseInPipeline machinery — per design doc 08, plugin selection is
 the LLM's job driven by user intent, not a toolkit affordance.
+
+CatalogDrawer.tsx: remove the onCloseDrawer={onClose} JSX prop from
+the <PluginCard> render site; the prop no longer exists on
+PluginCardProps after the rewrite.
+
+App.css: delete the dead .plugin-card-use-btn rule block (base rule,
+hover/focus selector, touch media query) per CLAUDE.md "No Legacy Code
+Policy". New class names (plugin-card-prose-fallback, etc.) are CSS-pass
+deferred; deleted class names are removed now.
+
+ChatInput.tsx: update the stale comment at line 63 to name the correct
+post-7B+7C dispatcher (InlineChatSourceEntry) instead of the removed
+PluginCard "Use in pipeline" action.
+
+PluginCard.test.tsx: surgical edits only — preserved 12 regression-guard
+tests for bug elspeth-dcf12c061b (flat + discriminated-union + error/loading
+paths); removed the 4-test "Use in pipeline action" describe block;
+updated aria-label query strings (13 occurrences across 11 tests) from
+"X plugin details" to /schema for X/i to match the new disclosure button.
 
 PREFILL_CHAT_INPUT_EVENT keeps its existing direct export at
 PluginCard.tsx:17 — ChatInput.tsx still listens for it and Phase 7C's
@@ -1307,16 +1464,17 @@ EOF
 
 ## What Phase 7B leaves the frontend in
 
-After all five tasks land:
+After all four tasks land:
 
 - `PluginSummary` exposes the Phase-7A reference-content fields; the
   TypeScript types match the wire format exactly.
 - A centralised `auditCharacteristics.ts` table maps every known flag
   string to display metadata; unknown flags fall back to a forward-
   compatible "unknown" chip.
-- `AuditCharacteristicIcon` and `TrustTierBadge` render the
-  per-characteristic and per-tier visuals; both are consumed by the
-  rewritten `PluginCard` and (in 16c) by `FilterChipStrip`.
+- `AuditCharacteristicIcon` renders per-characteristic visuals; it is
+  consumed by the rewritten `PluginCard` and (in 16c) by
+  `FilterChipStrip` (audit-characteristic filter chips only — 16c does
+  not add trust-tier filter chips; see Trust tier check section).
 - `PluginCard.tsx` is the reference-style card from design doc 08; the
   "Use in pipeline" toolkit affordance is gone.
 
@@ -1342,7 +1500,7 @@ affordances; ship 7C immediately after 7B to complete the reshape.
 | Removing "Use in pipeline" breaks a workflow some user depended on | Pre-RC5 has no documented users; per CLAUDE.md "No Legacy Code Policy," deferring breaking changes is the opposite of what we want. The replacement workflow is described in 16c's `InlineChatSourceEntry` and the chat input prefill. |
 | `audit_characteristics` ordering varies per response | Backend now emits `tuple[str, ...]` sorted in `_derive_audit_characteristics` (Phase 7A rev-2), so the wire shape is deterministic. The card also sorts the array lexically before rendering as belt-and-braces against future drift; the same plugin always shows the same icon order regardless of source ordering. |
 | Backend missing (Phase 7A not yet shipped) | Backwards-compatible TypeScript types: every new `PluginSummary` field is optional in the type union (`string \| null` / `string[]`). The frontend reads with `?? null` / `?? []` fallbacks. When the backend ships, the data "comes alive." |
-| `ChatInput.tsx` test breaks because `PREFILL_CHAT_INPUT_EVENT` moved | The export stays at the same import path (`@/components/catalog/PluginCard`). Verified during the regression sweep in Task 5. |
+| `ChatInput.tsx` test breaks because `PREFILL_CHAT_INPUT_EVENT` moved | The export stays at the same import path (`@/components/catalog/PluginCard`). Verified during the regression sweep in Task 4. |
 | The "see the technical description" fallback message blends into the technical description above it | Visually distinct class (`plugin-card-prose-fallback`) per the CSS author's discretion; the message is short and italicised by default. If staging exercise shows it's missed, 7C's smoke can surface and 7B's CSS can be retuned. |
 
 ## Memory references
@@ -1354,7 +1512,16 @@ affordances; ship 7C immediately after 7B to complete the reshape.
 - `feedback_no_calendar_shipping_commitments` — no calendar commitments
   in this plan.
 
+## Follow-ups
+
+- Operator raised the possibility of a future `destructive` or `irreversible_write` audit-characteristic for sinks where writes cannot be rolled back. This would require expanding 16a's `VALID_AUDIT_CHARACTERISTICS` vocabulary. Out of Phase 7 scope; defer to a later phase.
+
 ## Review history
 
 - 2026-05-15 reality-review: Changed `auditCharacteristics.ts` lookup key and all test flag strings from `"network"` to `"external_call"` (keeping user-facing `label` as `"Network call"`); fixed `KNOWN_AUDIT_FLAGS` and derived-flags loop to include `"external_call"`; clarified `PREFILL_CHAT_INPUT_EVENT` wording from "re-export" to "existing direct export at `PluginCard.tsx:17`".
 - 2026-05-16 reality-review (rev-2): Enumerated the existing test fixtures that will fail to compile when `PluginSummary` gains required new fields (`CatalogDrawer.test.tsx`, `PluginCard.test.tsx`). The plan previously said "if tsc reports errors, fix them"; rev-2 names the specific files so the Task-1 commit isn't blocked on rediscovery.
+- 2026-05-18 Round-1 fixes (synthesizer review): (B1) Corrected `emits_provenance` → `provenance` flag key in the `AUDIT_CHARACTERISTICS` metadata entry and test fixture; added `retention` (positive tone, "Respects configured retention policy") and `network` (attention tone, "Reaches an external system (network call)") entries to the metadata table and the corresponding test assertion, resyncing the 11-member frontend table with 16a's 13-member `VALID_AUDIT_CHARACTERISTICS`. (B2) Added parity gate in Task 2 Step 6: a Vitest test asserting the 13-member expected set (hardcoded, referencing 16a as source of truth) is a subset of `KNOWN_AUDIT_FLAGS`. (OD-D) Demoted `io_write` tone from `"attention"` to `"informational"`; extended `AuditCharacteristicTone` union; updated CSS class list; removed the "all sinks are risky" misread this produced. (OD-C) Removed `TrustTierBadge` from 16b scope: deleted Task 4 entirely; removed badge import, render, and test from what was Task 5 (renumbered to Task 4); stripped badge from Goal, Scope, File structure, "What Phase 7B leaves", ASCII card layout, and commit messages. Added operator-rationale paragraph to the Trust tier check section explaining that trust tier is kind-derived, not per-plugin, so there is nothing per-plugin to surface in the catalog UI. The `data_trust_tier` wire-format field stays on `PluginSummary` for 16a backend compatibility; no frontend code reads it. 16c will remove the trust-tier filter chip group consistent with this scope cut.
+- 2026-05-18 Round-2 carry-over fixups (R3 dispatch): (Rename) Renamed the four inner sub-bullets inside Task 4 Step 1's body from `**1a.**`/`**1b.**`/`**1c.**`/`**1d.**` to `**(a)**`/`**(b)**`/`**(c)**`/`**(d)**` to eliminate the step-numbering collision with the top-level sibling steps Step 1a (CatalogDrawer), Step 1b (App.css), Step 1c (ChatInput). The cross-reference at the tsc verification step (Step 5a) — "(Step 1a)" referring to the CatalogDrawer JSX removal — is unaffected. (Null-guard) Added `expect(meta).not.toBeNull()` guard to the Task 2 `external_call` metadata test, achieving 3/3 parity with the `io_read` and `io_write` sibling tests.
+- 2026-05-18 Round-2 fixes (B3 + B4 + dead CSS + ChatInput comment + R1 carry-overs): (B3) Added `CatalogDrawer.tsx` to Task 4's Modified files list and the Step 6 `git add`; added Step 1a directing removal of `onCloseDrawer={onClose}` from the `<PluginCard>` render at CatalogDrawer.tsx:359; added Step 5a (`npx tsc --noEmit`) after the regression suite to catch call-site breakage. (B4) Replaced the Task 4 Step 1 wholesale-file-replace instruction with surgical-edit instructions: PRESERVE the 12 regression-guard tests for bug `elspeth-dcf12c061b` (1 collapsed-header + 7 discriminated-union + 3 error/loading + 1 flat-schema); REMOVE only the 4-test "Use in pipeline action" describe block; UPDATE the 13 aria-label query strings across 11 retained tests from `"X plugin details"` to `/schema for X/i`; ADD the new Phase 7B layout describe block. (Dead CSS) Added `App.css` to Task 4's Modified files and the Step 6 `git add`; added Step 1b directing deletion of the complete `.plugin-card-use-btn` rule block (comment header + base rule + hover/focus selector + touch media query, approximately lines 3368-3392); cited the CLAUDE.md No-Legacy policy rationale distinguishing old-deleted-names (remove now) from new-not-yet-styled names (CSS-pass deferred). (ChatInput comment) Added `ChatInput.tsx` to Task 4's Modified files and the Step 6 `git add`; added Step 1c directing update of the stale line-63 comment from "PluginCard 'Use in pipeline' action" to name `InlineChatSourceEntry` as the post-7C dispatcher. (R1 carry-over Edit 5) Changed "Task 5" to "Task 4" in Task 1 Step 5 fixture-update narrative. (R1 carry-over Edit 6) Added `expect(meta).not.toBeNull()` guard before the `expect(meta?.tone)` assertion in the Task 2 `io_write informational tone` test for sibling consistency with the other describe tests. Updated File structure "Modified" list to include the three new files; removed `ChatInput.tsx` from "Not modified" (it is now Modified).
+
+- 2026-05-18 Worktree batch protocol added: Added the `## Implementation worktree (batched with [siblings])` section near the top of this plan documenting the shared `.worktrees/phase-7-catalog` worktree, the execution order in the batch, the operator-known gotchas (venv leak / Python 3.13 / subagent CWD / filigree CLI), and the single-PR shipping shape. See `16-phase-7-catalog-reshape.md` for the canonical batch protocol.

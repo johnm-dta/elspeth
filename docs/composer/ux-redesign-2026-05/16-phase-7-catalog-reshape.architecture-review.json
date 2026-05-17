@@ -1,0 +1,203 @@
+{
+  "review_date": "2026-05-17",
+  "reviewer": "Plan Review Architecture Agent (claude-sonnet-4-6)",
+  "plans_reviewed": [
+    "16-phase-7-catalog-reshape.md",
+    "16a-phase-7a-backend.md"
+  ],
+  "verdict_16": "GO",
+  "verdict_16a": "GO_WITH_CHANGES",
+
+  "blast_radius": {
+    "summary": "Low-Medium. Phase 7A touches 4 source files and creates 5 test files. No composition-root files. The most critical file is base.py (plugin infrastructure) which touches all three base classes but the changes are additive-only class attributes with safe defaults. No DB migration. No API contract breaking changes.",
+    "phase_7a": {
+      "modified_source_files": [
+        {
+          "file": "src/elspeth/plugins/infrastructure/base.py",
+          "weight": "2x",
+          "reason": "Core plugin infrastructure — all three base classes modified. However, changes are purely additive (new optional ClassVar fields with None/empty defaults); no existing attributes removed or modified."
+        },
+        {
+          "file": "src/elspeth/web/catalog/schemas.py",
+          "weight": "1x",
+          "reason": "Catalog response model. Additive optional fields on PluginSummary; _StrictResponse base and extra=forbid preserved. No breaking change to existing consumers."
+        },
+        {
+          "file": "src/elspeth/web/catalog/service.py",
+          "weight": "1x",
+          "reason": "_to_summary extended and _derive_audit_characteristics helper added. New module-level constant _DETERMINISM_TO_AUDIT_FLAG added. Existing code paths unchanged."
+        },
+        {
+          "file": "src/elspeth/plugins/sources/csv_source.py",
+          "weight": "0.5x",
+          "reason": "Documentation-only change: new class attributes with authored prose. No behavioural change."
+        }
+      ],
+      "new_test_files": [
+        "tests/unit/plugins/infrastructure/test_base_metadata.py",
+        "tests/unit/web/catalog/test_schemas_extended.py",
+        "tests/unit/web/catalog/test_service_audit_derivation.py",
+        "tests/unit/web/catalog/test_service_extended_summary.py",
+        "tests/unit/plugins/sources/test_csv_source_metadata.py"
+      ],
+      "weighted_score": "Source: 2x + 1x + 1x + 0.5x = 4.5 weighted. Test files: 5 * 0.5x = 2.5 weighted. Total: 7.0 weighted. Risk: Low-Medium.",
+      "overall_recommendation": "Acceptable to proceed. Blast radius is low relative to the plan size. The elevated weight on base.py is mitigated by the additive-only nature of the change."
+    }
+  },
+
+  "one_way_doors": [
+    {
+      "change": "New ClassVar fields on BaseSource / BaseTransform / BaseSink with None/empty defaults",
+      "risk": "Low",
+      "reversible": true,
+      "mitigation": "Fully reversible: removing the fields in a subsequent commit is a clean deletion with no callers outside catalog. The fields are not read by the engine, orchestrator, or any non-catalog consumer. No schema migration involved."
+    },
+    {
+      "change": "PluginSummary extended with six new optional fields",
+      "risk": "Low",
+      "reversible": true,
+      "mitigation": "Additive Pydantic fields with defaults. Existing callers (frontend, tests) ignore unknown fields by default. Removing them after the frontend ships (16b) would require a coordinated frontend update, but no data loss or migration is involved."
+    },
+    {
+      "change": "audit_readiness/trust.py deletion commitment triggered but not executed",
+      "risk": "Medium",
+      "reversible": false,
+      "mitigation": "INSUFFICIENT. See blocking_issues B1. The trust.py docstring commits to deletion 'when Phase 7 adds data_trust_tier ClassVar.' Phase 7A adds the ClassVar. The plan does NOT delete trust.py, does NOT author data_trust_tier on the EXTERNAL_BOUNDARY_TRANSFORMS plugins (llm, web_scrape, rag_retrieval, azure_content_safety, azure_prompt_shield), and does NOT delete the classify_plugin() call site in audit_readiness/service.py. The plan ships two sources of truth — the allowlist in trust.py and the class-attribute data_trust_tier=None on every transform — and explicitly defers reconciliation with no named phase owning it."
+    }
+  ],
+
+  "major_issues": [
+    {
+      "id": "B1",
+      "title": "trust.py deletion commitment fires but deletion is not in scope — two sources of truth will coexist indefinitely",
+      "severity": "MAJOR",
+      "description": "The audit-readiness module's trust.py has a load-bearing docstring (lines 31-35) committing to same-commit deletion 'when Phase 7 adds data_trust_tier ClassVar' per CLAUDE.md No-Legacy policy. Phase 7A adds the ClassVar with None defaults on all three base classes. This technically satisfies 'adds the ClassVar' but not the intent, which is for every plugin to carry a real value so the allowlist can be eliminated. Phase 7A only authors one plugin (csv_source). The remaining EXTERNAL_BOUNDARY_TRANSFORMS (llm, web_scrape, rag_retrieval, azure_content_safety, azure_prompt_shield) and EXTERNAL_BOUNDARY_SINKS (azure_blob, chroma_sink, database, dataverse) all have data_trust_tier=None after 7A ships. The audit_readiness panel's classify_plugin() call at service.py:172 still reads from the allowlist. The trust.py TODO comment at service.py:171 remains live. Phase 7B and 7C are cataloged as 'no backend changes' — they do not author trust_tier on transforms. No named phase owns the trust.py deletion. CLAUDE.md No-Legacy: 'No version checks, feature flags for old behaviour, adapter/wrapper/proxy shims' — the two parallel trust-classification mechanisms are precisely the pattern this policy prohibits.",
+      "evidence": [
+        "trust.py:31-35: 'Phase 7 deletion commitment (required verbatim — do not paraphrase): When Phase 7 adds data_trust_tier: ClassVar to plugin base classes, delete this module entirely and replace classify_plugin() callers with direct attribute lookup. CLAUDE.md No-Legacy requires same-commit replacement.'",
+        "16a-phase-7a-backend.md §Scope boundaries: 'Per-plugin prose authoring for every plugin in the codebase. That is an incremental documentation task; this plan ships the schema + one canonical example and intentionally stops there.'",
+        "audit_readiness/service.py:171: '# TODO(phase-7): delete trust.py and replace classify_plugin() callers per Phase 7 plan'",
+        "audit_readiness/service.py:172: 'trust = classify_plugin(kind, name)' — still live after Phase 7A ships",
+        "16-phase-7-catalog-reshape.md: no mention of trust.py deletion or classify_plugin() replacement",
+        "00-implementation-roadmap.md §C: Phase 7A-7B-7C listed; no trust.py deletion task appears anywhere"
+      ],
+      "severity_rationale": "Rated MAJOR not BLOCKING because: (1) the two-source-of-truth problem is architecturally unclean but not a functional regression — the catalog and audit_readiness panel use different consumers (PluginSummary.data_trust_tier vs trust.py allowlist); they serve different surfaces. (2) trust.py itself has a CI-enforced completeness test that will catch new EXTERNAL_CALL plugins without allowlist updates. The plan ships new functionality without breaking existing functionality. However, the No-Legacy commitment in trust.py is being violated, which CLAUDE.md treats as load-bearing. Rated MAJOR to require an explicit operator decision about when trust.py deletion is scheduled.",
+      "required_resolution": "One of: (a) Author data_trust_tier on all five EXTERNAL_BOUNDARY_TRANSFORMS and four EXTERNAL_BOUNDARY_SINKS in Phase 7A Task 5 (alongside csv_source, not instead of it) — then delete trust.py and replace classify_plugin() callers in the same commit. This makes the canonical CSV example one of ten, which is more work but fulfills the commitment. (b) Revise the trust.py deletion commitment to say 'when all EXTERNAL_BOUNDARY plugins have data_trust_tier authored' rather than 'when the ClassVar is added' — making the trigger condition truthful. Add a filigree issue tracking the completion of all plugin authoring as a blocker on trust.py deletion. (c) Delete the TODO comment in service.py:171 entirely and accept that trust.py is a long-lived module — but then also update the trust.py docstring to remove the 'Phase 7 deletion commitment' clause. Option (a) is preferred per No-Legacy policy. Option (b) is acceptable if operator confirms that documenting all 10+ plugins in a single phase is disproportionate. Option (c) preserves the two sources of truth permanently, which contradicts CLAUDE.md."
+    }
+  ],
+  "blocking_issues": [],
+
+  "warnings": [
+    {
+      "id": "W1",
+      "title": "Stale 'inferred-from-quarantine' language in goal summary and scope boundaries",
+      "severity": "WARNING",
+      "description": "The plan's Architecture summary (line 24) says the catalog service derives characteristics 'from determinism and the source quarantine setting.' The scope boundary block (line 55) lists 'inferred-from-quarantine' as a composition step. Both are stale: the 2026-05-16 reality-review (rev-2, line 1434) explicitly removed the quarantine inference rule and moved quarantine to author declaration. The implementation code (Task 3 _derive_audit_characteristics) correctly omits quarantine inference. But a future reader of the plan who reads the goal summary first will expect a quarantine-inference feature that was deliberately removed. The plan's review-history section documents the removal, but the goal and scope sections were not updated to match.",
+      "evidence": [
+        "16a-phase-7a-backend.md line 24: 'characteristics that can be inferred from determinism and the source quarantine setting'",
+        "16a-phase-7a-backend.md line 55: 'inferred-from-quarantine'",
+        "16a-phase-7a-backend.md line 171: 'Source quarantine behaviour is declared, not inferred.'",
+        "16a-phase-7a-backend.md line 1434: '2026-05-16 reality-review (rev-2): Removed the quarantine inference rule...'"
+      ],
+      "required_resolution": "Update lines 24-25 and 55-56 in 16a to remove the 'source quarantine setting' and 'inferred-from-quarantine' language. Replace with 'declared by authors in the audit_characteristics frozenset (quarantine cannot be inferred from class-level attributes; it is set per-instance in __init__).' This is a documentation fix only."
+    },
+    {
+      "id": "W2",
+      "title": "Task 5 commit message says 'inferred quarantine' — factual error in the commit message template",
+      "severity": "WARNING",
+      "description": "The Task 5 commit message template (lines 1315-1324) contains the phrase 'inferred quarantine' in describing the composed audit_characteristics: 'declared coerce + inferred io_read + inferred quarantine'. Quarantine is explicitly author-declared, not inferred. This error in the commit message template would produce a git log entry stating the system infers quarantine — contradicting the plan's own derivation rules and the test at line 713 ('Regression guard: the derivation MUST NOT read plugin_cls._on_validation_failure').",
+      "evidence": [
+        "16a-phase-7a-backend.md lines 1319-1321: 'correctly composed (declared coerce + inferred io_read + inferred quarantine)'",
+        "16a-phase-7a-backend.md line 171: 'Source quarantine behaviour is declared, not inferred.'",
+        "16a-phase-7a-backend.md line 635: '# quarantine is author-declared (not inferred from _on_validation_failure, ...)'",
+        "16a-phase-7a-backend.md lines 990-991: '# quarantine is author-declared, not inferred from instance state.'"
+      ],
+      "required_resolution": "Change line 1321 in the commit message template from 'inferred quarantine' to 'declared quarantine'. Correct form: 'declared coerce + inferred io_read + declared quarantine'. This is a documentation fix only."
+    },
+    {
+      "id": "W3",
+      "title": "test_transform_has_no_quarantine_inference docstring mischaracterizes the rule as 'source-only inference'",
+      "severity": "WARNING",
+      "description": "The test function test_transform_has_no_quarantine_inference (line 704) has a docstring saying 'quarantine is a source-only inference (transforms don't quarantine at the boundary).' This is wrong: quarantine is not an inference for sources either — it is author-declared for all plugin types. The docstring teaches the wrong mental model to the next author reading the test. The assertion itself is correct (quarantine not in derived for a transform).",
+      "evidence": [
+        "16a-phase-7a-backend.md lines 704-706: 'def test_transform_has_no_quarantine_inference() -> None: \"\"\"quarantine is a source-only inference (transforms dont quarantine at the boundary; they crash on type errors per the tier model).\"\"\"'"
+      ],
+      "required_resolution": "Replace the docstring with: 'quarantine is not inferred at all — it is author-declared in audit_characteristics for any plugin whose runtime configuration supports non-discard quarantine routing. The derivation helper cannot infer it because _on_validation_failure is a per-instance attribute set in __init__.' The assertion body is correct as-is."
+    },
+    {
+      "id": "W4",
+      "title": "type: ignore[attr-defined] suppression will be permanent — protocol update path not named",
+      "severity": "WARNING",
+      "description": "The plan's _to_summary implementation uses five consecutive # type: ignore[attr-defined] comments when reading the new fields from plugin_cls. This is because plugin_cls is typed as PluginClass = Union[type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol]] and the Protocol classes in contracts/plugin_protocols.py do not declare the new fields. The plan notes 'Remove them if they aren't required' in Task 6 mypy step, but since the Protocol classes are not being updated, they WILL be required. Unlike determinism (which is on the Protocol because the engine reads it), the reference-content fields are catalog-only and there is no engine-runtime reason to add them to the Protocol. However, the type: ignore pattern will silently swallow future typos in field names — if an author writes usage_when_to_ue (typo), mypy will not catch it because the suppression is already in place. This is not forbidden by CLAUDE.md, but it is a latent quality risk.",
+      "evidence": [
+        "16a-phase-7a-backend.md lines 1045-1049: five consecutive # type: ignore[attr-defined] comments",
+        "src/elspeth/contracts/plugin_protocols.py: SourceProtocol, TransformProtocol, SinkProtocol declare determinism but not the Phase-7A fields (verified by grep)"
+      ],
+      "required_resolution": "Either (a) add the six new class attributes to all three Protocol classes in contracts/plugin_protocols.py — this is L0 (contracts layer) and is the cleanest option since it makes the type system accurate; or (b) introduce a narrow TypedDict or Protocol (e.g., _HasReferenceContent) that asserts the six fields, narrow plugin_cls inside _to_summary with a cast, and document why the type suppression exists and how to remove it when/if the Protocol is updated. Option (a) requires updating plugin_protocols.py (an L0 file) and is a small addition. Option (b) is a local workaround. The plan's current text ('Remove them if they aren't required') implies they will not be needed, which is incorrect — surfacing this will prevent a future agent from unnecessarily investigating why mypy still flags them."
+    },
+    {
+      "id": "W5",
+      "title": "_derive_audit_characteristics uses dict.get() on a closed enum — silent drop on enum growth",
+      "severity": "WARNING",
+      "description": "The plan's _derive_audit_characteristics helper (lines ~820-823) uses _DETERMINISM_TO_AUDIT_FLAG.get(determinism) with an implicit None fallback: 'flag = _DETERMINISM_TO_AUDIT_FLAG.get(determinism); if flag is not None: inferred.add(flag)'. _DETERMINISM_TO_AUDIT_FLAG is documented as mapping all six Determinism values (and the plan's tests enumerate all six). Determinism is a closed StrEnum in contracts/enums.py (L0). If a future commit adds a 7th Determinism value without updating the mapping, .get() silently returns None — the inference is dropped, the catalog reports an incomplete audit-characteristic set for every plugin that uses the new value, no crash, no test failure. This is precisely the 'silent pass-through that destroys the audit trail' CLAUDE.md Defensive Programming: Forbidden prohibits. It is also the same closed-enum governance pattern that 00-implementation-roadmap.md §H5 named for sibling phases ('closed-enum governance fragmentation — multiple plans extend separate closed enums in parallel; each plan now references the same ceremony'). The Task 3 tests enumerate all six current values but do not pin exhaustivity — there is no regression guard that fails when the Determinism enum grows.",
+      "evidence": [
+        "16a-phase-7a-backend.md lines ~820-823: '_DETERMINISM_TO_AUDIT_FLAG.get(determinism)' with None fallback",
+        "src/elspeth/contracts/enums.py: Determinism is a StrEnum with six values (IO_READ, IO_WRITE, EXTERNAL_CALL, DETERMINISTIC, SEEDED, NON_DETERMINISTIC)",
+        "00-implementation-roadmap.md §H5: 'Closed-enum governance fragmentation — multiple plans extend separate closed enums in parallel. Each plan now references the same models.py:274-289 ceremony.'"
+      ],
+      "required_resolution": "Replace '_DETERMINISM_TO_AUDIT_FLAG.get(determinism)' with '_DETERMINISM_TO_AUDIT_FLAG[determinism]' (subscript access — raises KeyError on unknown value, which is the correct Tier-1 crash for a malformed enum). Add a test asserting exhaustivity: 'def test_determinism_flag_map_is_exhaustive() -> None: assert set(_DETERMINISM_TO_AUDIT_FLAG.keys()) == set(Determinism)'. This test will fail if a new Determinism value is added without updating the map, making the governance rule mechanically enforced rather than documented-only."
+    }
+  ],
+
+  "recommendations": [
+    {
+      "id": "R1",
+      "title": "Mixin duplication on three base classes: the plan's justification is technically correct but the cost accumulates",
+      "description": "The plan explicitly justifies triplicating the six new fields across BaseSource, BaseTransform, BaseSink with 'mixins fight with ABC + ClassVar + slots conventions used elsewhere in the codebase — match the existing precedent.' This is sound given the existing duplication of determinism / plugin_version / source_file_hash. However, the codebase does not use __slots__ on these classes (base.py:36 — ABC only; no slots keyword visible). The ABC + ClassVar incompatibility the plan cites applies specifically to slots=True dataclasses, not plain ABCs. For plain ABCs, a mixin with ClassVar fields works correctly. The justification is defensible but slightly over-stated. Given that the triplication precedent already exists and changing it requires a separate refactor, no action is required in Phase 7A — but the plan's comment 'mixins fight with ABC + ClassVar + slots conventions' should not be cited in future phases as a reason to avoid factoring common fields into a mixin.",
+      "action": "No change required for Phase 7A. If a future phase adds more shared class-attribute fields, evaluate whether a base mixin is now warranted (it was not worth the refactor for the existing three fields; it may be worth it for nine)."
+    },
+    {
+      "id": "R2",
+      "title": "Tracer bullet assessment: Task 5 route-level test closes the loop well",
+      "description": "The plan has 6 tasks across 5 commits: base schema (Task 1), response model (Task 2), derivation logic (Task 3), service wiring (Task 4), canonical example + route pin (Task 5), final regression (Task 6). Task 5 Step 8 adds an end-to-end route test against the real catalog API that asserts the composed audit_characteristics wire shape including the inferred 'io_read'. This is the tracer bullet — it validates that base.py, schemas.py, service.py, and csv_source.py are wired correctly before declaring the phase done. The split into 5 sequential commits before integration is appropriate for the dependencies involved. No phasing concern."
+    },
+    {
+      "id": "R3",
+      "title": "data_trust_tier validation (ge=1, le=3) is correct Tier-1 discipline",
+      "description": "The plan adds data_trust_tier: int | None = Field(default=None, ge=1, le=3) to PluginSummary. Under _StrictResponse (strict=True), a value of 7 or 0 will raise ValidationError at construction time — not silently coerced. The test test_plugin_summary_rejects_invalid_trust_tier (line 459) verifies this. A malformed plugin that sets data_trust_tier=0 or data_trust_tier=4 will crash the catalog service at summary-build time. This is correct Tier-1 offensive programming per CLAUDE.md: a malformed system plugin (wrong tier value) must crash, not silently produce a nonsense trust badge."
+    },
+    {
+      "id": "R4",
+      "title": "Layer-model compliance: confirmed sound",
+      "description": "Phase 7A's new code is entirely within L3 (catalog service, web catalog schemas) and L3 (plugins layer for base.py). The new import of Determinism from elspeth.contracts.enums in service.py is an L3 -> L0 downward import, which is permitted. No upward imports are introduced. The tier-model enforcement script check in Task 6 Step 5 will confirm this. The Determinism import path (contracts.enums) matches the pattern used by existing web-layer files (execution/accounting.py:11, execution/service.py:32) and matches how the test files import it."
+    },
+    {
+      "id": "R5",
+      "title": "Fake plugin fixtures in Task 4 tests — prefer NullSource over hand-rolled fakes if CatalogServiceImpl init is fragile",
+      "description": "The Task 4 test uses _BareTransform and _FilledSource hand-rolled fakes for CatalogServiceImpl. The plan notes (line 1009-1020) that CatalogServiceImpl.__init__ eagerly calls _populate_schema_cache -> _build_schema_info -> _knob_schema -> validate_knob_schema, and that the fakes need {} for get_config_schema() and None for get_config_model(). The plan hedges: 'If the validator rejects the empty schema, swap to a minimal real plugin class.' This is the right posture — the test is targeting _to_summary, not the schema validator. The hedge is load-bearing; the implementer should not skip it. If the fake-based approach fails, NullSource (the plan's suggested fallback) is the correct pivot."
+    }
+  ],
+
+  "plan_16_index_assessment": {
+    "description_accuracy": "The index accurately describes the three subplans. The split boundary is clean: 16a is pure backend (base classes + API schema + one canonical example), 16b is frontend primitives + PluginCard rewrite, 16c is drawer integration that imports 16b primitives. No scope appears to be hidden between slices.",
+    "split_soundness": "Sound. The 16a-backend-first order allows 16b to write integration tests against real API responses rather than mocked shapes. The 16c dependency on 16b is correctly identified and enforced ('16c must not ship before 16b'). The parallel-16a-plus-16b option is correctly identified as valid (different surfaces, no shared files).",
+    "trust_tier_clarification": "The trust-tier semantics section (reading (a) vs (b)) is well-reasoned and pre-empts the most likely confusion. Correctly scopes data_trust_tier as 'what tier of data does this plugin handle at its boundary' rather than 'how trusted is the plugin itself.'",
+    "scope_boundary_integrity": "The 'What 7a is not doing' and 'What 7b/7c are not doing' sections are complete and consistent with the subplan scope boundaries. No hidden scope detected.",
+    "one_gap": "The index does not mention trust.py deletion, despite trust.py carrying a load-bearing deletion commitment triggered by Phase 7. This is not a scope-hiding issue in the index itself — the index correctly summarizes what each subplan does. But the absence means an agent reading only the index would not know that Phase 7 triggers a CLAUDE.md No-Legacy obligation in the audit_readiness module. See B1."
+  },
+
+  "pattern_alignment": {
+    "layer_model": "ALIGNED. Phase 7A: L3 (catalog) imports L0 (contracts/enums.Determinism) and L3-peer (plugins/infrastructure/base.py ClassVar attributes). No upward imports. service.py already imports from contracts.plugin_protocols (L0); adding contracts.enums is consistent.",
+    "tdd_shape": "ALIGNED. All five tasks follow failing-test-first with explicit pytest invocations and expected failure modes. Task 4's note about fake-vs-real-plugin fallback is a quality marker.",
+    "schema_design": "ALIGNED. PluginSummary extension follows the additive-optional pattern used in Phase 2A. _StrictResponse base preserved. Sorted tuple for audit_characteristics wire format is the correct choice (set serialization is non-deterministic; frontend reads string[]).",
+    "offensive_programming": "ALIGNED. Direct attribute access in _to_summary and _derive_audit_characteristics. The type:ignore comments are type-narrowing suppressions, not defensive fallbacks. No .get(), no getattr(), no try/except swallowing.",
+    "no_legacy": "PARTIALLY ALIGNED. The new optional fields with sensible defaults are not legacy shims — they are correct incremental design. However, the trust.py two-source-of-truth problem (see B1) is a No-Legacy violation triggered by Phase 7A landing the ClassVar."
+  },
+
+  "cross_plan_integrity": {
+    "16a_to_16b_contract": "SOUND. PluginSummary with the six new optional fields is the wire contract. 16b frontend types will mirror these fields. Unfilled plugins render fallback content — this is the expected staging state and is correctly described in both plans.",
+    "16a_to_audit_readiness": "GAP. Phase 7A adds data_trust_tier ClassVar but does not update audit_readiness/trust.py. The deletion commitment in trust.py is triggered but not executed. See B1.",
+    "16b_16c_dependency": "Not reviewed in detail (16b and 16c are out of scope for this review), but the dependency direction (16c imports from 16b) is correctly enforced by the index sequencing notes."
+  },
+
+  "summary": "Plan 16 (index): GO. The index is an honest map of three clean subplan boundaries with no hidden scope. The trust-tier semantics section is a particularly well-reasoned pre-emption of the most likely confusion point. The one gap — no mention of the trust.py deletion obligation — is not a scope problem but a context gap for implementers working from the index alone.\n\nPlan 16a (backend): GO_WITH_CHANGES. The plan is technically sound, well-structured, and passes the layer model. TDD task ordering is coherent: schema before API before derivation before wiring before canonical example. One MAJOR concern (B1): the trust.py deletion commitment in audit_readiness is triggered by Phase 7A landing the ClassVar but the deletion is not in scope, creating two sources of truth for plugin trust classification. Five warnings: W1-W3 are stale prose from before the quarantine-inference removal and will mislead the next implementer; W4 is a latent type-system quality risk from type:ignore permanence; W5 is a closed-enum defensive-.get() in _derive_audit_characteristics that silently drops audit-characteristic inference on enum growth — the correct fix is subscript access plus an exhaustivity test. W5 and the B1 required_resolution (subscript access + exhaustivity guard) are the only changes needed before the plan is handed to an implementer. W1-W3 are documentation edits."
+}

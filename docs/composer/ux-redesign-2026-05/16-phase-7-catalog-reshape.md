@@ -43,6 +43,48 @@ Mergeability:
 Recommended ship order: 16a → 16b → 16c. 16a + 16b can run in parallel
 (different surfaces); 16c depends on 16b.
 
+## Implementation worktree (batched)
+
+All four plans (16, 16a, 16b, 16c) ship as a single batched implementation
+from one worktree. Create it once at the start of the batch:
+
+```bash
+git -C /home/john/elspeth worktree add .worktrees/phase-7-catalog -b feat/phase-7-catalog
+cd /home/john/elspeth/.worktrees/phase-7-catalog
+python3.13 -m venv .venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+cd src/elspeth/web/frontend && npm install
+```
+
+**Execution order inside the worktree:** 16a (backend) → 16b (frontend
+primitives) → 16c (drawer integration). 16c's Task 1 Step 0 preflight
+hard-aborts if 16b primitives are absent; 16b's vitest tests against the
+extended `PluginSummary` will fail if 16a's API surface isn't shipped
+first. 16a and 16b touch different surfaces (Python backend vs. React
+frontend) so once 16a is on a green commit, 16b can proceed in parallel
+with the 16a regression sweep; 16c must follow 16b.
+
+**Worktree discipline (operator-known gotchas):**
+
+- **Activate `.venv` before any `uv pip install`** — installing from the
+  worktree without `--python` finds main's `.venv` and clobbers it.
+- **Match Python version with main (3.13)** — `scripts/cicd/enforce_tier_model.py`
+  reports ~300 spurious violations under version drift.
+- **Subagents inherit parent CWD** — if any task delegates to a subagent,
+  prefix the prompt with absolute paths and CWD discipline; subagents
+  silently misread when the worktree path is stated only in prose.
+  Preferred alternative: run subagents from the main checkout against
+  files in the worktree by absolute path.
+- **`filigree` CLI rejects realpath-escaping DBs from worktrees** — prefer
+  MCP tools (`mcp__filigree__*`); for CLI fall back to
+  `(cd "$(git rev-parse --git-common-dir)/.." && filigree …)`.
+
+**On completion of all four plans:** single PR from
+`feat/phase-7-catalog` → `RC5.2` covering 7A + 7B + 7C. The PR
+description should pull the rev-history bullets from each plan as the
+change log. Single PR review, single merge, single revert lever if any
+post-merge issue surfaces.
+
 ---
 
 ## Phase 7 in the roadmap
@@ -173,4 +215,4 @@ value.
 
 ## Review history
 
-(empty — populate when reviewers comment)
+- 2026-05-18 Worktree batch protocol added: All four Phase 7 plans (16, 16a, 16b, 16c) now share a single worktree at `.worktrees/phase-7-catalog` on branch `feat/phase-7-catalog`, with a single PR to RC5.2 covering 7A + 7B + 7C. Added an `## Implementation worktree (batched)` section with worktree-creation commands, execution order (16a → 16b → 16c with parallelism notes), and operator-known gotchas (venv leak, Python 3.13 version match, subagent CWD discipline, filigree CLI realpath workaround). Sibling plans 16a/16b/16c each got a customized variant of the section that links back here for the canonical batch protocol.

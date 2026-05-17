@@ -1,0 +1,150 @@
+{
+  "plan": "16c-phase-7c-frontend-integration.md",
+  "review_date": "2026-05-17",
+  "reviewer_role": "quality-engineering",
+  "verdict": "GO-WITH-CHANGES",
+  "verdict_rationale": "Plan is TDD-shaped and structurally sound. The per-tab filter state (rev-2) is the right design call. Three blocking gaps prevent GO: no automated E2E gate on the demo-critical catalog flow (16a reviewer explicitly flagged this), the fixme'd llm-provider-schema.spec.ts is unaddressed, and the 13-member audit-characteristic vocabulary has no contract test to prevent silent drift. All three are additive changes — no structural rework required.",
+
+  "findings": [
+    {
+      "id": "QA-16C-001",
+      "severity": "BLOCKING",
+      "category": "test-strategy",
+      "title": "No Playwright E2E gate — demo-track catalog flow is unguarded",
+      "description": "Task 5 Step 4 (plan:1132-1169) is a 10-step human checklist with no automated Playwright counterpart. The quality reviewer of 16a explicitly flagged the absence of an E2E smoke gate on the catalog reshape as material given the demo track. The canonical demo prompt ('create a list of 5 government web pages and use an LLM to rate how cool they are') touches the catalog drawer during plugin selection. No automated assertion verifies this flow between merge and demo day. A regression in scorePlugin ranking, the InlineChatSourceEntry click, or the trust-tier badge render is undetectable without human re-execution of the checklist.",
+      "evidence": "plan:1132-1169 (Task 5 Step 4 manual checklist); plan:1-26 (scope statement — Playwright not mentioned anywhere); 16a quality reviewer finding cited in task brief",
+      "required_action": "Add a Playwright spec covering the post-16c E2E gate the 16a reviewer recommended. Minimum assertions: (1) open drawer with Ctrl+Shift+P, (2) capability-tag chip click narrows visible plugin list, (3) CSV card shows trust-tier badge and audit-characteristic icons, (4) 'Use in pipeline' button is absent (reference-only), (5) InlineChatSourceEntry click closes drawer and prefills chat input with a non-empty string, (6) Clear filters restores the full list. Suggested file: src/elspeth/web/frontend/e2e/catalog-reshape.spec.ts",
+      "demo_day_risk": "HIGH — scorePlugin ranking changes or badge render regressions will not be caught before demo"
+    },
+    {
+      "id": "QA-16C-002",
+      "severity": "BLOCKING",
+      "category": "test-strategy",
+      "title": "llm-provider-schema.spec.ts fixme is unaddressed — plan neither un-fixmes nor documents the deferral decision",
+      "description": "The task brief explicitly asks: 'Will 16c un-fixme it, or does 16c quietly accept it stays broken?' The plan contains no mention of llm-provider-schema.spec.ts at any point in its 1219 lines. Silence on an explicit question from the quality reviewer constitutes an unanswered blocking question. The catalog reshape (16a/16b/16c) restructures plugin schema surface area; a fixme'd spec on the LLM provider schema is highest-probability to be affected by or to mask regressions in the reshaped surface.",
+      "evidence": "plan:1-1219 (no mention of llm-provider-schema.spec.ts); task brief: 'An existing Playwright spec llm-provider-schema.spec.ts is fixme'd'",
+      "required_action": "The plan must explicitly address llm-provider-schema.spec.ts before 16c can be marked GO. Either: (A) un-fixme the spec as part of 16c (preferred — the reshape is the natural moment), documenting what the fixme was protecting against; or (B) add a plan note with the explicit decision to defer with a named owner and a dependency link. Silent carry-forward is not acceptable on a demo-track branch.",
+      "demo_day_risk": "MEDIUM — if the spec was fixme'd because of a known catalog regression, 16c may be landing on a broken foundation"
+    },
+    {
+      "id": "QA-16C-003",
+      "severity": "BLOCKING",
+      "category": "vocabulary-parity",
+      "title": "No contract test verifying FilterChipStrip audit chips are bounded by VALID_AUDIT_CHARACTERISTICS",
+      "description": "The 16a backend established a 13-member closed vocabulary (VALID_AUDIT_CHARACTERISTICS). The plan's Task 1 tests (plan:145-232) verify that chips render from the availableAuditCharacteristics prop, but no test asserts that the prop set is bounded by or resolves against the canonical 13 members. If an implementer passes an arbitrary string ('network' instead of the correct 'external_call'), the chip renders but filters nothing — a silent defect. The plan's own smoke checklist distinguishes the filter id 'external_call' from display label 'Network call' (plan:1157-1158), which is precisely the drift vector this contract test prevents.",
+      "evidence": "plan:139-232 (Task 1 test suite — no vocabulary boundary assertion); plan:344-359 (implementation uses lookupAuditCharacteristic with fallback to raw flag: `meta?.label ?? flag` — the fallback silently accepts unknown keys); plan:1157-1158 (smoke step distinguishes filter id from display label); 16a surface: 13-member VALID_AUDIT_CHARACTERISTICS",
+      "required_action": "Add a test in FilterChipStrip.test.tsx that: (1) passes all 13 canonical VALID_AUDIT_CHARACTERISTICS members as availableAuditCharacteristics, (2) asserts every rendered chip resolves to a non-raw label (i.e., lookupAuditCharacteristic returns a defined meta object for every member), (3) asserts that a chip with an unknown key either is not rendered or renders visually distinct (fallback-to-raw-flag is a defect indicator). This is the cheapest possible contract test and prevents the most likely drift path.",
+      "demo_day_risk": "MEDIUM — a chip that filters nothing is invisible to the user but will frustrate persona users who try to narrow the catalog"
+    },
+    {
+      "id": "QA-16C-004",
+      "severity": "WARNING",
+      "category": "test-strategy",
+      "title": "scorePlugin has no isolated unit test — tie cases, unicode, and long-string behavior unverified",
+      "description": "The extended scorePlugin (plan:778-792) is tested only through CatalogDrawer integration tests (plan:676-693). Tie cases in fuzzy ranking, search terms containing regex metacharacters, unicode input, very long strings (which raise the MIN_FUZZY_CONFIDENCE noise floor), and the interaction between the extended target string and confidenceFromScore are all untested. The demo canonical prompt ('create a list of 5 government web pages...') will exercise the ranking path; any score ordering surprise shifts which plugin the operator picks first.",
+      "evidence": "plan:778-792 (scorePlugin implementation); plan:676-693 (integration-only test coverage); plan:1201 (risk table acknowledges 'long prose strings become noisy' but provides no test guard)",
+      "required_action": "Add a scorePlugin unit test file (e.g., scorePlugin.test.ts) or test block in CatalogDrawer.test.tsx covering: (1) empty query returns all plugins unranked, (2) search term matching capability_tags but not name/description — confirms tag search works, (3) search term with regex metacharacters (e.g., '(csv)') does not throw, (4) very long search string does not promote a low-relevance plugin, (5) two plugins with equal name scores are ordered consistently (tie-break determinism).",
+      "demo_day_risk": "MEDIUM — ranking surprises during demo plugin selection are visible to the audience"
+    },
+    {
+      "id": "QA-16C-005",
+      "severity": "WARNING",
+      "category": "edge-cases",
+      "title": "Zero-match empty state: InlineChatSourceEntry visibility when all plugins are filtered out is untested",
+      "description": "The plan specifies that InlineChatSourceEntry is always visible on the Sources tab regardless of filters or search (plan:874-875). This is a deliberate design decision. However, no test verifies that when all real source plugins are filtered out (filter combo matches nothing), the synthetic entry remains visible. The empty-state rendering for the plugin list (zero matches) is also not tested — does the drawer show an empty list, a 'no results' message, or nothing?",
+      "evidence": "plan:874-875: 'The synthetic entry is unaffected by filters or searchQuery — it's always the first source row, by design'; plan:637-641 (InlineChatSourceEntry render test uses a non-empty plugin list); no zero-match test exists in Task 3 suite",
+      "required_action": "Add a CatalogDrawer test: activate filters such that no real source plugin matches; assert InlineChatSourceEntry is still visible. Add a second assertion for the empty-list state message (or verify that the zero-match case is handled gracefully without a blank white box)."
+    },
+    {
+      "id": "QA-16C-006",
+      "severity": "WARNING",
+      "category": "edge-cases",
+      "title": "Per-tab filter persistence on tab-back not tested — design implies it, tests only verify forward isolation",
+      "description": "The per-tab filter regression test (plan:695-722) verifies that switching from Sources to Transforms does not carry the Sources filter forward. It does not verify the symmetric case: switching back to Sources should restore the Sources filter state (the filtersByTab design implies this, but an implementation that resets filtersByTab on tab switch would pass the existing test while violating the UX contract).",
+      "evidence": "plan:695-722 (tab isolation test — verifies Sources filter does not appear on Transforms, but does not switch back); plan:744-773 (filtersByTab implementation — per-tab state should persist on round-trip)",
+      "required_action": "Extend the tab isolation test: after activating the 'csv' capability filter on Sources and switching to Transforms, switch back to Sources and assert the 'csv' filter chip is still active and azure_blob is still filtered out."
+    },
+    {
+      "id": "QA-16C-007",
+      "severity": "WARNING",
+      "category": "edge-cases",
+      "title": "Clear-filters asymmetry between button action and drawer-close action is untested",
+      "description": "The plan implements two filter-clearing paths with different scope: the 'Clear filters' button (plan:308-316) clears only the active tab's filters; the drawer-close useEffect (plan:768-772) clears all tabs' filters. This asymmetry is a deliberate design choice but is not tested. A user clearing filters before closing the drawer expects the per-tab state to reset on re-open; an implementation error that clears all tabs on button click would produce surprising cross-tab behavior.",
+      "evidence": "plan:308-316 (clear() callback — clears capabilityTags/trustTiers/auditCharacteristics for current tab only via onChange); plan:768-772 (useEffect resets all tabs on close); no test covering the asymmetry",
+      "required_action": "Add a test: (1) activate filter on Sources tab, (2) click 'Clear filters' — assert Sources tab is cleared, (3) activate filter on Sources again, (4) close drawer and reopen — assert both tabs are cleared."
+    },
+    {
+      "id": "QA-16C-008",
+      "severity": "WARNING",
+      "category": "accessibility",
+      "title": "No test for keyboard navigation of FilterChipStrip or focus management on drawer open",
+      "description": "The plan's FilterChipStrip uses aria-pressed and button roles (plan:387-393), which is correct. ShortcutsHelp uses useFocusTrap (plan:1049). However, no test verifies: (1) Tab order through chips in FilterChipStrip, (2) focus returns to the trigger element when the drawer closes, (3) a screen reader receives an announcement of the filtered result count after a chip toggle. The persona list includes Linda (non-tech user) for whom a11y is highest priority.",
+      "evidence": "plan:383-394 (Chip component — button with aria-pressed, no keyboard navigation beyond default tab); plan:1049 (useFocusTrap in ShortcutsHelp but not in CatalogDrawer); Task 1 test suite (plan:145-232) — no keyboard navigation tests",
+      "required_action": "Add to FilterChipStrip.test.tsx: (1) tab through chips using userEvent.tab(), assert each chip is reachable, (2) press Enter/Space on a focused chip toggles it. Add to CatalogDrawer.test.tsx or integration test: after filtering, assert a live-region or aria-label announces the count of visible plugins. Verify CatalogDrawer uses useFocusTrap or equivalent on open."
+    },
+    {
+      "id": "QA-16C-009",
+      "severity": "WARNING",
+      "category": "test-reliability",
+      "title": "userEvent.type followed by immediate expect may be flaky if CatalogDrawer has search debounce",
+      "description": "Task 3 search tests (plan:677-693) use userEvent.type(input, 'CSV file') followed immediately by expect assertions. If the existing CatalogDrawer implementation debounces the search query before filtering, the filter will not have executed when the assertion runs, making the test intermittently fail. The plan does not acknowledge or guard against this.",
+      "evidence": "plan:677-684 (search test — no waitFor wrapping the post-type expect); plan:686-693 (second search test — same pattern)",
+      "required_action": "Before committing Task 3 tests, verify whether the existing CatalogDrawer has a debounce on searchQuery. If yes, wrap the post-type expects in waitFor. If no, add a comment to the test noting that the absence of debounce is assumed and future debounce introduction will require wrapping."
+    }
+  ],
+
+  "test_strategy_assessment": {
+    "approach": "TDD — failing test before implementation in each task",
+    "shape": "CORRECT",
+    "coverage_summary": {
+      "FilterChipStrip": "6 unit tests — render, toggle, clear. Missing: vocabulary parity, empty-group guard, keyboard nav",
+      "InlineChatSourceEntry": "4 unit tests — render, visual style, dispatch, payload. Adequate for the component scope",
+      "CatalogDrawer_integration": "8 new tests — inline entry, tab isolation, capability filter, audit filter, search prose, search tags, per-tab regression. Missing: zero-match, tab-back persistence, clear asymmetry",
+      "ShortcutsHelp": "4 unit tests — headings render, shortcut placement. Adequate",
+      "scorePlugin_isolated": "ABSENT — tested only via integration",
+      "E2E_playwright": "ABSENT — only manual checklist"
+    },
+    "test_commands": {
+      "FilterChipStrip": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/FilterChipStrip.test.tsx",
+      "InlineChatSourceEntry": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/InlineChatSourceEntry.test.tsx",
+      "CatalogDrawer": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/CatalogDrawer.test.tsx",
+      "ShortcutsHelp": "cd src/elspeth/web/frontend && npx vitest run src/components/common/ShortcutsHelp.test.tsx",
+      "full_suite": "cd src/elspeth/web/frontend && npx vitest run",
+      "typecheck": "cd src/elspeth/web/frontend && npx tsc --noEmit",
+      "E2E_missing": "No command — Playwright spec does not exist in plan"
+    }
+  },
+
+  "observability_assessment": {
+    "note": "Frontend-only plan. No audit/telemetry/logging channels used. Filter state is ephemeral React state, never persisted. PREFILL_CHAT_INPUT_EVENT is a CustomEvent on window — no observability needed. Telemetry on filter usage is explicitly deferred to Phase 8 (plan:83). No slog recommendations made per project policy.",
+    "status": "ACCEPTABLE for this phase"
+  },
+
+  "security_assessment": {
+    "patterns_scanned": ["eval", "dangerouslySetInnerHTML", "raw SQL", "shell=True", "hardcoded secrets", "user input in paths"],
+    "findings": "None. The PREFILL_CHAT_INPUT_EVENT payload (plan:507-509) is a compile-time constant string, not user input. No user-controlled data enters any DOM rendering path without React's default XSS protection.",
+    "status": "CLEAN"
+  },
+
+  "production_readiness": {
+    "error_handling": "PARTIAL — matchesFilters handles null data_trust_tier (plan:801-803); no error boundary for plugin list fetch failures (pre-existing, not introduced by 16c)",
+    "css_dependency": "DOCUMENTED GAP — plan explicitly scopes CSS out and gates Task 5 staging smoke on its completion (plan:67-75). This is a known pre-condition, not a surprise.",
+    "phase_ordering_gate": "DOCUMENTED — 7C cannot land before 7B; risk table notes this (plan:1203). No automated CI enforcement of this ordering.",
+    "rollback": "Not addressed — no rollback plan if the drawer regression surfaces post-merge on demo day"
+  },
+
+  "summary": {
+    "blocking_count": 3,
+    "warning_count": 6,
+    "blocking_ids": ["QA-16C-001", "QA-16C-002", "QA-16C-003"],
+    "warning_ids": ["QA-16C-004", "QA-16C-005", "QA-16C-006", "QA-16C-007", "QA-16C-008", "QA-16C-009"],
+    "positives": [
+      "TDD shape is correct throughout — failing test precedes every implementation",
+      "Per-tab filtersByTab (rev-2) correctly resolves the cross-tab UX trap; regression test provided",
+      "scorePlugin composition is clean — matchesFilters AND scoreHit with explicit null-guards",
+      "InlineChatSourceEntry dispatch pattern (compile-time constant detail) is safe and auditable",
+      "ShortcutsHelp regroup is minimal, focused, and fully tested",
+      "No slog usage anywhere in the plan — consistent with project telemetry policy"
+    ]
+  }
+}

@@ -1,0 +1,305 @@
+{
+  "review_date": "2026-05-17",
+  "reviewer": "systems-review-agent",
+  "plans_reviewed": [
+    "docs/composer/ux-redesign-2026-05/16-phase-7-catalog-reshape.md",
+    "docs/composer/ux-redesign-2026-05/16a-phase-7a-backend.md"
+  ],
+  "supporting_files_read": [
+    "docs/composer/ux-redesign-2026-05/08-catalog-reshape.md",
+    "docs/composer/ux-redesign-2026-05/00-implementation-roadmap.md",
+    "src/elspeth/web/catalog/service.py",
+    "src/elspeth/web/catalog/schemas.py",
+    "src/elspeth/web/composer/tools.py (lines 1686-1812, 6173-6308)",
+    "src/elspeth/web/composer/prompts.py (lines 101-177)",
+    "src/elspeth/web/composer/service.py (lines 4484-4527)",
+    "src/elspeth/plugins/infrastructure/base.py (grep: audit metadata blocks)"
+  ],
+  "verdict_16": "GO",
+  "verdict_16a": "GO-WITH-CHANGES",
+
+  "blocking_issues": [],
+
+  "major_issues": [
+    {
+      "id": "M1",
+      "title": "No vocabulary enforcement for capability_tags and audit_characteristics declared values",
+      "severity": "MAJOR",
+      "description": "The plan introduces two free-text authoring surfaces — `capability_tags` and `audit_characteristics` — with no mechanical constraint on what values are valid. `audit_characteristics` is particularly dangerous: the derivation logic in `_derive_audit_characteristics` infers flag strings from `_DETERMINISM_TO_AUDIT_FLAG` (keys: `io_read`, `io_write`, `external_call`, `deterministic`, `seeded`, `non_deterministic`) and composes them with author-declared values. A plugin author who writes `'io-read'` (hyphen) instead of `'io_read'` (underscore), or `'quarentine'` instead of `'quarantine'`, will produce a silently broken card in the catalog UI. The frontend `auditCharacteristics.ts` (referenced in 16b's scope) must map these string IDs to icons and labels — an unrecognised string produces a silent no-op (unknown characteristic is just not displayed), which is a silent data quality failure with no alarm. This is structurally identical to the `Determinism.EXTERNAL_CALL` marker drift problem flagged in the Phase 2 systems review (14-phase-2-audit-readiness-panel.systems-review.json W1), where a missing marker silently mis-classifies the plugin. The same unidirectionality applies here: the plan tests that `csv_source.py` has the right values, but there is no test or CI gate asserting that all declared `audit_characteristics` values are drawn from the known enum of valid flags.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/16a-phase-7a-backend.md (Task 3: derivation note; derivation maps listed at lines 162-181)",
+        "docs/composer/ux-redesign-2026-05/16a-phase-7a-backend.md (Task 5: audit_characteristics declared as frozenset({'coerce', 'quarantine'}))"
+      ],
+      "system_impact": "Phase 7's core value proposition is that audit-characteristic icons on cards let Linda-persona users scan plugins' audit properties at a glance. An author typo in a flag name causes a characteristic to silently disappear from the card. The catalog becomes unreliable reference material for exactly the audience it is designed to serve. Because the failure is silent (no error raised, no test fails), it will go undetected until a user reports a missing icon.",
+      "failure_mode": "Silent data quality failure. Wrong flag string is stored, composed, serialized, and returned on the wire. Frontend receives an unrecognised string and renders nothing. No error anywhere.",
+      "idempotent": true,
+      "feedback_loop_risk": "Tragedy of the Commons archetype: each plugin author makes the same vocabulary guess independently. With 57 plugins to annotate incrementally, vocabulary drift compounds — early authors set the pattern, later authors copy it (correct or incorrect), and the set of declared characteristics diverges from the frontend's registered vocabulary without any signal. Once the pattern is set across multiple plugins, correcting a systematic typo requires a mechanical search-and-replace across all annotated files.",
+      "gate": "Must be addressed before the bulk-authoring sprint (Phase 7D / documentation pass). Analogous to Phase 2 systems review W1 (EXTERNAL_CALL marker drift), which was also a WARNING-not-blocker: at Phase 2A merge time only one plugin had the wrong marker; the risk was the unguarded pattern. Here at Phase 7A merge time only csv_source is annotated and it is correct; the vocabulary enforcement gate is needed before 57 additional plugins annotate their characteristics independently.",
+      "recommended_fixes": [
+        "Define an explicit `VALID_AUDIT_CHARACTERISTICS` frozenset constant in the service module (or a new `contracts/` type) containing all recognized flag strings. Add a test in `test_service_audit_derivation.py` that asserts every string in every plugin's `audit_characteristics` attribute is a member of this set — analogous to the Phase 2 `test_every_external_call_plugin_is_on_allowlist` test.",
+        "Alternatively, replace the `frozenset[str]` type with a `frozenset[AuditCharacteristic]` where `AuditCharacteristic` is a `StrEnum` (Python 3.11+) or a `Literal` union. This makes typos a TypeError at class definition time, which is exactly the Tier 1 'crash on malformed' posture CLAUDE.md requires for system code. Capability tags are lower risk (display-only, not matched to logic) and can remain free-text strings, but warrant a similar vocabulary guard if filter chips in 16b match tags by exact string.",
+        "At minimum: add a `frozenset[str]` constant for recognized flag IDs in the derivation module, and add a test that the CSV canonical example's declared values are all members of that set. This is a ~20-line addition to Task 3 and does not restructure the plan."
+      ]
+    }
+  ],
+
+  "warnings": [
+    {
+      "id": "W1",
+      "title": "LLM context bloat when discovery tools are called post-full-authoring: unquantified today but measurable",
+      "severity": "WARNING",
+      "description": "The `list_sources`, `list_transforms`, and `list_sinks` tools in `composer/tools.py:1686-1710` return full `PluginSummary` objects via `_discovery_result`. These are serialized to the LLM via `_serialize_tool_result → json.dumps(result.to_dict(), default=_pydantic_default)`, where `_pydantic_default` calls `.model_dump()` on Pydantic objects. The full `PluginSummary` including all Phase 7A fields is therefore sent to the LLM on every discovery turn. Measurement: current catalog (37 registered plugins) serializes to 49,407 bytes / ~12,351 tokens. With all 37 plugins fully authored at canonical CSV prose density (~691 bytes/plugin), the total grows to ~74,974 bytes / ~18,743 tokens. Phase 7A's immediate impact is bounded: only csv_source is annotated (1/37), and null fields (`null` JSON values) add approximately 6,091 bytes total across 36 unfilled plugins, bringing Phase 7A's catalog to ~55,498 bytes / ~13,874 tokens — a 12% increase. This is not a blocker today. However: (1) the discovery cache (`_CACHEABLE_DISCOVERY_TOOLS` includes `list_sources/transforms/sinks`) means each is called once per `compose()` turn, not repeatedly — the cache provides a meaningful bound. (2) `prompts.py:build_context_string` uses only `.name` and is not affected. The risk materialises only as later phases fill in prose for more plugins. Note for operator: the canonical demo ('5 government pages + LLM coolness rating') exercises freeform composition. Monitor token budgets when prose authoring expands beyond the initial csv_source.",
+      "affected_files": [
+        "src/elspeth/web/composer/tools.py:1686-1710 (_handle_list_sources / _handle_list_transforms / _handle_list_sinks)",
+        "src/elspeth/web/composer/service.py:4508-4518 (_pydantic_default, _serialize_tool_result)",
+        "src/elspeth/web/composer/tools.py:6173-6198 (_DISCOVERY_TOOLS / _CACHEABLE_DISCOVERY_TOOLS)"
+      ],
+      "system_impact": "Bounded in Phase 7A (12% token increase with 1/37 annotated). Becomes a medium-term concern when prose authoring scales to all registered plugins. Demo risk is low for the immediate phase; reassess at Phase 7D or whichever phase owns the bulk-authoring pass.",
+      "recommendation": "No action required before Phase 7A ships. Add a note to the Phase 8 polish plan (20-phase-8-polish-and-telemetry.md) to measure per-compose token counts after full prose authoring. If token cost becomes a concern, the mitigations are: (a) strip prose fields from the LLM-facing discovery payload (separate `PluginSummaryBrief` for LLM vs `PluginSummary` for HTTP), or (b) add prose to the system prompt as a static context block outside the tool-result channel."
+    },
+    {
+      "id": "W2",
+      "title": "No mechanical gate between 16a wire shape and 16b's consumer contract",
+      "severity": "WARNING",
+      "description": "The plan notes that 16a and 16b can ship in parallel and that 16b 'comes alive' when 16a is present (16-index lines 37-40). The only cross-boundary seam test is `test_routes.py:test_csv_source_summary_includes_reference_content`, which pins the CSV-specific shape. If the 16a wire shape changes during review (e.g., `audit_characteristics` field type is adjusted, field names are renamed, or `data_trust_tier` becomes a nested object rather than an int), 16b's TypeScript consumer contract would silently break until the frontend is tested against the live backend. Compare to the Phase 2 systems review finding B2: that cross-phase boundary also had only prose-level enforcement. Here the risk is lower because 16a is schema-extending (additive, old consumers ignore new fields) rather than deletion-coupled, but 16b's types.ts will be written against the 16a contract and that contract should be pinned.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/16-phase-7-catalog-reshape.md (lines 37-44: mergeability section)",
+        "docs/composer/ux-redesign-2026-05/16a-phase-7a-backend.md (Task 5 Step 8: test_csv_source_summary_includes_reference_content — the only cross-slice wire-shape pin)"
+      ],
+      "system_impact": "If 16a's wire shape diverges from what 16b expects, the frontend renders fallback content ('see the technical description') for every plugin including csv_source, with no test failure. The catalog ships looking identical to the pre-Phase-7 catalog despite backend changes having landed.",
+      "recommendation": "When 16b is written, its TypeScript interface declaration should be regenerated from the actual 16a API response (e.g., via `curl /api/catalog/sources | jq '.[0]'` or a type-generation step). The 16b plan should include a step that fails if the TypeScript types are not consistent with the live backend shape. This is the same recommendation as Phase 2 R2 applied to a different boundary."
+    },
+    {
+      "id": "W3",
+      "title": "data_trust_tier integer badge leaks without tooltip explanation until 16b ships",
+      "severity": "WARNING",
+      "description": "16a adds `data_trust_tier` to the `PluginSummary` wire shape as an integer (1, 2, or 3). The plan correctly documents that the tooltip explanation ('what the user is dealing with at this boundary') ships in 16b (16-index lines 77-80). If 16a ships and any other catalog consumer reads `data_trust_tier` before 16b, the integer is displayed without its framing text. More concretely: the LLM already receives this integer in list_sources/transforms/sinks discovery tool responses starting from 16a's merge. The LLM may interpret `data_trust_tier: 3` on a source as 'this source is low-trust' rather than 'this source surfaces Tier 3 external data at its boundary.' The two interpretations are opposite in meaning: one says the plugin is untrustworthy (and should be avoided), the other says the data crossing the boundary is unverified (and that is a normal, expected property of any source). If the LLM interprets the number as plugin quality rather than data-tier, it might bias toward sinks (tier 2) and away from sources (tier 3) in the canonical demo flow.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/16-phase-7-catalog-reshape.md (lines 65-80: trust tier semantics section)",
+        "docs/composer/ux-redesign-2026-05/16a-phase-7a-backend.md (schema.py PluginSummary addition: data_trust_tier: int | None = Field(default=None, ge=1, le=3))"
+      ],
+      "system_impact": "Potential LLM behavior regression on the canonical demo. If the LLM sees `data_trust_tier: 3` on CSVSource and `data_trust_tier: null` on most transforms, it may avoid suggesting CSVSource in freeform composition. This is not testable from tests alone — it requires an eval pass against the canonical demo prompt. Impact is bounded: the LLM's plugin name recognition in the system prompt is strong enough that it is unlikely to be derailed by a single integer. Risk classified as LOW-to-MEDIUM; noted here because demo risk is explicitly on the operator's radar.",
+      "recommendation": "Consider either: (a) adding a brief comment field alongside `data_trust_tier` in the JSON response (e.g., `data_trust_tier_label: 'handles external data'`) so the LLM has framing context before 16b ships; or (b) adding a system prompt section explaining the tier model's data-boundary semantics so the LLM interprets the integer correctly. The simplest mitigation: add a one-line entry to the pipeline composer skill that describes what `data_trust_tier` means in plugin metadata. This also helps the LLM use the information constructively when composing pipelines."
+    },
+    {
+      "id": "W4",
+      "title": "Unstated finish line for 'the catalog is a reference, not a toolkit'",
+      "severity": "WARNING",
+      "description": "The design spec (08-catalog-reshape.md) frames the catalog as a persona-facing reference surface. The Phase 7A plan explicitly declines prose authoring for 57 of 58 registered plugins (57/58 = 98% of plugins will render 'see the technical description' fallback). The index (16-phase-7-catalog-reshape.md) states this three times in three different sections (lines 13-16, 82-94, 100-104). The roadmap does not name a successor phase for bulk authoring (no '7D' or 'documentation sprint' in 00-implementation-roadmap.md). Memory `feedback_repeated_out_of_scope_is_underscoping` says 'third-tasking no X is a flag, not authority; surface to operator.' This is the third framing. The question the operator must answer: which of these is the intended finish line? (a) Phase 7 ships the schema; prose is authored incrementally per-PR by whoever touches a plugin (the 'Tragedy of the Commons' path, where prose ages alongside the plugin); (b) A Phase 7D or documentation sprint is explicitly scoped to author all registered plugins before demo; (c) The system accepts that 57/58 plugins have fallback text and the catalog's value is its filter/search surface (16c), not its prose. Option (c) is where the plan is today, but it is stated nowhere explicitly. If the intent is (a) or (b), neither has a tracking issue or a plan. If the intent is (c), 08-catalog-reshape.md's framing ('the catalog is orientation material') should be re-scoped to acknowledge it.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/16-phase-7-catalog-reshape.md (lines 13-16, 82-94, 100-104)",
+        "docs/composer/ux-redesign-2026-05/08-catalog-reshape.md (Plugin card content design section — implies all plugins will have prose)"
+      ],
+      "system_impact": "No code impact. Operator clarity impact: if the team believes (b) and builds the demo around showing a rich reference catalog, and only csv_source has prose, the demo will show fallback text on every card except one. This is not a surprise to the plan authors, but may be a surprise to a demo audience or a reviewer who read 08-catalog-reshape.md and expects the full card.",
+      "recommendation": "Surface this explicitly to the operator: 'Phase 7 ships the schema and one canonical example. The catalog will show fallback text for 57/58 plugins when the drawer opens. Is that acceptable for demo, or should we scope a prose-authoring sprint?' The plan is technically correct as written; this is an operator-communication gap, not a plan defect."
+    },
+    {
+      "id": "W5",
+      "title": "CLAUDE.md 'no legacy code' posture conflicts with optional defaults on new fields",
+      "severity": "WARNING",
+      "description": "CLAUDE.md 'No Legacy Code Policy' states: 'STRICT REQUIREMENT: Legacy code, backwards compatibility, and compatibility shims are strictly forbidden. WE HAVE NO USERS YET — deferring breaking changes is the opposite of what we want.' The Phase 7A new fields all default to `None` / empty to preserve backward compatibility with existing plugin subclasses. This is the correct call for this specific situation — the plan is adding optional documentation fields, not changing behavioral contracts, and the defaults encode 'not yet documented' rather than 'silently broken.' However, the design spec's intent ('every plugin should have these filled in eventually') aligns better with REQUIRED fields that crash at class-load time when absent, which would force each plugin author to think. The plan makes the pragmatic tradeoff but does not acknowledge the tension with the no-legacy-code posture. If a future phase tries to make these fields required (CLAUDE.md's preference), it will face 57 plugins that all need updating simultaneously — the classic 'deferred breaking change' pattern.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/16a-phase-7a-backend.md (Task 1 Step 4: fields default to None / empty)",
+        "src/elspeth/CLAUDE.md (No Legacy Code Policy section)"
+      ],
+      "system_impact": "No immediate impact. Creates a future friction point if the project decides to enforce required metadata. The longer the defaults persist, the more costly the eventual enforcement.",
+      "recommendation": "Acknowledge the tradeoff in the implementation comment added to base.py in Task 1 Step 4: note explicitly that these fields are optional by deliberate design (not by project default), that the intent is for authors to fill them in incrementally, and that if the project later decides to make them required, the migration path is 'update all 57 remaining plugins in one commit per no-legacy-code policy.' This makes the decision discoverable to future-Claude without changing the implementation."
+    }
+  ],
+
+  "recommendations": [
+    {
+      "id": "R1",
+      "title": "Add a VALID_AUDIT_CHARACTERISTICS constant and membership test (fixes B1)",
+      "priority": "HIGH",
+      "detail": "In `src/elspeth/web/catalog/service.py` (or a new `contracts/audit_flags.py`), define a frozenset of recognized audit characteristic strings: the six values from `_DETERMINISM_TO_AUDIT_FLAG` plus the author-declared ones referenced in the plan ('signed', 'credentials', 'emits_provenance', 'coerce', 'quarantine', 'network'). Add a CI-level test in `test_service_audit_derivation.py` that iterates over all registered plugins and asserts every element in `plugin_cls.audit_characteristics` is a member of the constant. This mirrors the Phase 2 trust.py approach exactly. Cost: ~20 lines of test code, one small constants module."
+    },
+    {
+      "id": "R2",
+      "title": "Add a comment to base.py Phase 7A block documenting the optional-by-design tradeoff (addresses W5)",
+      "priority": "MEDIUM",
+      "detail": "In the reference-content block added to BaseSource / BaseTransform / BaseSink in Task 1 Step 4, add a one-line note: '# Optional by deliberate design: authors fill these in incrementally per docs/composer/ux-redesign-2026-05/16a-phase-7a-backend.md. If the project later enforces required metadata, update all plugins simultaneously per CLAUDE.md no-legacy-code policy.' This makes the decision visible to future implementers without changing behavior."
+    },
+    {
+      "id": "R3",
+      "title": "Surface finish-line question to operator before 16b/16c begin (addresses W4)",
+      "priority": "MEDIUM",
+      "detail": "Before 16b implementation starts, confirm with the operator: 'Phase 7A ships schema + csv_source. The catalog will display fallback text for 57/58 plugins at demo time. Is (a) incremental per-PR authoring, (b) a dedicated prose sprint before demo, or (c) accepting fallback-mostly-catalog the intended path?' The answer determines whether a tracking issue or Phase 7D is needed. This is not a code change — it is a documentation and scope-clarification task."
+    },
+    {
+      "id": "R4",
+      "title": "Add LLM tier-semantics framing to pipeline composer skill (addresses W3)",
+      "priority": "LOW",
+      "detail": "Add two sentences to the pipeline composer skill (whichever section covers plugin metadata): 'data_trust_tier describes what kind of data flows through the plugin's boundary, not how trustworthy the plugin is. A value of 3 on a source means it surfaces external, unvalidated data (Tier 3 per the ELSPETH data manifesto); this is normal and expected for any source plugin, not a signal to avoid it.' This prevents LLM misinterpretation of the integer and costs nothing to implement."
+    },
+    {
+      "id": "R5",
+      "title": "Add Phase 8 polish note for token budget monitoring (addresses W1)",
+      "priority": "LOW",
+      "detail": "Add a note to 20-phase-8-polish-and-telemetry.md: 'After Phase 7 prose authoring reaches N > 10 plugins, measure per-compose token counts for list_sources/transforms/sinks tool responses. If the prose-inclusive discovery payload exceeds 30KB per tool, evaluate whether a PluginSummaryBrief (name, description, capability_tags only) should be used for LLM discovery while the full PluginSummary is reserved for the HTTP catalog endpoint.'"
+    }
+  ],
+
+  "dependency_chain_analysis": {
+    "components_changed": [
+      "src/elspeth/plugins/infrastructure/base.py (BaseSource, BaseTransform, BaseSink)",
+      "src/elspeth/web/catalog/schemas.py (PluginSummary)",
+      "src/elspeth/web/catalog/service.py (_to_summary, new _derive_audit_characteristics)",
+      "src/elspeth/plugins/sources/csv_source.py (canonical example prose)"
+    ],
+    "dependency_chain": {
+      "changed": "BaseSource / BaseTransform / BaseSink (base.py)",
+      "direct_dependents_1st_order": [
+        "All 37 registered plugin subclasses (inherit the new fields with defaults)",
+        "CatalogServiceImpl._to_summary (reads the new fields)",
+        "PluginSummary schema (carries the new fields)"
+      ],
+      "indirect_dependents_2nd_order": [
+        "catalog HTTP routes /api/catalog/{sources,transforms,sinks} (emit PluginSummary)",
+        "_handle_list_sources / _handle_list_transforms / _handle_list_sinks (return full PluginSummary in ToolResult.data)",
+        "_serialize_tool_result (serializes PluginSummary via _pydantic_default -> model_dump())"
+      ],
+      "system_wide_effects_3rd_order": [
+        "LLM receives new fields in discovery tool responses (capability_tags, audit_characteristics, data_trust_tier, prose) from 16a merge forward",
+        "Phase 7B frontend PluginCard layout reads new fields from /api/catalog/sources etc.",
+        "Phase 7C filter chips use capability_tags as filter keys (vocabulary consistency dependency)"
+      ]
+    },
+    "ripple_risk": "LOW-to-MEDIUM",
+    "ripple_risk_rationale": "16a is purely additive. Existing consumers ignore new fields by default. The two elevated risks are the LLM discovery serialization (all new prose flows to LLM immediately on 16a merge) and the vocabulary consistency dependency (16c filter chips must match the strings in capability_tags exactly, with no validation gate)."
+  },
+
+  "feedback_loop_analysis": {
+    "loops": [
+      {
+        "id": "FL1",
+        "description": "Plugin author writes audit_characteristics typo → CI passes (no vocabulary check) → card renders missing icon → user reports missing characteristic → author investigates → finds typo → fixes → but pattern already copied to N other plugins by then",
+        "type": "Delayed feedback (staleness compounds over time)",
+        "risk": "MEDIUM — see B1. Mitigated by adding vocabulary enforcement test."
+      },
+      {
+        "id": "FL2",
+        "description": "Plugin prose is written at time-of-feature, plugin config schema evolves later (e.g. option renamed), prose references old option name → catalog shows stale YAML example → Dev persona copies it → runtime error",
+        "type": "Balancing loop disrupted (the catalog's reference purpose is undermined)",
+        "risk": "LOW for Phase 7A (only csv_source.py). Risk grows proportionally with number of annotated plugins. Design doc 08-§Risks correctly identifies this as 'Plugin documentation lives next to the plugin code; catalog reads it. Drift then = the plugin's docs are out of date, which is a normal staleness problem.' — This is a known and accepted risk, not a defect in the plan."
+      },
+      {
+        "id": "FL3",
+        "description": "16a ships alone (schema + csv example) → 16b never ships (resource re-prioritization) → backend carries 6 new fields nobody reads in the UI → future maintainers inherit dead fields",
+        "type": "Reinforcing (orphaned schema grows with each new plugin that annotates)",
+        "risk": "LOW — Phase 7 is on the demo critical path per 00-implementation-roadmap.md. The risk would materialize only if 16b/16c are descoped, which contradicts the demo intent. Noted for completeness."
+      }
+    ]
+  },
+
+  "historical_pattern_analysis": {
+    "patterns": [
+      {
+        "pattern": "Tragedy of the Commons — shared vocabulary without enforcement",
+        "match_level": "YES",
+        "evidence": "audit_characteristics frozenset[str] is a free-text field across all 37 plugins with no single owner. B1 above.",
+        "concern": "Vocabulary drift is a slow-moving correctness failure. Each individual author's decision to use a variant spelling seems reasonable; the cumulative effect is a catalog where characteristic icons are inconsistent across plugins."
+      },
+      {
+        "pattern": "Deferred completion / underscoping",
+        "match_level": "PARTIAL",
+        "evidence": "1/58 plugins annotated in Phase 7A; 57/58 will show fallback text. Design spec frames all plugins as needing prose. No successor phase named for bulk authoring.",
+        "concern": "Memory feedback_repeated_out_of_scope_is_underscoping and feedback_default_is_fix_not_ticket apply here. The plan explicitly acknowledges the partial coverage (three times) but does not surface the finish-line question to the operator. W4 above."
+      },
+      {
+        "pattern": "Implicit contract between slices (16a → 16b vocabulary consistency)",
+        "match_level": "PARTIAL",
+        "evidence": "16c filter chips use capability_tags as string keys; 16b auditCharacteristics.ts must recognize audit_characteristics string IDs. Neither is validated against the other until 16c integration tests.",
+        "concern": "Cross-slice vocabulary consistency is documented in prose only. Same structural shape as Phase 2 B2 (prose-only constraint on Phase 2C → Phase 3A dependency). B1 and W2 above."
+      }
+    ]
+  },
+
+  "failure_mode_summary": {
+    "silent_failure_risks": [
+      "audit_characteristics typo → characteristic icon silently missing from card (B1)",
+      "capability_tags typo → filter chip in 16c silently fails to match plugin (B1 variant)",
+      "data_trust_tier integer misinterpreted by LLM as plugin quality score (W3)",
+      "Plugin prose example references renamed config option → stale YAML copy-pasted by Dev (FL2, accepted risk)"
+    ],
+    "loud_failure_risks": [
+      "_StrictResponse strict=True rejects tuple input built from wrong type in _to_summary → 500 at construction time (desired behavior, correctly caught)",
+      "data_trust_tier=7 → Pydantic Field(ge=1, le=3) validation error at construction time (correct Tier 1 crash)",
+      "_on_validation_failure read attempt at class level → AttributeError (correctly avoided by the plan's rev-2 fix)"
+    ],
+    "idempotency_assessment": "16a changes are pure additive class-attribute additions and schema extensions. No state mutations. No ordering dependencies. Fully idempotent."
+  },
+
+  "timing_assumption_analysis": [
+    {
+      "assumption": "16b ships before the catalog drawer is exercised by real users",
+      "what_breaks": "If 16a ships to production before 16b, the HTTP catalog endpoint includes data_trust_tier integers with no tooltip explanation. Bounded by the fact that the frontend renders the existing card layout (ignores new fields) until 16b lands.",
+      "severity": "LOW — frontend ignores unknown fields by default in TypeScript"
+    },
+    {
+      "assumption": "16c's filter chip strings match the capability_tags vocabulary established by 16a's canonical example",
+      "what_breaks": "If 16c's filter chip ids diverge from the tags authored on plugins (e.g., 16a uses 'tabular', 16c expects 'table'), chips produce zero results silently",
+      "severity": "MINOR — caught in 16c integration tests if those tests exercise the filter path end-to-end"
+    },
+    {
+      "assumption": "_derive_audit_characteristics is called at list_sources/transforms/sinks time (per-request), not at CatalogServiceImpl.__init__ time",
+      "what_breaks": "If derivation is expensive and called per-request, performance degrades under load. Not a Phase 7A concern (derivation is trivial set-union), but relevant if derivation logic grows.",
+      "severity": "NIT — derivation is called inside _to_summary which is called from list_* methods; caching is at the per-compose turn level (discovery cache), not at the service level"
+    }
+  ],
+
+  "integration_point_stress": {
+    "integration_points": [
+      {
+        "point": "BaseSource / BaseTransform / BaseSink class attribute additions",
+        "failure_modes": "Attribute name collision with existing class attributes in subclasses; ClassVar annotation conflict with ABC + slots conventions",
+        "plan_coverage": "Plan explicitly notes ClassVar is already imported and used (config_model: ClassVar[...]). Plan chooses duplication over mixin for ABC + slots compatibility. Risk low given precedent.",
+        "mitigation_needed": false
+      },
+      {
+        "point": "PluginSummary _StrictResponse extension with tuple fields under strict=True",
+        "failure_modes": "strict=True rejects list input for tuple[str,...] fields — verified by experiment: `capability_tags=['csv', 'file']` raises ValidationError under strict=True. This is not a production risk because _to_summary builds tuples from class attributes (not from JSON input), but it IS a test-authoring trap: any test that passes list literals to PluginSummary will fail.",
+        "plan_coverage": "Plan correctly uses tuple literals in all test examples. Task 2 Step 1 test uses tuple syntax for all new fields. The risk is that a future test author or reviewer writes a list and is confused by the rejection.",
+        "mitigation_needed": false,
+        "note": "Consider adding a comment in schemas.py next to the tuple field declarations noting 'strict=True rejects list input; use tuple() or a tuple literal in tests and service code.'"
+      },
+      {
+        "point": "LLM discovery tool serialization of new PluginSummary fields",
+        "failure_modes": "New fields serialize via _pydantic_default → model_dump() and appear in LLM tool responses from 16a merge forward. LLM behavior change from additional context is undetectable by unit tests.",
+        "plan_coverage": "Not mentioned in the plan. Low risk in Phase 7A (only csv_source has prose; 36 plugins serialize nulls). Medium risk post full-authoring.",
+        "mitigation_needed": true,
+        "mitigation": "See W1 and R4."
+      }
+    ]
+  },
+
+  "plan_cut_assessment_16": {
+    "cut_quality": "SOUND",
+    "reasoning": "The 7a/7b/7c cut mirrors the Phase 1 (12/13) and Phase 2 (14a/14b/14c) backend-then-frontend-primitives-then-integration pattern. The dependency graph is correctly described: 16a is independent, 16b depends on having a real backend to test against (but can render fallback without it), 16c depends on 16b primitives existing. The 'can ship in parallel' claim for 16a/16b is structurally correct — they touch different files. The risk in the cut is 16a shipping without 16b materializing (FL3 above), but this is mitigated by the demo dependency.",
+    "risks": [
+      "16b must consume 16a's wire shape without a formal contract — W2 above",
+      "No named successor phase for bulk prose authoring — W4 above",
+      "16c filter vocabulary depends on 16a's capability_tags vocabulary without a validation gate — B1 above"
+    ]
+  },
+
+  "demo_readiness_assessment": {
+    "adds_demo_value": true,
+    "adds_demo_risk": false,
+    "value_items": [
+      "Schema ships cleanly; csv_source becomes a canonical working example of the reference card design",
+      "Phase 7B can be started immediately after 16a merges; the catalog 'comes alive' for the canonical plugin the moment 16b lands",
+      "Audit-characteristic derivation logic is tested independently, establishing a clean boundary that 16b can mock against"
+    ],
+    "risk_items": [
+      "data_trust_tier integer flows to LLM in discovery tools from 16a merge forward; LLM misinterpretation risk is LOW but unverified (W3)",
+      "57/58 plugins will show fallback text in the UI after the full 7a/7b/7c sequence lands; if the demo showcases the catalog drawer, only csv_source has rich content"
+    ],
+    "canonical_demo_path": "The canonical demo ('5 government pages + LLM coolness rating') flows through the freeform composer. It uses csv_source as the data entry or the dynamic-source-from-chat path (Phase 5a). Phase 7A does not break this path: csv_source's behavior is unchanged; the new class attributes are additive. The demo composer LLM will see new fields in list_sources tool responses; the prose on csv_source is correctly scoped and will not confuse plugin selection."
+  },
+
+  "verdict_rationale": {
+    "16_verdict_rationale": "GO. The index is structurally sound. The 7a/7b/7c cut is the right shape. Dependencies are correctly described. The only concern — the unstated finish line for prose authoring — is an operator-communication gap, not a plan defect. The index explicitly does not claim all plugins will be annotated in Phase 7; the silence on a successor phase is the gap. Surface W4 to the operator before 16b begins.",
+    "16a_verdict_rationale": "GO-WITH-CHANGES. The technical content is sound: the ClassVar pattern matches existing precedent, the rev-2 AttributeError fix is correct, the Tier 1 emission discipline is preserved, the TDD structure is well-formed. M1 (no vocabulary enforcement for audit_characteristics and capability_tags declared values) is the load-bearing change request. It is proportionate to Phase 2 systems review W1 (same pattern, same structural gap, similar timing — one plugin annotated correctly at merge time, the unguarded pattern is the risk). M1 is fixable within Task 3 without restructuring the plan: add a VALID_AUDIT_CHARACTERISTICS constant and a membership-assertion test, ~20 lines. The plan can ship with this addition included; it should not ship without it, because Phase 7A establishes the vocabulary anchor that every subsequent plugin author will copy for the 57 remaining plugins."
+  }
+}

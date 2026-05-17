@@ -1,0 +1,337 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "verdict_basis": "Three reviewers (architecture, quality, systems) returned GO-WITH-CHANGES; reality returned NO-GO. Convergent evidence UPGRADES reality's NO-GO call. Every reality blocker is independently corroborated: B1 (16b primitives missing) is corroborated by architecture F-002; B2+B3 (ShortcutsHelp triple regression) is corroborated by architecture F-001 and systems S-001; B4 (vocabulary drift) is corroborated by 4 reviewers across the 16b plan plus systems S-003 and quality QA-16C-003 on 16c. Beyond the inherited drift, 16c has its own structural defects: a synthetic-entry empty-state visibility bug (systems S-002, BLOCKER), a missing E2E gate on the demo-critical catalog flow (quality QA-16C-001 + systems S-004), and an unaddressed fixme'd Playwright spec on the very surface 16c reshapes (quality QA-16C-002). Slice ordering (16b → 16c) is not mechanically gated.",
+  "summary": "Five blockers prevent 16c from executing: (B1) 16b primitives (auditCharacteristics.ts, DataTrustTier, AuditCharacteristicIcon, TrustTierBadge, extended PluginSummary) do not exist in the codebase; Task 1 fails with module-not-found, not the documented red-test failure. (B2) ShortcutsHelp Task 4 silently drops two LIVE wired shortcuts (Ctrl+Shift+G 'Open graph view', Ctrl+Shift+Y 'Export YAML' — both have keydown handlers in App.tsx:154-173 and are pinned by an existing passing test) AND re-adds the retired Alt+1-4 shortcut that an existing regression-guard test asserts is absent AND has NO keydown handler anywhere in the frontend (ghost shortcut documenting a non-existent capability). (B3) Synthetic InlineChatSourceEntry is not cordoned from the empty-state guard — filter combinations that exclude all real source plugins leave the drawer in an ambiguous state. (B4) llm-provider-schema.spec.ts is entirely fixme'd; the plan never addresses it; catalog reshape is the highest-probability surface to mask regressions in that spec. (B5) No Playwright E2E gate covers the canonical demo path through the catalog drawer; the 16a quality reviewer already flagged this gap. The structural design — per-tab filter state, AND composition, controlled FilterChipStrip, synthetic-entry as separate component — is sound.",
+  "plan_file": "docs/composer/ux-redesign-2026-05/16c-phase-7c-frontend-integration.md",
+  "sibling_plans": ["16-phase-7-catalog-reshape.md", "16a-phase-7a-backend.md", "16b-phase-7b-frontend.md"],
+  "reviewed_at": "2026-05-18T00:00:00Z",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+
+  "convergence_findings": [
+    {
+      "id": "C1-16B-PREREQUISITES-MISSING",
+      "title": "16b primitives are not in the codebase; Task 1 cannot compile; slice ordering is not mechanically gated",
+      "sources": {
+        "architecture": "F-002 (BLOCKER)",
+        "reality": "B1 (BLOCKER) — file-line verified"
+      },
+      "convergence_count": 2,
+      "evidence": "find of src/elspeth/web/frontend/src/components/catalog/ shows only CatalogDrawer.tsx, CatalogDrawer.test.tsx, PluginCard.tsx, PluginCard.test.tsx — no auditCharacteristics.ts, no AuditCharacteristicIcon.tsx, no TrustTierBadge.tsx. src/elspeth/web/frontend/src/types/index.ts:277-282 has no DataTrustTier and PluginSummary lacks capability_tags, audit_characteristics, data_trust_tier, usage_when_to_use, usage_when_not_to_use, example_use. 16c Task 1 Step 3 imports lookupAuditCharacteristic from './auditCharacteristics' (module-not-found error, not the documented red-test failure). 16c Task 3 imports DataTrustTier from '@/types/index'. The plan names 16b as a prerequisite at 16c:1203 but the constraint is prose-only — an executing agent may misread the module-not-found as environment breakage.",
+      "confidence": "HIGH (2 reviewers, codebase-verified)",
+      "resolution": "Add a preflight gate at the top of 16c: before any task begins, verify 16b artifacts exist. Concrete check (executable):\n```bash\ntest -f src/elspeth/web/frontend/src/components/catalog/auditCharacteristics.ts &&\ntest -f src/elspeth/web/frontend/src/components/catalog/AuditCharacteristicIcon.tsx &&\ntest -f src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.tsx &&\ngrep -q 'DataTrustTier' src/elspeth/web/frontend/src/types/index.ts &&\ngrep -q 'capability_tags' src/elspeth/web/frontend/src/types/index.ts\n```\nIf any check fails, block 16c execution and require 16b merge first. Rev-history dependency note (current plan) is NOT sufficient given the slice ordering risk — mechanical gate is required."
+    },
+    {
+      "id": "C2-SHORTCUTSHELP-REGRESSION",
+      "title": "Task 4 ShortcutsHelp rewrite is a triple regression: drops 2 live shortcuts, adds 1 ghost shortcut, contradicts existing passing tests",
+      "sources": {
+        "architecture": "F-001 (BLOCKER) + One-Way-Door cited twice",
+        "reality": "B2 (BLOCKER) + B3 (BLOCKER)",
+        "systems": "S-001 (BLOCKING)"
+      },
+      "convergence_count": 3,
+      "evidence": "16c Task 4 Step 3 (16c:1017-1025) ACTION_SHORTCUTS array: (a) DROPS 'Ctrl/Cmd+Shift+G — Open graph view' and 'Ctrl/Cmd+Shift+Y — Export YAML'. Both are CURRENTLY LIVE: ShortcutsHelp.tsx:11-12 documents them; ShortcutsHelp.test.tsx:18-30 pins them with passing assertions; App.tsx:154-173 contains the actual keydown handlers dispatching OPEN_GRAPH_MODAL_EVENT and OPEN_YAML_MODAL_EVENT; CommandPalette.tsx:145,156 surfaces them at a second site. (b) ADDS 'Alt+1-4 — Switch inspector tab (Spec/Graph/YAML/Runs)'. ShortcutsHelp.test.tsx:33-38 is an EXISTING passing regression-guard asserting `screen.queryByText(/Switch inspector tab/i)).toBeNull()`. (c) NO keydown handler for Alt+1-4 exists anywhere in the .tsx files (reality verified via grep of altKey, 'Alt+[1-4]', and inspector-tab components — 0 results). The shortcut is a ghost: documented but unwired. The plan's wholesale test-file replacement strategy hides all three regressions from the failing-test-first protocol because the replacement test file doesn't carry forward the assertions it would break.",
+      "confidence": "HIGH (3 reviewers, codebase-verified down to App.tsx line numbers)",
+      "resolution": "In Task 4 Step 3 ACTION_SHORTCUTS / REFERENCE_SHORTCUTS: (1) Add 'Ctrl/Cmd+Shift+G — Open graph view' (Actions or Reference, either defensible). (2) Add 'Ctrl/Cmd+Shift+Y — Export YAML'. (3) DELETE the 'Alt+1-4 — Switch inspector tab' entry. (4) Update the replacement test file to PRESERVE the existing 'lists graph and YAML modal shortcuts' assertion and the 'does not list retired inspector tab shortcuts' assertion; add the new subheading and grouping assertions alongside. (5) Cross-check the final ACTION_SHORTCUTS array against App.tsx keydown handlers BEFORE merging — at minimum a grep for each documented key combination. If the operator wants to add an Alt+1-4 shortcut, that is a separate task with a wiring implementation, NOT 16c scope."
+    },
+    {
+      "id": "C3-VOCABULARY-DRIFT-INHERITED",
+      "title": "Inherited vocabulary drift from 16a/16b silently degrades chip display; no contract test in 16c",
+      "sources": {
+        "reality": "B4 (BLOCKER) + W1 (MAJOR)",
+        "quality": "QA-16C-003 (BLOCKING)",
+        "systems": "S-003 (HIGH)"
+      },
+      "convergence_count": 3,
+      "evidence": "Backend VALID_AUDIT_CHARACTERISTICS uses 'provenance'; 16b's auditCharacteristics.ts uses 'emits_provenance' (wrong) and is missing 'retention' and 'network'. 16c's FilterChipStrip (16c:344-360) calls lookupAuditCharacteristic with fallback `meta?.label ?? flag` — the raw flag string is silently rendered when lookup misses. The chip filters nothing (filter id != displayed flag), an invisible defect. Demo CSV source from 16a Task 5 declares audit_characteristics={'provenance', 'quarantine'} — 'provenance' renders as a grey unknown chip. 16c has NO contract test asserting FilterChipStrip chips resolve to non-raw labels. 16c smoke step at 16c:1157-1158 explicitly distinguishes filter id 'external_call' from display label 'Network call' — precisely the drift vector this test prevents.",
+      "confidence": "HIGH (3 reviewers + the cross-plan convergence pattern carries from 16b's 4-reviewer C1)",
+      "resolution": "PRIMARY FIX: resolve in 16b (see 16b review C1-VOCAB-DRIFT and C2-PARITY-GATE). 16b is the metadata-table owner; the parity gate belongs there. 16c is the chip-render CONSUMER and DOES NOT need to duplicate the parity gate — the 16b gate covers KNOWN_AUDIT_FLAGS which feeds 16c's FilterChipStrip. SECONDARY FIX in 16c (defense-in-depth): add a FilterChipStrip.test.tsx test that passes all 13 canonical VALID_AUDIT_CHARACTERISTICS members as availableAuditCharacteristics and asserts each rendered chip resolves to a non-raw label (lookupAuditCharacteristic returns a defined meta object for every member). This is the cheapest possible contract test from the consumer side and complements 16b's parity gate."
+    },
+    {
+      "id": "C4-NO-E2E-GATE",
+      "title": "No Playwright E2E gate on demo-critical catalog flow",
+      "sources": {
+        "quality": "QA-16C-001 (BLOCKING)",
+        "systems": "S-004 (HIGH)"
+      },
+      "convergence_count": 2,
+      "evidence": "Task 5 Step 4 (16c:1132-1169) is a 10-step manual human checklist with no automated Playwright counterpart. The 16a quality reviewer explicitly flagged the absence of an E2E smoke as material for the demo track. The canonical demo prompt ('create a list of 5 government web pages and use an LLM to rate how cool they are') touches the catalog drawer during plugin selection. project_rc5ux_demo_prep_scope memory: merge bar is 'demo succeeds.' Existing Playwright harness is alive (smoke.spec.ts, composer-guided.spec.ts, composer-proposals.spec.ts, llm-provider-schema.spec.ts among others); Phase 1B and Phase 2C both landed Playwright tests. 16c is the natural home — it's where the integration becomes user-visible.",
+      "confidence": "HIGH (2 reviewers; project context — demo-prep track — elevates this to blocking)",
+      "resolution": "Add a Playwright spec covering the post-16c E2E gate at src/elspeth/web/frontend/tests/e2e/catalog-reshape.spec.ts. Minimum assertions: (1) Ctrl+Shift+P opens drawer; (2) InlineChatSourceEntry is visible on Sources tab; (3) capability-tag chip click narrows visible plugin list; (4) CSV card shows trust-tier badge and audit-characteristic icons; (5) 'Use in pipeline' button is absent (reference-only confirmation); (6) 'Try it' on InlineChatSourceEntry closes drawer and prefills chat input with non-empty string; (7) Clear filters restores full list. This spec would also catch B3 (empty-state visibility) as a regression under filter activation."
+    }
+  ],
+
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "title": "16b primitives missing — preflight gate required",
+      "sources": ["reality B1", "architecture F-002"],
+      "convergence": 2,
+      "severity": 5,
+      "likelihood": 5,
+      "reversibility": 1,
+      "priority_score": 25,
+      "evidence": "See C1-16B-PREREQUISITES-MISSING.",
+      "resolution": "Add executable preflight check at top of 16c (see C1-16B-PREREQUISITES-MISSING). If 16b not merged, halt. This makes the slice ordering MECHANICAL not prose-only."
+    },
+    {
+      "id": "B2",
+      "title": "ShortcutsHelp triple regression — drops 2 live shortcuts, adds 1 ghost, contradicts existing tests",
+      "sources": ["reality B2+B3", "architecture F-001", "systems S-001"],
+      "convergence": 3,
+      "severity": 5,
+      "likelihood": 5,
+      "reversibility": 2,
+      "priority_score": 50,
+      "evidence": "See C2-SHORTCUTSHELP-REGRESSION.",
+      "resolution": "See C2-SHORTCUTSHELP-REGRESSION. Restore Ctrl+Shift+G and Ctrl+Shift+Y to the arrays; delete Alt+1-4 entry; preserve existing test assertions in the replacement file; cross-check final arrays against App.tsx handlers."
+    },
+    {
+      "id": "B3",
+      "title": "Synthetic InlineChatSourceEntry not cordoned from empty-state guard",
+      "sources": ["systems S-002"],
+      "convergence": 1,
+      "severity": 4,
+      "likelihood": 4,
+      "reversibility": 2,
+      "priority_score": 32,
+      "evidence": "16c:866-875 places InlineChatSourceEntry render inside the same conditional path as the plugin list. Existing CatalogDrawer.tsx:340-345 empty-state guard fires when pluginList.length === 0. Two failure modes: (a) Synthetic entry nested inside the empty-state-skipped branch — when filters reduce pluginList to zero, synthetic entry disappears (contradicts plan's 'always visible by design' claim at 16c:874-875); (b) Synthetic entry rendered as sibling above empty-state node — appears as if it WERE the filter result (breaks the filter mental model). The plan's prose claims independence but the implementation sketch nests inside.",
+      "resolution": "Render InlineChatSourceEntry unconditionally when activeTab === 'sources', at a JSX position OUTSIDE the pluginList.length === 0 conditional. Both empty-state message and synthetic entry must be simultaneously visible when filters match zero real plugins. Add a CatalogDrawer test: given [csv, azure_blob] filtered to zero by an active chip, Sources tab still shows InlineChatSourceEntry AND the 'No plugins matching active filters' message. (Single-reviewer finding but the bug is concrete and demo-relevant — synthetic source is the hello-world tutorial path.)"
+    },
+    {
+      "id": "B4",
+      "title": "llm-provider-schema.spec.ts fixme is unaddressed; catalog reshape is highest-probability mask surface",
+      "sources": ["quality QA-16C-002"],
+      "convergence": 1,
+      "severity": 3,
+      "likelihood": 3,
+      "reversibility": 2,
+      "priority_score": 18,
+      "evidence": "src/elspeth/web/frontend/tests/e2e/llm-provider-schema.spec.ts — entire describe block wrapped in test.fixme(true, ...); both tests are empty stubs (reality reviewer confirmed file state). 16c plan (1219 lines) never mentions this spec. The 16a quality reviewer explicitly raised: 'Will 16c un-fixme it, or does 16c quietly accept it stays broken?' Silence on an explicit question is not acceptable on a demo-track branch. The catalog reshape directly restructures the plugin schema surface that the spec was originally written to guard.",
+      "resolution": "OPERATOR DECISION required (see operator_decisions OD-1). Two paths: (A — preferred) Un-fixme the spec as part of 16c. The reshape is the natural moment; the spec was guarding the very surface 16c restructures. Investigate what the fixme was protecting against, fix or remove the spec accordingly. (B) Add a plan note with explicit deferral, named owner, and dependency link to a filigree issue. Silent carry-forward is rejected."
+    },
+    {
+      "id": "B5",
+      "title": "No Playwright E2E gate on demo-critical catalog flow",
+      "sources": ["quality QA-16C-001", "systems S-004"],
+      "convergence": 2,
+      "severity": 4,
+      "likelihood": 3,
+      "reversibility": 2,
+      "priority_score": 24,
+      "evidence": "See C4-NO-E2E-GATE.",
+      "resolution": "See C4-NO-E2E-GATE. Add catalog-reshape.spec.ts with the 7 assertions listed. Demo merge-bar makes this material."
+    }
+  ],
+
+  "warnings": [
+    {
+      "id": "W1",
+      "title": "Inherited vocabulary drift — chip filters silently broken for provenance/retention/network",
+      "sources": ["reality B4+W1", "quality QA-16C-003", "systems S-003"],
+      "convergence_count": 3,
+      "priority_score": 36,
+      "evidence": "See C3-VOCABULARY-DRIFT-INHERITED.",
+      "resolution": "PRIMARY: resolve in 16b. SECONDARY (defense-in-depth in 16c): add FilterChipStrip parity test asserting all 13 VALID_AUDIT_CHARACTERISTICS members resolve to non-raw labels. Note: scored as warning (not blocker) on 16c BECAUSE the primary fix lives in 16b — 16c just needs 16b's resolution. If 16b ships without fix, escalate to blocker on 16c at that point."
+    },
+    {
+      "id": "W2",
+      "title": "scorePlugin extension omits example_use — asymmetric prose-search coverage",
+      "sources": ["architecture F-004", "reality N1"],
+      "priority_score": 8,
+      "evidence": "16c Task 3 scorePlugin extension matches usage_when_to_use, usage_when_not_to_use, capability_tags but omits example_use. 16a ships example_use as a first-class field. The canonical demo CSV plugin's example_use contains 'government web pages' from the canonical test prompt — an operator typing that phrase won't find it via example.",
+      "resolution": "Add `plugin.example_use ?? ''` to the target array in scorePlugin. One line. Reality flags this as NIT, architecture as MAJOR — convergent on the gap, divergent on severity. Treat as a should-fix (cheap; demo-relevant if the canonical phrase happens to live only in example_use)."
+    },
+    {
+      "id": "W3",
+      "title": "scorePlugin has no canonical-demo regression pin",
+      "sources": ["systems S-006"],
+      "priority_score": 9,
+      "evidence": "Extending the target string changes fuzzy scores for every plugin against every query. Long target strings raise the noise floor and may push a plugin below MIN_FUZZY_CONFIDENCE for a previously-matching query. No test pins the canonical demo phrase fragments ('government', 'web pages', 'LLM') to expected results. If a prose change to an unrelated plugin causes web_scrape to drop off the demo search, no automated test catches it before demo day.",
+      "resolution": "Add a Vitest regression-pin test calling scorePlugin with canonical demo query fragments against a representative fixture set; assert web_scrape and llm score above -1 (presence/absence, not ranking oracle). Cheap; protects demo path."
+    },
+    {
+      "id": "W4",
+      "title": "scorePlugin null-guard missing on capability_tags.join",
+      "sources": ["architecture F-006"],
+      "priority_score": 6,
+      "evidence": "scorePlugin's `plugin.capability_tags.join(' ')` call will throw if capability_tags is undefined on an old-shape API response or fixture. 16a marks it required but defensive null-guard at the consumer is idiomatic.",
+      "resolution": "Use `plugin.capability_tags?.join(' ') ?? ''` in the target concatenation. Independent of the file-level mock fixture update."
+    },
+    {
+      "id": "W5",
+      "title": "CatalogDrawer.test.tsx file-level mock fixtures use pre-16a PluginSummary shape",
+      "sources": ["architecture F-003 (downgraded)"],
+      "priority_score": 6,
+      "evidence": "Existing mock at CatalogDrawer.test.tsx:7-25 has only {name, plugin_type, description, config_fields}. When the new tests share the file-level mock, fixtures lack new fields. Current code-paths work because empty filters pass all plugins, but any future filter-active test on an old-shape fixture will throw on undefined capability_tags.",
+      "resolution": "Update the file-level vi.mock fixtures to include the new PluginSummary fields (empty arrays / null defaults). Forward-compatible; one-time edit at fixture creation."
+    },
+    {
+      "id": "W6",
+      "title": "availableCapabilityTags derived from pre-filter universe; conflicting filters → empty-state trap",
+      "sources": ["architecture F-005"],
+      "priority_score": 4,
+      "evidence": "16c Task 3 derives availableCapabilityTags from allPluginsForTab (pre-filter). User activating 'csv' then clicking 'network' sees empty results (AND of non-overlapping sets). Not a crash — a UX trap. The plan does not flag this in the risk table.",
+      "resolution": "DOCUMENT in risk table as known-behaviour with explicit design rationale (full universe vs contextually narrowed). If operator prefers narrowing, derive from pluginList post-filter. Either is defensible; the explicit choice is the load-bearing piece."
+    },
+    {
+      "id": "W7",
+      "title": "Filter-state invisibility on inactive tab badges",
+      "sources": ["systems S-005"],
+      "priority_score": 4,
+      "evidence": "Counts memo (16c:880-889) applies filtersByTab[tab] to every tab. A user who activates 'Tier 3' on Sources, switches to Transforms, sees 'Sources: 2' badge with no indication the filter is still active. The fix for one UX trap (cross-tab filter leakage) created a new one (filter-state invisibility on inactive tabs).",
+      "resolution": "Append a small visual indicator (dot, emphasis, ring) to each tab badge when that tab has any active filter. One CSS class + boolean derived from filtersByTab[tab]. Should-fix for the demo bar (operator may not notice during prep)."
+    },
+    {
+      "id": "W8",
+      "title": "Empty-state message does not distinguish 'filtered to zero' from 'no plugins available'",
+      "sources": ["architecture F-008"],
+      "priority_score": 3,
+      "evidence": "CatalogDrawer.tsx:341-344 empty-state logic: searchQuery.trim() ? 'No plugins matching ...' : 'No plugins available.' With filter chips added, a user can activate filters with no search query, narrow to zero, and see 'No plugins available' (misleading — plugins exist, filter excluded them).",
+      "resolution": "Add tertiary branch: if pluginList.length === 0 and any filter active, show 'No plugins match the active filters.' Coordinate with B3 fix — when synthetic entry is cordoned outside, this message is the only signal for filtered-to-zero state."
+    },
+    {
+      "id": "W9",
+      "title": "Per-tab filter persistence on tab-back not tested",
+      "sources": ["quality QA-16C-006"],
+      "priority_score": 3,
+      "evidence": "Plan tests forward tab-switch isolation (Sources filter doesn't appear on Transforms) but not symmetric round-trip (switching back to Sources restores its filter). filtersByTab design implies the latter; an implementation that resets on tab switch would pass the existing test while violating the UX contract.",
+      "resolution": "Extend tab isolation test: activate filter on Sources → switch to Transforms → switch back to Sources → assert filter still active and exclusions still in effect."
+    },
+    {
+      "id": "W10",
+      "title": "Clear-filters asymmetry untested (button clears current tab; drawer close clears all)",
+      "sources": ["quality QA-16C-007"],
+      "priority_score": 3,
+      "evidence": "Plan implements two clearing paths with different scope: button (current tab only via onChange) vs drawer close useEffect (all tabs). Deliberate design but no test pins the asymmetry.",
+      "resolution": "Add test: activate filter on Sources → click 'Clear filters' → assert Sources cleared → re-activate Sources filter → close+reopen drawer → assert both tabs cleared."
+    },
+    {
+      "id": "W11",
+      "title": "Keyboard nav / focus management of FilterChipStrip not tested",
+      "sources": ["quality QA-16C-008", "systems S-007"],
+      "priority_score": 6,
+      "evidence": "FilterChipStrip uses aria-pressed (correct) but no test verifies Tab order, Enter/Space toggle, focus return on drawer close, or live-region count announcement. ChipGroup is a <div>+<span> with no role='group' / aria-labelledby — screen readers encounter ungrouped button run. Linda persona priority.",
+      "resolution": "Add tests: userEvent.tab through chips assertion; press Enter/Space on focused chip toggles; live-region announces post-toggle count. Add role='group' and aria-labelledby to ChipGroup. Single-paragraph fix."
+    },
+    {
+      "id": "W12",
+      "title": "userEvent.type + immediate expect may be flaky if CatalogDrawer has search debounce",
+      "sources": ["quality QA-16C-009"],
+      "priority_score": 2,
+      "evidence": "Task 3 search tests use userEvent.type followed by immediate expect. If existing CatalogDrawer debounces searchQuery, assertion runs before filter executes.",
+      "resolution": "Verify current CatalogDrawer has no debounce. If yes, wrap in waitFor. Add a comment if no debounce: 'absence-of-debounce assumed; future debounce introduction requires waitFor wrapping.'"
+    },
+    {
+      "id": "W13",
+      "title": "Zero-match empty state for synthetic entry visibility untested",
+      "sources": ["quality QA-16C-005"],
+      "priority_score": 3,
+      "evidence": "Plan specifies synthetic entry is always visible on Sources tab (16c:874-875). No test verifies that when all real source plugins are filtered out, synthetic entry remains.",
+      "resolution": "Folded into B3 resolution — the test that proves the fix to B3 also proves W13. Single test, both covered."
+    },
+    {
+      "id": "W14",
+      "title": "InlineChatSourceEntry role=region semantically disproportionate",
+      "sources": ["architecture F-007"],
+      "priority_score": 2,
+      "evidence": "16c Task 2 wraps InlineChatSourceEntry in <div role='region' aria-label='Inline data from chat'>. Landmark roles are for major content areas, not single-row affordances. PluginCard uses no landmark role.",
+      "resolution": "Remove role='region'. Visual class + 'Try it' button aria-label suffice."
+    }
+  ],
+
+  "recommendations": [
+    {
+      "id": "R1",
+      "type": "DEMO-PROTECTION",
+      "source": "Convergent — quality QA-16C-001+QA-16C-004, systems S-006",
+      "suggestion": "The demo-prep merge bar makes the Playwright E2E spec (B5) AND the scorePlugin canonical-query regression pin (W3) both demo-protection. They cost little; the upside is catching a ranking surprise or wiring regression before demo day."
+    },
+    {
+      "id": "R2",
+      "type": "VOCABULARY-OWNERSHIP",
+      "source": "C3 cross-plan synthesis",
+      "suggestion": "16b is the parity-gate owner (metadata-table side). 16c can add a defense-in-depth FilterChipStrip parity test but DOES NOT need to duplicate the gate. Recommend the redundant test in 16c only if the cost (1 short test) is low — it documents the consumer contract at the consumer site."
+    },
+    {
+      "id": "R3",
+      "type": "SCOPE-DISCIPLINE",
+      "source": "B2 + Alt+1-4 ghost shortcut",
+      "suggestion": "The Alt+1-4 entry probably leaked from an older spec or pre-RC reshape draft. Treat this as a signal: cross-check ACTION_SHORTCUTS / REFERENCE_SHORTCUTS line-by-line against App.tsx handlers before any merge. The plan diff is small enough that one grep per documented combination is feasible."
+    },
+    {
+      "id": "R4",
+      "type": "TEST-FILE-DISCIPLINE",
+      "source": "B2 + 16b B4 (cross-plan pattern)",
+      "suggestion": "Both 16b and 16c plan full-file replacements of an existing .test.tsx that silently delete pinned assertions on unchanged production code. Avoid full-file replacement as a default editing mode in plans. Prefer 'add tests for new behaviour; preserve existing describe blocks; update test queries for changed contracts in-place'. The 'wholesale replacement' anti-pattern conceals exactly the convergence reviewers caught here."
+    }
+  ],
+
+  "operator_decisions": [
+    {
+      "id": "OD-1",
+      "question": "llm-provider-schema.spec.ts: un-fixme now (in 16c) or accept formal deferral with a filigree dependency?",
+      "context": "The spec is entirely fixme'd. Catalog reshape is the highest-probability surface to mask regressions in that spec — but un-fixme requires investigating what it was originally guarding against, which is non-trivial scope expansion. Silent carry-forward is unacceptable; the choice is between an investigation+fix in 16c or an explicit deferral with an owner.",
+      "recommendation": "Un-fixme NOW. Reasons: (a) the reshape is the natural moment to revisit the spec; (b) the operator's standing instruction is 'risk not cost/effort' — accepting a fixme'd demo-track spec is risk-asymmetric; (c) a filigree deferral on a demo-prep branch is the kind of debt that survives the demo and quietly metastasizes. If the spec turns out to be redundant after the reshape, delete it explicitly in 16c rather than fixme'ing it.",
+      "blocking": true
+    },
+    {
+      "id": "OD-2",
+      "question": "Alt+1-4 shortcut: was its presence in the plan a draft leak, or is the operator considering wiring it?",
+      "context": "The shortcut is documented in the plan but unwired in code and pinned-absent by an existing regression-guard test. Three possibilities: (a) draft leak from an older spec, just delete the entry; (b) operator intends to wire it later, in which case the wiring is a SEPARATE task and the documentation entry must be deferred until that task ships; (c) operator wants it documented now as forward-promise — REJECTED (a documented unwired shortcut is a user-facing lie per CLAUDE.md no-fabrication doctrine).",
+      "recommendation": "Default: option (a). Delete the entry from 16c. If operator confirms intent (b), open a separate filigree issue with both the wiring and the doc entry as siblings. Option (c) is not on the table.",
+      "blocking": true
+    },
+    {
+      "id": "OD-3",
+      "question": "Filter universe scope: derive availableCapabilityTags from full tab list (current plan) or post-filter narrowed list?",
+      "context": "Current design (full universe) creates the 'filter to empty state' trap (W6). Post-filter narrowing prevents the trap but changes the chip semantics (chips disappear as user filters). Both are defensible UX patterns; the plan should make the choice explicit.",
+      "recommendation": "Keep full-universe (current plan) — chips remain stable, user can deactivate; document the empty-state behaviour in W8's resolution.",
+      "blocking": false
+    }
+  ],
+
+  "what_is_good": {
+    "structural_design": "Per-tab filter state (filtersByTab) correctly resolves the cross-tab UX trap. AND composition of filters within a tab is correct. FilterChipStrip is a pure controlled component (filters in, onChange out). Synthetic-entry as separate component honestly models the 'option, not a plugin' framing.",
+    "tdd_shape": "Every task follows failing-test-first with explicit run commands. Quality reviewer confirms 'TDD shape is correct throughout.'",
+    "tab_isolation_test": "Per-tab regression test (Sources filter doesn't appear on Transforms) directly pins the design intent.",
+    "event_reuse": "InlineChatSourceEntry reuses PREFILL_CHAT_INPUT_EVENT from PluginCard rather than inventing a parallel event name. The minor coupling (event constant lives on a leaf component) was explicitly accepted in 16b.",
+    "scope_split": "16b primitives vs 16c integration boundary is coherent. 16c does not claim primitive work belonging to 16b and vice versa. FilterChipStrip is correctly classified as integration (consumes 16b's auditCharacteristics table) rather than primitive.",
+    "telemetry_policy": "No slog usage anywhere. Filter usage telemetry explicitly deferred to Phase 8. Consistent with project telemetry policy."
+  },
+
+  "reviewer_summaries": {
+    "reality": {
+      "verdict": "NO-GO",
+      "blocking": 4,
+      "warnings": 3,
+      "key_signal": "Codebase-verified: 16b primitives absent, Alt+1-4 is a ghost shortcut, vocabulary drift cascades from 16a/16b. NO-GO upgraded by convergent evidence."
+    },
+    "architecture": {
+      "verdict": "GO-WITH-CHANGES",
+      "blocking": 2,
+      "warnings": 3,
+      "key_signal": "ShortcutsHelp triple regression baked into plan code; 16b dependencies not mechanically gated."
+    },
+    "quality": {
+      "verdict": "GO-WITH-CHANGES",
+      "blocking": 3,
+      "warnings": 6,
+      "key_signal": "Demo-track has no E2E gate; llm-provider-schema fixme unaddressed; no vocabulary parity contract test."
+    },
+    "systems": {
+      "verdict": "GO-WITH-CHANGES",
+      "blocking": 2,
+      "warnings": 4,
+      "key_signal": "Shortcuts regression + synthetic-entry empty-state bug + missing E2E + missing parity gate. Stringly-typed-documentation + dual-source-of-truth patterns named."
+    }
+  },
+
+  "cross_plan_must_fix": {
+    "title": "Slice ordering: 16b MUST land before 16c, and the gate must be mechanical not prose",
+    "rationale": "All 4 reviewers (across the convergence on B1) confirm 16b's primitives are required for 16c Task 1 to compile. The current rev-history dependency note is insufficient — an executing agent may misread module-not-found as environment breakage. A preflight check is the lowest-cost mechanical gate.",
+    "implementation": "Add to 16c Task 1 Step 1 (executable bash preflight): test -f auditCharacteristics.ts && test -f AuditCharacteristicIcon.tsx && test -f TrustTierBadge.tsx && grep -q 'DataTrustTier' types/index.ts && grep -q 'capability_tags' types/index.ts. Fail loudly with 'Run 16b first' message if any check fails.",
+    "vocabulary_parity_gate_ownership": "Lives in 16b auditCharacteristics.test.ts (metadata-table owner). 16c may optionally add a defense-in-depth FilterChipStrip consumer-side parity test, but 16b's gate is the load-bearing one."
+  },
+
+  "next_step": "Fix the five blockers (B1-B5) in-session BEFORE 16c execution begins. Sequence: (1) Add preflight gate at top of Task 1 (B1) — must be executable, not prose. (2) Fix ACTION_SHORTCUTS / REFERENCE_SHORTCUTS arrays AND replacement test file (B2): restore Ctrl+Shift+G and Ctrl+Shift+Y, delete Alt+1-4 entry, preserve existing test assertions, cross-check against App.tsx handlers. (3) Move InlineChatSourceEntry render OUTSIDE pluginList.length === 0 conditional and add empty-state test (B3). (4) Surface OD-1 to operator; default to un-fixme llm-provider-schema.spec.ts (B4). (5) Add catalog-reshape.spec.ts Playwright spec (B5). (6) Then address should-fix warnings W2 (example_use in scorePlugin), W3 (canonical-demo regression pin), W4 (null-guard), W5 (file-level mock fixture update), W7 (tab badge active-filter indicator), W8 (empty-state message variant), W11 (keyboard nav + ARIA grouping). (7) Surface OD-2 (Alt+1-4 intent) and OD-3 (filter universe scope) to operator. CRITICAL ORDERING: 16b must merge before 16c executes — see cross_plan_must_fix. Re-run reality + quality on revised plan; architecture and systems can be skipped unless scope expands."
+}

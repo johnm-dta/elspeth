@@ -122,7 +122,7 @@ def _make_service(state, validation_result, inventory=()):
     return ReadinessService(
         execution_service=exec_svc,
         session_service=sess_svc,
-        secret_service=scoped_resolver,
+        scoped_secret_resolver=scoped_resolver,
         settings=settings,
         state_from_record=lambda _record: state,
     )
@@ -420,7 +420,7 @@ def test_snapshot_raises_when_no_state():
     svc = ReadinessService(
         execution_service=exec_svc,
         session_service=sess_svc,
-        secret_service=scoped_resolver,
+        scoped_secret_resolver=scoped_resolver,
         settings=settings,
     )
     with pytest.raises(LookupError, match="no composition state"):

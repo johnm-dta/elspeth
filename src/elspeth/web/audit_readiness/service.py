@@ -16,6 +16,7 @@ from elspeth.web.audit_readiness.models import (
     ReadinessRow,
 )
 from elspeth.web.audit_readiness.trust import (
+    PluginKind,
     PluginTrust,
     classify_plugin,
 )
@@ -67,13 +68,13 @@ class ReadinessService:
         *,
         execution_service: _ExecutionServiceLike,
         session_service: _SessionServiceLike,
-        secret_service: _SecretServiceLike,
+        scoped_secret_resolver: _SecretServiceLike,
         settings: _SettingsLike,
         state_from_record: Callable[..., CompositionState] | None = None,
     ) -> None:
         self._execution_service = execution_service
         self._session_service = session_service
-        self._secret_service = secret_service
+        self._scoped_secret_resolver = scoped_secret_resolver
         self._settings = settings
         self._state_from_record: Callable[..., CompositionState] = (
             state_from_record if state_from_record is not None else _default_state_from_record
@@ -93,7 +94,7 @@ class ReadinessService:
         state: CompositionState = self._state_from_record(record)
         validation = await self._execution_service.validate(session_id, user_id=user_id)
         inventory = await run_sync_in_worker(
-            self._secret_service.list_refs,
+            self._scoped_secret_resolver.list_refs,
             user_id,  # scoped_secret_resolver.list_refs takes user_id only
         )
         rows: tuple[ReadinessRow, ...] = (
@@ -148,12 +149,12 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
     boundary: list[tuple[str, str, str]] = []
     unknown: list[tuple[str, str]] = []
 
-    def _record(kind: str, component_id: str, name: str | None) -> None:
+    def _record(kind: PluginKind, component_id: str, name: str | None) -> None:
         if name is None:
             unknown.append((kind, component_id))
             return
         # TODO(phase-7): delete trust.py and replace classify_plugin() callers per Phase 7 plan
-        trust = classify_plugin(kind, name)  # type: ignore[arg-type]
+        trust = classify_plugin(kind, name)
         if trust is PluginTrust.BOUNDARY:
             boundary.append((kind, component_id, name))
 
@@ -246,7 +247,7 @@ def _build_retention_row(retention_days: int) -> ReadinessRow:
 def _build_llm_interpretations_row(state: CompositionState) -> ReadinessRow:
     """Always not_applicable in Phase 2A; Phase 5b implements the real signal."""
     has_llm = any(n.node_type == "transform" and n.plugin == "llm" for n in state.nodes)
-    summary = "Interpretation surface not yet available (Phase 5b)" if has_llm else "No LLM transforms in this composition"
+    summary = "Interpretation surface not yet available" if has_llm else "No LLM transforms in this composition"
     return ReadinessRow(
         id="llm_interpretations",
         label="LLM interpretations",

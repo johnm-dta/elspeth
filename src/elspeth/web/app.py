@@ -245,7 +245,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.readiness_service = ReadinessService(
         execution_service=execution_service,
         session_service=session_service,
-        secret_service=app.state.scoped_secret_resolver,
+        scoped_secret_resolver=app.state.scoped_secret_resolver,
         settings=settings,
     )
 

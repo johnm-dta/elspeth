@@ -12,7 +12,7 @@ from __future__ import annotations
 import html
 from typing import Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema import SchemaConfig
@@ -61,13 +61,25 @@ class ReportAssembleConfig(TransformDataConfig):
             raise ValueError(f"output_field must be a valid Python identifier, got {value!r}")
         return value
 
+    @model_validator(mode="after")
+    def _reject_output_field_collision(self) -> ReportAssembleConfig:
+        # Detect at config time: process() builds the output dict with the
+        # custom output_field first, then overwrites with the metadata keys,
+        # so a colliding output_field would silently drop the report body.
+        if self.output_field in _REPORT_METADATA_FIELDS:
+            raise ValueError(
+                f"output_field {self.output_field!r} collides with a reserved "
+                f"report metadata field. Reserved names: {sorted(_REPORT_METADATA_FIELDS)!r}"
+            )
+        return self
+
 
 class ReportAssemble(BaseTransform):
     """Assemble a paginated report from a flushed batch of text rows."""
 
     name = "report_assemble"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ad02b339e07193a6"
+    source_file_hash: str | None = "sha256:f70736da1d3604fa"
     config_model = ReportAssembleConfig
     is_batch_aware = True
 

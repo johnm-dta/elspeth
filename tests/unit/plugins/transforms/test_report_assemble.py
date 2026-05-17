@@ -225,6 +225,25 @@ class TestReportAssembleRendering:
         assert result.retryable is False
 
 
+class TestReportAssembleConfig:
+    def test_output_field_colliding_with_metadata_is_rejected(self) -> None:
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+        from elspeth.plugins.transforms.report_assemble import ReportAssemble
+
+        for reserved in (
+            "report_format",
+            "report_index",
+            "line_start",
+            "line_end",
+            "line_count",
+            "lines_seen_total",
+            "flush_trigger",
+            "is_end_of_source_report",
+        ):
+            with pytest.raises(PluginConfigError, match="reserved report metadata"):
+                ReportAssemble({"schema": DYNAMIC_SCHEMA, "text_field": "line", "output_field": reserved})
+
+
 class TestReportAssembleDiscovery:
     def test_register_builtin_plugins_discovers_report_assemble(self) -> None:
         from elspeth.plugins.infrastructure.manager import PluginManager

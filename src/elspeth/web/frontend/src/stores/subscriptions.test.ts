@@ -4,6 +4,7 @@ import { initStoreSubscriptions, _resetSubscriptionsForTesting } from "./subscri
 import { useSessionStore } from "./sessionStore";
 import { useExecutionStore } from "./executionStore";
 import { useAuditReadinessStore } from "./auditReadinessStore";
+import { useAuthStore } from "./authStore";
 import type { Session } from "../types/api";
 
 const SESSION_A = "00000000-0000-0000-0000-000000000001";
@@ -502,5 +503,180 @@ describe("auto-validate on composition-state version change", () => {
       validationResult: { ...sameContentResult } as never,
     } as never);
     await waitFor(() => expect(injectSystemMessageSpy).toHaveBeenCalledTimes(1));
+  });
+});
+
+// ── Fix A: auto-validate guard checks progress?.status === "running" ─────────
+//
+// Discrimination: the old guard only checks isExecuting. If isExecuting is
+// false but progress.status === "running" (the post-200 live-run window),
+// the bug fires validate; the fix suppresses it.
+describe("auto-validate guard respects progress.status === 'running' (Fix A)", () => {
+  beforeEach(() => {
+    _resetSubscriptionsForTesting();
+    useAuthStore.setState({ token: "tok", user: { user_id: "user-a" } as never });
+    // compositionState starts null so no auto-validate fires during setup.
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: null,
+      sessions: [{ id: "sess-1", title: "x" } as never],
+    } as never);
+    useExecutionStore.setState({
+      isExecuting: false,
+      progress: null,
+      validationResult: null,
+    } as never);
+    initStoreSubscriptions();
+  });
+
+  it("does NOT fire validate when progress.status is 'running' even though isExecuting is false", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    // Simulate: HTTP /execute returned 200 (isExecuting=false) but WS progress
+    // is live (status="running").
+    useExecutionStore.setState({
+      isExecuting: false,
+      progress: { status: "running", source_rows_processed: 0, tokens_succeeded: 0,
+        tokens_failed: 0, tokens_quarantined: 0, tokens_routed_success: 0,
+        tokens_routed_failure: 0, accounting: null, recent_errors: [] } as never,
+    } as never);
+
+    // Bump the composition version — this fires the auto-validate subscription.
+    // Bug: only checks isExecuting (false) → validate fires.
+    // Fix: also checks progress?.status === "running" → validate suppressed.
+    useSessionStore.setState({
+      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(validate).not.toHaveBeenCalled();
+
+    // Now clear the running progress — validate should fire.
+    useExecutionStore.setState({ progress: null } as never);
+    // Re-fire the same compositionState (new object ref) so the subscriber
+    // callback runs again. The version is unchanged; what changed is the guard
+    // condition (progress=null), which is checked from executionStore at fire
+    // time. pendingValidateTarget was set to version 2 by the blocked
+    // subscription fire above, so fireValidateLoop will run with target 2.
+    useSessionStore.setState({
+      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 2 }));
+  });
+});
+
+// ── Fix B: lastValidatedVersionBySession cleared on session removal ───────────
+//
+// Discrimination: without the fix, re-adding a session with the same id and
+// the same version skips auto-validate (cache hit). With the fix, the cache
+// was cleared at removal, so re-adding triggers validate.
+describe("lastValidatedVersionBySession cleared when session is removed (Fix B)", () => {
+  beforeEach(() => {
+    _resetSubscriptionsForTesting();
+    useAuthStore.setState({ token: "tok", user: { user_id: "user-a" } as never });
+    // compositionState starts null so no auto-validate fires during setup.
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: null,
+      sessions: [{ id: "sess-1", title: "x" } as never],
+    } as never);
+    useExecutionStore.setState({
+      isExecuting: false,
+      progress: null,
+      validationResult: null,
+    } as never);
+    initStoreSubscriptions();
+  });
+
+  it("re-fires validate after a session is removed and re-added with the same version", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    // Seed the cache: trigger the initial auto-validate for sess-1 / version 1.
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 1 }),
+    );
+    expect(validate).toHaveBeenCalledTimes(1);
+
+    // Remove sess-1 — Fix B: this clears the cache entry.
+    // Bug: cache entry persists → re-adding with version 1 short-circuits.
+    useSessionStore.setState({ sessions: [], activeSessionId: null } as never);
+
+    // Re-add sess-1 with the same version 1.
+    useSessionStore.setState({
+      sessions: [{ id: "sess-1", title: "x" } as never],
+      activeSessionId: "sess-1",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    // With the fix, cache was cleared at removal → validate fires again.
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
+  });
+});
+
+// ── Fix C: per-user state resets on auth fingerprint change ──────────────────
+//
+// Discrimination: without the fix, the lastValidatedVersionBySession cache
+// survives a user switch, so re-firing the same session/version with the new
+// user short-circuits. With the fix, the cache is cleared on auth identity
+// change, so validate fires for the new user.
+//
+// NOTE: UserProfile uses `user_id` (not `id`) — authIdentityFingerprint reads
+// state.user?.user_id, confirmed from types/index.ts.
+describe("per-user state resets on auth identity change (Fix C)", () => {
+  beforeEach(() => {
+    _resetSubscriptionsForTesting();
+    // Establish user-a as the initial identity BEFORE init, so
+    // previousAuthFingerprint is captured as "user-a" at init time.
+    useAuthStore.setState({ token: "token-a", user: { user_id: "user-a" } as never });
+    // compositionState starts null so no auto-validate fires during setup.
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: null,
+      sessions: [{ id: "sess-1", title: "x" } as never],
+    } as never);
+    useExecutionStore.setState({
+      isExecuting: false,
+      progress: null,
+      validationResult: null,
+    } as never);
+    initStoreSubscriptions();
+  });
+
+  it("fires validate after user switches even when session/version are unchanged", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    // Seed the cache: trigger the initial auto-validate for user-a / sess-1 / version 1.
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 1 }),
+    );
+    expect(validate).toHaveBeenCalledTimes(1);
+
+    // Switch to user-b — resetPerUserState() clears the cache.
+    // Bug: cache survives → re-firing version 1 short-circuits.
+    // Fix: cache cleared → validate fires again for user-b.
+    useAuthStore.setState({ token: "token-b", user: { user_id: "user-b" } as never });
+
+    // Re-fire compositionState (new object ref) to trigger the auto-validate
+    // subscription. The session and version are unchanged.
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
   });
 });

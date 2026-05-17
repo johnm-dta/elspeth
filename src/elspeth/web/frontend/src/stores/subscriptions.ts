@@ -7,6 +7,7 @@
 import { useSessionStore } from "./sessionStore";
 import { useExecutionStore } from "./executionStore";
 import { useAuditReadinessStore } from "./auditReadinessStore";
+import { useAuthStore } from "./authStore";
 import type { ValidationResult } from "@/types/index";
 
 let previousVersion: number | null = null;
@@ -24,6 +25,7 @@ let pendingValidateTarget: { sessionId: string; version: number } | null = null;
 let validateInflight = false;
 let unsubscribeAutoValidate: (() => void) | null = null;
 let inflightValidateTarget: { sessionId: string; version: number } | null = null;
+let unsubscribeAuth: (() => void) | null = null;
 
 function validationFingerprint(result: ValidationResult | null): string | null {
   if (!result) return null;
@@ -42,6 +44,42 @@ function validationFingerprint(result: ValidationResult | null): string | null {
       suggestion: warn.suggestion ?? null,
     })),
   });
+}
+
+/**
+ * Returns a string that changes when the authenticated identity changes.
+ * "anon" when no token is present; the user_id string otherwise.
+ * Used by the auth subscription to detect user switches (logout / re-login
+ * as a different user in the same tab) so per-user caches can be cleared.
+ *
+ * NOTE: UserProfile uses `user_id` (not `id`) — confirmed from types/index.ts.
+ */
+function authIdentityFingerprint(state: { token: string | null; user: { user_id: string } | null }): string {
+  return state.token == null ? "anon" : `${state.user?.user_id ?? "unknown"}`;
+}
+
+/**
+ * Clears all per-user module-level state without tearing down subscription
+ * wiring. Called when the authenticated identity transitions (logout or
+ * user switch). Does NOT touch validateInflight, initialized, or any
+ * unsubscribe handle — those belong to the subscription wiring lifetime,
+ * not the user session lifetime.
+ *
+ * inflightValidateTarget is deliberately preserved. The executionStore
+ * subscriber uses `inflightValidateTarget.sessionId !== activeSessionId`
+ * to drop a stale validationResult that resolves after the user has
+ * already switched sessions or identities. Nulling it here would short-
+ * circuit that guard and let a previous user's validation side-effect
+ * (system message, sendValidationFeedback) fire on the new user's
+ * session. fireValidateLoop's own try/finally clears the field once
+ * the in-flight validate() promise settles.
+ */
+function resetPerUserState(): void {
+  previousVersion = null;
+  previousValidationFingerprint = null;
+  previousSessionIds = new Set();
+  lastValidatedVersionBySession.clear();
+  pendingValidateTarget = null;
 }
 
 /**
@@ -89,6 +127,7 @@ export function initStoreSubscriptions(): void {
     for (const prevId of previousSessionIds) {
       if (!currentIds.has(prevId)) {
         useAuditReadinessStore.getState().clearSession(prevId);
+        lastValidatedVersionBySession.delete(prevId);
       }
     }
     previousSessionIds = currentIds;
@@ -149,11 +188,26 @@ export function initStoreSubscriptions(): void {
     const version = state.compositionState?.version ?? null;
     if (!sessionId || version === null) return;
     if (lastValidatedVersionBySession.get(sessionId) === version) return;
-    if (useExecutionStore.getState().isExecuting) return;
+    const exec = useExecutionStore.getState();
+    if (exec.isExecuting || exec.progress?.status === "running") return;
 
     pendingValidateTarget = { sessionId, version };
     if (validateInflight) return;
     void fireValidateLoop();
+  });
+
+  // Auth identity subscription — clears per-user caches on logout or user
+  // switch (same tab, different user). The subscription wiring itself is not
+  // torn down; only the per-user state is cleared so the next user starts
+  // fresh. `previousAuthFingerprint` is function-scoped so it is re-captured
+  // fresh on every `initStoreSubscriptions()` call, which is what the test
+  // seam in `_resetSubscriptionsForTesting` requires.
+  let previousAuthFingerprint = authIdentityFingerprint(useAuthStore.getState());
+  unsubscribeAuth = useAuthStore.subscribe((state) => {
+    const fingerprint = authIdentityFingerprint(state);
+    if (fingerprint === previousAuthFingerprint) return;
+    previousAuthFingerprint = fingerprint;
+    resetPerUserState();
   });
 }
 
@@ -162,7 +216,8 @@ async function fireValidateLoop(): Promise<void> {
   try {
     while (pendingValidateTarget !== null) {
       const target = pendingValidateTarget;
-      if (useExecutionStore.getState().isExecuting) {
+      const execState = useExecutionStore.getState();
+      if (execState.isExecuting || execState.progress?.status === "running") {
         pendingValidateTarget = null;
         break;
       }
@@ -209,6 +264,8 @@ export function _resetSubscriptionsForTesting(): void {
   unsubscribeExecution = null;
   unsubscribeAutoValidate?.();
   unsubscribeAutoValidate = null;
+  unsubscribeAuth?.();
+  unsubscribeAuth = null;
   previousVersion = null;
   previousValidationFingerprint = null;
   previousSessionIds = new Set();

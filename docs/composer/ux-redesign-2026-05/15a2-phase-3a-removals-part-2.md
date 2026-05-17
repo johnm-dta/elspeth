@@ -829,4 +829,32 @@ Final pre-execution sweep landed three small doc-only clarifications; this file 
 
 **IMPORTANT (Handoff) — Task 7 owns the Playwright shell spec.** `phase-3a-shell.spec.ts` is now in the Task 7 file list and Step 6a, matching the risks-table acceptance criteria.
 
+### 2026-05-17 — P3A-008 — Retired RunsView capabilities (decision: not returning in 15b/3B)
+
+The deletion of `RunsView.test.tsx` (579 lines, commit `66748edb9`) removed test coverage for a set of behaviours that have no successor tests anywhere in the current suite. This entry records the operator-gate decision on their disposition.
+
+**Deleted capabilities (Agent D Finding 5 inventory):**
+
+- Diagnostics accordion (expanded / collapsed state, content rendering)
+- Polling while active (interval-driven refresh, stop-on-unmount)
+- Token states + artifacts on inspect (per-token status badges, artifact download links)
+- LLM explanation rendering (streamed explanation text, loading state)
+- `failure_detail` rendering (error message surface, stack-trace display)
+- Fan-out accounting (multi-path token count display)
+- Inspect-button `aria-expanded` / `aria-controls` (disclosure semantics for the detail panel)
+- Suggestion-banner from SpecView (cross-tab nudge injected into the Runs surface)
+- Active-run indicator + inline-rename from SessionSidebar (sidebar badge + rename-in-place affordance)
+
+**Decision: retired.** These capabilities belonged to `RunsView`, the component that was intentionally deleted as part of the Phase 3A IA cleanup. The successor surface is `RunsHistoryDrawer` (launched via `InlineRunResults`), whose scope is deliberately lighter — it does not include diagnostics accordions, LLM explanations, or polling. The 15a2 plan treats that lighter scope as the correct post-cleanup steady state.
+
+**Rationale:**
+
+- Phase 3A's stated direction is IA cleanup, not feature migration. `RunsView` was the unit being deleted; the test file deletion was a consequence, not an omission.
+- `RunsHistoryDrawer` / `InlineRunResults` intentionally carry a narrower capability surface. Adding the deleted behaviours to 15b/3B would re-inflate the surface the IA cleanup was designed to shrink.
+- The default for "deleted on purpose" is that it stays deleted unless an explicit product need re-emerges.
+
+**Override path:** If any of the listed capabilities is intended to return in 15b/3B, the plan for that phase must (1) include the capability explicitly in scope and (2) add a tests-rehoming sub-task that recreates the corresponding coverage. The synthesis file at `.review/synthesis.md` (Agent D Finding 5) preserves the full missing-test inventory as the rehoming checklist.
+
+**Operator note:** This entry records the orchestrator's reasonable-call default. Operator may override at merge review by selecting option (b) — deferred to 15b/3B — in which case the missing-tests list above becomes a mandatory 15b/3B sub-task checklist item.
+
 **IMPORTANT (Handoff) — `useHashRouter` return widening called out.** Task 5 Step 6 now tells implementers to change `App.tsx` from bare `useHashRouter();` to `const { redirectToast } = useHashRouter();`.

@@ -186,20 +186,17 @@ describe("AuditReadinessPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/Internal server error/);
   });
 
-  it("mounts the Explain dialog when Explain → is clicked (narrative content asserted in 14c)", async () => {
+  it("mounts the Explain dialog when Explain → is clicked", async () => {
     vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
       (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
     );
-    // The placeholder ExplainDialog still calls loadExplain on mount, so mock
-    // the response to keep the store happy. The narrative content is NOT
-    // asserted here — that belongs to 14c's ExplainDialog.test.tsx.
     vi.mocked(api.fetchAuditReadinessExplain).mockImplementationOnce(
       (_sid, signal) =>
         makeAbortablePromise(
           {
             session_id: SESSION_ID,
             composition_version: 1,
-            narrative: "stub for placeholder mount; content assertion lives in 14c",
+            narrative: "Narrative content rendered by ExplainDialog.",
           },
           { signal },
         ),
@@ -210,13 +207,12 @@ describe("AuditReadinessPanel", () => {
     await user.click(summary); // expand
     const explainBtn = screen.getByRole("button", { name: /Explain/i });
     await user.click(explainBtn);
-    // 14b asserts mount only — the placeholder's data-testid was added by the
-    // W2 a11y fix (role="dialog" removed; proper dialog semantics are 14c's
-    // responsibility). When 14c replaces the placeholder, this assertion must
-    // change to findByRole("dialog") to validate the real modal contract.
-    expect(
-      await screen.findByTestId("explaindialog-placeholder"),
-    ).toBeInTheDocument();
+    // The real ExplainDialog (Phase 2C) renders role="dialog" labelled by the
+    // heading "What this pipeline will record". Content assertions for the
+    // dialog itself live in ExplainDialog.test.tsx.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveTextContent(/What this pipeline will record/i);
   });
 
   it("renders nothing when there is no active session", () => {

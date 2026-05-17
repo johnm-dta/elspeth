@@ -6,9 +6,18 @@
 // panel whose outermost container already carries position: relative.
 //
 // Features:
-// - Fuzzy search across plugin names and descriptions
+// - Fuzzy search across plugin names, descriptions, usage prose, and tags
+// - Per-tab filter chips for capability tags and audit characteristics
 // - Tab-based filtering by plugin type with counts
 // - Schema details fetched on demand and cached
+// - Sources tab pins an InlineChatSourceEntry as the first row — a
+//   synthetic affordance that is unaffected by filters or search and is
+//   always visible alongside the empty-state message when filters
+//   eliminate every real plugin.
+//
+// Filter state is **per-tab** (one CatalogFilters record per CatalogTab),
+// so an active capability filter on Sources does NOT silently hide every
+// plugin on Transforms when the user switches tabs.
 //
 // Data is fetched once on first open and cached in component state for the
 // lifetime of the drawer instance.
@@ -23,6 +32,8 @@ import {
 } from "@/api/client";
 import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
 import { PluginCard } from "./PluginCard";
+import { FilterChipStrip, type CatalogFilters } from "./FilterChipStrip";
+import { InlineChatSourceEntry } from "./InlineChatSourceEntry";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import {
   MIN_FUZZY_CONFIDENCE,
@@ -33,21 +44,68 @@ import {
 type CatalogTab = "sources" | "transforms" | "sinks";
 
 /**
- * Score a plugin's name+description against the search query.
+ * Score a plugin against the search query.
  *
- * Returns the raw fuzzy score (lower is better, -1 for no match) when the
- * normalized confidence clears the noise floor, otherwise -1. Centralising
- * this keeps the list and the per-tab counts in lockstep — without it, the
- * tab badges and the visible results can disagree on what "matches" means.
+ * Fuzzy-matches across name, description, usage prose (when_to_use,
+ * when_not_to_use), and capability tags. Returns the raw fuzzy score
+ * (lower is better, -1 for no match) when the normalized confidence
+ * clears the noise floor, otherwise -1. Centralising this keeps the
+ * list and the per-tab counts in lockstep — without it, the tab badges
+ * and the visible results can disagree on what "matches" means.
  */
 function scorePlugin(query: string, plugin: PluginSummary): number {
-  const target = `${plugin.name} ${plugin.description ?? ""}`;
+  const target = [
+    plugin.name,
+    plugin.description ?? "",
+    plugin.usage_when_to_use ?? "",
+    plugin.usage_when_not_to_use ?? "",
+    plugin.capability_tags.join(" "),
+  ].join(" ");
   const score = fuzzyMatch(query, target);
   if (score < 0) return -1;
   if (confidenceFromScore(score, target.length) < MIN_FUZZY_CONFIDENCE) {
     return -1;
   }
   return score;
+}
+
+/**
+ * Predicate: does a plugin satisfy the active filter sets?
+ *
+ * AND composition across groups, OR composition within a group.
+ * Empty group = no constraint (matches all).
+ */
+function matchesFilters(plugin: PluginSummary, filters: CatalogFilters): boolean {
+  if (filters.capabilityTags.size > 0) {
+    const has = plugin.capability_tags.some((t) => filters.capabilityTags.has(t));
+    if (!has) return false;
+  }
+  if (filters.auditCharacteristics.size > 0) {
+    const has = plugin.audit_characteristics.some((a) =>
+      filters.auditCharacteristics.has(a),
+    );
+    if (!has) return false;
+  }
+  return true;
+}
+
+function hasActiveFilters(f: CatalogFilters): boolean {
+  return f.capabilityTags.size > 0 || f.auditCharacteristics.size > 0;
+}
+
+function emptyFilters(): CatalogFilters {
+  return {
+    capabilityTags: new Set(),
+    auditCharacteristics: new Set(),
+  };
+}
+
+function emptyFiltersByTab(): Record<CatalogTab, CatalogFilters> {
+  return {
+    sources: emptyFilters(),
+    transforms: emptyFilters(),
+    sinks: emptyFilters(),
+  };
 }
 
 interface CatalogDrawerProps {
@@ -68,9 +126,22 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
   const [fetchError, setFetchError] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  // Per-tab filter state — switching tabs reveals the user's filter set
+  // for that tab. Avoids the "active capability filter on Sources hides
+  // every Transform on tab switch" UX trap.
+  const [filtersByTab, setFiltersByTab] = useState<
+    Record<CatalogTab, CatalogFilters>
+  >(emptyFiltersByTab);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
   useFocusTrap(drawerRef, isOpen);
+
+  const filters = filtersByTab[activeTab];
+  const setFilters = useCallback(
+    (next: CatalogFilters) =>
+      setFiltersByTab((prev) => ({ ...prev, [activeTab]: next })),
+    [activeTab],
+  );
 
   const loadCatalog = useCallback(() => {
     if (isFetching) return;
@@ -128,10 +199,11 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Clear search when drawer closes
+  // Clear search and filters when drawer closes
   useEffect(() => {
     if (!isOpen) {
       setSearchQuery("");
+      setFiltersByTab(emptyFiltersByTab());
     }
   }, [isOpen]);
 
@@ -177,7 +249,9 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
     [schemaCache, loadingSchemas, schemaErrors],
   );
 
-  // Get plugins for current tab and apply search filter
+  // Get plugins for current tab — used as the input for both the
+  // filter-chip strip (which derives chip values from this set) and the
+  // composed filter+search predicate.
   const allPluginsForTab: PluginSummary[] =
     activeTab === "sources"
       ? (sources ?? [])
@@ -185,34 +259,50 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
         ? (transforms ?? [])
         : (sinks ?? []);
 
+  // Composed list: filter first, then search. AND composition between
+  // filter groups and the search predicate; OR composition within a group.
   const pluginList = useMemo(() => {
     const query = searchQuery.trim();
-    if (!query) {
-      return allPluginsForTab;
-    }
-    // Score, drop noise, then sort best-match first (ascending = lower score
-    // = closer match). Stable sort keeps original tab order for ties.
-    return allPluginsForTab
+    const filtered = allPluginsForTab.filter((p) => matchesFilters(p, filters));
+    if (!query) return filtered;
+    return filtered
       .map((plugin) => ({ plugin, score: scorePlugin(query, plugin) }))
       .filter((item) => item.score >= 0)
       .sort((a, b) => a.score - b.score)
       .map((item) => item.plugin);
-  }, [allPluginsForTab, searchQuery]);
+  }, [allPluginsForTab, searchQuery, filters]);
 
-  // Counts for tab badges (filtered counts when searching). Uses the same
-  // scored predicate so the per-tab badge totals match the rendered list.
+  // Derive available chip values from the loaded plugins on the visible
+  // tab. Chips for tags/characteristics that aren't actually present in
+  // the catalog would be dead-ends — show only what's available.
+  const availableCapabilityTags = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of allPluginsForTab) {
+      for (const t of p.capability_tags) set.add(t);
+    }
+    return [...set].sort();
+  }, [allPluginsForTab]);
+
+  const availableAuditCharacteristics = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of allPluginsForTab) {
+      for (const a of p.audit_characteristics) set.add(a);
+    }
+    return [...set].sort();
+  }, [allPluginsForTab]);
+
+  // Per-tab counts apply each tab's own filters AND the global search.
   const counts = useMemo(() => {
     const query = searchQuery.trim();
-    const filterFn = query
-      ? (p: PluginSummary) => scorePlugin(query, p) >= 0
-      : () => true;
-
+    const passes = (p: PluginSummary, tab: CatalogTab) =>
+      matchesFilters(p, filtersByTab[tab]) &&
+      (query ? scorePlugin(query, p) >= 0 : true);
     return {
-      sources: (sources ?? []).filter(filterFn).length,
-      transforms: (transforms ?? []).filter(filterFn).length,
-      sinks: (sinks ?? []).filter(filterFn).length,
+      sources: (sources ?? []).filter((p) => passes(p, "sources")).length,
+      transforms: (transforms ?? []).filter((p) => passes(p, "transforms")).length,
+      sinks: (sinks ?? []).filter((p) => passes(p, "sinks")).length,
     };
-  }, [sources, transforms, sinks, searchQuery]);
+  }, [sources, transforms, sinks, searchQuery, filtersByTab]);
 
   const isLoading =
     (activeTab === "sources" && sources === null) ||
@@ -279,6 +369,14 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
           </div>
         </div>
 
+        {/* Filter chip strip — between search and tab strip per plan. */}
+        <FilterChipStrip
+          availableCapabilityTags={availableCapabilityTags}
+          availableAuditCharacteristics={availableAuditCharacteristics}
+          filters={filters}
+          onChange={setFilters}
+        />
+
         {/* Tab strip with counts */}
         <div
           role="tablist"
@@ -315,8 +413,17 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
           })}
         </div>
 
-        {/* Scrollable plugin list */}
+        {/* Scrollable plugin list.
+            The InlineChatSourceEntry is a pinned affordance: it sits OUTSIDE
+            the fetchError → loading → empty → list conditional ladder so it
+            remains visible even when filters eliminate every real plugin.
+            The empty-state message applies to the plugin list, not the
+            Sources tab as a whole — the synthetic entry stays usable. */}
         <div className="catalog-list">
+          {activeTab === "sources" && (
+            <InlineChatSourceEntry onCloseDrawer={onClose} />
+          )}
+
           {fetchError ? (
             <div className="catalog-status-message catalog-status-message--error">
               <span>Failed to load plugin catalog.</span>
@@ -339,8 +446,8 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
             </div>
           ) : pluginList.length === 0 ? (
             <div className="catalog-status-message catalog-status-message--center">
-              {searchQuery.trim()
-                ? `No plugins matching "${searchQuery}"`
+              {hasActiveFilters(filters)
+                ? "No plugins match the active filters."
                 : "No plugins available."}
             </div>
           ) : (

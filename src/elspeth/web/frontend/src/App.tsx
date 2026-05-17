@@ -6,6 +6,8 @@ import { AppHeader } from "./components/common/AppHeader";
 import { Layout } from "./components/common/Layout";
 import { SideRail } from "./components/sidebar/SideRail";
 import { ExecuteButton } from "./components/sidebar/ExecuteButton";
+import { GraphMiniView } from "./components/sidebar/GraphMiniView";
+import { GraphModal } from "./components/sidebar/GraphModal";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
@@ -310,7 +312,7 @@ function App() {
             siderail={
               <SideRail
                 auditReadinessSlot={null}
-                graphMiniSlot={null}
+                graphMiniSlot={<GraphMiniView />}
                 catalogSlot={null}
                 exportYamlSlot={null}
                 executeButtonSlot={<ExecuteButton />}
@@ -323,6 +325,7 @@ function App() {
         </div>
 
         {showSecrets && <SecretsPanel onClose={closeSecrets} />}
+        <GraphModal />
         {showComposerSettings && (
           <ComposerPreferencesPanel onClose={closeComposerSettings} />
         )}

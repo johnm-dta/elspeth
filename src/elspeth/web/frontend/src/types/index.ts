@@ -273,12 +273,58 @@ export interface ComposerProgressSnapshot {
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
-/** Plugin summary from the catalog listing endpoints. */
+/** Three-tier trust classification surfaced on plugin cards.
+ *
+ * Reading: "what tier of data does this plugin handle at its boundary?"
+ *   1 = our data (audit, checkpoints)
+ *   2 = pipeline data (post-source)
+ *   3 = external data (source input, external-call response)
+ *
+ * Sources and external-call transforms surface tier 3; pure row
+ * transforms = tier 2; sinks = tier 2. See CLAUDE.md "Data Manifesto"
+ * for the underlying tier definitions.
+ */
+export type DataTrustTier = 1 | 2 | 3;
+
+/** Plugin summary from the catalog listing endpoints.
+ *
+ * Phase 7A added reference-content fields populated by plugin authors.
+ * Unfilled plugins return `null` / empty values; the catalog drawer
+ * renders a "see the technical description" fallback for them.
+ */
 export interface PluginSummary {
   name: string;
   plugin_type: "source" | "transform" | "sink";
   description: string;
   config_fields: { name: string; type: string; required: boolean; description: string; default: unknown }[];
+
+  // Phase 7B reference-content fields
+  usage_when_to_use: string | null;
+  usage_when_not_to_use: string | null;
+  example_use: string | null;
+  capability_tags: string[];
+  audit_characteristics: string[];
+  data_trust_tier: DataTrustTier | null;
+}
+
+/** Synthetic catalog entry rendered as the first row of the Sources tab.
+ *
+ * NOT a backend plugin — it is a frontend-only affordance representing
+ * "type your data directly in chat; no plugin required" per design doc
+ * 08-§"The 'Inline data from chat' entry". The composer creates a one-
+ * row dynamic source from the user's chat message at runtime.
+ *
+ * Distinct shape from PluginSummary so the catalog drawer can render it
+ * with different visual style and different action (prefill the chat
+ * input rather than expand a schema).
+ */
+export interface InlineChatSourceEntry {
+  kind: "inline-chat-source";
+  name: string;
+  description: string;
+  /** Suggested prompt the user can adapt; clicking the entry prefills
+   * this into the chat input via PREFILL_CHAT_INPUT_EVENT. */
+  example_prompt: string;
 }
 
 /** Detailed plugin schema info including configuration JSON Schema. */

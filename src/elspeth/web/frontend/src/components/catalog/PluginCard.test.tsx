@@ -20,6 +20,12 @@ function makePlugin(overrides: Partial<PluginSummary> = {}): PluginSummary {
     plugin_type: "transform",
     description: "An example plugin",
     config_fields: [],
+    usage_when_to_use: null,
+    usage_when_not_to_use: null,
+    example_use: null,
+    capability_tags: [],
+    audit_characteristics: [],
+    data_trust_tier: null,
     ...overrides,
   };
 }

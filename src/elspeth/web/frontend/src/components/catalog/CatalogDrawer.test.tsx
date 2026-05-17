@@ -5,13 +5,46 @@ import { CatalogDrawer } from "./CatalogDrawer";
 
 vi.mock("@/api/client", () => ({
   listSources: vi.fn().mockResolvedValue([
-    { name: "csv", plugin_type: "source", description: "CSV file source", config_fields: [] },
+    {
+      name: "csv",
+      plugin_type: "source",
+      description: "CSV file source",
+      config_fields: [],
+      usage_when_to_use: null,
+      usage_when_not_to_use: null,
+      example_use: null,
+      capability_tags: [],
+      audit_characteristics: [],
+      data_trust_tier: null,
+    },
   ]),
   listTransforms: vi.fn().mockResolvedValue([
-    { name: "uppercase", plugin_type: "transform", description: "Uppercase transform", config_fields: [] },
+    {
+      name: "uppercase",
+      plugin_type: "transform",
+      description: "Uppercase transform",
+      config_fields: [],
+      usage_when_to_use: null,
+      usage_when_not_to_use: null,
+      example_use: null,
+      capability_tags: [],
+      audit_characteristics: [],
+      data_trust_tier: null,
+    },
   ]),
   listSinks: vi.fn().mockResolvedValue([
-    { name: "json", plugin_type: "sink", description: "JSON file sink", config_fields: [] },
+    {
+      name: "json",
+      plugin_type: "sink",
+      description: "JSON file sink",
+      config_fields: [],
+      usage_when_to_use: null,
+      usage_when_not_to_use: null,
+      example_use: null,
+      capability_tags: [],
+      audit_characteristics: [],
+      data_trust_tier: null,
+    },
   ]),
   getPluginSchema: vi.fn().mockResolvedValue({
     name: "csv",
@@ -75,7 +108,18 @@ describe("CatalogDrawer", () => {
     vi.mocked(listSources)
       .mockRejectedValueOnce(new Error("catalog unavailable"))
       .mockResolvedValueOnce([
-        { name: "csv", plugin_type: "source", description: "CSV file source", config_fields: [] },
+        {
+          name: "csv",
+          plugin_type: "source",
+          description: "CSV file source",
+          config_fields: [],
+          usage_when_to_use: null,
+          usage_when_not_to_use: null,
+          example_use: null,
+          capability_tags: [],
+          audit_characteristics: [],
+          data_trust_tier: null,
+        },
       ]);
     render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
     const user = userEvent.setup();

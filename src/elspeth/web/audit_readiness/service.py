@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from functools import lru_cache
+from functools import cache, lru_cache
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -71,6 +71,7 @@ def _is_registered_plugin(kind: PluginKind, name: str) -> bool:
     raise ValueError(f"unknown plugin kind: {kind!r}")
 
 
+@cache
 def _get_plugin_class_for_kind(kind: PluginKind, name: str) -> type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol]:
     """Return the registered plugin class for (kind, name).
 
@@ -78,6 +79,12 @@ def _get_plugin_class_for_kind(kind: PluginKind, name: str) -> type[SourceProtoc
     must guard with _is_registered_plugin() first (as _record() does).
     Layer: L3. Called only after _is_registered_plugin() confirms the
     name is present.
+
+    Cached: the builtin plugin catalog is process-stable (registered at
+    import time via ``register_builtin_plugins``), so repeated lookups
+    for the same (kind, name) pair return the same class. The sibling
+    ``_registered_plugin_names`` uses the same caching strategy; the
+    pair stays symmetric.
     """
     from elspeth.plugins.infrastructure.manager import PluginManager
 

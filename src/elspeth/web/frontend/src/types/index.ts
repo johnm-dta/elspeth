@@ -307,26 +307,6 @@ export interface PluginSummary {
   data_trust_tier: DataTrustTier | null;
 }
 
-/** Synthetic catalog entry rendered as the first row of the Sources tab.
- *
- * NOT a backend plugin — it is a frontend-only affordance representing
- * "type your data directly in chat; no plugin required" per design doc
- * 08-§"The 'Inline data from chat' entry". The composer creates a one-
- * row dynamic source from the user's chat message at runtime.
- *
- * Distinct shape from PluginSummary so the catalog drawer can render it
- * with different visual style and different action (prefill the chat
- * input rather than expand a schema).
- */
-export interface InlineChatSourceEntry {
-  kind: "inline-chat-source";
-  name: string;
-  description: string;
-  /** Suggested prompt the user can adapt; clicking the entry prefills
-   * this into the chat input via PREFILL_CHAT_INPUT_EVENT. */
-  example_prompt: string;
-}
-
 /** Detailed plugin schema info including configuration JSON Schema. */
 export interface PluginSchemaInfo {
   name: string;

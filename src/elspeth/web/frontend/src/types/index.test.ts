@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import type { PluginSummary, InlineChatSourceEntry, DataTrustTier } from "./index";
+import type { PluginSummary, DataTrustTier } from "./index";
 
 describe("PluginSummary type extension (Phase 7B)", () => {
   it("has the Phase-7A reference-content fields", () => {
@@ -39,15 +39,5 @@ describe("PluginSummary type extension (Phase 7B)", () => {
 
   it("DataTrustTier is the literal union 1 | 2 | 3", () => {
     expectTypeOf<DataTrustTier>().toEqualTypeOf<1 | 2 | 3>();
-  });
-
-  it("InlineChatSourceEntry has its own shape distinct from PluginSummary", () => {
-    const entry: InlineChatSourceEntry = {
-      kind: "inline-chat-source",
-      name: "Inline data from chat",
-      description: "Type your data directly; no plugin required.",
-      example_prompt: "Use the LLM to summarise this article: https://example.com",
-    };
-    expectTypeOf(entry.kind).toEqualTypeOf<"inline-chat-source">();
   });
 });

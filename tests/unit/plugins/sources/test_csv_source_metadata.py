@@ -27,11 +27,6 @@ def test_csv_source_has_capability_tags() -> None:
     assert "file" in tags
 
 
-def test_csv_source_data_trust_tier_is_three() -> None:
-    """Sources surface Tier 3 (external) data at their boundary."""
-    assert CSVSource.data_trust_tier == 3
-
-
 def test_csv_source_declared_audit_characteristics_includes_coerce() -> None:
     """CSV source coerces external string data to typed columns per
     Tier-3 boundary rules; that's a notable audit trait worth declaring."""

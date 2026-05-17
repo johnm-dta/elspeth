@@ -149,7 +149,6 @@ class TestTransformProtocol:
 
     def test_transform_implementation(self) -> None:
         from elspeth.contracts import (
-            DataTrustTier,
             DeclaredAuditCharacteristics,
             Determinism,
             PluginSchema,
@@ -195,7 +194,6 @@ class TestTransformProtocol:
             example_use: str | None = None
             capability_tags: tuple[str, ...] = ()
             audit_characteristics: DeclaredAuditCharacteristics = frozenset()
-            data_trust_tier: DataTrustTier | None = None
             # Lifecycle guards managed by BaseTransform; declared here for the
             # hand-rolled structural fake to satisfy TransformProtocol's
             # @runtime_checkable structural typing.

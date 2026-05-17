@@ -1,5 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
-import type { PluginSummary, DataTrustTier } from "./index";
+import type { PluginSummary } from "./index";
 
 describe("PluginSummary type extension (Phase 7B)", () => {
   it("has the Phase-7A reference-content fields", () => {
@@ -13,12 +13,10 @@ describe("PluginSummary type extension (Phase 7B)", () => {
       example_use: "source:\n  plugin: csv",
       capability_tags: ["csv", "file"],
       audit_characteristics: ["io_read", "quarantine", "coerce"],
-      data_trust_tier: 3,
     };
     expectTypeOf(summary.usage_when_to_use).toEqualTypeOf<string | null>();
     expectTypeOf(summary.capability_tags).toEqualTypeOf<string[]>();
     expectTypeOf(summary.audit_characteristics).toEqualTypeOf<string[]>();
-    expectTypeOf(summary.data_trust_tier).toEqualTypeOf<DataTrustTier | null>();
   });
 
   it("accepts null / empty defaults for unfilled plugins", () => {
@@ -32,12 +30,7 @@ describe("PluginSummary type extension (Phase 7B)", () => {
       example_use: null,
       capability_tags: [],
       audit_characteristics: ["io_read"],
-      data_trust_tier: null,
     };
     expect(summary.usage_when_to_use).toBeNull();
-  });
-
-  it("DataTrustTier is the literal union 1 | 2 | 3", () => {
-    expectTypeOf<DataTrustTier>().toEqualTypeOf<1 | 2 | 3>();
   });
 });

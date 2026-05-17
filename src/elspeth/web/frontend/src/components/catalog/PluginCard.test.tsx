@@ -25,7 +25,6 @@ function makePlugin(overrides: Partial<PluginSummary> = {}): PluginSummary {
     example_use: null,
     capability_tags: [],
     audit_characteristics: [],
-    data_trust_tier: null,
     ...overrides,
   };
 }

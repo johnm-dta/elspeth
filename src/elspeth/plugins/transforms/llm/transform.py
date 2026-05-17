@@ -28,7 +28,7 @@ import structlog
 from pydantic import BaseModel, TypeAdapter
 from pydantic import Field as PydanticField
 
-from elspeth.contracts import DataTrustTier, Determinism, TransformErrorReason, TransformResult, propagate_contract
+from elspeth.contracts import Determinism, TransformErrorReason, TransformResult, propagate_contract
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.errors import FrameworkBugError, RuntimePreflightFailedError
@@ -1039,14 +1039,10 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1d727f6e551b007c"
+    source_file_hash: str | None = "sha256:6b6bb595f475a9b6"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
-    data_trust_tier: DataTrustTier | None = 3
-    # Crosses a Tier-3 external boundary (LLM API). See CLAUDE.md
-    # "Data Manifesto" for tier definitions. Declaration required for
-    # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).
     _provider: LLMProvider | None
 
     @classmethod

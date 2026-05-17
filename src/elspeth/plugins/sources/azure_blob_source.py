@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from elspeth.contracts import CallStatus, CallType, DataTrustTier, PluginSchema, SourceRow
+from elspeth.contracts import CallStatus, CallType, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
@@ -321,12 +321,8 @@ class AzureBlobSource(BaseSource):
 
     name = "azure_blob"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:13c6d550e9781289"
+    source_file_hash: str | None = "sha256:525397539f159571"
     config_model = AzureBlobSourceConfig
-    data_trust_tier: DataTrustTier | None = 3
-    # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
-    # for tier definitions. Declaration required for trust.py deletion
-    # per Phase 7A No-Legacy commitment (trust.py:31-35).
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

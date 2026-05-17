@@ -101,20 +101,18 @@ def test_closes_with_evidence_promise():
 
 
 def test_calls_out_dataverse_sink_as_boundary():
-    """Pins that ``explain.py`` emits a Tier-3 boundary narrative when the
-    plugin name is ``'dataverse'``. The production code dispatches by
-    plugin name (``if plugin == "dataverse":`` in
-    ``audit_readiness/explain.py``) rather than by ``data_trust_tier``
+    """Pins that ``explain.py`` emits a boundary narrative when the plugin
+    name is ``'dataverse'``. The production code dispatches by plugin name
+    (``if plugin == "dataverse":`` in ``audit_readiness/explain.py``)
     because the narrative text is plugin-specific — each external-boundary
     sink has tailored prose naming the receiving system (Dataverse
-    instance, Azure Blob container, etc.). A future refactor of
-    ``explain.py`` to consult ``data_trust_tier`` for the boundary fork
-    would change this dispatch — at which point this test's docstring
-    and assertion shape should be updated together.
+    instance, Azure Blob container, etc.).
 
-    The boundary-attribute correctness of DataverseSink itself
-    (``data_trust_tier == 3``) is guarded separately by
-    ``tests/unit/web/audit_readiness/test_boundary_attribute_parity.py``.
+    Boundary classification at the panel level (``_build_plugin_trust_row``
+    in ``audit_readiness/service.py``) is verified by
+    ``tests/unit/web/audit_readiness/test_boundary_predicate_parity.py``;
+    the (kind, determinism) predicate there independently confirms that
+    every Sink is a boundary plugin.
     """
     text = build_narrative(_state(sinks=(("primary", "dataverse"),)), retention_days=90)
     assert "Dataverse" in text

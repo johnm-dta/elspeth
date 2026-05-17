@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from elspeth.contracts.enums import DataTrustTier, DerivedAuditCharacteristics
+from elspeth.contracts.enums import DerivedAuditCharacteristics
 
 PluginKind = Literal["source", "transform", "sink"]
 
@@ -38,11 +38,11 @@ class PluginSummary(_StrictResponse):
     """Lightweight plugin info for catalog browsing.
 
     Phase 7A adds reference-content fields (when-to-use prose, capability
-    tags, audit-characteristic flags, data trust tier) so the catalog
-    drawer can render persona-facing reference cards instead of a bare
-    name+description. All new fields are optional and default to
-    None / empty for plugins that haven't been authored yet; the
-    frontend renders a fallback message rather than blocking display.
+    tags, audit-characteristic flags) so the catalog drawer can render
+    persona-facing reference cards instead of a bare name+description.
+    All new fields are optional and default to None / empty for plugins
+    that haven't been authored yet; the frontend renders a fallback
+    message rather than blocking display.
 
     `audit_characteristics` is the catalog service's *derived* set:
     declared characteristics from the plugin class composed with the
@@ -64,7 +64,6 @@ class PluginSummary(_StrictResponse):
     example_use: str | None = None
     capability_tags: tuple[str, ...] = ()
     audit_characteristics: DerivedAuditCharacteristics = ()
-    data_trust_tier: DataTrustTier | None = None
 
 
 class PluginSchemaInfo(_StrictResponse):

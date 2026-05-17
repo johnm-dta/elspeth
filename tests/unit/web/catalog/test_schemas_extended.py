@@ -25,11 +25,9 @@ def test_plugin_summary_accepts_all_new_fields() -> None:
             AuditCharacteristic.IO_READ,
             AuditCharacteristic.QUARANTINE,
         ),
-        data_trust_tier=3,
     )
     assert summary.capability_tags == ("csv", "file", "batch")
     assert AuditCharacteristic.IO_READ in summary.audit_characteristics
-    assert summary.data_trust_tier == 3
 
 
 def test_plugin_summary_defaults_for_unfilled_plugin() -> None:
@@ -45,68 +43,6 @@ def test_plugin_summary_defaults_for_unfilled_plugin() -> None:
     assert summary.example_use is None
     assert summary.capability_tags == ()
     assert summary.audit_characteristics == ()
-    assert summary.data_trust_tier is None
-
-
-def test_plugin_summary_rejects_invalid_trust_tier() -> None:
-    """Tier-1 strictness: data_trust_tier is a Literal[1, 2, 3] | None — 7 is
-    outside the closed set and must be rejected by pydantic's literal check."""
-    with pytest.raises(ValidationError):
-        PluginSummary(
-            name="csv",
-            description="...",
-            plugin_type="source",
-            config_fields=[],
-            data_trust_tier=7,  # type: ignore[arg-type]
-        )
-
-
-def test_plugin_summary_rejects_trust_tier_zero() -> None:
-    """0 is outside the closed Literal[1, 2, 3] set and must be rejected."""
-    with pytest.raises(ValidationError):
-        PluginSummary(
-            name="csv",
-            description="...",
-            plugin_type="source",
-            config_fields=[],
-            data_trust_tier=0,  # type: ignore[arg-type]
-        )
-
-
-def test_plugin_summary_rejects_negative_trust_tier() -> None:
-    """-1 is outside the closed Literal[1, 2, 3] set and must be rejected."""
-    with pytest.raises(ValidationError):
-        PluginSummary(
-            name="csv",
-            description="...",
-            plugin_type="source",
-            config_fields=[],
-            data_trust_tier=-1,  # type: ignore[arg-type]
-        )
-
-
-def test_plugin_summary_accepts_trust_tier_one() -> None:
-    """1 is a member of Literal[1, 2, 3] and must be accepted."""
-    summary = PluginSummary(
-        name="csv",
-        description="...",
-        plugin_type="source",
-        config_fields=[],
-        data_trust_tier=1,
-    )
-    assert summary.data_trust_tier == 1
-
-
-def test_plugin_summary_accepts_trust_tier_three() -> None:
-    """3 is a member of Literal[1, 2, 3] and must be accepted."""
-    summary = PluginSummary(
-        name="csv",
-        description="...",
-        plugin_type="source",
-        config_fields=[],
-        data_trust_tier=3,
-    )
-    assert summary.data_trust_tier == 3
 
 
 def test_plugin_summary_rejects_extra_fields() -> None:

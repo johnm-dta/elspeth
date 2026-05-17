@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from elspeth.contracts import DataTrustTier, Determinism
+from elspeth.contracts import Determinism
 from elspeth.contracts.audit import Call
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
@@ -339,13 +339,9 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2a1c308102a1d5e9"
+    source_file_hash: str | None = "sha256:4b5cf12339422ebe"
     config_model = WebScrapeConfig
     passes_through_input = True
-    data_trust_tier: DataTrustTier | None = 3
-    # Crosses a Tier-3 external boundary (HTTP fetch). See CLAUDE.md
-    # "Data Manifesto" for tier definitions. Declaration required for
-    # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

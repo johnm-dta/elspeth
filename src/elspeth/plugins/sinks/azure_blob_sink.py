@@ -25,7 +25,7 @@ from jinja2 import StrictUndefined, TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, DataTrustTier, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
@@ -302,14 +302,9 @@ class AzureBlobSink(BaseSink):
 
     name = "azure_blob"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6056591f9ebbcded"
+    source_file_hash: str | None = "sha256:1816d1d5730f7f52"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
-    data_trust_tier: DataTrustTier | None = 3
-    # Crosses a Tier-3 external boundary (Azure Blob Storage write).
-    # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
-    # required for trust.py deletion per Phase 7A No-Legacy commitment
-    # (trust.py:31-35).
 
     # Resume capability: Azure Blobs are immutable - cannot append
     supports_resume: bool = False

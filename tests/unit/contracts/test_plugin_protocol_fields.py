@@ -29,7 +29,6 @@ _PHASE_7A_FIELDS = {
     "example_use",
     "capability_tags",
     "audit_characteristics",
-    "data_trust_tier",
 }
 
 

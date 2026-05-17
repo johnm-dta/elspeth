@@ -273,19 +273,6 @@ export interface ComposerProgressSnapshot {
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
-/** Three-tier trust classification surfaced on plugin cards.
- *
- * Reading: "what tier of data does this plugin handle at its boundary?"
- *   1 = our data (audit, checkpoints)
- *   2 = pipeline data (post-source)
- *   3 = external data (source input, external-call response)
- *
- * Sources and external-call transforms surface tier 3; pure row
- * transforms = tier 2; sinks = tier 2. See CLAUDE.md "Data Manifesto"
- * for the underlying tier definitions.
- */
-export type DataTrustTier = 1 | 2 | 3;
-
 /** Plugin summary from the catalog listing endpoints.
  *
  * Phase 7A added reference-content fields populated by plugin authors.
@@ -304,7 +291,6 @@ export interface PluginSummary {
   example_use: string | null;
   capability_tags: string[];
   audit_characteristics: string[];
-  data_trust_tier: DataTrustTier | null;
 }
 
 /** Detailed plugin schema info including configuration JSON Schema. */

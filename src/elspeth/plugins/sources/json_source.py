@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
-from elspeth.contracts import DataTrustTier, PluginSchema, SourceRow
+from elspeth.contracts import PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -145,12 +145,8 @@ class JSONSource(BaseSource):
 
     name = "json"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8ef35beeeb2c4194"
+    source_file_hash: str | None = "sha256:b6ec4f1922589c69"
     config_model = JSONSourceConfig
-    data_trust_tier: DataTrustTier | None = 3
-    # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
-    # for tier definitions. Declaration required for trust.py deletion
-    # per Phase 7A No-Legacy commitment (trust.py:31-35).
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
 

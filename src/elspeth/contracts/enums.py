@@ -6,7 +6,6 @@ This is per ELSPETH's principle: "I don't know what happened" is never acceptabl
 """
 
 from enum import StrEnum
-from typing import Literal
 
 
 class RunStatus(StrEnum):
@@ -402,13 +401,6 @@ class OutputMode(StrEnum):
 # These types are referenced by base plugin classes (L3) and protocols (L0)
 # and by catalog/audit-readiness services (L3).  They live here at L0 so
 # every layer can import them without violating the dependency rules.
-
-# Data trust tier — see CLAUDE.md "Data Manifesto" for definitions.
-# 1 = our data (audit, checkpoints) — full trust
-# 2 = pipeline data (post-source) — elevated trust
-# 3 = external data (source input, external API responses, external-boundary
-#                    sinks that write to non-ELSPETH systems) — zero trust
-type DataTrustTier = Literal[1, 2, 3]
 
 
 class AuditCharacteristic(StrEnum):

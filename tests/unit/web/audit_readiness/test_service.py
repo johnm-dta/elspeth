@@ -263,8 +263,8 @@ def test_validation_row_error_lists_component_ids():
 
 
 def test_plugin_trust_row_ok_summary_when_boundary_plugins_present():
-    # Default source_plugin="csv" → CSVSource.data_trust_tier == 3 (the
-    # post-Phase-7A successor to classify_plugin("source", "csv") is BOUNDARY).
+    # Default source_plugin="csv" (a Source — kind-derived boundary), plus
+    # the default ("out", "csv") sink (Sink — also kind-derived boundary).
     # Exercises the boundary branch of _build_plugin_trust_row.
     svc = _make_service(
         _state(transforms=(("t", "passthrough"),), sinks=(("out", "csv"),)),
@@ -284,14 +284,15 @@ def test_plugin_trust_row_ok_summary_when_boundary_plugins_present():
 
 
 def test_plugin_trust_row_ok_summary_when_no_boundary_plugins():
-    # source_plugin=None skips the source _record call (service.py:145-146),
-    # all-internal transforms+sinks leave `boundary` empty, hitting the
-    # no-boundary branch (service.py:164-172).
+    # Source=None and sinks=() means no source-or-sink kind in the
+    # composition. With only an internal transform (passthrough,
+    # determinism=DETERMINISTIC), the (kind, determinism) predicate has
+    # nothing to classify as boundary — exercises the no-boundary branch.
     svc = _make_service(
         _state(
             source_plugin=None,
             transforms=(("t", "passthrough"),),
-            sinks=(("out", "csv"),),
+            sinks=(),
         ),
         _OK,
     )

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from elspeth.contracts.enums import AuditCharacteristic, DataTrustTier, Determinism
+from elspeth.contracts.enums import AuditCharacteristic, Determinism
 from elspeth.web.catalog.service import CatalogServiceImpl
 
 
@@ -30,7 +30,6 @@ class _BareTransform:
     example_use: ClassVar[str | None] = None
     capability_tags: ClassVar[tuple[str, ...]] = ()
     audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset()
-    data_trust_tier: ClassVar[DataTrustTier | None] = None
     config_model = None
     is_batch_aware = False
 
@@ -63,7 +62,6 @@ class _FilledSource:
     audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset(
         {AuditCharacteristic.COERCE, AuditCharacteristic.QUARANTINE}
     )
-    data_trust_tier: ClassVar[DataTrustTier | None] = 3
     config_model = None
 
     @classmethod
@@ -104,7 +102,6 @@ def test_bare_plugin_summary_uses_defaults() -> None:
     # Derived: DETERMINISTIC -> {"deterministic"}; no declared chars.
     # The response model exposes the composed set as a sorted tuple.
     assert s.audit_characteristics == ("deterministic",)
-    assert s.data_trust_tier is None
 
 
 def test_filled_source_summary_propagates_all_fields() -> None:
@@ -122,4 +119,3 @@ def test_filled_source_summary_propagates_all_fields() -> None:
     assert "coerce" in s.audit_characteristics
     assert "io_read" in s.audit_characteristics
     assert "quarantine" in s.audit_characteristics
-    assert s.data_trust_tier == 3

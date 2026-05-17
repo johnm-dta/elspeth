@@ -16,7 +16,6 @@ from typing import Any, TypedDict
 
 from pydantic import Field
 
-from elspeth.contracts import DataTrustTier
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -96,14 +95,9 @@ class AzurePromptShield(BaseAzureSafetyTransform):
 
     name = "azure_prompt_shield"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1f0427b35b420715"
+    source_file_hash: str | None = "sha256:19f08887d6f0065d"
     config_model = AzurePromptShieldConfig
     passes_through_input = True
-    data_trust_tier: DataTrustTier | None = 3
-    # Crosses a Tier-3 external boundary (Azure Prompt Shield API).
-    # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
-    # required for trust.py deletion per Phase 7A No-Legacy commitment
-    # (trust.py:31-35).
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

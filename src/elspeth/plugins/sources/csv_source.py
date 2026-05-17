@@ -15,7 +15,6 @@ from pydantic import Field, ValidationError, field_validator
 
 from elspeth.contracts import (
     AuditCharacteristic,
-    DataTrustTier,
     DeclaredAuditCharacteristics,
     PluginSchema,
     SourceRow,
@@ -82,7 +81,7 @@ class CSVSource(BaseSource):
 
     name = "csv"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:64728f751a3ff343"
+    source_file_hash: str | None = "sha256:e2c2e8a44fbb2963"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -128,10 +127,6 @@ class CSVSource(BaseSource):
     #     per-instance attribute set in `__init__`, not a class
     #     attribute. Authors of sources that support non-discard
     #     quarantine routing must declare `"quarantine"` themselves.
-
-    data_trust_tier: DataTrustTier | None = 3
-    # Sources surface Tier 3 (external) data at their boundary. See
-    # CLAUDE.md "Data Manifesto" for the tier definitions.
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

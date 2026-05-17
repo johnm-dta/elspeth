@@ -16,7 +16,6 @@ from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from elspeth.contracts.enums import (
-    DataTrustTier,
     DeclaredAuditCharacteristics,
     Determinism,
 )
@@ -107,7 +106,6 @@ class SourceProtocol(Protocol):
     example_use: str | None
     capability_tags: tuple[str, ...]
     audit_characteristics: DeclaredAuditCharacteristics
-    data_trust_tier: DataTrustTier | None
 
     # Sink name for quarantined rows, or "discard" to drop invalid rows
     # All sources must set this - config-based sources get it from SourceDataConfig
@@ -293,7 +291,6 @@ class TransformProtocol(Protocol):
     example_use: str | None
     capability_tags: tuple[str, ...]
     audit_characteristics: DeclaredAuditCharacteristics
-    data_trust_tier: DataTrustTier | None
 
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # The TransformExecutor checks _on_start_called before process() to ensure
@@ -510,7 +507,6 @@ class BatchTransformProtocol(Protocol):
     example_use: str | None
     capability_tags: tuple[str, ...]
     audit_characteristics: DeclaredAuditCharacteristics
-    data_trust_tier: DataTrustTier | None
 
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # Batch transforms inherit BaseTransform which manages these. Contract tests
@@ -677,7 +673,6 @@ class SinkProtocol(Protocol):
     example_use: str | None
     capability_tags: tuple[str, ...]
     audit_characteristics: DeclaredAuditCharacteristics
-    data_trust_tier: DataTrustTier | None
 
     # Resume capability
     supports_resume: bool  # Can this sink append to existing output on resume?

@@ -68,7 +68,6 @@ class TestListSources:
         assert "io_read" in csv["audit_characteristics"]  # inferred from determinism
         assert "coerce" in csv["audit_characteristics"]  # author-declared
         assert "quarantine" in csv["audit_characteristics"]  # author-declared
-        assert csv["data_trust_tier"] == 3
 
 
 class TestListTransforms:

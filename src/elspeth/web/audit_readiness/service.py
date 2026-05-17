@@ -10,6 +10,7 @@ from functools import cache, lru_cache
 from typing import Any, Protocol
 from uuid import UUID
 
+from elspeth.contracts.enums import Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.web.async_workers import run_sync_in_worker
@@ -216,9 +217,33 @@ def _build_validation_row(result: ValidationResult) -> ReadinessRow:
     )
 
 
+_BOUNDARY_DETERMINISMS: frozenset[Determinism] = frozenset(
+    {
+        Determinism.EXTERNAL_CALL,
+        # NON_DETERMINISTIC marks a Transform whose output is not
+        # reproducible from inputs alone (LLM completions are the
+        # canonical case). The same audit-trail concern applies — the
+        # value came from somewhere outside our deterministic control,
+        # which an auditor needs to see surfaced as a boundary crossing.
+        Determinism.NON_DETERMINISTIC,
+    },
+)
+
+
 def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
     """Classify every plugin in the composition (boundary vs internal).
-    Panel uses "Plugin trust" vocabulary; tier numbers belong in the Explain view.
+
+    A plugin crosses an external trust boundary when:
+      - it is a Source — by definition reads external data into the pipeline
+      - it is a Sink — by definition emits pipeline data to an external
+        destination (file, database, blob store, downstream service)
+      - it is a Transform whose declared determinism is in
+        ``_BOUNDARY_DETERMINISMS`` (EXTERNAL_CALL or NON_DETERMINISTIC) —
+        both signal an audit-relevant non-internal behaviour
+
+    The predicate is derived from (kind, determinism) so any future plugin
+    is classified correctly at registration time without a separate
+    declared attribute.
     """
     boundary: list[tuple[str, str, str]] = []
     unknown: list[tuple[str, str]] = []
@@ -228,7 +253,7 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
             unknown.append((kind, component_id))
             return
         plugin_cls = _get_plugin_class_for_kind(kind, name)
-        if plugin_cls.data_trust_tier == 3:
+        if kind in ("source", "sink") or plugin_cls.determinism in _BOUNDARY_DETERMINISMS:
             boundary.append((kind, component_id, name))
 
     if state.source is not None:

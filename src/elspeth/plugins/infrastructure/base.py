@@ -38,7 +38,6 @@ from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from elspeth.contracts import (
-    DataTrustTier,
     DeclaredAuditCharacteristics,
     Determinism,
     PluginSchema,
@@ -201,16 +200,6 @@ class BaseTransform(ABC):
     the enum itself is the closed vocabulary; typos fail mypy at the
     declaration site rather than disappearing silently from the rendered
     catalog card."""
-
-    data_trust_tier: DataTrustTier | None = None
-    """Which tier of data this plugin handles at its boundary. 1 = our
-    own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
-    external data (source input, external API responses, external-boundary
-    sinks that write to non-ELSPETH systems). Sources and external-call
-    transforms = 3; pure row transforms = 2; sinks that write to external
-    systems = 3; internal sinks (CSVSink, JSONSink for local file output)
-    = 2. See CLAUDE.md "Data Manifesto" for the tier definitions. Leave
-    None to render as 'tier unspecified.'"""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
@@ -857,16 +846,6 @@ class BaseSink(ABC):
     declaration site rather than disappearing silently from the rendered
     catalog card."""
 
-    data_trust_tier: DataTrustTier | None = None
-    """Which tier of data this plugin handles at its boundary. 1 = our
-    own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
-    external data (source input, external API responses, external-boundary
-    sinks that write to non-ELSPETH systems). Sources and external-call
-    transforms = 3; pure row transforms = 2; sinks that write to external
-    systems = 3; internal sinks (CSVSink, JSONSink for local file output)
-    = 2. See CLAUDE.md "Data Manifesto" for the tier definitions. Leave
-    None to render as 'tier unspecified.'"""
-
     # Config model — each subclass sets this to its Pydantic config class.
     config_model: ClassVar[type[PluginConfig] | None] = None
 
@@ -1206,16 +1185,6 @@ class BaseSource(ABC):
     the enum itself is the closed vocabulary; typos fail mypy at the
     declaration site rather than disappearing silently from the rendered
     catalog card."""
-
-    data_trust_tier: DataTrustTier | None = None
-    """Which tier of data this plugin handles at its boundary. 1 = our
-    own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
-    external data (source input, external API responses, external-boundary
-    sinks that write to non-ELSPETH systems). Sources and external-call
-    transforms = 3; pure row transforms = 2; sinks that write to external
-    systems = 3; internal sinks (CSVSink, JSONSink for local file output)
-    = 2. See CLAUDE.md "Data Manifesto" for the tier definitions. Leave
-    None to render as 'tier unspecified.'"""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # NullSource sets this to None (no config validation needed).

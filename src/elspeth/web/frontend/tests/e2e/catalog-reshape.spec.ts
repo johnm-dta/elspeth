@@ -102,9 +102,9 @@ test.describe("catalog-reshape — Phase 7 demo path", () => {
   });
 
   test("7: PluginCard shows reference content — no toolkit affordance (OD-C regression gate)", async ({ page }) => {
-    // Per OD-C: PluginCard is reference-only. The "Use in pipeline" button
-    // and TrustTierBadge are removed. "When you'd use this" prose must be
-    // present on the CSV source card (which has authored prose from Phase 7A).
+    // PluginCard is reference-only. The "Use in pipeline" button is removed.
+    // "When you'd use this" prose must be present on the CSV source card
+    // (which has authored prose from Phase 7A).
     const composer = new ComposerPage(page);
     await composer.goto();
     await page.keyboard.press("Control+Shift+P");
@@ -114,7 +114,5 @@ test.describe("catalog-reshape — Phase 7 demo path", () => {
     await expect(page.getByText(/when you.d use this/i)).toBeVisible();
     // "Use in pipeline" button must NOT be present.
     await expect(page.getByRole("button", { name: /use in pipeline/i })).not.toBeVisible();
-    // TrustTierBadge must NOT be present (trust tier is internal metadata, not surfaced).
-    await expect(page.getByTestId("trust-tier-badge")).not.toBeVisible();
   });
 });

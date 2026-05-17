@@ -16,7 +16,6 @@ vi.mock("@/api/client", () => ({
       example_use: null,
       capability_tags: [],
       audit_characteristics: [],
-      data_trust_tier: null,
     },
   ]),
   listTransforms: vi.fn().mockResolvedValue([
@@ -30,7 +29,6 @@ vi.mock("@/api/client", () => ({
       example_use: null,
       capability_tags: [],
       audit_characteristics: [],
-      data_trust_tier: null,
     },
   ]),
   listSinks: vi.fn().mockResolvedValue([
@@ -44,7 +42,6 @@ vi.mock("@/api/client", () => ({
       example_use: null,
       capability_tags: [],
       audit_characteristics: [],
-      data_trust_tier: null,
     },
   ]),
   getPluginSchema: vi.fn().mockResolvedValue({
@@ -119,7 +116,6 @@ describe("CatalogDrawer", () => {
           example_use: null,
           capability_tags: [],
           audit_characteristics: [],
-          data_trust_tier: null,
         },
       ]);
     render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
@@ -163,7 +159,6 @@ const csv = {
   example_use: null,
   capability_tags: ["csv", "file"],
   audit_characteristics: ["io_read", "quarantine"],
-  data_trust_tier: 3,
 };
 const azure = {
   name: "azure_blob",
@@ -175,7 +170,6 @@ const azure = {
   example_use: null,
   capability_tags: ["azure", "blob", "network"],
   audit_characteristics: ["io_read", "external_call"],
-  data_trust_tier: 3,
 };
 
 describe("CatalogDrawer — Phase 7B reshape", () => {
@@ -260,7 +254,6 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
         example_use: null,
         capability_tags: ["string"],
         audit_characteristics: ["deterministic"],
-        data_trust_tier: 2,
       },
     ] as never);
     render(<CatalogDrawer isOpen onClose={() => {}} />);

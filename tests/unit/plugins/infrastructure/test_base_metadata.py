@@ -18,7 +18,6 @@ def test_base_source_has_reference_fields() -> None:
     assert BaseSource.example_use is None
     assert BaseSource.capability_tags == ()
     assert BaseSource.audit_characteristics == frozenset()
-    assert BaseSource.data_trust_tier is None
 
 
 def test_base_transform_has_reference_fields() -> None:
@@ -27,7 +26,6 @@ def test_base_transform_has_reference_fields() -> None:
     assert BaseTransform.example_use is None
     assert BaseTransform.capability_tags == ()
     assert BaseTransform.audit_characteristics == frozenset()
-    assert BaseTransform.data_trust_tier is None
 
 
 def test_base_sink_has_reference_fields() -> None:
@@ -36,7 +34,6 @@ def test_base_sink_has_reference_fields() -> None:
     assert BaseSink.example_use is None
     assert BaseSink.capability_tags == ()
     assert BaseSink.audit_characteristics == frozenset()
-    assert BaseSink.data_trust_tier is None
 
 
 def test_capability_tags_is_a_tuple_not_a_list() -> None:

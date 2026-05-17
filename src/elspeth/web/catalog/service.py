@@ -265,7 +265,6 @@ class CatalogServiceImpl:
         usage_when_not_to_use = plugin_cls.usage_when_not_to_use
         example_use = plugin_cls.example_use
         capability_tags = plugin_cls.capability_tags
-        data_trust_tier = plugin_cls.data_trust_tier
 
         audit_characteristics = _derive_audit_characteristics(plugin_cls, plugin_kind=plugin_type)
 
@@ -279,7 +278,6 @@ class CatalogServiceImpl:
             example_use=example_use,
             capability_tags=capability_tags,
             audit_characteristics=audit_characteristics,
-            data_trust_tier=data_trust_tier,
         )
 
     def _catalog_schema(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> dict[str, Any]:

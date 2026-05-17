@@ -311,7 +311,7 @@ class TestRebindCheckpointBatchIds:
         node = AggregationNodeCheckpoint(
             tokens=(),
             batch_id="draft-batch",
-            elapsed_age_seconds=1.5,
+            elapsed_age_seconds=0.0,
             count_fire_offset=None,
             condition_fire_offset=None,
             accepted_count_total=0,
@@ -366,7 +366,7 @@ class TestRebindCheckpointBatchIds:
         node_b = AggregationNodeCheckpoint(
             tokens=(),
             batch_id="batch-b",
-            elapsed_age_seconds=2.0,
+            elapsed_age_seconds=0.0,
             count_fire_offset=None,
             condition_fire_offset=None,
             accepted_count_total=0,

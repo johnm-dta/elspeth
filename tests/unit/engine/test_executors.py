@@ -2609,6 +2609,98 @@ class TestAggregationExecutor:
 
         assert ctx.aggregation_batch is None
 
+    def test_aggregation_batch_context_resumes_pagination_after_checkpoint_restore(self) -> None:
+        """After restore, the next flush emits flush_index = M+1 and rows_seen_total = N + new_rows.
+
+        Headline guarantee of the durable-counter design: pagination metadata
+        derived from AggregationExecutor counters must survive a checkpoint
+        round-trip. This exercises checkpoint→restore→flush end-to-end:
+
+        1. Executor A flushes a batch of 3 rows successfully (accepted_count_total=3,
+           completed_flush_count=1, buffer empty).
+        2. get_checkpoint_state() emits a counter-only node (no buffered tokens).
+        3. Fresh executor B restores from that state.
+        4. Buffer 2 new rows and flush. AggregationBatchContext seen by the
+           transform must report flush_index=2, rows_seen_total=5, row_start=4,
+           row_end=5, batch_size=2.
+        """
+        from elspeth.contracts.node_state_context import AggregationBatchContext
+        from elspeth.contracts.plugin_context import PluginContext
+
+        # === Phase 1: Executor A flushes 3 rows successfully ===
+        executor_a, factory, nid = self._make_agg_executor(count=3)
+        contract = _make_contract()
+        ctx = make_context()
+
+        for i, label in enumerate(("a", "b", "c"), start=1):
+            executor_a.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        transform_a = MagicMock()
+        transform_a.name = "agg"
+        transform_a.process.return_value = TransformResult.success(
+            make_row({"v": "agg1"}, contract=contract),
+            success_reason={"action": "agg"},
+        )
+        executor_a.execute_flush(nid, transform_a, ctx, TriggerType.COUNT)
+
+        # === Phase 2: Checkpoint includes counter-only node ===
+        state = executor_a.get_checkpoint_state()
+        assert isinstance(state, AggregationCheckpointState)
+        assert str(nid) in state.nodes, "Counter-only node must be included in checkpoint"
+        node_ckpt = state.nodes[str(nid)]
+        assert node_ckpt.tokens == ()
+        assert node_ckpt.batch_id is None
+        assert node_ckpt.accepted_count_total == 3
+        assert node_ckpt.completed_flush_count == 1
+
+        # === Phase 3: Fresh executor B restores from checkpoint ===
+        executor_b = AggregationExecutor(
+            factory.execution,
+            _make_span_factory(),
+            _make_step_resolver(),
+            run_id="test-run",
+            aggregation_settings={
+                nid: AggregationSettings(
+                    name="test_agg",
+                    plugin="batch_stats",
+                    input="default",
+                    on_error="discard",
+                    trigger=TriggerConfig(count=2),
+                )
+            },
+        )
+        executor_b.restore_from_checkpoint(state)
+        assert executor_b.get_buffer_count(nid) == 0  # No buffered tokens restored
+
+        # === Phase 4: Buffer 2 new rows on B, flush, capture ctx.aggregation_batch ===
+        captured: list[AggregationBatchContext] = []
+
+        class _CapturingBatchTransform:
+            name = "capturing_agg"
+
+            def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
+                if ctx.aggregation_batch is None:
+                    raise AssertionError("ctx.aggregation_batch was None during transform.process()")
+                captured.append(ctx.aggregation_batch)
+                return TransformResult.success(
+                    make_row({"v": "agg2"}, contract=rows[0].contract),
+                    success_reason={"action": "agg"},
+                )
+
+        for i, label in enumerate(("d", "e"), start=4):
+            executor_b.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        executor_b.execute_flush(nid, _CapturingBatchTransform(), ctx, TriggerType.COUNT)
+
+        # === Phase 5: Pagination continues correctly ===
+        assert len(captured) == 1
+        post = captured[0]
+        assert post.flush_index == 2, "completed_flush_count restored as 1 → next flush is the 2nd"
+        assert post.rows_seen_total == 5, "accepted_count_total restored as 3 + 2 new rows = 5"
+        assert post.row_start == 4
+        assert post.row_end == 5
+        assert post.batch_size == 2
+
     def test_execute_flush_resets_batch_state(self) -> None:
         """After flush, batch state is reset (new batch on next row)."""
         executor, _factory, nid = self._make_agg_executor(count=1)

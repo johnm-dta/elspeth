@@ -170,14 +170,7 @@ class AggregationNodeCheckpoint:
     completed_flush_count: int
 
     def __post_init__(self) -> None:
-        # batch_id is required when tokens are buffered; absence is only allowed
-        # for "counters only" snapshots taken after a successful flush.
-        if self.tokens:
-            if not self.batch_id:
-                raise ValueError("AggregationNodeCheckpoint.batch_id must be set when tokens are buffered")
-        elif self.batch_id is not None and not self.batch_id:
-            # Empty string is never a valid batch_id, even with no tokens.
-            raise ValueError("AggregationNodeCheckpoint.batch_id must be a non-empty string when set")
+        # Value-level guards first (apply regardless of tokens/counter-only shape).
         if self.elapsed_age_seconds < 0 or not math.isfinite(self.elapsed_age_seconds):
             raise ValueError(
                 f"AggregationNodeCheckpoint.elapsed_age_seconds must be non-negative and finite, got {self.elapsed_age_seconds}"
@@ -188,6 +181,36 @@ class AggregationNodeCheckpoint:
             raise ValueError(
                 f"AggregationNodeCheckpoint.condition_fire_offset must be non-negative and finite, got {self.condition_fire_offset}"
             )
+        # Structural pairing: batch_id is required when tokens are buffered;
+        # absence is only allowed for "counters only" snapshots taken after a
+        # successful flush.
+        if self.tokens:
+            if not self.batch_id:
+                raise ValueError("AggregationNodeCheckpoint.batch_id must be set when tokens are buffered")
+        else:
+            if self.batch_id is not None and not self.batch_id:
+                # Empty string is never a valid batch_id, even with no tokens.
+                raise ValueError("AggregationNodeCheckpoint.batch_id must be a non-empty string when set")
+            # Counter-only invariant (Tier 1: crash on bad data, not after-the-fact
+            # inference at restore). When tokens is empty, there is no active batch
+            # and therefore no in-flight trigger fire-state to preserve. Restoring a
+            # non-None fire offset against batch_count=0 would install a stale
+            # _count_fire_time on TriggerEvaluator and could mis-fire the next batch.
+            if self.count_fire_offset is not None:
+                raise ValueError(
+                    "AggregationNodeCheckpoint.count_fire_offset must be None when tokens is empty "
+                    f"(counter-only node), got {self.count_fire_offset}"
+                )
+            if self.condition_fire_offset is not None:
+                raise ValueError(
+                    "AggregationNodeCheckpoint.condition_fire_offset must be None when tokens is empty "
+                    f"(counter-only node), got {self.condition_fire_offset}"
+                )
+            if self.elapsed_age_seconds != 0.0:
+                raise ValueError(
+                    "AggregationNodeCheckpoint.elapsed_age_seconds must be 0.0 when tokens is empty "
+                    f"(counter-only node), got {self.elapsed_age_seconds}"
+                )
         # Reject bool and non-int (bool is an int subclass in Python).
         if isinstance(self.accepted_count_total, bool) or not isinstance(self.accepted_count_total, int):
             raise TypeError(

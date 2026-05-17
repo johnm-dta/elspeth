@@ -288,29 +288,109 @@ class TestAggregationNodeCheckpointPostInit:
             )
 
     def test_accepts_valid(self) -> None:
+        token = AggregationTokenCheckpoint(
+            token_id="t1",
+            row_id="r1",
+            branch_name=None,
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id=None,
+            row_data={},
+            contract_version="v1",
+            contract={},
+        )
         n = AggregationNodeCheckpoint(
-            tokens=(),
+            tokens=(token,),
             batch_id="b1",
             elapsed_age_seconds=5.0,
             count_fire_offset=None,
             condition_fire_offset=None,
-            accepted_count_total=0,
+            accepted_count_total=1,
             completed_flush_count=0,
         )
         assert n.batch_id == "b1"
 
     def test_accepts_valid_with_fire_offsets(self) -> None:
+        """Fire offsets are valid only when tokens are buffered (active batch)."""
+        token = AggregationTokenCheckpoint(
+            token_id="t1",
+            row_id="r1",
+            branch_name=None,
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id=None,
+            row_data={},
+            contract_version="v1",
+            contract={},
+        )
         n = AggregationNodeCheckpoint(
-            tokens=(),
+            tokens=(token,),
             batch_id="b1",
             elapsed_age_seconds=0.0,
             count_fire_offset=1.5,
             condition_fire_offset=3.0,
-            accepted_count_total=0,
+            accepted_count_total=1,
             completed_flush_count=0,
         )
         assert n.count_fire_offset == 1.5
         assert n.condition_fire_offset == 3.0
+
+    # --- Counter-only invariant (Tier 1: no stale trigger state) ---
+
+    def test_rejects_counter_only_with_count_fire_offset(self) -> None:
+        """tokens=() must have count_fire_offset=None — no in-flight trigger to preserve."""
+        with pytest.raises(ValueError, match="count_fire_offset must be None when tokens is empty"):
+            AggregationNodeCheckpoint(
+                tokens=(),
+                batch_id=None,
+                elapsed_age_seconds=0.0,
+                count_fire_offset=2.5,
+                condition_fire_offset=None,
+                accepted_count_total=3,
+                completed_flush_count=1,
+            )
+
+    def test_rejects_counter_only_with_condition_fire_offset(self) -> None:
+        """tokens=() must have condition_fire_offset=None — no in-flight trigger to preserve."""
+        with pytest.raises(ValueError, match="condition_fire_offset must be None when tokens is empty"):
+            AggregationNodeCheckpoint(
+                tokens=(),
+                batch_id=None,
+                elapsed_age_seconds=0.0,
+                count_fire_offset=None,
+                condition_fire_offset=4.0,
+                accepted_count_total=3,
+                completed_flush_count=1,
+            )
+
+    def test_rejects_counter_only_with_nonzero_elapsed_age(self) -> None:
+        """tokens=() must have elapsed_age_seconds=0.0 — no in-flight age to preserve."""
+        with pytest.raises(ValueError, match=r"elapsed_age_seconds must be 0\.0 when tokens is empty"):
+            AggregationNodeCheckpoint(
+                tokens=(),
+                batch_id=None,
+                elapsed_age_seconds=12.5,
+                count_fire_offset=None,
+                condition_fire_offset=None,
+                accepted_count_total=3,
+                completed_flush_count=1,
+            )
+
+    def test_accepts_counter_only_snapshot(self) -> None:
+        """Valid counter-only snapshot: empty tokens, no batch_id, no trigger state."""
+        n = AggregationNodeCheckpoint(
+            tokens=(),
+            batch_id=None,
+            elapsed_age_seconds=0.0,
+            count_fire_offset=None,
+            condition_fire_offset=None,
+            accepted_count_total=9,
+            completed_flush_count=3,
+        )
+        assert n.tokens == ()
+        assert n.batch_id is None
+        assert n.accepted_count_total == 9
+        assert n.completed_flush_count == 3
 
 
 class TestAggregationCheckpointStatePostInit:

@@ -465,8 +465,12 @@ class AggregationExecutor:
                             f"output via TransformResult.success(row) or TransformResult.success_multi(rows)."
                         )
 
+                    # Normalize trigger_type to its str value so AggregationFlushContext
+                    # (annotated as str) matches AggregationBatchContext exactly and a
+                    # future non-StrEnum refactor cannot silently produce divergent
+                    # serializations between the two contexts.
                     flush_context = AggregationFlushContext(
-                        trigger_type=trigger_type,
+                        trigger_type=trigger_type.value,
                         buffer_size=batch_size,
                         batch_id=batch_id,
                         flush_index=flush_index,

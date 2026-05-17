@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { act, waitFor } from "@testing-library/react";
 import { initStoreSubscriptions, _resetSubscriptionsForTesting } from "./subscriptions";
 import { useSessionStore } from "./sessionStore";
 import { useExecutionStore } from "./executionStore";
@@ -205,5 +206,227 @@ describe("subscriptions — validation result side effects", () => {
 
     expect(injectSystemMessage).toHaveBeenCalledTimes(1);
     expect(sendValidationFeedback).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("auto-validate on composition-state version change", () => {
+  beforeEach(() => {
+    _resetSubscriptionsForTesting();
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: null,
+      sessions: [{ id: "sess-1", title: "x" } as never],
+    } as never);
+    useExecutionStore.setState({
+      isExecuting: false,
+      validationResult: null,
+    } as never);
+    initStoreSubscriptions();
+  });
+
+  it("fires validate when compositionState.version increments", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-1"));
+
+    useSessionStore.setState({
+      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not fire when version is unchanged (reference change only)", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+
+    useSessionStore.setState({
+      compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(validate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT fire while executing", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate, isExecuting: true } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 9, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it("does not fire when activeSessionId is null", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+    useSessionStore.setState({ activeSessionId: null } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it("re-fires after the in-flight validate settles if a newer version arrived (correctness loop)", async () => {
+    let resolveFirst: (() => void) | null = null;
+    const firstCallPromise = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    const validate = vi
+      .fn()
+      .mockImplementationOnce(() => firstCallPromise)
+      .mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+
+    useSessionStore.setState({
+      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    expect(validate).toHaveBeenCalledTimes(1);
+
+    resolveFirst!();
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1");
+  });
+
+  it("resets per-session tracking when activeSessionId changes (cross-session isolation)", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+
+    useSessionStore.setState({
+      activeSessionId: "sess-B",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-B"));
+  });
+
+  it("does not inject system message when the user switched sessions mid-validate (cross-session guard)", async () => {
+    const injectSystemMessageSpy = vi.fn();
+    const staleValidationResult = {
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_type: "source",
+          component_id: "csv_source",
+          message: "Missing path",
+        } as never,
+      ],
+      warnings: [],
+    };
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      sessions: [{ id: "sess-A" } as never, { id: "sess-B" } as never],
+      injectSystemMessage: injectSystemMessageSpy,
+    } as never);
+
+    let resolveValidate: (() => void) | null = null;
+    const validatePromise = new Promise<void>((r) => {
+      resolveValidate = r;
+    });
+    const validate = vi.fn().mockImplementation(() => validatePromise);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+
+    useSessionStore.setState({ activeSessionId: "sess-B" } as never);
+
+    useExecutionStore.setState({
+      validationResult: staleValidationResult as never,
+    } as never);
+    resolveValidate!();
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(injectSystemMessageSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not let a suppressed stale result consume the validation fingerprint", async () => {
+    const injectSystemMessageSpy = vi.fn();
+    const sameContentResult = {
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_type: "source",
+          component_id: "csv_source",
+          message: "Missing path",
+        } as never,
+      ],
+      warnings: [],
+    };
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      sessions: [{ id: "sess-A" } as never, { id: "sess-B" } as never],
+      injectSystemMessage: injectSystemMessageSpy,
+    } as never);
+
+    let resolveValidate: (() => void) | null = null;
+    const validatePromise = new Promise<void>((r) => {
+      resolveValidate = r;
+    });
+    const validate = vi.fn().mockImplementation(() => validatePromise);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+    useSessionStore.setState({ activeSessionId: "sess-B" } as never);
+
+    useExecutionStore.setState({ validationResult: sameContentResult as never } as never);
+    resolveValidate!();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(injectSystemMessageSpy).not.toHaveBeenCalled();
+
+    useExecutionStore.setState({
+      validationResult: { ...sameContentResult } as never,
+    } as never);
+    await waitFor(() => expect(injectSystemMessageSpy).toHaveBeenCalledTimes(1));
   });
 });

@@ -19,6 +19,12 @@ let unsubscribe: (() => void) | null = null;
 let previousValidationFingerprint: string | null = null;
 let unsubscribeExecution: (() => void) | null = null;
 
+const lastValidatedVersionBySession = new Map<string, number>();
+let pendingValidateTarget: { sessionId: string; version: number } | null = null;
+let validateInflight = false;
+let unsubscribeAutoValidate: (() => void) | null = null;
+let inflightValidateSessionId: string | null = null;
+
 function validationFingerprint(result: ValidationResult | null): string | null {
   if (!result) return null;
   return JSON.stringify({
@@ -54,6 +60,9 @@ function validationFingerprint(result: ValidationResult | null): string | null {
  *   that previously lived in InspectorPanel.handleValidate; the
  *   InspectorPanel Validate button was removed in the same phase and the
  *   keyboard/CommandPalette callers of validate() are now the only triggers.
+ * - Auto-validate when compositionState.version increments, with a correctness
+ *   loop that re-fires after in-flight validation settles if a newer version
+ *   arrived in the meantime.
  */
 export function initStoreSubscriptions(): void {
   if (initialized) return;
@@ -91,14 +100,25 @@ export function initStoreSubscriptions(): void {
 
   unsubscribeExecution = useExecutionStore.subscribe((state) => {
     const result = state.validationResult;
+    if (!result) {
+      previousValidationFingerprint = null;
+      return;
+    }
+
+    const currentSessionId = useSessionStore.getState().activeSessionId;
+    if (
+      inflightValidateSessionId !== null &&
+      inflightValidateSessionId !== currentSessionId
+    ) {
+      return;
+    }
+
     const fingerprint = validationFingerprint(result);
     // Content guard: fire only when the validation outcome changes, not when
     // the same result is re-created as a fresh object during hydration or
     // auto-validation refreshes.
     if (fingerprint === previousValidationFingerprint) return;
     previousValidationFingerprint = fingerprint;
-
-    if (!result) return;
 
     const sessionStore = useSessionStore.getState();
 
@@ -126,6 +146,53 @@ export function initStoreSubscriptions(): void {
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     }
   });
+
+  unsubscribeAutoValidate = useSessionStore.subscribe((state) => {
+    const sessionId = state.activeSessionId;
+    const version = state.compositionState?.version ?? null;
+    if (!sessionId || version === null) return;
+    if (lastValidatedVersionBySession.get(sessionId) === version) return;
+    if (useExecutionStore.getState().isExecuting) return;
+
+    pendingValidateTarget = { sessionId, version };
+    if (validateInflight) return;
+    void fireValidateLoop();
+  });
+}
+
+async function fireValidateLoop(): Promise<void> {
+  validateInflight = true;
+  try {
+    while (pendingValidateTarget !== null) {
+      const target = pendingValidateTarget;
+      if (useExecutionStore.getState().isExecuting) {
+        pendingValidateTarget = null;
+        break;
+      }
+      if (target.sessionId !== useSessionStore.getState().activeSessionId) {
+        pendingValidateTarget = null;
+        break;
+      }
+      if (lastValidatedVersionBySession.get(target.sessionId) === target.version) {
+        pendingValidateTarget = null;
+        break;
+      }
+
+      // FRAGILE: clear pending before awaiting validate() so any newer
+      // compositionState.version that arrives during the await is re-queued
+      // by the subscription and picked up by the next loop iteration.
+      pendingValidateTarget = null;
+      inflightValidateSessionId = target.sessionId;
+      try {
+        await useExecutionStore.getState().validate(target.sessionId);
+      } finally {
+        inflightValidateSessionId = null;
+      }
+      lastValidatedVersionBySession.set(target.sessionId, target.version);
+    }
+  } finally {
+    validateInflight = false;
+  }
 }
 
 /**
@@ -139,8 +206,14 @@ export function _resetSubscriptionsForTesting(): void {
   unsubscribe = null;
   unsubscribeExecution?.();
   unsubscribeExecution = null;
+  unsubscribeAutoValidate?.();
+  unsubscribeAutoValidate = null;
   previousVersion = null;
   previousValidationFingerprint = null;
   previousSessionIds = new Set();
+  lastValidatedVersionBySession.clear();
+  pendingValidateTarget = null;
+  validateInflight = false;
+  inflightValidateSessionId = null;
   initialized = false;
 }

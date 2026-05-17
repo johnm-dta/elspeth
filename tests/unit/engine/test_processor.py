@@ -279,7 +279,7 @@ class TestConstructorErrorEdgeMap:
             },
             restored_aggregation_state={
                 NodeID("agg-1"): AggregationCheckpointState(
-                    version="4.0",
+                    version="5.0",
                     nodes={},
                 ),
             },

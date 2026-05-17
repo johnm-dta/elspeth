@@ -128,7 +128,7 @@ class TestAggregationRecoveryIntegration:
 
         # Simulate checkpoint before flush — construct typed DTO
         agg_state = AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "sum_aggregator": AggregationNodeCheckpoint(
                     tokens=tuple(
@@ -149,6 +149,8 @@ class TestAggregationRecoveryIntegration:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=len(tokens),
+                    completed_flush_count=0,
                 ),
             },
         )
@@ -269,7 +271,7 @@ class TestAggregationRecoveryIntegration:
             node_id="count_aggregator",
             sequence_number=3,
             aggregation_state=AggregationCheckpointState(
-                version="4.0",
+                version="5.0",
                 nodes={
                     "count_aggregator": AggregationNodeCheckpoint(
                         tokens=tuple(
@@ -290,6 +292,8 @@ class TestAggregationRecoveryIntegration:
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
+                        accepted_count_total=len(tokens[2:]),
+                        completed_flush_count=0,
                     ),
                 },
             ),
@@ -571,9 +575,11 @@ class TestAggregationRecoveryIntegration:
             elapsed_age_seconds=elapsed,  # Bug #6 fix: store elapsed time
             count_fire_offset=evaluator.get_count_fire_offset(),  # P2-2026-02-01
             condition_fire_offset=evaluator.get_condition_fire_offset(),  # P2-2026-02-01
+            accepted_count_total=len(tokens),
+            completed_flush_count=0,
         )
         agg_state = AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={"sum_aggregator": sum_agg_node},
         )
 

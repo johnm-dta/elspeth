@@ -362,7 +362,7 @@ def test_get_resume_point_restores_aggregation_state(
         checkpoint_manager,
         run_id,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -382,6 +382,8 @@ def test_get_resume_point_restores_aggregation_state(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -413,7 +415,7 @@ def test_get_unprocessed_rows_reuses_resume_point_aggregation_state_parse(
         checkpoint_manager,
         run_id,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -433,6 +435,8 @@ def test_get_unprocessed_rows_reuses_resume_point_aggregation_state_parse(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -545,7 +549,7 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         sequence_number=10,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -576,6 +580,8 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -625,7 +631,7 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -656,6 +662,8 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -765,7 +773,7 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -785,6 +793,8 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),

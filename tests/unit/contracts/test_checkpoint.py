@@ -32,7 +32,7 @@ def _checkpoint() -> Checkpoint:
 def _make_agg_state() -> AggregationCheckpointState:
     """Create a minimal typed aggregation checkpoint state for testing."""
     return AggregationCheckpointState(
-        version="4.0",
+        version="5.0",
         nodes={
             "node-001": AggregationNodeCheckpoint(
                 tokens=(
@@ -52,6 +52,8 @@ def _make_agg_state() -> AggregationCheckpointState:
                 elapsed_age_seconds=0.0,
                 count_fire_offset=None,
                 condition_fire_offset=None,
+                accepted_count_total=1,
+                completed_flush_count=0,
             ),
         },
     )
@@ -245,6 +247,8 @@ def _valid_node_dict() -> dict[str, object]:
         "elapsed_age_seconds": 0.0,
         "count_fire_offset": None,
         "condition_fire_offset": None,
+        "accepted_count_total": 1,
+        "completed_flush_count": 0,
     }
 
 
@@ -368,7 +372,7 @@ def test_aggregation_checkpoint_json_round_trip_multiple_nodes_and_tokens() -> N
     import json
 
     state = AggregationCheckpointState(
-        version="4.0",
+        version="5.0",
         nodes={
             "node-A": AggregationNodeCheckpoint(
                 tokens=(
@@ -399,6 +403,8 @@ def test_aggregation_checkpoint_json_round_trip_multiple_nodes_and_tokens() -> N
                 elapsed_age_seconds=5.5,
                 count_fire_offset=1.0,
                 condition_fire_offset=2.5,
+                accepted_count_total=2,
+                completed_flush_count=0,
             ),
             "node-B": AggregationNodeCheckpoint(
                 tokens=(),
@@ -406,6 +412,8 @@ def test_aggregation_checkpoint_json_round_trip_multiple_nodes_and_tokens() -> N
                 elapsed_age_seconds=0.0,
                 count_fire_offset=None,
                 condition_fire_offset=None,
+                accepted_count_total=0,
+                completed_flush_count=0,
             ),
         },
     )

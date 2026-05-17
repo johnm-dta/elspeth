@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.audit_protocols import PluginAuditWriter
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
     from elspeth.contracts.identity import TokenInfo
+    from elspeth.contracts.node_state_context import AggregationBatchContext
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_context import ValidationErrorToken
     from elspeth.contracts.schema_contract import SchemaContract
@@ -108,6 +109,9 @@ class TransformContext(Protocol):
 
     @property
     def batch_token_ids(self) -> tuple[str, ...] | None: ...
+
+    @property
+    def aggregation_batch(self) -> AggregationBatchContext | None: ...
 
     @property
     def contract(self) -> SchemaContract | None: ...

@@ -1138,7 +1138,7 @@ class TestInterruptAndResume:
             sequence_number=1,
             graph=graph,
             aggregation_state=AggregationCheckpointState(
-                version="4.0",
+                version="5.0",
                 nodes={
                     agg_node_id: AggregationNodeCheckpoint(
                         tokens=(
@@ -1169,6 +1169,8 @@ class TestInterruptAndResume:
                         elapsed_age_seconds=0.0,
                         count_fire_offset=None,
                         condition_fire_offset=None,
+                        accepted_count_total=2,
+                        completed_flush_count=0,
                     )
                 },
             ),

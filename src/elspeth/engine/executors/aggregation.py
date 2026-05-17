@@ -31,7 +31,7 @@ from elspeth.contracts.errors import (
     PluginContractViolation,
 )
 from elspeth.contracts.freeze import deep_thaw
-from elspeth.contracts.node_state_context import AggregationFlushContext
+from elspeth.contracts.node_state_context import AggregationBatchContext, AggregationFlushContext
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 slog = structlog.get_logger(__name__)
 
-AGGREGATION_CHECKPOINT_VERSION = "4.0"
+AGGREGATION_CHECKPOINT_VERSION = "5.0"
 
 
 @dataclass(slots=True)
@@ -70,6 +70,11 @@ class _AggregationNodeState:
     buffers: list[dict[str, Any]] = field(default_factory=list)
     tokens: list[TokenInfo] = field(default_factory=list)
     restored_state: AggregationCheckpointState | None = None
+    # Durable counters used to derive AggregationBatchContext pagination metadata.
+    # Persisted in AggregationNodeCheckpoint so resume after a successful sink
+    # write preserves flush_index / rows_seen_total across crashes.
+    accepted_count_total: int = 0
+    completed_flush_count: int = 0
 
 
 class AggregationExecutor:
@@ -192,6 +197,9 @@ class AggregationExecutor:
             ordinal=ordinal,
         )
         node.member_count = ordinal + 1
+        # Durable cumulative counter that drives AggregationBatchContext.rows_seen_total.
+        # Incremented exactly once per accepted row; persisted in the checkpoint.
+        node.accepted_count_total += 1
 
         # Update trigger evaluator
         node.trigger.record_accept()
@@ -357,6 +365,32 @@ class AggregationExecutor:
             batch_token_ids = tuple(t.token_id for t in buffered_tokens)
             ctx.batch_token_ids = batch_token_ids
 
+            # Compute durable batch-context pagination metadata from the executor's
+            # counters. accepted_count_total has already been incremented for every
+            # row in buffered_rows (see buffer_row()), so:
+            #   row_end   = accepted_count_total
+            #   row_start = accepted_count_total - len(buffered_rows) + 1
+            #   flush_index = completed_flush_count + 1 (this is the (N+1)-th flush)
+            # completed_flush_count is only incremented on the success path below
+            # so a retry of a failed flush gets the same flush_index.
+            batch_size = len(buffered_rows)
+            rows_seen_total = node.accepted_count_total
+            row_start = rows_seen_total - batch_size + 1
+            row_end = rows_seen_total
+            flush_index = node.completed_flush_count + 1
+            is_end_of_source = trigger_type is TriggerType.END_OF_SOURCE
+            batch_context = AggregationBatchContext(
+                trigger_type=trigger_type.value,
+                batch_id=batch_id,
+                batch_size=batch_size,
+                flush_index=flush_index,
+                rows_seen_total=rows_seen_total,
+                row_start=row_start,
+                row_end=row_end,
+                is_end_of_source=is_end_of_source,
+            )
+            ctx.aggregation_batch = batch_context
+
             # Track whether the batch was finalized (COMPLETED or FAILED).
             # Used by the outer except to decide whether to fail the batch.
             batch_finalized = False
@@ -433,8 +467,13 @@ class AggregationExecutor:
 
                     flush_context = AggregationFlushContext(
                         trigger_type=trigger_type,
-                        buffer_size=len(buffered_rows),
+                        buffer_size=batch_size,
                         batch_id=batch_id,
+                        flush_index=flush_index,
+                        rows_seen_total=rows_seen_total,
+                        row_start=row_start,
+                        row_end=row_end,
+                        is_end_of_source=is_end_of_source,
                     )
                     guard.complete(
                         NodeStateStatus.COMPLETED,
@@ -451,6 +490,11 @@ class AggregationExecutor:
                         trigger_type=trigger_type,
                         state_id=guard.state_id,
                     )
+                    # Durable counter — only advances on a successfully completed
+                    # flush. A retry of a failed flush therefore receives the
+                    # same flush_index, so the audit pagination is stable
+                    # across retries.
+                    node.completed_flush_count += 1
                     batch_finalized = True
                 else:
                     # Transform returned error status
@@ -506,6 +550,7 @@ class AggregationExecutor:
                 node.tokens.clear()
                 node.trigger.reset()
                 ctx.batch_token_ids = None
+                ctx.aggregation_batch = None
                 raise
 
         # Success cleanup: save batch_id before reset (needed by caller for CONSUMED_IN_BATCH)
@@ -519,8 +564,10 @@ class AggregationExecutor:
         # Reset trigger evaluator for next batch
         node.trigger.reset()
 
-        # Clear batch_token_ids to prevent stale data leaking to next batch
+        # Clear batch_token_ids and aggregation_batch to prevent stale data
+        # leaking to subsequent transforms on the shared context.
         ctx.batch_token_ids = None
+        ctx.aggregation_batch = None
 
         return result, buffered_tokens, flushed_batch_id
 
@@ -564,40 +611,54 @@ class AggregationExecutor:
             AggregationCheckpointState with all buffered aggregation data.
 
         """
-        # Build checkpoint state from all nodes
+        # Build checkpoint state from all nodes. A node is included when it
+        # has buffered tokens OR has non-zero durable counters — the latter
+        # ensures that pagination metadata (rows_seen_total, completed_flush_count)
+        # is preserved across resume even immediately after a successful flush
+        # that emptied the buffer.
         nodes: dict[str, AggregationNodeCheckpoint] = {}
         for node_id, node in self._nodes.items():
-            if not node.tokens:  # Only include non-empty buffers
+            has_tokens = bool(node.tokens)
+            has_counters = node.accepted_count_total > 0 or node.completed_flush_count > 0
+            if not has_tokens and not has_counters:
                 continue
 
-            # Get trigger state for preservation
-            elapsed_age_seconds = node.trigger.get_age_seconds()
-            # Preserve fire time offsets for "first to fire wins" ordering
-            count_fire_offset = node.trigger.get_count_fire_offset()
-            condition_fire_offset = node.trigger.get_condition_fire_offset()
+            if has_tokens:
+                # Active batch — preserve full trigger state.
+                elapsed_age_seconds = node.trigger.get_age_seconds()
+                count_fire_offset = node.trigger.get_count_fire_offset()
+                condition_fire_offset = node.trigger.get_condition_fire_offset()
 
-            if node.batch_id is None:
-                raise OrchestrationInvariantError(
-                    f"AggregationExecutor checkpoint missing batch_id for node {node_id}. "
-                    "Buffered tokens exist without an active batch_id - internal state corruption."
+                if node.batch_id is None:
+                    raise OrchestrationInvariantError(
+                        f"AggregationExecutor checkpoint missing batch_id for node {node_id}. "
+                        "Buffered tokens exist without an active batch_id - internal state corruption."
+                    )
+
+                batch_id: str | None = node.batch_id
+
+                token_checkpoints = tuple(
+                    AggregationTokenCheckpoint(
+                        token_id=t.token_id,
+                        row_id=t.row_id,
+                        branch_name=t.branch_name,
+                        fork_group_id=t.fork_group_id,
+                        join_group_id=t.join_group_id,
+                        expand_group_id=t.expand_group_id,
+                        row_data=t.row_data.to_dict(),
+                        contract_version=t.row_data.contract.version_hash(),
+                        contract=t.row_data.contract.to_checkpoint_format(),
+                    )
+                    for t in node.tokens
                 )
-
-            batch_id = node.batch_id
-
-            token_checkpoints = tuple(
-                AggregationTokenCheckpoint(
-                    token_id=t.token_id,
-                    row_id=t.row_id,
-                    branch_name=t.branch_name,
-                    fork_group_id=t.fork_group_id,
-                    join_group_id=t.join_group_id,
-                    expand_group_id=t.expand_group_id,
-                    row_data=t.row_data.to_dict(),
-                    contract_version=t.row_data.contract.version_hash(),
-                    contract=t.row_data.contract.to_checkpoint_format(),
-                )
-                for t in node.tokens
-            )
+            else:
+                # Counters-only snapshot (post-flush): no active batch, no
+                # in-flight trigger state. Persist just the durable counters.
+                token_checkpoints = ()
+                batch_id = None
+                elapsed_age_seconds = 0.0
+                count_fire_offset = None
+                condition_fire_offset = None
 
             nodes[node_id] = AggregationNodeCheckpoint(
                 tokens=token_checkpoints,
@@ -605,6 +666,8 @@ class AggregationExecutor:
                 elapsed_age_seconds=elapsed_age_seconds,
                 count_fire_offset=count_fire_offset,
                 condition_fire_offset=condition_fire_offset,
+                accepted_count_total=node.accepted_count_total,
+                completed_flush_count=node.completed_flush_count,
             )
 
         checkpoint = AggregationCheckpointState(
@@ -671,25 +734,54 @@ class AggregationExecutor:
                     )
                 )
 
-            persisted_member_count = self._reconcile_checkpoint_batch_members(
-                node_id=node_id,
-                batch_id=node_checkpoint.batch_id,
-                checkpoint_tokens=reconstructed_tokens,
-            )
+            if node_checkpoint.tokens:
+                # Active batch — reconcile with persisted batch_members.
+                checkpoint_batch_id = node_checkpoint.batch_id
+                if checkpoint_batch_id is None:
+                    # Should be unreachable: AggregationNodeCheckpoint.__post_init__
+                    # rejects None batch_id when tokens are non-empty. Guard for type
+                    # narrowing and to surface any future invariant violation.
+                    raise AuditIntegrityError(
+                        f"Aggregation node {node_id!r} has buffered tokens but null batch_id in checkpoint — invariant violation."
+                    )
+                persisted_member_count = self._reconcile_checkpoint_batch_members(
+                    node_id=node_id,
+                    batch_id=checkpoint_batch_id,
+                    checkpoint_tokens=reconstructed_tokens,
+                )
 
-            # Restore buffer state on consolidated node
-            node.tokens = reconstructed_tokens
-            node.buffers = [t.row_data.to_dict() for t in reconstructed_tokens]
-            node.batch_id = node_checkpoint.batch_id
-            node.member_count = persisted_member_count
+                node.tokens = reconstructed_tokens
+                node.buffers = [t.row_data.to_dict() for t in reconstructed_tokens]
+                node.batch_id = checkpoint_batch_id
+                node.member_count = persisted_member_count
 
-            # Restore trigger evaluator state using dedicated API that preserves fire time ordering
-            node.trigger.restore_from_checkpoint(
-                batch_count=len(reconstructed_tokens),
-                elapsed_age_seconds=node_checkpoint.elapsed_age_seconds,
-                count_fire_offset=node_checkpoint.count_fire_offset,
-                condition_fire_offset=node_checkpoint.condition_fire_offset,
-            )
+                # Restore trigger evaluator state using dedicated API that
+                # preserves fire time ordering.
+                node.trigger.restore_from_checkpoint(
+                    batch_count=len(reconstructed_tokens),
+                    elapsed_age_seconds=node_checkpoint.elapsed_age_seconds,
+                    count_fire_offset=node_checkpoint.count_fire_offset,
+                    condition_fire_offset=node_checkpoint.condition_fire_offset,
+                )
+            else:
+                # Counters-only checkpoint (no active batch). No batch_members to
+                # reconcile and no trigger fire-state to restore; trigger is reset
+                # to its empty state with batch_count=0.
+                node.tokens = []
+                node.buffers = []
+                node.batch_id = None
+                node.member_count = 0
+                node.trigger.restore_from_checkpoint(
+                    batch_count=0,
+                    elapsed_age_seconds=node_checkpoint.elapsed_age_seconds,
+                    count_fire_offset=node_checkpoint.count_fire_offset,
+                    condition_fire_offset=node_checkpoint.condition_fire_offset,
+                )
+
+            # Always restore the durable counters — these drive the next batch's
+            # AggregationBatchContext pagination metadata.
+            node.accepted_count_total = node_checkpoint.accepted_count_total
+            node.completed_flush_count = node_checkpoint.completed_flush_count
 
             # Log successful checkpoint restoration for observability
             slog.info(

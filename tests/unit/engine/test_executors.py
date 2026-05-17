@@ -2436,6 +2436,11 @@ class TestAggregationExecutor:
         assert context_after.trigger_type == "count"
         assert context_after.buffer_size == 2
         assert context_after.batch_id == "batch_001"
+        assert context_after.flush_index == 1
+        assert context_after.rows_seen_total == 2
+        assert context_after.row_start == 1
+        assert context_after.row_end == 2
+        assert context_after.is_end_of_source is False
 
     def test_execute_flush_error_result_marks_batch_failed(self) -> None:
         """Error result from transform marks batch as FAILED."""
@@ -2509,6 +2514,100 @@ class TestAggregationExecutor:
 
         # batch_token_ids must be None after error, not stale ["t1", "t2"]
         assert ctx.batch_token_ids is None
+
+    def test_execute_flush_exposes_aggregation_batch_context_to_transform(self) -> None:
+        """ctx.aggregation_batch is populated for batch-aware transforms during flush.
+
+        The batch context carries durable pagination metadata (flush_index,
+        row_start/end, rows_seen_total, is_end_of_source) that batch-aware
+        transforms (e.g. ReportAssembler) need in order to emit truthful
+        pagination columns. Counters are owned by AggregationExecutor (not the
+        transform) so they survive checkpoint round-trip.
+
+        After the flush returns, ctx.aggregation_batch must be cleared so that
+        subsequent transforms outside the aggregation don't see stale state.
+        """
+        from elspeth.contracts.node_state_context import AggregationBatchContext
+        from elspeth.contracts.plugin_context import PluginContext
+
+        captured: list[AggregationBatchContext] = []
+
+        class _CapturingBatchTransform:
+            """Tiny batch-aware transform that snapshots ctx.aggregation_batch."""
+
+            name = "capturing_agg"
+
+            def process(self, rows: list[PipelineRow], ctx: PluginContext) -> TransformResult:
+                # ctx.aggregation_batch must be set by AggregationExecutor before process()
+                if ctx.aggregation_batch is None:
+                    raise AssertionError("ctx.aggregation_batch was None during transform.process()")
+                captured.append(ctx.aggregation_batch)
+                return TransformResult.success(
+                    make_row({"agg": "ok"}, contract=rows[0].contract),
+                    success_reason={"action": "agg"},
+                )
+
+        executor, _factory, nid = self._make_agg_executor(count=3)
+        contract = _make_contract()
+
+        ctx = make_context()
+
+        # === First flush: 3 rows ===
+        for i, label in enumerate(("a", "b", "c"), start=1):
+            executor.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        transform = _CapturingBatchTransform()
+        _result, _tokens, flushed_batch_id = executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        # ctx must be cleared after success
+        assert ctx.aggregation_batch is None
+
+        assert len(captured) == 1
+        first = captured[0]
+        assert first.trigger_type == "count"
+        assert first.batch_id == flushed_batch_id
+        assert first.batch_size == 3
+        assert first.flush_index == 1
+        assert first.rows_seen_total == 3
+        assert first.row_start == 1
+        assert first.row_end == 3
+        assert first.is_end_of_source is False
+
+        # === Second flush: another 3 rows ===
+        for i, label in enumerate(("d", "e", "f"), start=4):
+            executor.buffer_row(nid, _make_token(data={"v": label}, token_id=f"t{i}", contract=contract))
+
+        executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        assert ctx.aggregation_batch is None
+        assert len(captured) == 2
+        second = captured[1]
+        assert second.flush_index == 2
+        assert second.rows_seen_total == 6
+        assert second.row_start == 4
+        assert second.row_end == 6
+
+    def test_execute_flush_clears_aggregation_batch_context_on_failure(self) -> None:
+        """On a failed flush, ctx.aggregation_batch is cleared in the failure cleanup path.
+
+        Mirrors test_execute_flush_exception_clears_batch_token_ids — exception
+        path must not leave aggregation_batch dangling on the shared ctx.
+        """
+        executor, _factory, nid = self._make_agg_executor(count=2)
+        contract = _make_contract()
+
+        executor.buffer_row(nid, _make_token(data={"v": "a"}, token_id="t1", contract=contract))
+        executor.buffer_row(nid, _make_token(data={"v": "b"}, token_id="t2", contract=contract))
+
+        transform = MagicMock()
+        transform.name = "agg"
+        transform.process.side_effect = RuntimeError("boom")
+        ctx = make_context()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            executor.execute_flush(nid, transform, ctx, TriggerType.COUNT)
+
+        assert ctx.aggregation_batch is None
 
     def test_execute_flush_resets_batch_state(self) -> None:
         """After flush, batch state is reset (new batch on next row)."""
@@ -2819,6 +2918,8 @@ class TestAggregationExecutor:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=1,
+                    completed_flush_count=0,
                 )
             },
         )

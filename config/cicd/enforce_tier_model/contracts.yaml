@@ -32,8 +32,9 @@ per_file_rules:
   rules:
   - R5
   reason: Deep-freeze guards, from_dict validation, and Tier 1 __post_init__ type guards
+    (extended for accepted_count_total / completed_flush_count counters in checkpoint v5.0)
   expires: null
-  max_hits: 7
+  max_hits: 13
 - pattern: contracts/audit.py
   rules:
   - R5
@@ -283,7 +284,7 @@ allow_hits:
     The field remains present in the propagated contract as object/any; non-finite
     values still raise ValueError and no row data is dropped or coerced.
   expires: null
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=ded2e01b10149753
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=f01f2689fdd1623e
   owner: composer-audit
   reason: >-
     Tier 3 boundary - response_snapshot.get('usage') reads optional usage metadata from an external LLM
@@ -291,7 +292,7 @@ allow_hits:
   safety: >-
     Missing usage preserves None; TokenUsage.from_dict validates present mappings before telemetry emission.
   expires: null
-- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=482af02b41f7c916
+- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=07e4c311accb2dde
   owner: composer-audit
   reason: >-
     Telemetry transport failures must not corrupt the primary Landscape call recording after it has already
@@ -300,7 +301,7 @@ allow_hits:
     Only OSError, ConnectionError, and TimeoutError are caught; the warning carries class metadata and call
     recording still returns.
   expires: null
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=55506bc73df2d0c0
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=4cbabe02b68966d2
   owner: composer-audit
   reason: >-
     Tier 3 boundary - stable_hash can reject non-canonical external row data such as NaN or non-serializable

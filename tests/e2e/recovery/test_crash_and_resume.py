@@ -835,7 +835,7 @@ class TestCheckpointRecovery:
             conn.commit()
 
         _agg_state = AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "test_agg": AggregationNodeCheckpoint(
                     tokens=(
@@ -855,6 +855,8 @@ class TestCheckpointRecovery:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         )
@@ -1028,7 +1030,7 @@ class TestAggregationRecovery:
 
         # Create aggregation state (buffer of 3 rows) — typed DTO
         agg_state = AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "aggregator": AggregationNodeCheckpoint(
                     tokens=tuple(
@@ -1049,6 +1051,8 @@ class TestAggregationRecovery:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         )

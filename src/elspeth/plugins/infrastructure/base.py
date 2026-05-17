@@ -158,34 +158,34 @@ class BaseTransform(ABC):
     # 08-catalog-reshape.md for the per-field semantics and the
     # canonical csv_source.py example.
 
-    usage_when_to_use: ClassVar[str | None] = None
+    usage_when_to_use: str | None = None
     """Persona-facing prose. One short paragraph answering "when should I
     pick this plugin?" — written for compliance / research / ops readers,
     not for plugin developers. Avoid restating the technical
     description; that's what the docstring is for."""
 
-    usage_when_not_to_use: ClassVar[str | None] = None
+    usage_when_not_to_use: str | None = None
     """Persona-facing prose. One short paragraph answering "when should I
     *not* pick this plugin?" — gracefully redirecting users with the
     wrong shape of problem to the right plugin. The Marcus persona (per
     project_composer_personas) reads this to discover the plugin isn't
     a fit for his Zapier-shaped expectations."""
 
-    example_use: ClassVar[str | None] = None
+    example_use: str | None = None
     """One-or-two-line YAML snippet showing realistic use. Format
     matches the pipeline YAML so a developer (Dev persona) can copy and
     paste into a composer session as a starting point. Indent under
     `source:` / `transform:` / `sink:` as appropriate for the plugin
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
-    capability_tags: ClassVar[tuple[str, ...]] = ()
+    capability_tags: tuple[str, ...] = ()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
     are non-exhaustive; pick the two or three most useful for a user
     who is searching the catalog."""
 
-    audit_characteristics: ClassVar[frozenset[str]] = frozenset()
+    audit_characteristics: frozenset[str] = frozenset()
     """Declared audit characteristics that the framework cannot derive
     from other attributes. The catalog service composes this set with
     the characteristic derived from `determinism` at summary-build time.
@@ -194,7 +194,7 @@ class BaseTransform(ABC):
     pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
     in catalog/service.py."""
 
-    data_trust_tier: ClassVar[int | None] = None
+    data_trust_tier: int | None = None
     """Which tier of data this plugin handles at its boundary. 1 = our
     own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
     external data (source input, external API responses). Sources and
@@ -809,34 +809,34 @@ class BaseSink(ABC):
     # 08-catalog-reshape.md for the per-field semantics and the
     # canonical csv_source.py example.
 
-    usage_when_to_use: ClassVar[str | None] = None
+    usage_when_to_use: str | None = None
     """Persona-facing prose. One short paragraph answering "when should I
     pick this plugin?" — written for compliance / research / ops readers,
     not for plugin developers. Avoid restating the technical
     description; that's what the docstring is for."""
 
-    usage_when_not_to_use: ClassVar[str | None] = None
+    usage_when_not_to_use: str | None = None
     """Persona-facing prose. One short paragraph answering "when should I
     *not* pick this plugin?" — gracefully redirecting users with the
     wrong shape of problem to the right plugin. The Marcus persona (per
     project_composer_personas) reads this to discover the plugin isn't
     a fit for his Zapier-shaped expectations."""
 
-    example_use: ClassVar[str | None] = None
+    example_use: str | None = None
     """One-or-two-line YAML snippet showing realistic use. Format
     matches the pipeline YAML so a developer (Dev persona) can copy and
     paste into a composer session as a starting point. Indent under
     `source:` / `transform:` / `sink:` as appropriate for the plugin
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
-    capability_tags: ClassVar[tuple[str, ...]] = ()
+    capability_tags: tuple[str, ...] = ()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
     are non-exhaustive; pick the two or three most useful for a user
     who is searching the catalog."""
 
-    audit_characteristics: ClassVar[frozenset[str]] = frozenset()
+    audit_characteristics: frozenset[str] = frozenset()
     """Declared audit characteristics that the framework cannot derive
     from other attributes. The catalog service composes this set with
     the characteristic derived from `determinism` at summary-build time.
@@ -845,7 +845,7 @@ class BaseSink(ABC):
     pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
     in catalog/service.py."""
 
-    data_trust_tier: ClassVar[int | None] = None
+    data_trust_tier: int | None = None
     """Which tier of data this plugin handles at its boundary. 1 = our
     own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
     external data (source input, external API responses). Sources and
@@ -1155,34 +1155,34 @@ class BaseSource(ABC):
     # 08-catalog-reshape.md for the per-field semantics and the
     # canonical csv_source.py example.
 
-    usage_when_to_use: ClassVar[str | None] = None
+    usage_when_to_use: str | None = None
     """Persona-facing prose. One short paragraph answering "when should I
     pick this plugin?" — written for compliance / research / ops readers,
     not for plugin developers. Avoid restating the technical
     description; that's what the docstring is for."""
 
-    usage_when_not_to_use: ClassVar[str | None] = None
+    usage_when_not_to_use: str | None = None
     """Persona-facing prose. One short paragraph answering "when should I
     *not* pick this plugin?" — gracefully redirecting users with the
     wrong shape of problem to the right plugin. The Marcus persona (per
     project_composer_personas) reads this to discover the plugin isn't
     a fit for his Zapier-shaped expectations."""
 
-    example_use: ClassVar[str | None] = None
+    example_use: str | None = None
     """One-or-two-line YAML snippet showing realistic use. Format
     matches the pipeline YAML so a developer (Dev persona) can copy and
     paste into a composer session as a starting point. Indent under
     `source:` / `transform:` / `sink:` as appropriate for the plugin
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
-    capability_tags: ClassVar[tuple[str, ...]] = ()
+    capability_tags: tuple[str, ...] = ()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
     are non-exhaustive; pick the two or three most useful for a user
     who is searching the catalog."""
 
-    audit_characteristics: ClassVar[frozenset[str]] = frozenset()
+    audit_characteristics: frozenset[str] = frozenset()
     """Declared audit characteristics that the framework cannot derive
     from other attributes. The catalog service composes this set with
     the characteristic derived from `determinism` at summary-build time.
@@ -1191,7 +1191,7 @@ class BaseSource(ABC):
     pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
     in catalog/service.py."""
 
-    data_trust_tier: ClassVar[int | None] = None
+    data_trust_tier: int | None = None
     """Which tier of data this plugin handles at its boundary. 1 = our
     own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
     external data (source input, external API responses). Sources and

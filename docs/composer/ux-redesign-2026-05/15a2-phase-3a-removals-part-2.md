@@ -878,6 +878,6 @@ Only **Shim 1** required a deletion commit:
 2. Saved sidebar width already reset to `320px` at the `a43594051` deploy; no additional impact.
 3. Bookmarks to `#/<sessionId>/spec` or `#/<sessionId>/runs` silently land on Graph (default) without an explanation banner — the redirect-toast was never deployed to staging, so no operator-visible regression.
 
-**Commit:** `<fill-in-sha-after-commit>` (`refactor(web/frontend): delete staging migration shims per operator override (P3A-003 option a)`).
+**Commit:** `5e909cb6c` (`refactor(web/frontend): delete staging migration shims per operator override (P3A-003 option a)`).
 
 **Operator note:** This entry records the orchestrator's reasonable-call default. Operator may override at merge review by selecting option (b) — deferred to 15b/3B — in which case the missing-tests list above becomes a mandatory 15b/3B sub-task checklist item.

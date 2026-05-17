@@ -17,6 +17,24 @@ describe("SideRail", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the validation banner slot region above the graph mini slot", () => {
+    render(
+      <SideRail
+        validationBannerSlot={<div>Validation banner</div>}
+        graphMiniSlot={<div>Graph mini</div>}
+      />,
+    );
+
+    const validationSlot = screen.getByTestId(
+      "siderail-slot-validation-banner",
+    );
+    const graphSlot = screen.getByTestId("siderail-slot-graph-mini");
+    expect(within(validationSlot).getByText("Validation banner")).toBeInTheDocument();
+    expect(validationSlot.compareDocumentPosition(graphSlot)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
   it("renders the catalog slot region", () => {
     render(<SideRail />);
     expect(screen.getByTestId("siderail-slot-catalog")).toBeInTheDocument();
@@ -58,12 +76,8 @@ describe("SideRail", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders children passed through (the transitional inspector mount)", () => {
-    render(
-      <SideRail>
-        <div data-testid="children-marker" />
-      </SideRail>,
-    );
-    expect(screen.getByTestId("children-marker")).toBeInTheDocument();
+  it("does not render the retired transitional inspector mount", () => {
+    render(<SideRail />);
+    expect(document.querySelector(".side-rail-transitional")).toBeNull();
   });
 });

@@ -18,11 +18,12 @@ import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
 import { ChatPanel } from "./components/chat/ChatPanel";
-import { InspectorPanel } from "./components/inspector/InspectorPanel";
 import { CatalogDrawer } from "./components/catalog/CatalogDrawer";
+import { AuditReadinessPanel } from "./components/audit/AuditReadinessPanel";
 import { RecoveryPanel } from "./components/recovery/RecoveryPanel";
 import { SecretsPanel } from "./components/settings/SecretsPanel";
 import { ComposerPreferencesPanel } from "./components/settings/ComposerPreferencesPanel";
+import { SideRailValidationBanner } from "./components/sidebar/SideRailValidationBanner";
 import { useAuthStore } from "./stores/authStore";
 import { initStoreSubscriptions } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
@@ -56,7 +57,7 @@ initStoreSubscriptions();
  *
  * Single composition root: AuthGuard gates the entire app behind authentication,
  * then AppHeader and Layout render the composer shell with ChatPanel and
- * InspectorPanel. No router in v1 -- the entire application is a single page.
+ * SideRail. No router in v1 -- the entire application is a single page.
  */
 function App() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
@@ -331,15 +332,14 @@ function App() {
             }
             siderail={
               <SideRail
-                auditReadinessSlot={null}
+                auditReadinessSlot={<AuditReadinessPanel />}
+                validationBannerSlot={<SideRailValidationBanner />}
                 graphMiniSlot={<GraphMiniView />}
                 catalogSlot={<CatalogButton />}
                 exportYamlSlot={<ExportYamlButton />}
                 executeButtonSlot={<ExecuteButton />}
                 completionBarSlot={null}
-              >
-                <InspectorPanel />
-              </SideRail>
+              />
             }
           />
         </div>

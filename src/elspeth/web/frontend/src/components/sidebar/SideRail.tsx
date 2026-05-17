@@ -9,27 +9,30 @@ import { type ReactNode } from "react";
 
 interface SideRailProps {
   auditReadinessSlot?: ReactNode | null;
+  validationBannerSlot?: ReactNode | null;
   graphMiniSlot?: ReactNode | null;
   catalogSlot?: ReactNode | null;
   exportYamlSlot?: ReactNode | null;
   executeButtonSlot?: ReactNode | null;
   completionBarSlot?: ReactNode | null;
-  children?: ReactNode;
 }
 
 export function SideRail({
   auditReadinessSlot = null,
+  validationBannerSlot = null,
   graphMiniSlot = null,
   catalogSlot = null,
   exportYamlSlot = null,
   executeButtonSlot = null,
   completionBarSlot = null,
-  children,
 }: SideRailProps): JSX.Element {
   return (
     <aside className="side-rail" aria-label="Composer side rail">
       <div data-testid="siderail-slot-audit-readiness" className="side-rail-slot">
         {auditReadinessSlot}
+      </div>
+      <div data-testid="siderail-slot-validation-banner" className="side-rail-slot">
+        {validationBannerSlot}
       </div>
       <div data-testid="siderail-slot-graph-mini" className="side-rail-slot">
         {graphMiniSlot}
@@ -43,7 +46,6 @@ export function SideRail({
       <div data-testid="siderail-slot-execute-button" className="side-rail-slot">
         {executeButtonSlot}
       </div>
-      {children && <div className="side-rail-transitional">{children}</div>}
       <div data-testid="siderail-slot-completion-bar" className="side-rail-slot">
         {completionBarSlot}
       </div>

@@ -52,12 +52,18 @@ vi.mock("./components/chat/ChatPanel", () => ({
   },
 }));
 
-vi.mock("./components/inspector/InspectorPanel", () => ({
-  InspectorPanel: () => <div data-testid="inspector-panel-stub" />,
-}));
-
 vi.mock("./components/settings/SecretsPanel", () => ({
   SecretsPanel: () => <div data-testid="secrets-panel-stub" />,
+}));
+
+vi.mock("./components/audit/AuditReadinessPanel", () => ({
+  AuditReadinessPanel: () => <div data-testid="audit-readiness-stub" />,
+}));
+
+vi.mock("./components/sidebar/SideRailValidationBanner", () => ({
+  SideRailValidationBanner: () => (
+    <div data-testid="side-rail-validation-banner-stub" />
+  ),
 }));
 
 vi.mock("./components/common/CommandPalette", () => ({
@@ -221,6 +227,19 @@ describe("App banner roles", () => {
       expect(api.fetchSystemStatus).toHaveBeenCalled();
     });
     expect(screen.queryByLabelText(/sessions sidebar/i)).not.toBeInTheDocument();
+  });
+
+  it("mounts audit readiness and validation through side rail slots", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    expect(screen.getByTestId("audit-readiness-stub")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("side-rail-validation-banner-stub"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("inspector-panel-stub")).toBeNull();
   });
 
   it("removes the retired sidebar collapsed preference on startup", async () => {

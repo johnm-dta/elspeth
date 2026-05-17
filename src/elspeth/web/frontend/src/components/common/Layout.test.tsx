@@ -1,66 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { render, screen, within } from "@testing-library/react";
 import { Layout } from "./Layout";
 
-const localStorageMock = (() => {
-  let store: Record<string, string> = {};
-  return {
-    getItem: vi.fn((key: string): string | null => store[key] ?? null),
-    setItem: vi.fn((key: string, val: string) => { store[key] = val; }),
-    clear: () => { store = {}; },
-  };
-})();
-
-Object.defineProperty(window, "localStorage", { value: localStorageMock });
-Object.defineProperty(window, "innerWidth", { value: 1600, writable: true });
+vi.mock("./DefaultModeChangedBanner", () => ({
+  DefaultModeChangedBanner: () => (
+    <div data-testid="default-mode-changed-banner" />
+  ),
+}));
 
 describe("Layout", () => {
-  beforeEach(() => {
-    localStorageMock.clear();
-    vi.clearAllMocks();
-  });
-
-  it("uses approximately 50% of remaining space for side rail by default", () => {
-    const { container } = render(
-      <Layout
-        chat={<div>Chat</div>}
-        siderail={<div>Side rail</div>}
-      />,
-    );
-    const layoutDiv = container.querySelector(".app-layout") as HTMLElement;
-    const columns = layoutDiv.style.gridTemplateColumns;
-    const match = columns.match(/(\d+)px$/);
-    expect(match).not.toBeNull();
-    const sideRailWidth = Number(match![1]);
-    // With no sidebar, half of the 1600px viewport is 800px.
-    expect(sideRailWidth).toBe(800);
-    expect(columns.trim()).toBe("1fr 800px");
-  });
-
-  it("restores persisted side-rail width from localStorage", () => {
-    localStorageMock.getItem.mockImplementation((key: string) => {
-      if (key === "elspeth_inspector_width") return "500";
-      return null;
-    });
-    const { container } = render(
-      <Layout
-        chat={<div>Chat</div>}
-        siderail={<div>Side rail</div>}
-      />,
-    );
-    const layoutDiv = container.querySelector(".app-layout") as HTMLElement;
-    const columns = layoutDiv.style.gridTemplateColumns;
-    expect(columns).toContain("500px");
-  });
-
-  it("does not render the removed sidebar chrome or persist the retired collapse key", () => {
-    const setItem = vi.spyOn(localStorageMock, "setItem");
-    localStorageMock.getItem.mockImplementation((key: string) => {
-      if (key === "elspeth_sidebar_collapsed") return "true";
-      return null;
-    });
-
+  it("uses the fixed 320px composer side rail width", () => {
     const { container } = render(
       <Layout
         chat={<div>Chat</div>}
@@ -68,143 +17,39 @@ describe("Layout", () => {
       />,
     );
 
-    expect(container.querySelector(".layout-sidebar")).toBeNull();
+    const layout = container.querySelector(".app-layout") as HTMLElement;
+    expect(layout.style.gridTemplateColumns).toBe("minmax(0, 1fr) 320px");
+  });
+
+  it("keeps the default-mode banner inside the chat column", () => {
+    render(
+      <Layout
+        chat={<div>Chat</div>}
+        siderail={<div>Side rail</div>}
+      />,
+    );
+
+    const chatColumn = screen.getByTestId("layout-chat");
     expect(
-      screen.queryByRole("button", { name: /sessions sidebar/i }),
+      within(chatColumn).getByTestId("default-mode-changed-banner"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render the retired overlay, toggle, or resize controls", () => {
+    render(
+      <Layout
+        chat={<div>Chat</div>}
+        siderail={<div>Side rail</div>}
+      />,
+    );
+
+    expect(screen.queryByRole("separator")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /side rail/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /switch to light theme/i }),
+      screen.queryByRole("button", { name: /close side rail/i }),
     ).not.toBeInTheDocument();
-    expect(
-      setItem.mock.calls.some(([key]) => key === "elspeth_sidebar_collapsed"),
-    ).toBe(false);
-  });
-
-  describe("Layout resize handle keyboard arrows", () => {
-    function lastPersistedWidth(setItem: ReturnType<typeof vi.spyOn>): number {
-      const calls = setItem.mock.calls.filter(
-        ([k]: [string, string]) => k === "elspeth_inspector_width",
-      );
-      return Number(calls[calls.length - 1]?.[1]);
-    }
-
-    it("ArrowLeft decreases by 10px and ArrowRight increases by 10px (per-keypress step)", async () => {
-      const user = userEvent.setup();
-      const setItem = vi.spyOn(localStorageMock, "setItem");
-      localStorageMock.getItem.mockImplementation((key: string) => {
-        if (key === "elspeth_inspector_width") return "700";
-        return null;
-      });
-
-      const { container } = render(
-        <Layout
-          chat={<div>Chat</div>}
-          siderail={<div>Side rail</div>}
-        />,
-      );
-
-      // Read the initial mounted width directly from the grid template so
-      // step-size assertions are anchored to a known baseline.
-      const layoutDiv = container.querySelector(".app-layout") as HTMLElement;
-      const initialMatch = layoutDiv.style.gridTemplateColumns.match(/(\d+)px$/);
-      const initialWidth = Number(initialMatch![1]);
-
-      const handle = screen.getByRole("separator", { name: /resize side rail/i });
-      handle.focus();
-
-      await user.keyboard("{ArrowRight}");
-      expect(lastPersistedWidth(setItem)).toBe(initialWidth + 10);
-
-      await user.keyboard("{ArrowLeft}");
-      expect(lastPersistedWidth(setItem)).toBe(initialWidth);
-
-      await user.keyboard("{ArrowLeft}");
-      expect(lastPersistedWidth(setItem)).toBe(initialWidth - 10);
-    });
-
-    it("clamps side-rail width at 50% of viewport on repeated ArrowRight", async () => {
-      // window.innerWidth is fixed at 1600 for these tests, so the upper
-      // clamp is 800.  Start near the upper bound so the clamp is reachable
-      // in a few keypresses.
-      const user = userEvent.setup();
-      const setItem = vi.spyOn(localStorageMock, "setItem");
-
-      localStorageMock.getItem.mockImplementation((key: string) => {
-        if (key === "elspeth_inspector_width") return "780";
-        return null;
-      });
-
-      render(
-        <Layout
-          chat={<div>Chat</div>}
-          siderail={<div>Side rail</div>}
-        />,
-      );
-
-      const handle = screen.getByRole("separator", { name: /resize side rail/i });
-      handle.focus();
-
-      // 780 → 790 → 800 → 800 (clamp).  Three keypresses; clamp at 800.
-      await user.keyboard("{ArrowRight}{ArrowRight}{ArrowRight}{ArrowRight}");
-      expect(lastPersistedWidth(setItem)).toBe(800);
-    });
-
-    it("clamps side-rail width at 240px on repeated ArrowLeft", async () => {
-      const user = userEvent.setup();
-      const setItem = vi.spyOn(localStorageMock, "setItem");
-
-      // Start narrow so the clamp is reachable in a few keypresses.
-      localStorageMock.getItem.mockImplementation((key: string) => {
-        if (key === "elspeth_inspector_width") return "260";
-        return null;
-      });
-
-      render(
-        <Layout
-          chat={<div>Chat</div>}
-          siderail={<div>Side rail</div>}
-        />,
-      );
-
-      const handle = screen.getByRole("separator", { name: /resize side rail/i });
-      handle.focus();
-
-      // 260 → 250 → 240 → 240 (clamp).  Three keypresses; clamp at 240.
-      await user.keyboard("{ArrowLeft}{ArrowLeft}{ArrowLeft}{ArrowLeft}");
-      expect(lastPersistedWidth(setItem)).toBe(240);
-    });
-
-    it("exposes aria-valuenow/min/max so AT can announce current width", () => {
-      render(
-        <Layout
-          chat={<div>Chat</div>}
-          siderail={<div>Side rail</div>}
-        />,
-      );
-
-      const handle = screen.getByRole("separator", { name: /resize side rail/i });
-      expect(handle.getAttribute("aria-valuenow")).not.toBeNull();
-      expect(Number(handle.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(240);
-      expect(handle.getAttribute("aria-valuemin")).toBe("240");
-      // valuemax = 50% of viewport (1600 / 2 = 800).
-      expect(handle.getAttribute("aria-valuemax")).toBe("800");
-    });
-  });
-
-  it("reads side-rail width from the pre-rename elspeth_inspector_width localStorage key", () => {
-    localStorageMock.getItem.mockImplementation((key: string) => {
-      if (key === "elspeth_inspector_width") return "420";
-      return null;
-    });
-
-    const { container } = render(
-      <Layout
-        chat={<div data-testid="chat" />}
-        siderail={<div data-testid="siderail" />}
-      />,
-    );
-
-    const layoutNode = container.querySelector(".app-layout") as HTMLElement;
-    expect(layoutNode.style.gridTemplateColumns).toContain("420px");
+    expect(document.querySelector(".siderail-overlay-backdrop")).toBeNull();
   });
 });

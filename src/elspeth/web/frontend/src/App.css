@@ -1313,73 +1313,6 @@ summary:focus-visible {
   background-color: var(--color-surface-inspector);
 }
 
-/* Side-rail overlay mode — slides over from the right */
-.layout-siderail--overlay {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: var(--z-overlay);
-  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
-}
-
-.siderail-overlay-backdrop {
-  position: fixed;
-  inset: 0;
-  background-color: rgba(0, 0, 0, 0.35);
-  z-index: var(--z-overlay-backdrop);
-}
-
-.siderail-overlay-close {
-  position: absolute;
-  top: var(--space-sm);
-  right: var(--space-sm);
-  z-index: var(--z-panel-controls);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 44px;
-  min-height: 44px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background-color: var(--color-surface-elevated);
-  color: var(--color-text-muted);
-  cursor: pointer;
-  font-size: var(--font-size-lg);
-}
-
-.siderail-overlay-close:hover {
-  background-color: var(--color-surface-hover);
-  color: var(--color-text);
-}
-
-/* Toggle button that appears when inspector is hidden */
-.inspector-toggle-btn {
-  position: absolute;
-  top: var(--space-sm);
-  right: var(--space-sm);
-  z-index: var(--z-panel-controls);
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background-color: var(--color-surface-elevated);
-  color: var(--color-text-muted);
-  cursor: pointer;
-  font-size: var(--font-size-xs);
-  font-family: var(--font-sans);
-  font-weight: 500;
-  min-height: 32px;
-}
-
-.inspector-toggle-btn:hover {
-  background-color: var(--color-surface-hover);
-  color: var(--color-text);
-  border-color: var(--color-border-strong);
-}
-
 .side-rail {
   display: flex;
   flex-direction: column;
@@ -1389,6 +1322,11 @@ summary:focus-visible {
 
 .side-rail-slot:empty {
   display: none;
+}
+
+.side-rail-validation-banner {
+  display: flex;
+  flex-direction: column;
 }
 
 .side-rail-execute-btn {
@@ -1532,12 +1470,6 @@ summary:focus-visible {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-}
-
-.side-rail-transitional {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
 }
 
 /* ---------------------------------------------------------------------------

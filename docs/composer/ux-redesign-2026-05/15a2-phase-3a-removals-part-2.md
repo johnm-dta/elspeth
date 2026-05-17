@@ -33,14 +33,14 @@ The `handleExecute` callback in `InspectorPanel.tsx:378–385` (drift from pre-P
 
 CommandPalette.tsx's `tab-runs` command needs removing. (15b removes the remaining `tab-spec/graph/yaml` commands; Task 5 removes `tab-runs` because Spec is still alive in this commit but Runs isn't.) Grep for `tab-runs` rather than relying on a line number — the pre-Phase-2C citation L174-179 is likely drifted.
 
-Hash-router `VALID_TABS` in useHashRouter.ts:29 still includes `"runs"`. **Leave it in 15a** — old `#/sess-1/runs` deep links resolve as "session sess-1, no valid tab, fall back to spec" via the `tab` parameter being `null` after `VALID_TABS` excludes it. Wait — `VALID_TABS` *includes* "runs" today; if we remove it from `VALID_TABS`, the regex in `parseHash` still matches but the `tab` value becomes `null` (because `VALID_TABS.has(match[2])` returns false). So **remove `"runs"` from `VALID_TABS`** in this task; the existing fallback handles the redirect.
+Hash-router `VALID_TABS` in useHashRouter.ts:29 still includes `"runs"`. **Leave it in 15a** — old `#/sess-1/runs` deep links resolve as "session sess-1, no valid tab, fall back to spec" via the `tab` parameter being `null` after `VALID_TABS` excludes it. Wait — `VALID_TABS` *includes* "runs" today; if we remove it from `VALID_TABS`, the regex in `parseHash` still matches but the `tab` value becomes `null` (because `VALID_TABS.has(match[2])` returns false). So **remove `"runs"` from `VALID_TABS`** in this task; the existing fallback handles the redirect. **Default-tab change folded into this task (Section A panel fix).** The `resolvedTab = tab ?? "graph"` default change — originally specified for Task 6 — moves up to Task 5 so the redirect toast text ("Showing Graph instead") is truthful for the entire Task 5 → Task 6 window. Task 6 leaves the default at `"graph"`.
 
 > **Review finding (CRITICAL):** Silently redirecting old `#/{id}/runs` bookmarks during the 15a → 15b window produces a disorienting no-error experience. **Transient redirect toast:** when `useHashRouter` detects an old `runs` or `spec` hash fragment (before `VALID_TABS` strips it), show a one-time dismissible toast: _"The Runs tab was removed in this update. Showing Graph instead."_ (or _"The Spec tab was removed…"_). Track dismissal in `localStorage.elspeth_redirect_toast_dismissed`; the toast never reappears after dismissal. Add a test asserting the toast renders on first visit and does not render after dismissal.
 
 Test the hash redirect: navigate to `#/sess-1/runs` and verify:
 1. A toast banner appears the first time.
 2. After dismissal, navigating to `#/sess-1/runs` again shows no toast.
-3. The inspector shows the Spec tab (the default) in both cases. The full URL rewrite is in 15b.
+3. The inspector shows the Graph tab (the default, per the S4 fold-forward in Step 6) in both cases. The full URL rewrite is in 15b.
 
 - [ ] **Step 1: Write a failing test for the InspectorPanel tab strip**
 
@@ -128,11 +128,37 @@ Change `VALID_TABS`:
 
 ```typescript
 const VALID_TABS = new Set(["spec", "graph", "yaml"]);
+
+// Inside applyHash / resolvedTab computation: default tab changes from
+// "spec" to "graph" in the SAME edit as the VALID_TABS narrowing, so the
+// redirect toast text ("Showing Graph instead") matches the actual
+// destination during the Task 5 → Task 6 window. Task 6 keeps this value
+// (no further change to the default).
+const resolvedTab = tab ?? "graph";
 ```
 
-(Old `#/sess/runs` links will resolve to `tab=null`, then `resolvedTab = "spec"` per useHashRouter.ts:64 default. 15b rewrites the URL.)
+(Old `#/sess/runs` links now resolve to `tab=null`, then `resolvedTab = "graph"` — the toast text matches what the user actually sees. 15b rewrites the URL so the address bar also reflects this.)
 
-Also add the redirect-toast logic: when `parseHash()` sees a fragment that is not in `VALID_TABS` (and is not empty), check `localStorage.getItem("elspeth_redirect_toast_dismissed")`; if not set, show a toast and call `localStorage.setItem("elspeth_redirect_toast_dismissed", "1")`.
+Also add the redirect-toast logic: when `parseHash()` sees a fragment that is not in `VALID_TABS` (and is not empty), check `localStorage.getItem("elspeth_redirect_toast_dismissed")`; if not set, surface the toast and call `localStorage.setItem("elspeth_redirect_toast_dismissed", "1")` on dismiss.
+
+**Toast mount point (IMPORTANT — pre-review-finding 2026-05-17 follow-up).** `useHashRouter` is a hook, not a UI mounter. The redirect message DOM has to render *somewhere*. Specification:
+
+- `useHashRouter` returns a new field on its return value, `redirectToast: { message: string; dismiss: () => void } | null`. The hook owns the localStorage read on first invocation and the message-text mapping (`"runs"` → _"The Runs tab was removed in this update. Showing Graph instead."_; `"spec"` → _"The Spec tab was removed in this update. Showing Graph instead."_). `dismiss` calls `localStorage.setItem("elspeth_redirect_toast_dismissed", "1")` and clears the in-state message.
+- `App.tsx` consumes the hook (it already does — search the file for `useHashRouter(` to find the call site). Render a banner immediately above the existing alert-banner region at `App.tsx:235`:
+
+  ```tsx
+  {redirectToast && (
+    <div role="alert" className="alert-banner alert-banner--info">
+      <span>{redirectToast.message}</span>
+      <button type="button" onClick={redirectToast.dismiss} aria-label="Dismiss">
+        Dismiss
+      </button>
+    </div>
+  )}
+  ```
+
+  The `role="alert"` selector is what the Step 6a / Step 8a tests target via `screen.getByRole("alert")`. Reusing the existing `alert-banner` class keeps the visual treatment consistent; the `--info` modifier (add to `App.css` as a one-line `background: var(--color-info, #2b3a4a);` rule, or whatever the existing info-banner colour is) distinguishes the redirect notice from the error banner already at that location.
+- The dismissal-flag tests (Step 6a and Step 8a, including the cross-path "shared dismissal flag" test) work against this shape because `redirectToast` becomes `null` whenever `elspeth_redirect_toast_dismissed === "1"`, regardless of which fragment triggered the read.
 
 - [ ] **Step 6a: Add hash-fallback tests (IMPORTANT — not deferred to 15b)**
 
@@ -215,6 +241,8 @@ the URL."
 - Delete: `src/elspeth/web/frontend/src/components/inspector/SpecView.tsx`.
 - Delete: `src/elspeth/web/frontend/src/components/inspector/SpecView.test.tsx`.
 - Modify: `src/elspeth/web/frontend/src/stores/sessionStore.ts` — line 175 (drift +1 from pre-Phase-2C plan citation L174) comment "GraphView <-> SpecView" → "GraphView selection" (since SpecView is gone but the selection state is still consumed by GraphView).
+- Modify: `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx` — Phase 2C added a "View in Spec" affordance that dispatches `SWITCH_TAB_EVENT` with `detail: "spec"`. With Spec gone, change the dispatch to `detail: "graph"` and rename the button label to "View in graph". The GraphView's highlight ring (driven by `selectNode`) is the surviving destination for the audit-readiness → composition surface link.
+- Modify: `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.test.tsx` — update the assertion that exercises the View-in-Spec button to expect the new label and the new dispatch payload.
 
 Spec was the only tab where node-card click-to-highlight worked. With Spec gone:
 - `handleValidationComponentClick` (`InspectorPanel.tsx:400–410`, drift from pre-Phase-2C plan citation L448-458) currently selects a node and switches to Spec. The Spec switch goes away; **the `selectNode` call is preserved** so GraphView's highlight ring still appears when a validation error is clicked.
@@ -226,6 +254,8 @@ Spec was the only tab where node-card click-to-highlight worked. With Spec gone:
 `VALID_TABS` removes `"spec"`. Old `#/sess/spec` deep links fall through to `graph`.
 
 - [ ] **Step 1: Write failing tests**
+
+> **Delete the contradictory Task-5 assertion first.** Task 5 Step 1 added an `it("still renders Spec, Graph, YAML tabs (Spec removed in Task 6)", ...)` block to `InspectorPanel.test.tsx`. That block now asserts the wrong thing (it expects Spec to be present, and this task removes Spec). Open `InspectorPanel.test.tsx` and delete that entire `it(...)` block from inside the `describe("InspectorPanel tab strip after Runs removal", ...)` group before adding the new failing tests below. Without this deletion, the suite breaks on the Task 6 commit and "every commit green" is violated.
 
 Add to `InspectorPanel.test.tsx`:
 
@@ -305,6 +335,43 @@ Remove the `tab-spec` command block. (Leaves `tab-graph` and `tab-yaml` — 15b 
 // Shared selection state for cross-component sync (GraphView selection)
 ```
 
+- [ ] **Step 6a: Re-target `ReadinessRowDetail`'s "View in Spec" affordance**
+
+> **Review finding (CRITICAL — Section A panel fix S2):** `ReadinessRowDetail.tsx` (Phase 2C) dispatches `SWITCH_TAB_EVENT` with `detail: "spec"` when the user clicks the "View in Spec" button. After this task narrows the `InspectorPanel` listener to `graph | yaml`, that dispatch becomes a silent no-op — no error, no feedback, dead affordance. The fix is to retarget the dispatch to `"graph"` and rename the button so the user sees a truthful label.
+
+First, write the failing test. Open `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.test.tsx` and replace the assertion that currently exercises the "View in Spec" button. The new assertion should read:
+
+```typescript
+it("dispatches SWITCH_TAB_EVENT with 'graph' when the View-in-graph button is clicked", async () => {
+  const listener = vi.fn();
+  window.addEventListener(SWITCH_TAB_EVENT, listener);
+  render(<ReadinessRowDetail {/* ...props with a node-anchored row... */} />);
+  await userEvent.click(screen.getByRole("button", { name: /view in graph/i }));
+  expect(listener).toHaveBeenCalledTimes(1);
+  expect((listener.mock.calls[0][0] as CustomEvent).detail).toBe("graph");
+  window.removeEventListener(SWITCH_TAB_EVENT, listener);
+});
+```
+
+Run: `npx vitest run src/components/audit/ReadinessRowDetail.test.tsx -t "View-in-graph"`. Expected: FAIL — the button is still labelled "View in Spec" and dispatches `"spec"`.
+
+Now edit `ReadinessRowDetail.tsx`. Two edits:
+
+1. Change the button label text from "View in Spec" (or whatever Phase 2C wrote) to "View in graph". Re-grep first because Phase 2C's exact wording may have changed; the goal is the user-visible label that previously routed to Spec.
+2. Change the `window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "spec" }))` call to `detail: "graph"`. Re-grep to confirm `"spec"` does not appear in any other dispatch in this file (sanity check; ReadinessRowDetail has one dispatch).
+
+Re-run the test. Expected: PASS.
+
+Smoke-grep for any other surviving `"spec"` dispatches across the frontend in case Phase 2C added a second one I have not anticipated:
+
+```bash
+grep -rn 'detail:.*"spec"' src/elspeth/web/frontend/src --include="*.tsx" --include="*.ts"
+```
+
+Expected: zero matches. If there is a hit, surface it before continuing — it is another dead-dispatch site this task must also retarget.
+
+> **Known false-negative (deliberate scope):** This grep does NOT catch `App.tsx:155-162` (line numbers approximate; re-grep before relying), which builds a `tabMap = { "1": "spec", "2": "graph", "3": "yaml", "4": "runs" }` and dispatches `new CustomEvent(SWITCH_TAB_EVENT, { detail: tab })` — the literal `"spec"` never appears at the dispatch site, only in the lookup table. After Tasks 5 and 6 narrow the `InspectorPanel` listener to `"graph" | "yaml"`, Alt+1 (→`"spec"`) and Alt+4 (→`"runs"`) become silent no-ops. This is **explicitly deferred to 15b** per 15a1 §"Out of scope (deferred to 15b)" (`Alt+1/2/3/4 shortcut cleanup`); the keyboard handler stays untouched in 15a so that the surviving Alt+2 (Graph) and Alt+3 (YAML) keep working without an interleaved refactor. Do not "fix" this in 15a — the deferral is intentional and the dead-dispatch is harmless (no listener = silent return).
+
 - [ ] **Step 7: Delete `SpecView.tsx` and its test**
 
 ```bash
@@ -360,10 +427,28 @@ describe("useHashRouter — Task 6 spec hash fallback", () => {
     render(<App />);
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  it("does not show the spec toast after the runs toast was dismissed (shared dismissal flag)", () => {
+    // Cross-path verification: the runs toast and the spec toast share a
+    // single localStorage key. Dismissing either silences both. Without
+    // this test, a regression that keyed the spec branch separately would
+    // leave dismissed-runs users seeing the spec toast on first visit.
+    window.location.hash = "#/sess-1/runs";
+    const first = render(<App />);
+    // Simulate the user dismissing the runs toast.
+    userEvent.click(screen.getByRole("button", { name: /dismiss|close/i }));
+    expect(localStorage.getItem("elspeth_redirect_toast_dismissed")).toBe("1");
+    first.unmount();
+
+    // Same user then visits a stale spec link. The spec toast must NOT appear.
+    window.location.hash = "#/sess-1/spec";
+    render(<App />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 });
 ```
 
-Note that the dismissal flag is shared with the `#/runs` toast (single `elspeth_redirect_toast_dismissed` key). Dismissing one silences the other for that user — by design; the user has indicated "I understand this kind of redirect happens." 15b's hash-router rewrite makes both inert.
+Note that the dismissal flag is shared with the `#/runs` toast (single `elspeth_redirect_toast_dismissed` key). Dismissing one silences the other for that user — by design; the user has indicated "I understand this kind of redirect happens." 15b's hash-router rewrite makes both inert. The new cross-path test (`does not show the spec toast after the runs toast was dismissed`) locks in the shared-flag invariant explicitly, so a future regression that keys the two toasts separately fails CI rather than silently re-introducing two announcements per dismissal cycle.
 
 - [ ] **Step 9: Commit**
 
@@ -423,17 +508,68 @@ const { resolvedTheme, toggleTheme } = useTheme();
 </li>
 ```
 
-Add a test in `UserMenu.test.tsx`:
+Add three tests in `UserMenu.test.tsx` covering label-reflects-state, label-inversion, and click-fires-and-closes contracts. Presence-only assertions are too weak — a stub `useTheme` returning the wrong direction or a click handler that doesn't dismiss the menu would slip past.
+
+**Mocking discipline.** `useTheme` is a hook the component reads at render time; the tests need control over what it returns. Two pitfalls to avoid:
+
+1. **Do not set `document.documentElement.dataset.theme` and assume `useTheme` reads it.** Whatever `useTheme`'s internal implementation is (CSS media query, React state, localStorage), setting a DOM attribute before `render()` does not synchronously force the hook's return value. The test must mock `useTheme` directly.
+2. **Do not call `vi.mock(...)` inside an `it()` body.** Vitest hoists `vi.mock` calls to the top of the module ONLY when they appear at module/describe scope. A `vi.mock` inside `it()` runs after module evaluation and the mock will not be applied at the next `render()`. Tests that need per-test control over a mock's return value use `vi.hoisted` to capture a mutable state object the module-level `vi.mock` factory closes over.
+
+At the top of `UserMenu.test.tsx` (or merging into Phase 1B Task 6's existing mock block if one is there), add a hoisted mock setup:
 
 ```typescript
-it("shows a theme toggle menu item", async () => {
-  render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
-  await userEvent.click(screen.getByRole("button", { name: /account/i }));
-  expect(
-    screen.getByRole("menuitem", { name: /theme/i }),
-  ).toBeInTheDocument();
+const { mockUseThemeState } = vi.hoisted(() => ({
+  mockUseThemeState: {
+    resolvedTheme: "light" as "light" | "dark",
+    toggleTheme: vi.fn(),
+  },
+}));
+vi.mock("@/hooks/useTheme", () => ({
+  useTheme: () => mockUseThemeState,
+}));
+```
+
+Then add the three tests inside the existing `describe("UserMenu", ...)` block:
+
+```typescript
+describe("UserMenu — theme toggle (Phase 3A Task 7)", () => {
+  beforeEach(() => {
+    mockUseThemeState.resolvedTheme = "light";
+    mockUseThemeState.toggleTheme = vi.fn();
+  });
+
+  it("shows a theme toggle menu item with a label reflecting current theme", async () => {
+    // resolvedTheme = "light" from beforeEach
+    render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    expect(
+      screen.getByRole("menuitem", { name: /switch to dark theme/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("inverts the label when current theme is dark", async () => {
+    mockUseThemeState.resolvedTheme = "dark";
+    render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    expect(
+      screen.getByRole("menuitem", { name: /switch to light theme/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("calls toggleTheme and closes the menu when the theme item is clicked", async () => {
+    render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /switch to dark theme/i }));
+    expect(mockUseThemeState.toggleTheme).toHaveBeenCalledTimes(1);
+    // Menu collapses after toggle.
+    expect(
+      screen.queryByRole("menuitem", { name: /switch to dark theme/i }),
+    ).not.toBeInTheDocument();
+  });
 });
 ```
+
+**Also explicitly delete the orphan Layout theme-toggle test.** Search `src/elspeth/web/frontend/src/components/common/Layout.test.tsx` for any test named "keeps the theme toggle available" or that asserts the theme toggle inside the sidebar toolbar — delete those `it(...)` blocks in the same commit. The new UserMenu tests own this contract.
 
 Run: `npx vitest run src/components/common/UserMenu.test.tsx`. Expected: PASS.
 
@@ -481,7 +617,7 @@ Run: `npx vitest run src/components/common/Layout.test.tsx -t "without sidebar"`
      siderail: ReactNode;
    }
    ```
-2. Remove the entire `<div className="layout-sidebar">…</div>` block (Layout.tsx:230–273).
+2. Remove the entire `<div className="layout-sidebar">…</div>` block. Search for `layout-sidebar` in `Layout.tsx` and delete the enclosing `<div>` from its opening tag to its matching closing tag (this region was approximately Layout.tsx:243–292 at the time this plan was written; re-grep before editing because Phase 2C and the SideRail rename may have shifted the range).
 3. Drop the sidebar-related state and constants: `sidebarCollapsed`, `setSidebarCollapsed`, `SIDEBAR_COLLAPSED_KEY`, `SIDEBAR_EXPANDED_WIDTH`, `SIDEBAR_COLLAPSED_WIDTH`, `NARROW_BREAKPOINT`'s sidebar-collapse handling.
 4. Update `gridColumns`:
    ```typescript
@@ -534,6 +670,18 @@ import { SessionSidebar } from "./components/sessions/SessionSidebar";
 
 Remove the `SessionSidebar` import.
 
+Add a one-shot localStorage cleanup for the orphaned `elspeth_sidebar_collapsed` key. The sidebar's collapse state is no longer read by any code after this task, but the key persists in every existing user's `localStorage`. Per CLAUDE.md No-Legacy Policy ("we have no users yet — deferring breaking changes is the opposite of what we want"), delete it in the same commit. Add this at module scope inside `App.tsx`, near the existing module-level imports:
+
+```typescript
+// Phase 3A Task 7 — sidebar removed; clean up orphaned preference key.
+// Runs once on app boot. Safe to delete in Phase 8 polish.
+if (typeof localStorage !== "undefined") {
+  localStorage.removeItem("elspeth_sidebar_collapsed");
+}
+```
+
+This is a one-shot side effect, not a useEffect — it must run before any other code reads from localStorage (e.g., the renamed `siderailWidth` initializer). Running it at module scope guarantees that ordering.
+
 - [ ] **Step 6: Delete `SessionSidebar.tsx` and its test**
 
 ```bash
@@ -583,7 +731,7 @@ The validation dot indicator (currently at `InspectorPanel.tsx:452–494`, drift
 
 | Risk | Mitigation |
 |---|---|
-| App becomes un-launchable mid-phase between commits | Each task ends with `npx vitest run src` including `App.test.tsx`. **Note (Quality panel 2026-05-17): `App.test.tsx` stubs out Layout, SessionSidebar, ChatPanel, InspectorPanel, SecretsPanel, CommandPalette, ShortcutsHelp, and ConfirmDialog — so it asserts banner DOM, not the real component tree. Treat it as an "App-shell smoke" gate, not a component-integration gate.** Real component-integration risk for Tasks 5–7 (tab strip, layout grid, UserMenu) lands on the staging deploy. Phase 3 acceptance criteria add at least one Playwright pass for two-column layout and UserMenu keyboard nav at the 15a→15b boundary. |
+| App becomes un-launchable mid-phase between commits | Each task ends with `npx vitest run src` including `App.test.tsx`. **Note (Quality panel 2026-05-17): `App.test.tsx` stubs out Layout, SessionSidebar, ChatPanel, InspectorPanel, SecretsPanel, CommandPalette, ShortcutsHelp, and ConfirmDialog — so it asserts banner DOM, not the real component tree. Treat it as an "App-shell smoke" gate, not a component-integration gate.** Real component-integration risk for Tasks 5–7 (tab strip, layout grid, UserMenu) lands on the staging deploy. Phase 3 acceptance criteria add three named Playwright passes at the 15a→15b boundary: (1) **InlineRunResults real wiring** — start a pipeline run, assert a `[aria-label="Pipeline run results"]` region appears in the chat column and contains non-stub `ProgressView` content (live status + token counters); (2) **Two-column layout** — assert the `.app-layout` element resolves to two grid-column tracks (chat + side rail), with no surviving session-sidebar region; (3) **UserMenu keyboard nav** — open the user menu, ArrowDown to the theme-toggle item, Enter, assert the theme toggle fires and the menu closes. The Playwright spec lives at `src/elspeth/web/frontend/tests/e2e/phase-3a-shell.spec.ts` (new file in this PR). |
 | Users hit a stale `#/{id}/spec` or `#/{id}/runs` bookmark and see a confusing default | 15a leaves `VALID_TABS` excluding the gone tabs; useHashRouter's fallback resolves them to a valid default (`spec` → `graph`, `runs` → `graph`). Tasks 5 and 6 add a one-time redirect toast (shared dismissal flag). 15b adds explicit hash rewrites. |
 | Spec-tab regulars confused by no "list view" | Phase 2C's audit-readiness "Explain" surface (already shipped) inherits the lineage view. Until 15b migrates the validation-banner click handler to use it, validation-banner clicks select a node (GraphView highlight) but don't navigate further. Acceptable transitional state. |
 | **Auto-validate stales validation badge during rapid composition flows (correctness, not load)** | Systems panel 2026-05-17 finding. A simple skip-if-in-flight guard discards intermediate `compositionState.version` increments during LLM tool-call bursts (N → N+1 → N+2). Resolution in Task 4: per-session `lastValidatedVersionBySession` map + `pendingValidateTarget` + `fireValidateLoop()` that re-fires `validate()` after the in-flight settles when a newer version arrived. The user never sees a "validated" badge for a stale snapshot. Debounce framing retired — correctness is the goal, not load shaping. |
@@ -629,3 +777,33 @@ Four-reviewer panel (Reality / Architecture / Quality / Systems) ran after Phase
 **IMPORTANT (Quality) — Symmetric `#/{id}/spec` redirect-toast tests** added as Task 6 Step 8a, mirroring Task 5 Step 6a's `#/{id}/runs` set. The shared dismissal flag is documented.
 
 **IMPORTANT (Systems) — Auto-validate correctness loop, not load debounce.** See 15a1 review history. The risks-table row was retitled to frame this as a correctness issue (stale validation badge) rather than a backend-load issue. The non-falsifiable "defer to Phase 8 if telemetry shows pain" framing is retired.
+
+### 2026-05-17 — Section A panel-fix pass (S2 / S11 / S4 / A1 / Q4 / Q3)
+
+**CRITICAL (Systems) — `ReadinessRowDetail` dead-dispatch fix folded into Task 6.** Phase 2C's "View in Spec" affordance dispatches `SWITCH_TAB_EVENT("spec")`, which goes silently dead after this task narrows the listener. New Step 6a retargets the dispatch to `"graph"` and renames the button to "View in graph"; the `ReadinessRowDetail.test.tsx` assertion is updated to lock in the new payload. The Task 6 **Files:** list now includes `ReadinessRowDetail.tsx` + its test.
+
+**CRITICAL (Systems) — Pipeline-self-break removed.** Task 6 Step 1 now explicitly deletes the `it("still renders Spec, Graph, YAML tabs ...")` assertion that Task 5 added; without this, the suite breaks at Task 6 commit and the block's "every commit green" claim is violated.
+
+**IMPORTANT (Systems) — Hash-fallback default folded forward.** `resolvedTab = tab ?? "graph"` moves into Task 5 alongside the `VALID_TABS` narrowing, so the redirect toast text ("Showing Graph instead") is truthful for the entire Task 5 → Task 6 window. Task 6 leaves the default at `"graph"`.
+
+**IMPORTANT (Architecture) — Orphan localStorage key cleaned up.** Task 7 Step 5 adds a one-shot `localStorage.removeItem("elspeth_sidebar_collapsed")` at `App.tsx` module scope, deleting the key in the same commit as the code that wrote it. Per CLAUDE.md No-Legacy.
+
+**IMPORTANT (Quality) — Cross-toast-flag test added.** Task 6 Step 8a now includes a test that dismisses the `#/runs` toast and verifies the `#/spec` toast does not appear (shared dismissal flag). Locks in the design choice that was previously documented but untested.
+
+**IMPORTANT (Quality) — Risks-table Playwright scenarios named.** The smoke-gate-honesty row now names three specific Playwright passes (InlineRunResults real wiring, two-column layout, UserMenu keyboard nav) instead of the vague "at least one Playwright pass" wording.
+
+### 2026-05-17 — Section B+C panel-fix pass (B10 / C13)
+
+**IMPORTANT (Quality, B10) — Theme-toggle test strengthened.** Task 7 Step 1 now spec's three tests covering label-reflects-state, label-inversion (dark→light wording), and click-fires-and-closes contracts. The previous presence-only assertion would have passed against a stub `useTheme` returning the wrong direction. The orphan Layout theme-toggle test is explicitly marked for deletion in the same commit.
+
+**IMPORTANT (Quality, B10 follow-up) — Vitest mocking pattern corrected.** Initial B10 spec set `document.documentElement.dataset.theme` and used `vi.mock(...)` inside the `it()` body — both wrong. `dataset.theme` does not influence what `useTheme` returns (the hook has its own internal state); `vi.mock` inside `it()` is not hoisted by Vitest and runs too late to apply at render time. Replaced with the canonical pattern: `vi.hoisted` captures a mutable state object, `vi.mock` at module scope returns it from `useTheme`, `beforeEach` resets the state. Mocking-discipline prose added above the test fence so the executor doesn't repeat either mistake.
+
+**MINOR (Reality, C13) — Layout sidebar line range corrected.** Task 7 Step 3's "Layout.tsx:230–273" range was misleading (the actual sidebar `<div>` is at ~243–292). The instruction now tells the executor to grep for `layout-sidebar` and delete the enclosing div, with the line range noted as approximate. Defends against an executor literally cutting line 230 (the `gridColumns` block).
+
+### 2026-05-17 — Pre-execution reality-check addendum (cross-references 15a1)
+
+Final pre-execution sweep landed three small doc-only clarifications; this file carries two of them (the third lives in 15a1). No behavioural change.
+
+**MINOR (Quality) — Redirect-toast mount-point spec'd.** Task 5 Step 6 now defines the precise integration shape between `useHashRouter` (which owns the localStorage read and the message-text mapping) and `App.tsx` (which mounts a `role="alert"` banner immediately above the existing alert-banner region at `App.tsx:235`). The `useHashRouter` hook gains a `redirectToast: { message; dismiss } | null` return field. The shared dismissal-flag invariant (a single `elspeth_redirect_toast_dismissed` key silences both the runs- and spec-path toasts) is preserved structurally because the field becomes `null` whenever the flag is set, regardless of which fragment triggered the read. The `screen.getByRole("alert")` test assertions in Steps 6a and 8a now have a concrete mount point to verify.
+
+**MINOR (Architecture) — Alt-key tabMap dead-dispatch documented as deliberate scope-deferral.** Task 6 Step 6a's smoke-grep `grep 'detail:.*"spec"'` cannot catch `App.tsx:155-162`'s keyboard tabMap (which constructs `detail: tab` from a lookup table rather than dispatching a literal). A "known false-negative" note now flags this site as intentionally deferred to 15b per 15a1 §"Out of scope (deferred to 15b)" (`Alt+1/2/3/4 shortcut cleanup`). Rationale: removing the table entries for `"spec"` and `"runs"` in 15a would interleave a keyboard-handler refactor into an IA-cleanup pass; the dead dispatch is a silent no-op (no listener, no crash) so deferral is safe.

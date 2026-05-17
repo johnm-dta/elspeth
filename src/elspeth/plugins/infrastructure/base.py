@@ -37,7 +37,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from elspeth.contracts import Determinism, PluginSchema, SourceRow
+from elspeth.contracts import (
+    DeclaredAuditCharacteristics,
+    Determinism,
+    PluginSchema,
+    SourceRow,
+)
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -146,6 +151,55 @@ class BaseTransform(ABC):
     determinism: Determinism = Determinism.DETERMINISTIC
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: str | None = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: tuple[str, ...] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog."""
+
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
@@ -743,6 +797,55 @@ class BaseSink(ABC):
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
 
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: str | None = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: tuple[str, ...] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog."""
+
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
+
     # Config model — each subclass sets this to its Pydantic config class.
     config_model: ClassVar[type[PluginConfig] | None] = None
 
@@ -1033,6 +1136,55 @@ class BaseSource(ABC):
     determinism: Determinism = Determinism.IO_READ
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: str | None = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: tuple[str, ...] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog."""
+
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # NullSource sets this to None (no config validation needed).

@@ -15,7 +15,10 @@ Plugin Types:
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from elspeth.contracts.enums import Determinism
+from elspeth.contracts.enums import (
+    DeclaredAuditCharacteristics,
+    Determinism,
+)
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.schema import SchemaConfig
 
@@ -92,6 +95,17 @@ class SourceProtocol(Protocol):
     determinism: Determinism
     plugin_version: str
     source_file_hash: str | None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
+    # Protocol declarations here let mypy verify that PluginClass-typed
+    # variables in catalog/service.py can access these fields without
+    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
+    usage_when_to_use: str | None
+    usage_when_not_to_use: str | None
+    example_use: str | None
+    capability_tags: tuple[str, ...]
+    audit_characteristics: DeclaredAuditCharacteristics
 
     # Sink name for quarantined rows, or "discard" to drop invalid rows
     # All sources must set this - config-based sources get it from SourceDataConfig
@@ -266,6 +280,17 @@ class TransformProtocol(Protocol):
     determinism: Determinism
     plugin_version: str
     source_file_hash: str | None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
+    # Protocol declarations here let mypy verify that PluginClass-typed
+    # variables in catalog/service.py can access these fields without
+    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
+    usage_when_to_use: str | None
+    usage_when_not_to_use: str | None
+    example_use: str | None
+    capability_tags: tuple[str, ...]
+    audit_characteristics: DeclaredAuditCharacteristics
 
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # The TransformExecutor checks _on_start_called before process() to ensure
@@ -472,6 +497,17 @@ class BatchTransformProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
+    # Protocol declarations here let mypy verify that PluginClass-typed
+    # variables in catalog/service.py can access these fields without
+    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
+    usage_when_to_use: str | None
+    usage_when_not_to_use: str | None
+    example_use: str | None
+    capability_tags: tuple[str, ...]
+    audit_characteristics: DeclaredAuditCharacteristics
+
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # Batch transforms inherit BaseTransform which manages these. Contract tests
     # use these flags as falsifiable post-conditions for lifecycle invocation
@@ -626,6 +662,17 @@ class SinkProtocol(Protocol):
     determinism: Determinism
     plugin_version: str
     source_file_hash: str | None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
+    # Protocol declarations here let mypy verify that PluginClass-typed
+    # variables in catalog/service.py can access these fields without
+    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
+    usage_when_to_use: str | None
+    usage_when_not_to_use: str | None
+    example_use: str | None
+    capability_tags: tuple[str, ...]
+    audit_characteristics: DeclaredAuditCharacteristics
 
     # Resume capability
     supports_resume: bool  # Can this sink append to existing output on resume?

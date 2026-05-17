@@ -57,6 +57,21 @@ class TestListSources:
         names = [e["name"] for e in resp.json()]
         assert "text" in names
 
+    def test_csv_source_summary_includes_reference_content(self, client: TestClient) -> None:
+        """Wire-shape pin: catalog API returns canonical CSV reference content."""
+        resp = client.get("/api/catalog/sources")
+        assert resp.status_code == 200
+        sources = resp.json()
+        csv = next(s for s in sources if s["name"] == "csv")
+        assert csv["usage_when_to_use"] is not None
+        assert "tabular" in csv["capability_tags"]
+        # io_read is the kind-default determinism for sources; the catalog
+        # suppresses default-derived flags so the strip only shows author
+        # decisions. csv inherits the default, so no determinism flag.
+        assert "io_read" not in csv["audit_characteristics"]
+        assert "coerce" in csv["audit_characteristics"]  # author-declared
+        assert "quarantine" in csv["audit_characteristics"]  # author-declared
+
 
 class TestListTransforms:
     """GET /api/catalog/transforms"""

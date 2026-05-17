@@ -136,10 +136,13 @@ from elspeth.contracts.data import (
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.engine import BufferEntry, PendingOutcome, RetryPolicy
 from elspeth.contracts.enums import (
+    AuditCharacteristic,
     BackpressureMode,
     BatchStatus,
     CallStatus,
     CallType,
+    DeclaredAuditCharacteristics,
+    DerivedAuditCharacteristics,
     Determinism,
     ExportStatus,
     NodeStateStatus,
@@ -375,10 +378,13 @@ __all__ = [  # Grouped by category for readability
     # NOTE: Settings classes (RetrySettings, ElspethSettings, etc.) are NOT here
     # Import them from elspeth.core.config to avoid breaking the leaf boundary
     # enums
+    "AuditCharacteristic",
     "BackpressureMode",
     "BatchStatus",
     "CallStatus",
     "CallType",
+    "DeclaredAuditCharacteristics",
+    "DerivedAuditCharacteristics",
     "Determinism",
     "ExportStatus",
     "NodeStateStatus",

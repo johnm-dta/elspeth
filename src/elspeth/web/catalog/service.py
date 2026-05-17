@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from elspeth.contracts.enums import AuditCharacteristic, DerivedAuditCharacteristics, Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.plugins.infrastructure.discovery import get_plugin_description
 from elspeth.plugins.infrastructure.manager import PluginManager, PluginNotFoundError
@@ -38,6 +39,100 @@ _DEFS_REF_PREFIX = "#/$defs/"
 # transforms. Batch-aware transform schemas must not advertise this option
 # until a batch pre-emission dispatch site exists.
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
+
+# Map Determinism enum values to the AuditCharacteristic flag they
+# imply. The catalog surfaces these as visual cues on the plugin card so
+# a compliance-focused user (Linda persona) can see at a glance which
+# audit traits apply without reading the technical description.
+#
+# Subscript access ([determinism]) is deliberate: if a future seventh
+# Determinism value is added to contracts/enums.py without updating this
+# table, the KeyError surfaces immediately at catalog-build time rather
+# than silently returning None and dropping the inferred flag.
+#
+# The closed vocabulary of audit-characteristic strings is the
+# AuditCharacteristic enum itself (defined in contracts/enums.py).  A typo
+# at a plugin's `audit_characteristics` declaration site (e.g. attempting
+# `frozenset({"io-read"})` as a bare string) fails mypy rather than
+# silently disappearing from the rendered catalog card.
+_DETERMINISM_TO_AUDIT_FLAG: dict[Determinism, AuditCharacteristic] = {
+    Determinism.IO_READ: AuditCharacteristic.IO_READ,
+    Determinism.IO_WRITE: AuditCharacteristic.IO_WRITE,
+    Determinism.EXTERNAL_CALL: AuditCharacteristic.EXTERNAL_CALL,
+    Determinism.DETERMINISTIC: AuditCharacteristic.DETERMINISTIC,
+    Determinism.SEEDED: AuditCharacteristic.SEEDED,
+    Determinism.NON_DETERMINISTIC: AuditCharacteristic.NON_DETERMINISTIC,
+}
+
+# Default Determinism value per plugin kind — mirrors the class-level
+# `determinism = Determinism.<X>` declared on BaseSource / BaseTransform /
+# BaseSink (`plugins/infrastructure/base.py`).
+#
+# Used by `_derive_audit_characteristics` to suppress emission of the
+# determinism-derived AuditCharacteristic flag when the plugin inherits
+# the kind default unchanged. The principle: a card surfaces metadata
+# only when the author made a meaningful per-plugin choice. Every
+# Source inheriting Determinism.IO_READ is a kind-constant signal that
+# teaches the user nothing about CSV-vs-JSON-vs-Dataverse; an explicit
+# override (NullSource → DETERMINISTIC, DataverseSource → EXTERNAL_CALL)
+# is a deliberate author claim and *is* worth surfacing.
+#
+# Subscript access is deliberate: a future PluginKind addition or
+# Determinism rebase on the base classes that drifts from this table
+# fails fast at catalog-build time instead of silently mis-suppressing.
+_KIND_DEFAULT_DETERMINISM: dict[PluginKind, Determinism] = {
+    "source": Determinism.IO_READ,
+    "transform": Determinism.DETERMINISTIC,
+    "sink": Determinism.IO_WRITE,
+}
+
+
+def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: PluginKind) -> DerivedAuditCharacteristics:
+    """Compose declared + inferred audit characteristics for a plugin.
+
+    The declared set comes from the plugin class's `audit_characteristics`
+    attribute (defaulting to `frozenset()` on the base). The inferred set
+    is derived from `determinism` *only when the subclass overrode the
+    kind default*. A plugin that inherits its kind's default determinism
+    contributes no inferred flag, because surfacing it on every card of
+    that kind teaches the user nothing per-plugin — the architectural
+    fact (every Source reads I/O, every Sink writes I/O, every Transform
+    defaults to deterministic) belongs in category-level documentation,
+    not in a flag repeated 6+ times.
+
+    Quarantine behaviour is **author-declared, not inferred.** The
+    source-quarantine signal lives in `_on_validation_failure`, which is
+    set per-instance in `__init__` from runtime config — it does not
+    exist on the class object. Reading `plugin_cls._on_validation_failure`
+    here would AttributeError at catalog-build time. Sources whose
+    runtime configuration supports non-discard quarantine routing
+    declare `"quarantine"` in their `audit_characteristics` frozenset
+    (the CSV canonical example does this).
+
+    Direct attribute access (`plugin_cls.audit_characteristics`,
+    `plugin_cls.determinism`) is correct here: the bases and protocols
+    declare these with sensible defaults, so every plugin reachable via
+    the catalog has them. A plugin without these attributes would be a
+    malformed system plugin (Tier 1 bug); crash via AttributeError is
+    the correct response, not defensive fallback.
+    """
+    declared: frozenset[AuditCharacteristic] = plugin_cls.audit_characteristics
+    determinism = plugin_cls.determinism
+
+    inferred: frozenset[AuditCharacteristic] = frozenset()
+    if determinism is not _KIND_DEFAULT_DETERMINISM[plugin_kind]:
+        # Author overrode the kind default — emit the corresponding flag.
+        # Subscript raises KeyError if a future Determinism value is added
+        # to contracts/enums.py without updating _DETERMINISM_TO_AUDIT_FLAG;
+        # that crash is correct (silent None would drop the flag with no
+        # test failure and no audit-trail signal).
+        inferred = frozenset({_DETERMINISM_TO_AUDIT_FLAG[determinism]})
+
+    # Sort for stable wire-format ordering; the response model exposes
+    # this as a tuple[AuditCharacteristic, ...] which serialises to a
+    # flat list of flag strings on the wire (StrEnum members serialise
+    # as their str value).
+    return tuple(sorted(declared | inferred))
 
 
 class CatalogServiceImpl:
@@ -173,16 +268,39 @@ class CatalogServiceImpl:
             raise ValueError(f"Unknown {plugin_type} plugin: {name}. Available: {available}") from exc
 
     def _to_summary(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> PluginSummary:
-        """Convert a plugin class to a PluginSummary."""
+        """Convert a plugin class to a PluginSummary.
+
+        Phase 7A: also emits reference-content fields. Audit
+        characteristics are the *derived* set: declared chars from
+        `audit_characteristics` composed with the flag derived from
+        `determinism`. The frontend reads audit_characteristics as a
+        flat list of flag strings.
+        """
         name: str = plugin_cls.name
         description = get_plugin_description(plugin_cls)
         schema = self._catalog_schema(plugin_cls, plugin_type)
         config_fields = self._extract_config_fields(schema)
+
+        # Direct attribute access: the bases and protocols declare every
+        # Phase-7A field with a default. A plugin missing them would be
+        # a malformed system plugin (Tier 1 bug); crash is correct.
+        usage_when_to_use = plugin_cls.usage_when_to_use
+        usage_when_not_to_use = plugin_cls.usage_when_not_to_use
+        example_use = plugin_cls.example_use
+        capability_tags = plugin_cls.capability_tags
+
+        audit_characteristics = _derive_audit_characteristics(plugin_cls, plugin_kind=plugin_type)
+
         return PluginSummary(
             name=name,
             description=description,
             plugin_type=plugin_type,
             config_fields=config_fields,
+            usage_when_to_use=usage_when_to_use,
+            usage_when_not_to_use=usage_when_not_to_use,
+            example_use=example_use,
+            capability_tags=capability_tags,
+            audit_characteristics=audit_characteristics,
         )
 
     def _catalog_schema(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> dict[str, Any]:

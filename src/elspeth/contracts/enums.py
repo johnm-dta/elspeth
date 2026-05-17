@@ -396,6 +396,55 @@ class OutputMode(StrEnum):
     TRANSFORM = "transform"
 
 
+# ── Plugin catalog types (Phase 7A) ──────────────────────────────────────
+#
+# These types are referenced by base plugin classes (L3) and protocols (L0)
+# and by catalog/audit-readiness services (L3).  They live here at L0 so
+# every layer can import them without violating the dependency rules.
+
+
+class AuditCharacteristic(StrEnum):
+    """Closed vocabulary of audit-characteristic flags rendered on catalog cards.
+
+    Determinism-derived (composed from Determinism enum via
+    _DETERMINISM_TO_AUDIT_FLAG in web/catalog/service.py):
+        IO_READ, IO_WRITE, EXTERNAL_CALL, DETERMINISTIC, SEEDED, NON_DETERMINISTIC
+    Author-declared (per 08-catalog-reshape.md vocabulary):
+        PROVENANCE, RETENTION, QUARANTINE, COERCE, SIGNED, NETWORK, CREDENTIALS
+
+    The StrEnum IS the closed vocabulary: a typo at the declaration site
+    (e.g. ``frozenset({"io-read"})``) fails mypy rather than silently
+    disappearing from the rendered catalog card.  When a new visual cue is
+    added to the UI, extend this enum together with 08-catalog-reshape.md.
+    """
+
+    # Determinism-derived
+    IO_READ = "io_read"
+    IO_WRITE = "io_write"
+    EXTERNAL_CALL = "external_call"
+    DETERMINISTIC = "deterministic"
+    SEEDED = "seeded"
+    NON_DETERMINISTIC = "non_deterministic"
+    # Author-declared (08-catalog-reshape.md vocabulary)
+    PROVENANCE = "provenance"
+    RETENTION = "retention"
+    QUARANTINE = "quarantine"
+    COERCE = "coerce"
+    SIGNED = "signed"
+    NETWORK = "network"
+    CREDENTIALS = "credentials"
+
+
+# Wire-format asymmetry for audit characteristics:
+#   - Declared on plugin classes as an *unordered* frozenset (set semantics
+#     match the author's intent — "this plugin has flags X, Y, Z").
+#   - Derived on PluginSummary as a *sorted* tuple for stable wire-format
+#     ordering (the catalog API response is canonical-byte-stable across
+#     reordered declarations).
+type DeclaredAuditCharacteristics = frozenset[AuditCharacteristic]
+type DerivedAuditCharacteristics = tuple[AuditCharacteristic, ...]
+
+
 def error_edge_label(transform_id: str) -> str:
     """Canonical label for a transform error DIVERT edge.
 

@@ -43,9 +43,8 @@ That's a reference-surface job, not a toolkit-surface job.
 | **"Use this" / "Select" buttons** | Implied by toolkit framing | **Removed** — there are no add-to-pipeline actions |
 | **Drag handles** | None today | None — explicitly not added |
 | **"In use" highlighting** | None today | None — explicitly not added (would imply a workflow link back to composition) |
-| **Trust tier badge** | Not present | **Added** — every plugin card shows its tier |
-| **Filters** | Three-tab segmentation | Add: filter by capability tag, by trust tier, by audit characteristics |
-| **Audit characteristic icons** | Not present | **Added** — "emits provenance," "supports redaction," "deterministic," etc. |
+| **Filters** | Three-tab segmentation | Add: filter by capability tag, by audit characteristics |
+| **Audit characteristic icons** | Not present | **Added** — "emits provenance," "supports redaction," "deterministic," etc. — emitted only when the author made a per-plugin choice (kind-default determinism does NOT emit a flag) |
 | **Persona-framed descriptions** | Single technical description | Multiple framings: "When you'd use this," "When you wouldn't," "What it does technically" |
 | **Examples** | Schema only | Add: one-or-two-line example snippets showing realistic use |
 
@@ -64,13 +63,13 @@ Each plugin card has a consistent structure:
 
 ```text
   ┌──────────────────────────────────────────────────┐
-  │  CSV Source                            Tier 3    │  ← trust tier
-  │  ─────────                                       │     badge
+  │  CSV Source                                      │
+  │  ─────────                                       │
   │  Read rows from a CSV file. Validates and        │
   │  coerces types at the boundary; quarantines      │
   │  malformed rows.                                 │
   │                                                  │
-  │  Audit: ✓ provenance  ✓ retention  ✓ quarantine │
+  │  Audit: ✓ coerces types  ✓ quarantines bad rows │
   │                                                  │
   │  When you'd use this:                            │
   │    A reasonably large dataset (more than ~20     │
@@ -120,7 +119,7 @@ Hover or tap reveals the explanation in plain language.
 Each tab (Sources / Transforms / Sinks) gets a filter strip at the top:
 
 ```text
-  Filter: [ all ] [ ✓ provenance ] [ Tier 1/2 ] [ no network ]
+  Filter: [ all ] [ ✓ provenance ] [ no network ]
 ```
 
 The filter strip lets users narrow the catalog to "what works for my
@@ -181,8 +180,7 @@ The shortcut placement is a small detail; flag in [11-open-questions.md](11-open
 | Component | Touch-point |
 |---|---|
 | Backend | Plugin metadata needs "when you'd use this" / "when you wouldn't" / "example use" fields. These are documentation, not config — they can live in the plugin's docstring or in a sidecar markdown file per plugin. |
-| Backend | Audit-characteristic flags can be inferred from existing plugin contracts (provenance, retention, etc.). New endpoint or extended existing one to return them as flags. |
-| Backend | Trust tier per plugin is already known to the system; just needs to be exposed via the catalog endpoint. |
+| Backend | Audit-characteristic flags can be inferred from existing plugin contracts (provenance, retention, etc.). New endpoint or extended existing one to return them as flags. The determinism-derived flag is **suppressed** when the plugin inherits the kind default (every Source's IO_READ, every Sink's IO_WRITE, every Transform's DETERMINISTIC) — surfacing it on every card teaches the user nothing per-plugin and fails the "every tag must represent a meaningful per-plugin decision" test. |
 | Frontend | New card layout matching the spec above. |
 | Frontend | Filter chips and search-across-prose. |
 | Documentation | Each plugin author needs to write "when you'd use this" / "when you wouldn't" prose. This is a per-plugin documentation task; can be done incrementally. |

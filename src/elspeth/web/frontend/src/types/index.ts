@@ -273,12 +273,24 @@ export interface ComposerProgressSnapshot {
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
-/** Plugin summary from the catalog listing endpoints. */
+/** Plugin summary from the catalog listing endpoints.
+ *
+ * Phase 7A added reference-content fields populated by plugin authors.
+ * Unfilled plugins return `null` / empty values; the catalog drawer
+ * renders a "see the technical description" fallback for them.
+ */
 export interface PluginSummary {
   name: string;
   plugin_type: "source" | "transform" | "sink";
   description: string;
   config_fields: { name: string; type: string; required: boolean; description: string; default: unknown }[];
+
+  // Phase 7B reference-content fields
+  usage_when_to_use: string | null;
+  usage_when_not_to_use: string | null;
+  example_use: string | null;
+  capability_tags: string[];
+  audit_characteristics: string[];
 }
 
 /** Detailed plugin schema info including configuration JSON Schema. */

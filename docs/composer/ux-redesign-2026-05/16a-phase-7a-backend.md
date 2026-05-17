@@ -1,5 +1,31 @@
 # Phase 7A — Backend: Plugin metadata schema extension + catalog API surface
 
+> **⚠️ HISTORICAL — `data_trust_tier` scope rescinded 2026-05-18.**
+>
+> The original Phase 7A scope included a per-plugin `data_trust_tier`
+> field (`int | None` with values `1`, `2`, `3`) and authored
+> declarations on all 15 boundary plugins. **That scope was rescinded
+> in commit `c76ecc0f2`** (operator review 2026-05-18) because the
+> field failed the "each tag must represent a meaningful per-plugin
+> decision" test — `data_trust_tier == 3` was structurally constant
+> across every Source and every external-call Transform, and
+> `data_trust_tier == 2` was structurally constant across every pure
+> Transform. Authors were copy-pasting a value the kind already
+> determined.
+>
+> The boundary predicate in
+> `src/elspeth/web/audit_readiness/service.py` was rewritten to derive
+> boundary status from `(kind, determinism)`, and the field + enum
+> type + all 15 declarations + the `_INTERNAL_PLUGIN_CLASSES` parity
+> test were deleted. A successor parity test
+> (`test_boundary_predicate_parity.py`) exercises the new predicate
+> against the same expected-boundary lists.
+>
+> Sections below referencing `data_trust_tier` are preserved as
+> historical record of the Phase 7A planning state. New work should
+> not re-introduce the field — see commit `c76ecc0f2` rationale and
+> `feedback_catalog_is_reference_not_toolkit` memory.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps
@@ -2358,3 +2384,4 @@ extension, "Inline data from chat" synthetic entry, shortcuts regroup.
 - 2026-05-17 Round-4 textual cleanup (S4 + S5): (S4) Swept all stale "inferred-from-quarantine" / "on-validation-failure handling" prose. Nine sites corrected: (1) `**Goal:**` preamble — `"(determinism, validation-failure handling)"` → `"(determinism)"`; (2) `**Architecture:**` — dropped `"and the source quarantine setting"`; (3) Scope bullets union — dropped `"∪ inferred-from-quarantine"`; (4) `_derive_audit_characteristics` scope bullet — `"inference"` → `"derivation"`; (5) `test_source_without_declared_quarantine_omits_it` docstring — replaced "don't get it inferred / Inference from …" with factual author-declared framing; (6) `test_transform_has_no_quarantine_inference` docstring — replaced "source-only inference" with "author-declared, not derived"; (7) `_to_summary` docstring — replaced `"inferred from determinism and (for sources) on-validation-failure handling"` with `"derived from determinism"`; (8) Risks table row — swapped `quarantine` (now author-declared, so not a derivation surprise) for `io_read` as the example, and `"inference rules"` → `"derivation rules"`; (9) `audit_characteristics` base-class docstring — replaced `"inferred characteristics (from determinism, validation-failure handling)"` with `"characteristic derived from determinism"`, and added `'quarantine'` to the declare-flags examples since it is now author-declared. Rev-history entries left intact. (S5) Replaced `TestSources` → `TestListSources` in Task 5 Steps 7 and 8 (2 occurrences); verified against actual `tests/unit/web/catalog/test_routes.py` class names (`TestListSources`, `TestListTransforms`, `TestListSinks`) — no other mismatches found in the plan.
 
 - 2026-05-18 Worktree batch protocol added: Added the `## Implementation worktree (batched with [siblings])` section near the top of this plan documenting the shared `.worktrees/phase-7-catalog` worktree, the execution order in the batch, the operator-known gotchas (venv leak / Python 3.13 / subagent CWD / filigree CLI), and the single-PR shipping shape. See `16-phase-7-catalog-reshape.md` for the canonical batch protocol.
+- **2026-05-18 implementation complete**: All 7 tasks landed on `feat/phase-7-catalog`. 13 commits ahead of RC5.2: `7accf6bb1` (Phase 7A.0 mypy paydown prelude), `1aefdab31` (Phase 7A.0.1 prelude amendment for env drift), `2975efbe2` (Task 1.1 base-class fields), `1221c1c28` (Task 1.2 protocols + ClassVar drop), `d23386e34` (Task 2 PluginSummary extension), `b49a164de` (Task 3 derivation helper), `36be249a8` (Task 4 _to_summary wire-up), `3f963c7ac` (Task 5 canonical CSV reference content), `76df27a21` (Task 6 trust.py discharge), `d8968ccb1` (Task 6 fix: drift guards + cache + negative coverage), `1d6cbdef0` (Task 7 fix: TransformProtocol fake), `f008ba505` (post-review type hardening: DataTrustTier Literal + AuditCharacteristic StrEnum + 3 comment fixes). Per-plan PR-toolkit review verdict: zero BLOCKERs, zero unaddressed MAJORs after the post-review hardening commit. Test coverage analysis, silent-failure hunt, and general code review all approved on first pass. Type-design review found 4 MAJORs (all addressed in `f008ba505` — DataTrustTier Literal alias, AuditCharacteristic StrEnum, type aliases for wire-format asymmetry, sink-docstring contradiction fixed). Comment-accuracy review found 2 MAJORs (both addressed in `f008ba505` — test_explain.py docstring inaccuracy, test_boundary_attribute_parity.py import-section comment). Final unit-test count: 16053 passing. `mypy src/elspeth` clean across 420 source files. One pre-existing failure flagged (NOT 7A's fault): `test_happy_trivial_prompt_under_production_byte_envelope` (202237 vs 200000 byte envelope) reproduces identically on the merge-base — surfaced for operator awareness, not in scope for this plan.

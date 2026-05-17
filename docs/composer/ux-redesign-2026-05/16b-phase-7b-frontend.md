@@ -1,5 +1,18 @@
 # Phase 7B — Frontend: Catalog primitives + PluginCard rewrite
 
+> **⚠️ HISTORICAL — `TrustTierBadge` + `data_trust_tier` rescinded
+> 2026-05-18.** Operator review concluded the field was kind-derived
+> metadata that failed the "every tag must represent a meaningful
+> per-plugin decision" test. Commit `c76ecc0f2` deleted the field, the
+> `DataTrustTier` type alias, and every fixture reference. The
+> `TrustTierBadge` component referenced below was never built (the
+> Phase 7C frontend authors recognised the issue mid-implementation
+> and silently dropped it from the rendered card; an e2e assertion of
+> its absence was kept until commit `c76ecc0f2` deleted that
+> assertion as vacuous). The `data_trust_tier: 3` lines in test
+> fixtures below are preserved as historical record; do not copy
+> them into new tests.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps
@@ -1525,3 +1538,4 @@ affordances; ship 7C immediately after 7B to complete the reshape.
 - 2026-05-18 Round-2 fixes (B3 + B4 + dead CSS + ChatInput comment + R1 carry-overs): (B3) Added `CatalogDrawer.tsx` to Task 4's Modified files list and the Step 6 `git add`; added Step 1a directing removal of `onCloseDrawer={onClose}` from the `<PluginCard>` render at CatalogDrawer.tsx:359; added Step 5a (`npx tsc --noEmit`) after the regression suite to catch call-site breakage. (B4) Replaced the Task 4 Step 1 wholesale-file-replace instruction with surgical-edit instructions: PRESERVE the 12 regression-guard tests for bug `elspeth-dcf12c061b` (1 collapsed-header + 7 discriminated-union + 3 error/loading + 1 flat-schema); REMOVE only the 4-test "Use in pipeline action" describe block; UPDATE the 13 aria-label query strings across 11 retained tests from `"X plugin details"` to `/schema for X/i`; ADD the new Phase 7B layout describe block. (Dead CSS) Added `App.css` to Task 4's Modified files and the Step 6 `git add`; added Step 1b directing deletion of the complete `.plugin-card-use-btn` rule block (comment header + base rule + hover/focus selector + touch media query, approximately lines 3368-3392); cited the CLAUDE.md No-Legacy policy rationale distinguishing old-deleted-names (remove now) from new-not-yet-styled names (CSS-pass deferred). (ChatInput comment) Added `ChatInput.tsx` to Task 4's Modified files and the Step 6 `git add`; added Step 1c directing update of the stale line-63 comment from "PluginCard 'Use in pipeline' action" to name `InlineChatSourceEntry` as the post-7C dispatcher. (R1 carry-over Edit 5) Changed "Task 5" to "Task 4" in Task 1 Step 5 fixture-update narrative. (R1 carry-over Edit 6) Added `expect(meta).not.toBeNull()` guard before the `expect(meta?.tone)` assertion in the Task 2 `io_write informational tone` test for sibling consistency with the other describe tests. Updated File structure "Modified" list to include the three new files; removed `ChatInput.tsx` from "Not modified" (it is now Modified).
 
 - 2026-05-18 Worktree batch protocol added: Added the `## Implementation worktree (batched with [siblings])` section near the top of this plan documenting the shared `.worktrees/phase-7-catalog` worktree, the execution order in the batch, the operator-known gotchas (venv leak / Python 3.13 / subagent CWD / filigree CLI), and the single-PR shipping shape. See `16-phase-7-catalog-reshape.md` for the canonical batch protocol.
+- **2026-05-18 implementation complete**: All 4 tasks landed on `feat/phase-7-catalog`. 4 commits on top of 16a: `d853344bb` (Task 1 PluginSummary types + DataTrustTier + InlineChatSourceEntry), `32dca8ae5` (Task 2 auditCharacteristics centralised metadata table — 13 entries with parity test), `656107b02` (Task 3 AuditCharacteristicIcon component), `bf6eab93f` (Task 4 PluginCard.tsx rewrite — 12 elspeth-dcf12c061b regression tests preserved + 9 new layout tests; "Use in pipeline" toolkit affordance fully deleted from PluginCard / CatalogDrawer / App.css / ChatInput; auditCharacteristics.ts label-casing normalized as a Task 2 review carry-forward). Per-plan PR-toolkit review verdict: zero BLOCKERs, zero unaddressed MAJORs. Code-reviewer approved. Test-analyzer approved with one Important Improvement (audit-characteristic sorted-order is uncovered by test — criticality 6, below the 80-MAJOR threshold so non-blocking; rolling forward into 16c) and one quality nit (tone-class assertions could also assert base `audit-icon` class — criticality 3). Final frontend test count: 757/757 passing across 79 test files. `npm run typecheck` clean.

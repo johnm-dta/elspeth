@@ -180,6 +180,16 @@ class TestTransformProtocol:
             _output_schema_config: SchemaConfig | None = None  # Set by BaseTransform
             on_error: str | None = None  # Error routing (WP-11.99b)
             on_success: str | None = None  # Success routing
+            # Reference-content fields (Phase 7A) — declared on TransformProtocol
+            # for the catalog/audit_readiness surfaces. The hand-rolled fake
+            # mirrors BaseTransform's defaults so @runtime_checkable conformance
+            # holds without inheriting BaseTransform.
+            usage_when_to_use: str | None = None
+            usage_when_not_to_use: str | None = None
+            example_use: str | None = None
+            capability_tags: tuple[str, ...] = ()
+            audit_characteristics: frozenset[str] = frozenset()
+            data_trust_tier: int | None = None
             # Lifecycle guards managed by BaseTransform; declared here for the
             # hand-rolled structural fake to satisfy TransformProtocol's
             # @runtime_checkable structural typing.

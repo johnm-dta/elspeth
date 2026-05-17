@@ -699,10 +699,10 @@ class AggregationExecutor:
 
         if state.version != checkpoint_version:
             raise AuditIntegrityError(
-                f"Incompatible checkpoint version: {state.version!r}. "
-                f"Expected: {checkpoint_version!r}. "
-                f"Cannot resume from incompatible checkpoint format. "
-                f"This checkpoint may be from a different ELSPETH version."
+                f"Incompatible aggregation checkpoint version: got {state.version!r}, "
+                f"expected {checkpoint_version!r}. This checkpoint is from a different "
+                f"ELSPETH version. Per the project DB migration policy, delete the audit "
+                f"database and start a fresh run rather than attempting to resume."
             )
 
         for node_id_str, node_checkpoint in state.nodes.items():

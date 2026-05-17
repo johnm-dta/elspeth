@@ -196,6 +196,75 @@ class TestReportAssembleRendering:
         assert body.startswith("# Findings\n\n")
         assert result.row["report_format"] == "markdown"
 
+    def test_html_fragment_renders_escaped_paragraphs_with_title(self) -> None:
+        # html_fragment must escape HTML-special chars in body lines and the
+        # title, wrap each line in <p>, and wrap the title in <h1>.
+        from elspeth.plugins.transforms.report_assemble import ReportAssemble
+
+        transform = ReportAssemble(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "text_field": "line",
+                "format": "html_fragment",
+                "title": "Headlines & <updates>",
+            }
+        )
+        ctx = _ctx(batch_size=2)
+
+        result = transform.process([_row({"line": "a < b"}), _row({"line": "c > d"})], ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        body = result.row["report_body"]
+        assert isinstance(body, str)
+        # Title is escaped and wrapped in <h1>
+        assert "<h1>Headlines &amp; &lt;updates&gt;</h1>" in body
+        # Each body line is escaped and wrapped in <p>
+        assert "<p>a &lt; b</p>" in body
+        assert "<p>c &gt; d</p>" in body
+        assert result.row["report_format"] == "html_fragment"
+
+    def test_join_with_separator_applies_to_html_fragment(self) -> None:
+        # Regression: html_fragment previously hardcoded "\n" between <p>
+        # elements, silently dropping the configured join_with separator.
+        from elspeth.plugins.transforms.report_assemble import ReportAssemble
+
+        transform = ReportAssemble(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "text_field": "line",
+                "format": "html_fragment",
+                "join_with": "\n\n",
+            }
+        )
+        ctx = _ctx(batch_size=2)
+
+        result = transform.process([_row({"line": "alpha"}), _row({"line": "beta"})], ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        body = result.row["report_body"]
+        assert body == "<p>alpha</p>\n\n<p>beta</p>"
+
+    def test_join_with_non_default_applies_to_plain_text(self) -> None:
+        # Sanity check: join_with applies as documented for plain_text format.
+        from elspeth.plugins.transforms.report_assemble import ReportAssemble
+
+        transform = ReportAssemble(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "text_field": "line",
+                "join_with": "|",
+            }
+        )
+        ctx = _ctx(batch_size=2)
+
+        result = transform.process([_row({"line": "alpha"}), _row({"line": "beta"})], ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["report_body"] == "alpha|beta"
+
     def test_non_string_row_value_crashes(self) -> None:
         # Plugin contract: text_field MUST be a string by the time it
         # reaches the report assembler.  A non-string value is an

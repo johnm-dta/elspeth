@@ -79,7 +79,7 @@ class ReportAssemble(BaseTransform):
 
     name = "report_assemble"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f70736da1d3604fa"
+    source_file_hash: str | None = "sha256:3c7bc6b5e7c26f31"
     config_model = ReportAssembleConfig
     is_batch_aware = True
 
@@ -154,7 +154,11 @@ class ReportAssemble(BaseTransform):
         return body
 
     def _render_html_fragment(self, lines: list[str]) -> str:
-        paragraphs = "\n".join(f"<p>{html.escape(line)}</p>" for line in lines)
+        # Rule (consistent across all three renderers): self._join_with separates
+        # body elements; the title-to-body separator is a per-format constant
+        # (plain_text/markdown use "\n\n"; html_fragment uses "\n" because
+        # block-level HTML elements don't require blank-line separation).
+        paragraphs = self._join_with.join(f"<p>{html.escape(line)}</p>" for line in lines)
         if self._title:
             return f"<h1>{html.escape(self._title)}</h1>\n{paragraphs}" if paragraphs else f"<h1>{html.escape(self._title)}</h1>"
         return paragraphs

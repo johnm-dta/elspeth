@@ -4162,14 +4162,24 @@ class TestAggregationCheckpointVersion:
     """Tests for aggregation checkpoint version compatibility."""
 
     def test_old_checkpoint_version_rejected(self) -> None:
-        """Old checkpoint version (2.1) is rejected — prevents silent state corruption."""
+        """Old checkpoint version (2.1) is rejected — prevents silent state corruption.
+
+        Error message must include operator recovery guidance ("delete the
+        audit" database / "fresh run") consistent with the project DB
+        migration policy. Future drift that drops the recovery instruction
+        will fail this assertion.
+        """
         executor, _factory, _nid = TestAggregationExecutor._make_agg_executor(TestAggregationExecutor())
 
         # Construct typed DTO with wrong version — restore_from_checkpoint checks value
         old_checkpoint = AggregationCheckpointState(version="2.1", nodes={})
 
-        with pytest.raises(AuditIntegrityError, match="Incompatible checkpoint version"):
+        with pytest.raises(AuditIntegrityError, match="Incompatible aggregation checkpoint version") as exc_info:
             executor.restore_from_checkpoint(old_checkpoint)
+
+        message = str(exc_info.value)
+        assert "delete the audit" in message
+        assert "fresh run" in message
 
     def test_current_version_accepted(self) -> None:
         """Current checkpoint version is accepted without error."""

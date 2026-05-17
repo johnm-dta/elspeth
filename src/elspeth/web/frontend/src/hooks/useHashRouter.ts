@@ -10,7 +10,7 @@
  * The fragment is an arrival action, not steady-state URL state.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   OPEN_GRAPH_MODAL_EVENT,
   OPEN_YAML_MODAL_EVENT,
@@ -22,10 +22,27 @@ interface HashState {
   verb: string | null;
 }
 
+interface RedirectToast {
+  message: string;
+  dismiss: () => void;
+}
+
 const ACTION_VERBS: Record<string, string> = {
   graph: OPEN_GRAPH_MODAL_EVENT,
   yaml: OPEN_YAML_MODAL_EVENT,
 };
+
+/**
+ * Verbs that were valid tabs in earlier versions but have since been removed.
+ * When detected, a one-time dismissible toast is shown to the user.
+ * All other unrecognized verbs are silently stripped (backward compat).
+ */
+const RETIRED_VERBS: Record<string, string> = {
+  runs: "The Runs tab was removed in this update. Showing Graph instead.",
+  spec: "The Spec tab was removed in this update. Showing Graph instead.",
+};
+
+const TOAST_DISMISSED_KEY = "elspeth_redirect_toast_dismissed";
 
 function parseHash(): HashState {
   const hash = window.location.hash;
@@ -38,35 +55,72 @@ function buildCanonicalHash(sessionId: string | null): string {
   return sessionId ? `#/${sessionId}` : "";
 }
 
-export function useHashRouter(): void {
+export function useHashRouter(): { redirectToast: RedirectToast | null } {
   const lastWrittenHash = useRef<string>("");
   const applying = useRef(false);
 
+  // Read dismissal flag once at mount. Using a ref rather than reading
+  // localStorage on every applyHash invocation avoids repeated storage reads.
+  const dismissedRef = useRef<boolean>(
+    typeof window !== "undefined" &&
+      window.localStorage.getItem(TOAST_DISMISSED_KEY) === "1",
+  );
+
+  const [redirectToast, setRedirectToast] = useState<RedirectToast | null>(
+    null,
+  );
+
   const applyHash = (state: HashState) => {
     applying.current = true;
-    const { sessionId, verb } = state;
-    const store = useSessionStore.getState();
+    try {
+      const { sessionId, verb } = state;
+      const store = useSessionStore.getState();
 
-    if (sessionId && sessionId !== store.activeSessionId) {
-      store.selectSession(sessionId);
+      if (sessionId && sessionId !== store.activeSessionId) {
+        store.selectSession(sessionId);
+      }
+
+      // Fix A: use hasOwnProperty to avoid prototype-chain walk.
+      // The `in` operator walks the prototype chain: `"constructor" in ACTION_VERBS`
+      // is true even though "constructor" is not an own property of ACTION_VERBS.
+      // `ACTION_VERBS["constructor"]` returns the Object constructor function and
+      // `new CustomEvent(fn)` would coerce it to a garbage event name.
+      // Object.prototype.hasOwnProperty.call() is the ES2020-compatible guard.
+      const hasOwn = Object.prototype.hasOwnProperty;
+      if (verb && hasOwn.call(ACTION_VERBS, verb)) {
+        const eventName = ACTION_VERBS[verb];
+        queueMicrotask(() => window.dispatchEvent(new CustomEvent(eventName)));
+      }
+
+      // Fix C: retired-verb redirect toast. Only "runs" and "spec" trigger
+      // the toast; all other unrecognized verbs are silently stripped.
+      if (verb && hasOwn.call(RETIRED_VERBS, verb) && !dismissedRef.current) {
+        const message = RETIRED_VERBS[verb];
+        setRedirectToast({
+          message,
+          dismiss: () => {
+            dismissedRef.current = true;
+            window.localStorage.setItem(TOAST_DISMISSED_KEY, "1");
+            setRedirectToast(null);
+          },
+        });
+      }
+
+      const canonical = buildCanonicalHash(sessionId);
+      if (canonical !== window.location.hash) {
+        lastWrittenHash.current = canonical;
+        window.history.replaceState(
+          null,
+          "",
+          canonical || window.location.pathname,
+        );
+      }
+    } finally {
+      // Fix B: guarantee the flag is cleared even if selectSession throws.
+      // Without this, applying.current stays true permanently and the URL-echo
+      // subscription (useEffect #3) becomes a no-op until page reload.
+      applying.current = false;
     }
-
-    if (verb && verb in ACTION_VERBS) {
-      const eventName = ACTION_VERBS[verb];
-      queueMicrotask(() => window.dispatchEvent(new CustomEvent(eventName)));
-    }
-
-    const canonical = buildCanonicalHash(sessionId);
-    if (canonical !== window.location.hash) {
-      lastWrittenHash.current = canonical;
-      window.history.replaceState(
-        null,
-        "",
-        canonical || window.location.pathname,
-      );
-    }
-
-    applying.current = false;
   };
 
   useEffect(() => {
@@ -139,4 +193,5 @@ export function useHashRouter(): void {
     return unsub;
   }, []);
 
+  return { redirectToast };
 }

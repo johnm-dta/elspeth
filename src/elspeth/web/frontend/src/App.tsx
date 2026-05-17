@@ -25,6 +25,11 @@ import type { SystemStatus } from "./types/index";
 
 // Health check interval in milliseconds (30 seconds)
 const HEALTH_CHECK_INTERVAL = 30_000;
+// NOTE (P3A-003 — operator-gated retention, see CLAUDE.md "No Legacy Code Policy"):
+// This key cleans up localStorage state from the old SessionSidebar collapse widget
+// which was deleted in Phase 3A. Retained (not deleted) because elspeth.foundryside.dev
+// holds the operator's own browser state; clearing it is an operator-gated action.
+// Safe to remove once the operator confirms staging localStorage has been cleared.
 const RETIRED_SIDEBAR_COLLAPSED_KEY = "elspeth_sidebar_collapsed";
 
 /**

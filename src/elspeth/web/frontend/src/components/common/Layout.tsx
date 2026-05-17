@@ -8,6 +8,8 @@ import {
 import { ErrorBoundary } from "./ErrorBoundary";
 import { DefaultModeChangedBanner } from "./DefaultModeChangedBanner";
 
+// NOTE (P3A-003 — operator-gated retention): key retains the legacy "inspector" prefix
+// to preserve any operator-bookmarked width value across the Phase 3A inspector → siderail rename.
 const SIDERAIL_WIDTH_KEY = "elspeth_inspector_width";
 
 const MIN_SIDERAIL_WIDTH = 240;

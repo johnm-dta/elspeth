@@ -30,6 +30,12 @@ interface HashState {
 const VALID_TABS = new Set(["graph", "yaml"]);
 const DEFAULT_TAB = "graph";
 const REDIRECT_TOAST_DISMISSED_KEY = "elspeth_redirect_toast_dismissed";
+// NOTE (P3A-003 — operator-gated retention, see CLAUDE.md "No Legacy Code Policy"):
+// Retained per Phase-3A review entry P3A-003 (operator-gated retention). Users (primarily
+// the operator on elspeth.foundryside.dev) may have bookmarked #/spec or #/runs URLs from
+// the pre-Phase-3A UI. This redirect-toast machinery intercepts those stale tabs and shows
+// a one-time informational banner. Safe to remove when staging-user bookmarks have rotated
+// past those routes, or after the next staging DB reset.
 const REMOVED_TAB_MESSAGES: Record<string, string> = {
   runs: "The Runs tab was removed in this update. Showing Graph instead.",
   spec: "The Spec tab was removed in this update. Showing Graph instead.",

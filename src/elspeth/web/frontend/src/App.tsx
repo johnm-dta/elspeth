@@ -4,7 +4,7 @@ import * as api from "./api/client";
 import { AuthGuard } from "./components/common/AuthGuard";
 import { AppHeader } from "./components/common/AppHeader";
 import { Layout } from "./components/common/Layout";
-import { SideRail } from "./components/common/SideRail";
+import { SideRail } from "./components/sidebar/SideRail";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";

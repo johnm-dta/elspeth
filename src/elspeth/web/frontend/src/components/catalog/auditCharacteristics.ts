@@ -153,7 +153,7 @@ export const AUDIT_CHARACTERISTICS: AuditCharacteristicMeta[] = [
   },
   {
     flag: "network",
-    label: "network call",
+    label: "Network call",
     glyph: "📡",
     tooltip:
       "Plugin reaches an external system over the network. This is the " +

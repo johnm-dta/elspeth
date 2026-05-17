@@ -60,14 +60,16 @@ export function ChatInput({
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const uploadBlob = useBlobStore((s) => s.uploadBlob);
 
-  // Listen for prefill events dispatched by PluginCard "Use in pipeline" action.
+  // Listen for prefill events dispatched by InlineChatSourceEntry (catalog
+  // Sources tab, Phase 7C). After Phase 7B the PluginCard no longer dispatches
+  // this event; after Phase 7C InlineChatSourceEntry is the sole dispatcher.
   // Uses setText (the controlled/uncontrolled abstraction) to set the value,
   // then focuses the textarea via the external inputRef.
   useEffect(() => {
     function handlePrefill(e: Event) {
       const detail = (e as CustomEvent<string>).detail;
       if (typeof detail !== "string") {
-        // System-to-system contract violation (PluginCard always sends a
+        // System-to-system contract violation (the dispatcher always sends a
         // string).  Per CLAUDE.md trust-tier model: internal contract
         // violations crash, not log-and-continue.  This surfaces immediately
         // in dev / tests / DevTools rather than producing a silent no-op

@@ -193,6 +193,17 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
       if (e.key === "/" && !isEditable) {
         e.preventDefault();
         searchInputRef.current?.focus();
+        return;
+      }
+      // Alt+1 / Alt+2 / Alt+3: Switch catalog tab while drawer is open.
+      // Binding is drawer-scoped — the handler only runs when isOpen is true.
+      // Does NOT dispatch a custom event; calls setActiveTab directly so
+      // App.test.tsx's "does not dispatch retired inspector tab shortcuts on
+      // Alt+digit" regression guard continues to pass unchanged.
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        if (e.key === "1") { e.preventDefault(); setActiveTab("sources"); return; }
+        if (e.key === "2") { e.preventDefault(); setActiveTab("transforms"); return; }
+        if (e.key === "3") { e.preventDefault(); setActiveTab("sinks"); return; }
       }
     }
     document.addEventListener("keydown", handleKeyDown);
@@ -252,12 +263,21 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
   // Get plugins for current tab — used as the input for both the
   // filter-chip strip (which derives chip values from this set) and the
   // composed filter+search predicate.
-  const allPluginsForTab: PluginSummary[] =
-    activeTab === "sources"
-      ? (sources ?? [])
-      : activeTab === "transforms"
-        ? (transforms ?? [])
-        : (sinks ?? []);
+  //
+  // Memoized so downstream useMemo hooks (pluginList,
+  // availableCapabilityTags, availableAuditCharacteristics) don't see a
+  // freshly-built reference on every render — without memoization those
+  // hooks tripped `react-hooks/exhaustive-deps` warnings (their dep array
+  // depended on a conditional expression rebuilt each render).
+  const allPluginsForTab = useMemo<PluginSummary[]>(
+    () =>
+      activeTab === "sources"
+        ? (sources ?? [])
+        : activeTab === "transforms"
+          ? (transforms ?? [])
+          : (sinks ?? []),
+    [activeTab, sources, transforms, sinks],
+  );
 
   // Composed list: filter first, then search. AND composition between
   // filter groups and the search predicate; OR composition within a group.

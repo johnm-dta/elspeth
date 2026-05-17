@@ -1,5 +1,5 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CatalogDrawer } from "./CatalogDrawer";
 import * as api from "@/api/client";
@@ -317,5 +317,41 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
     // Both must be in the document at the same time.
     expect(screen.getByText("No plugins match the active filters.")).toBeInTheDocument();
     expect(screen.getByText(/inline data from chat/i)).toBeInTheDocument();
+  });
+});
+
+describe("CatalogDrawer — Alt+1-3 tab shortcuts", () => {
+  it("Alt+1 switches to the Sources tab", async () => {
+    render(<CatalogDrawer isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: /sources/i })).toBeInTheDocument());
+
+    // Start on Sources (default); switch away first to make the Alt+1 test meaningful.
+    await userEvent.click(screen.getByRole("tab", { name: /transforms/i }));
+    expect(screen.getByRole("tab", { name: /transforms/i })).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(document, { key: "1", altKey: true });
+    expect(screen.getByRole("tab", { name: /sources/i })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("Alt+2 switches to the Transforms tab", async () => {
+    render(<CatalogDrawer isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: /sources/i })).toBeInTheDocument());
+
+    fireEvent.keyDown(document, { key: "2", altKey: true });
+    expect(screen.getByRole("tab", { name: /transforms/i })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("Alt+3 switches to the Sinks tab", async () => {
+    render(<CatalogDrawer isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: /sources/i })).toBeInTheDocument());
+
+    fireEvent.keyDown(document, { key: "3", altKey: true });
+    expect(screen.getByRole("tab", { name: /sinks/i })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("Alt+1-3 has no effect when drawer is closed", () => {
+    render(<CatalogDrawer isOpen={false} onClose={() => {}} />);
+    // No keydown handler registered when closed — this must not throw.
+    fireEvent.keyDown(document, { key: "1", altKey: true });
   });
 });

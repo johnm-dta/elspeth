@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import { relativeTime } from "../../utils/time";
 import type {
   ReadinessRow,
   ReadinessRowId,
@@ -138,6 +139,9 @@ export function AuditReadinessPanel() {
   if (!activeSessionId || !hasCompositionContent) {
     return null;
   }
+  if (!compositionState) {
+    throw new Error("compositionState missing after audit-readiness content guard");
+  }
 
   if (isLoading && !snapshot) {
     return (
@@ -175,6 +179,9 @@ export function AuditReadinessPanel() {
     return null;
   }
 
+  const checkedText = relativeTime(snapshot.checked_at);
+  const freshnessLabel = `Audit readiness checked ${checkedText} as of v${snapshot.composition_version}`;
+
   // Collapsed view — single summary line when nothing is actionable.
   if (!showExpanded) {
     return (
@@ -191,6 +198,12 @@ export function AuditReadinessPanel() {
           aria-label="Audit ready. Show details."
         >
           <span aria-hidden="true">{"✓"}</span> Audit ready
+          <span
+            className="audit-readiness-summary-meta"
+            aria-label={freshnessLabel}
+          >
+            Checked {checkedText} · as of v{snapshot.composition_version}
+          </span>
         </button>
       </section>
     );
@@ -204,8 +217,28 @@ export function AuditReadinessPanel() {
         aria-busy={isLoading ? "true" : undefined}
       >
         <header className="audit-readiness-header">
-          <h2 className="audit-readiness-title">Audit readiness</h2>
+          <div>
+            <h2 className="audit-readiness-title">Audit readiness</h2>
+            <p
+              className="audit-readiness-freshness"
+              aria-label={freshnessLabel}
+            >
+              Checked {checkedText} · as of v{snapshot.composition_version}
+            </p>
+          </div>
           <div className="audit-readiness-actions">
+            <button
+              type="button"
+              className="btn audit-readiness-action-btn audit-readiness-action-btn--ghost"
+              onClick={() =>
+                void loadSnapshot(activeSessionId, compositionState.version, {
+                  force: true,
+                })
+              }
+              aria-label="Refresh audit check now"
+            >
+              Refresh
+            </button>
             <button
               type="button"
               className="btn audit-readiness-action-btn"

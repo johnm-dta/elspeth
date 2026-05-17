@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal, Self, get_args
 
 from pydantic import Field, model_validator
@@ -43,6 +44,7 @@ class AuditReadinessSnapshot(_StrictResponse):
 
     session_id: str = Field(min_length=1)
     composition_version: int = Field(ge=1)
+    checked_at: datetime
     rows: tuple[ReadinessRow, ...]
 
     @model_validator(mode="after")

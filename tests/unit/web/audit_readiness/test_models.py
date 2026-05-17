@@ -1,5 +1,6 @@
 """Tests for audit-readiness Pydantic response models."""
 
+from datetime import UTC, datetime
 from typing import get_args
 
 import pytest
@@ -12,6 +13,8 @@ from elspeth.web.audit_readiness.models import (
     ReadinessRowId,
     ReadinessStatus,
 )
+
+CHECKED_AT = datetime(2026, 5, 17, 3, 30, tzinfo=UTC)
 
 
 def _row(row_id, status="ok"):
@@ -60,9 +63,51 @@ def test_snapshot_emits_six_canonical_rows():
     snap = AuditReadinessSnapshot(
         session_id="11111111-1111-1111-1111-111111111111",
         composition_version=1,
+        checked_at=CHECKED_AT,
         rows=rows,
     )
     assert {row.id for row in snap.rows} == set(get_args(ReadinessRowId))
+
+
+def test_snapshot_requires_checked_at():
+    rows = tuple(
+        _row(r)
+        for r in (
+            "validation",
+            "plugin_trust",
+            "provenance",
+            "retention",
+            "llm_interpretations",
+            "secrets",
+        )
+    )
+    with pytest.raises(ValidationError, match="checked_at"):
+        AuditReadinessSnapshot(
+            session_id="11111111-1111-1111-1111-111111111111",
+            composition_version=1,
+            rows=rows,
+        )
+
+
+def test_snapshot_accepts_utc_checked_at():
+    rows = tuple(
+        _row(r)
+        for r in (
+            "validation",
+            "plugin_trust",
+            "provenance",
+            "retention",
+            "llm_interpretations",
+            "secrets",
+        )
+    )
+    snap = AuditReadinessSnapshot(
+        session_id="11111111-1111-1111-1111-111111111111",
+        composition_version=1,
+        checked_at=CHECKED_AT,
+        rows=rows,
+    )
+    assert snap.checked_at == CHECKED_AT
 
 
 def test_snapshot_rejects_duplicate_rows():
@@ -71,6 +116,7 @@ def test_snapshot_rejects_duplicate_rows():
         AuditReadinessSnapshot(
             session_id="11111111-1111-1111-1111-111111111111",
             composition_version=1,
+            checked_at=CHECKED_AT,
             rows=rows,
         )
 

@@ -59,7 +59,7 @@ def create_audit_readiness_router() -> APIRouter:
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return JSONResponse(
-            content=result.model_dump(),
+            content=result.model_dump(mode="json"),
             headers={"Cache-Control": _NO_STORE},
         )
 

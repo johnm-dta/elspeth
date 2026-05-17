@@ -5,6 +5,7 @@ No new validation logic. Layer: L3 (application).
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -85,6 +86,7 @@ class ReadinessService:
             LookupError: when the session has no composition state. The
                 route layer translates this into a 404.
         """
+        checked_at = datetime.now(UTC)
         record = await self._session_service.get_current_state(session_id)
         if record is None:
             raise LookupError(f"no composition state for session {session_id!r}")
@@ -108,6 +110,7 @@ class ReadinessService:
         return AuditReadinessSnapshot(
             session_id=str(session_id),
             composition_version=state.version,
+            checked_at=checked_at,
             rows=rows,
         )
 

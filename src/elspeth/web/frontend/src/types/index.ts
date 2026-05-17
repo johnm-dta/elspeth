@@ -860,6 +860,7 @@ export interface ReadinessRow {
 export interface AuditReadinessSnapshot {
   session_id: string;
   composition_version: number;
+  checked_at: string;
   rows: readonly ReadinessRow[];
 }
 

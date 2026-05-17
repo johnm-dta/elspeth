@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
@@ -146,6 +147,21 @@ def test_validation_row_ok_when_no_errors():
         )
     )
     assert _row(snap, "validation").status == "ok"
+
+
+def test_compute_snapshot_populates_utc_checked_at():
+    svc = _make_service(_state(transforms=(("t", "passthrough"),)), _OK)
+    before = datetime.now(UTC)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    after = datetime.now(UTC)
+
+    assert before <= snap.checked_at <= after
+    assert snap.checked_at.tzinfo is UTC
 
 
 def test_validation_row_error_lists_component_ids():

@@ -11,6 +11,7 @@ function snapshot(version: number): AuditReadinessSnapshot {
   return {
     session_id: SESSION_ID,
     composition_version: version,
+    checked_at: new Date().toISOString(),
     rows: [
       { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
       { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
@@ -46,6 +47,17 @@ describe("useAuditReadinessStore", () => {
     await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
 
     expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1);
+  });
+
+  it("loadSnapshot force option bypasses a matching-version cached snapshot", async () => {
+    vi.mocked(api.fetchAuditReadiness)
+      .mockResolvedValueOnce(snapshot(2))
+      .mockResolvedValueOnce(snapshot(2));
+
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2);
+    await useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 2, { force: true });
+
+    expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(2);
   });
 
   it("loadSnapshot refetches when the version advances", async () => {

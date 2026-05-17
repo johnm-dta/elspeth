@@ -23,6 +23,10 @@ import type {
   ApiError,
 } from "../types/api";
 
+export interface LoadSnapshotOptions {
+  force: boolean;
+}
+
 export interface AuditReadinessState {
   snapshotsBySession: Record<string, AuditReadinessSnapshot>;
   explainsBySession: Record<string, AuditReadinessExplain>;
@@ -52,7 +56,11 @@ export interface AuditReadinessState {
    *  per-session maps; clearSession drops the entry alongside them. */
   userExpandedBySession: Record<string, boolean>;
 
-  loadSnapshot: (sessionId: string, compositionVersion: number) => Promise<void>;
+  loadSnapshot: (
+    sessionId: string,
+    compositionVersion: number,
+    options?: LoadSnapshotOptions,
+  ) => Promise<void>;
   loadExplain: (sessionId: string, compositionVersion: number) => Promise<void>;
   clearSession: (sessionId: string) => void;
   reset: () => void;
@@ -74,9 +82,13 @@ export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "l
 export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => ({
   ...getInitialState(),
 
-  async loadSnapshot(sessionId: string, compositionVersion: number) {
+  async loadSnapshot(
+    sessionId: string,
+    compositionVersion: number,
+    options: LoadSnapshotOptions = { force: false },
+  ) {
     const cached = get().snapshotsBySession[sessionId];
-    if (cached && cached.composition_version === compositionVersion) {
+    if (!options.force && cached && cached.composition_version === compositionVersion) {
       return;
     }
 

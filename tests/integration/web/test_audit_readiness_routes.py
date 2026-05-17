@@ -41,6 +41,7 @@ def test_snapshot_returns_six_canonical_rows(
     body = response.json()
     assert body["session_id"] == str(session_id)
     assert body["composition_version"] >= 1
+    assert body["checked_at"].endswith("Z") or body["checked_at"].endswith("+00:00")
     assert {row["id"] for row in body["rows"]} == {
         "validation",
         "plugin_trust",

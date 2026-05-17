@@ -16,6 +16,7 @@ function allGreenSnapshot(version: number): AuditReadinessSnapshot {
   return {
     session_id: SESSION_ID,
     composition_version: version,
+    checked_at: new Date().toISOString(),
     rows: [
       { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
       { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
@@ -195,10 +196,46 @@ describe("AuditReadinessPanel", () => {
     await waitFor(() => expect(panel).not.toHaveAttribute("aria-busy"));
   });
 
+  it("renders a freshness indicator with the checked time and composition version", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    expect(
+      await screen.findByLabelText(/audit readiness checked just now.*v1/i),
+    ).toBeInTheDocument();
+  });
+
+  it("force-refreshes the current composition version when Refresh is clicked", async () => {
+    useAuditReadinessStore.setState({
+      snapshotsBySession: { [SESSION_ID]: snapshotWithProvenanceWarning(1) },
+    });
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(1),
+    });
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+
+    expect(api.fetchAuditReadiness).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole("button", { name: /refresh audit check now/i }),
+    );
+
+    await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1));
+  });
+
   it("renders all six rows when every row is warning or error (no collapse path)", async () => {
     const everyRowActionable: AuditReadinessSnapshot = {
       session_id: SESSION_ID,
       composition_version: 1,
+      checked_at: new Date().toISOString(),
       rows: [
         { id: "validation", label: "Validation", status: "error", summary: "Two errors", detail: "Missing source plugin.", component_ids: ["source"] },
         { id: "plugin_trust", label: "Plugin trust", status: "warning", summary: "One Tier 3 plugin", detail: null, component_ids: ["web_scrape"] },

@@ -547,6 +547,7 @@ describe("AuditReadinessPanel mount in InspectorPanel", () => {
     vi.mocked(fetchAuditReadiness).mockResolvedValue({
       session_id: "s-1",
       composition_version: 1,
+      checked_at: new Date().toISOString(),
       rows: [
         { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
         { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },

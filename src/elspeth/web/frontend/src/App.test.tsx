@@ -240,17 +240,6 @@ describe("App banner roles", () => {
     expect(screen.queryByTestId("inspector-panel-stub")).toBeNull();
   });
 
-  it("removes the retired sidebar collapsed preference on startup", async () => {
-    localStorage.setItem("elspeth_sidebar_collapsed", "true");
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(api.fetchSystemStatus).toHaveBeenCalled();
-    });
-    expect(localStorage.getItem("elspeth_sidebar_collapsed")).toBeNull();
-  });
-
   it("loads sessions on startup after SessionSidebar removal", async () => {
     const session: Session = {
       id: "session-loaded",

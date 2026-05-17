@@ -857,4 +857,27 @@ The deletion of `RunsView.test.tsx` (579 lines, commit `66748edb9`) removed test
 
 **Override path:** If any of the listed capabilities is intended to return in 15b/3B, the plan for that phase must (1) include the capability explicitly in scope and (2) add a tests-rehoming sub-task that recreates the corresponding coverage. The synthesis file at `.review/synthesis.md` (Agent D Finding 5) preserves the full missing-test inventory as the rehoming checklist.
 
+### 2026-05-17 — P3A-003 — Migration shim policy decision (operator override)
+
+**Background.** Commit `2ac40b164` (orchestrator initial decision, option c) annotated three staging migration shims with retention rationale comments rather than deleting them, on the grounds that the operator's own browser state on `elspeth.foundryside.dev` contained localStorage entries from the pre-Phase-3A UI that a forced deletion would silently erase.
+
+**Operator override (option a).** At merge review the operator overrode option (c) and directed option (a): delete all three shims per CLAUDE.md "No Legacy Code Policy". The operator accepted the one-time UX cost explicitly.
+
+**Actual execution state at override time.** When the override was applied against the current HEAD (`bf09e4339`), two of the three shims had already been removed by intervening Phase 3A commits:
+
+- **Shim 2 — `SIDERAIL_WIDTH_KEY` / `"elspeth_inspector_width"` (Layout.tsx):** removed in commit `a43594051` (`feat(web/frontend): remove composer inspector panel`). The entire resizable side-rail panel was replaced with a fixed-width layout; the localStorage-persisted width concept was abandoned. No rename to `"elspeth_siderail_width"` was necessary — the key ceased to exist. Operator-visible impact: saved sidebar width already reset to the fixed `320px` default for any browser that loaded the updated code.
+- **Shim 3 — redirect-toast machinery (useHashRouter.ts / App.tsx):** removed in commit `bb9f12e4a` (`feat(web/frontend): rewrite hash router for composer actions`). The entire tab-based + redirect-toast system (`REDIRECT_TOAST_DISMISSED_KEY`, `REMOVED_TAB_MESSAGES`, `RedirectToast` interface, `maybeShowRedirectToast`, `dismissRedirectToast`, and the `redirectToast` return field) was replaced with the Phase 3B action-verb router that returns `void`. `useHashRouter.test.ts` was also rewritten — the 6 tests it now contains all exercise non-toast Phase 3B fragment behavior and are load-bearing; the file was preserved.
+
+Only **Shim 1** required a deletion commit:
+
+- **Shim 1 — `RETIRED_SIDEBAR_COLLAPSED_KEY` / `"elspeth_sidebar_collapsed"` (App.tsx):** deleted in this commit (see below). Both the NOTE comment block + const declaration and the `useEffect(() => { localStorage.removeItem(RETIRED_SIDEBAR_COLLAPSED_KEY); }, [])` call were removed. The colocated test `"removes the retired sidebar collapsed preference on startup"` in `App.test.tsx` was also deleted (it existed solely to verify the shim's cleanup behavior).
+
+**Operator-visible impact of the full option-(a) outcome:**
+
+1. `"elspeth_sidebar_collapsed"` localStorage entry left orphaned in operator's browser (~30 bytes, no functional effect — the SessionSidebar that read it was already deleted in Phase 3A.7).
+2. Saved sidebar width already reset to `320px` at the `a43594051` deploy; no additional impact.
+3. Bookmarks to `#/<sessionId>/spec` or `#/<sessionId>/runs` silently land on Graph (default) without an explanation banner — the redirect-toast was never deployed to staging, so no operator-visible regression.
+
+**Commit:** `<fill-in-sha-after-commit>` (`refactor(web/frontend): delete staging migration shims per operator override (P3A-003 option a)`).
+
 **Operator note:** This entry records the orchestrator's reasonable-call default. Operator may override at merge review by selecting option (b) — deferred to 15b/3B — in which case the missing-tests list above becomes a mandatory 15b/3B sub-task checklist item.

@@ -147,6 +147,61 @@ class BaseTransform(ABC):
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
 
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: ClassVar[str | None] = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: ClassVar[str | None] = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: ClassVar[str | None] = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: ClassVar[tuple[str, ...]] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog."""
+
+    audit_characteristics: ClassVar[frozenset[str]] = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare flags like 'signed', 'credentials', 'quarantine', 'provenance'
+    (only for plugins that do extra provenance work beyond the standard
+    pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
+    in catalog/service.py."""
+
+    data_trust_tier: ClassVar[int | None] = None
+    """Which tier of data this plugin handles at its boundary. 1 = our
+    own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
+    external data (source input, external API responses). Sources and
+    external-call transforms = 3; pure row transforms = 2; sinks = 2
+    (they emit, they don't ingest). See CLAUDE.md "Data Manifesto" for
+    the tier definitions. Leave None to render as 'tier unspecified.'"""
+
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
     # (e.g. provider-based LLM config selection).
@@ -743,6 +798,61 @@ class BaseSink(ABC):
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
 
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: ClassVar[str | None] = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: ClassVar[str | None] = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: ClassVar[str | None] = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: ClassVar[tuple[str, ...]] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog."""
+
+    audit_characteristics: ClassVar[frozenset[str]] = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare flags like 'signed', 'credentials', 'quarantine', 'provenance'
+    (only for plugins that do extra provenance work beyond the standard
+    pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
+    in catalog/service.py."""
+
+    data_trust_tier: ClassVar[int | None] = None
+    """Which tier of data this plugin handles at its boundary. 1 = our
+    own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
+    external data (source input, external API responses). Sources and
+    external-call transforms = 3; pure row transforms = 2; sinks = 2
+    (they emit, they don't ingest). See CLAUDE.md "Data Manifesto" for
+    the tier definitions. Leave None to render as 'tier unspecified.'"""
+
     # Config model — each subclass sets this to its Pydantic config class.
     config_model: ClassVar[type[PluginConfig] | None] = None
 
@@ -1033,6 +1143,61 @@ class BaseSource(ABC):
     determinism: Determinism = Determinism.IO_READ
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: ClassVar[str | None] = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: ClassVar[str | None] = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: ClassVar[str | None] = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: ClassVar[tuple[str, ...]] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog."""
+
+    audit_characteristics: ClassVar[frozenset[str]] = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare flags like 'signed', 'credentials', 'quarantine', 'provenance'
+    (only for plugins that do extra provenance work beyond the standard
+    pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
+    in catalog/service.py."""
+
+    data_trust_tier: ClassVar[int | None] = None
+    """Which tier of data this plugin handles at its boundary. 1 = our
+    own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
+    external data (source input, external API responses). Sources and
+    external-call transforms = 3; pure row transforms = 2; sinks = 2
+    (they emit, they don't ingest). See CLAUDE.md "Data Manifesto" for
+    the tier definitions. Leave None to render as 'tier unspecified.'"""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # NullSource sets this to None (no config validation needed).

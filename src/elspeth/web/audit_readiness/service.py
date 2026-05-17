@@ -217,14 +217,30 @@ def _build_validation_row(result: ValidationResult) -> ReadinessRow:
     )
 
 
-_BOUNDARY_DETERMINISMS: frozenset[Determinism] = frozenset(
+# Determinism values that flag a Transform as audit-relevant beyond the
+# pure-deterministic baseline. Two distinct semantics share this set:
+#
+#   EXTERNAL_CALL    — the Transform crosses an external trust boundary
+#                      via a network request (web_scrape, RAG, Azure
+#                      moderation). The audit trail records request +
+#                      response so replay is reproducible.
+#
+#   NON_DETERMINISTIC — the Transform's output is not reproducible from
+#                      inputs alone (LLM completions). The audit trail
+#                      records the verbatim output. The classification
+#                      shares an audit signal with EXTERNAL_CALL even
+#                      though the mechanism differs — both produce values
+#                      that came from outside our deterministic control,
+#                      which an auditor needs to see surfaced.
+#
+# The set name reflects that audit-relevance, not strict
+# external-boundary semantics. A hypothetical future plugin that's
+# NON_DETERMINISTIC without making an external call (e.g. uses unseeded
+# randomness) would also classify as audit-flagged here — that's the
+# correct outcome under ELSPETH's auditability standard.
+_AUDIT_FLAGGED_DETERMINISMS: frozenset[Determinism] = frozenset(
     {
         Determinism.EXTERNAL_CALL,
-        # NON_DETERMINISTIC marks a Transform whose output is not
-        # reproducible from inputs alone (LLM completions are the
-        # canonical case). The same audit-trail concern applies — the
-        # value came from somewhere outside our deterministic control,
-        # which an auditor needs to see surfaced as a boundary crossing.
         Determinism.NON_DETERMINISTIC,
     },
 )
@@ -233,13 +249,12 @@ _BOUNDARY_DETERMINISMS: frozenset[Determinism] = frozenset(
 def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
     """Classify every plugin in the composition (boundary vs internal).
 
-    A plugin crosses an external trust boundary when:
+    A plugin is surfaced in the plugin-trust row when:
       - it is a Source — by definition reads external data into the pipeline
       - it is a Sink — by definition emits pipeline data to an external
         destination (file, database, blob store, downstream service)
       - it is a Transform whose declared determinism is in
-        ``_BOUNDARY_DETERMINISMS`` (EXTERNAL_CALL or NON_DETERMINISTIC) —
-        both signal an audit-relevant non-internal behaviour
+        ``_AUDIT_FLAGGED_DETERMINISMS`` (EXTERNAL_CALL or NON_DETERMINISTIC)
 
     The predicate is derived from (kind, determinism) so any future plugin
     is classified correctly at registration time without a separate
@@ -253,7 +268,7 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
             unknown.append((kind, component_id))
             return
         plugin_cls = _get_plugin_class_for_kind(kind, name)
-        if kind in ("source", "sink") or plugin_cls.determinism in _BOUNDARY_DETERMINISMS:
+        if kind in ("source", "sink") or plugin_cls.determinism in _AUDIT_FLAGGED_DETERMINISMS:
             boundary.append((kind, component_id, name))
 
     if state.source is not None:

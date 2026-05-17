@@ -15,7 +15,7 @@ plugins fails CI here.
 from __future__ import annotations
 
 from elspeth.plugins.infrastructure.manager import PluginManager
-from elspeth.web.audit_readiness.service import _BOUNDARY_DETERMINISMS
+from elspeth.web.audit_readiness.service import _AUDIT_FLAGGED_DETERMINISMS
 from elspeth.web.catalog.schemas import PluginKind
 
 # Every Source in the registered catalog is a boundary plugin: by
@@ -48,7 +48,7 @@ _EXPECTED_BOUNDARY_SINKS: frozenset[str] = frozenset(
 )
 
 # Boundary Transforms — determinism is EXTERNAL_CALL or NON_DETERMINISTIC
-# per ``_BOUNDARY_DETERMINISMS`` in
+# per ``_AUDIT_FLAGGED_DETERMINISMS`` in
 # ``elspeth.web.audit_readiness.service``. Every other Transform in the
 # catalog is internal-only.
 _EXPECTED_BOUNDARY_TRANSFORMS: frozenset[str] = frozenset(
@@ -68,7 +68,7 @@ def _predicate_says_boundary(kind: PluginKind, plugin_cls: type) -> bool:
     test so a future change to the production helper that drifts from
     the parity-set lists below fails this test, not just integration
     tests that happen to exercise an affected plugin."""
-    return kind in ("source", "sink") or plugin_cls.determinism in _BOUNDARY_DETERMINISMS
+    return kind in ("source", "sink") or plugin_cls.determinism in _AUDIT_FLAGGED_DETERMINISMS
 
 
 def _make_manager() -> PluginManager:

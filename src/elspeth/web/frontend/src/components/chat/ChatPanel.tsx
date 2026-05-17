@@ -8,6 +8,7 @@ import { ComposingIndicator } from "./ComposingIndicator";
 import { ChatInput } from "./ChatInput";
 import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
+import { InlineRunResults } from "@/components/execution/InlineRunResults";
 import { CompletionSummary } from "./guided/CompletionSummary";
 import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
 import { InlineOptOutCheckbox } from "./guided/InlineOptOutCheckbox";
@@ -508,6 +509,8 @@ export function ChatPanel({
 
       {/* Blob manager drawer */}
       {showBlobManager && <BlobManager onUseAsInput={handleUseAsInput} />}
+
+      <InlineRunResults />
 
       {/* Pending-proposal banner — surfaces composer proposals that need
           operator approval, co-located with the input so the user does not

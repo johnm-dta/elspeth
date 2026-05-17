@@ -27,6 +27,16 @@ import type { SystemStatus } from "./types/index";
 const HEALTH_CHECK_INTERVAL = 30_000;
 const RETIRED_SIDEBAR_COLLAPSED_KEY = "elspeth_sidebar_collapsed";
 
+/**
+ * Maps Alt+digit keyboard shortcuts to inspector tab IDs.
+ * Exported so that P3A-002's test guard can import this single source-of-truth
+ * rather than duplicating the mapping.
+ */
+export const TAB_SHORTCUT_MAP: Readonly<Record<string, string>> = {
+  "1": "graph",
+  "2": "yaml",
+} as const;
+
 // Wire up cross-store subscriptions once at module load time.
 // This must run before any component renders so that version-change
 // auto-clear is active from the first render.
@@ -150,15 +160,9 @@ function App() {
         return;
       }
 
-      // Alt+1/2/3/4: Switch inspector tabs
+      // Alt+1/2: Switch inspector tabs
       if (e.altKey && !e.ctrlKey && !e.metaKey) {
-        const tabMap: Record<string, string> = {
-          "1": "spec",
-          "2": "graph",
-          "3": "yaml",
-          "4": "runs",
-        };
-        const tab = tabMap[e.key];
+        const tab = TAB_SHORTCUT_MAP[e.key];
         if (tab) {
           e.preventDefault();
           window.dispatchEvent(

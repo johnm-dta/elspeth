@@ -303,7 +303,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         },
       });
 
-      // Refresh runs list so the new run appears in the Runs tab immediately
+      // Refresh runs list so the new run appears in InlineRunResults immediately
       get().loadRuns(sessionId);
 
       // Connect WebSocket for live progress
@@ -328,7 +328,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         apiErr.status === 409
           ? "A run is already in progress for this pipeline."
           : apiErr.detail ??
-            "Pipeline execution failed. Check the Runs tab for error details.";
+            "Pipeline execution failed. Check the run results panel for error details.";
       set({
         isExecuting: false,
         error: message,

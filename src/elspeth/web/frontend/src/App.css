@@ -592,47 +592,6 @@ summary:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
-   Interactive Component Highlight (click-to-highlight in Spec tab)
-   --------------------------------------------------------------------------- */
-.component-card {
-  background-color: var(--color-surface-elevated);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-md);
-  cursor: pointer;
-  transition: background-color var(--transition-fast),
-    border-color var(--transition-fast),
-    opacity var(--transition-normal);
-}
-
-.component-card:hover {
-  background-color: var(--color-surface-hover);
-  border-color: var(--color-border-strong);
-}
-
-.component-card-selected {
-  border-color: var(--color-selected-ring);
-  box-shadow: 0 0 0 2px var(--color-selected-ring);
-}
-
-.component-card-dimmed {
-  background-color: rgba(26, 61, 71, var(--opacity-dimmed));
-}
-
-/* Text inside dimmed cards stays fully readable */
-.component-card-dimmed * {
-  opacity: 1;
-}
-
-.component-card-input {
-  border-left: 3px solid var(--color-info);
-}
-
-.component-card-output {
-  border-left: 3px solid var(--color-success);
-}
-
-/* ---------------------------------------------------------------------------
    Button Base Styles
    --------------------------------------------------------------------------- */
 .btn {
@@ -1744,10 +1703,6 @@ summary:focus-visible {
   }
 
   .type-badge {
-    border-width: 2px;
-  }
-
-  .component-card {
     border-width: 2px;
   }
 

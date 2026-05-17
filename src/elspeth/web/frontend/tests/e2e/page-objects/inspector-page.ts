@@ -1,9 +1,9 @@
-// Page object for the right-side inspector panel (tabs: spec/graph/yaml/runs).
+// Page object for the right-side inspector panel (tabs: graph/yaml).
 // Navigation/DOM only; assertions live in spec files.
 
 import type { Page, Locator } from "@playwright/test";
 
-export type InspectorTab = "spec" | "graph" | "yaml" | "runs";
+export type InspectorTab = "graph" | "yaml";
 
 export class InspectorPage {
   readonly page: Page;

@@ -12,7 +12,7 @@ const SHORTCUTS = [
   { keys: "Ctrl+/", action: "Focus chat input" },
   { keys: "Ctrl+Shift+V", action: "Validate pipeline" },
   { keys: "Ctrl+E", action: "Execute pipeline" },
-  { keys: "Alt+1-4", action: "Switch inspector tab (Spec/Graph/YAML/Runs)" },
+  { keys: "Alt+1-2", action: "Switch inspector tab (Graph/YAML)" },
   { keys: "?", action: "Keyboard shortcuts" },
   { keys: "Escape", action: "Close dialog or drawer" },
 ];

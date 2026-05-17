@@ -27,7 +27,7 @@ interface HashState {
   staleTab: string | null;
 }
 
-const VALID_TABS = new Set(["spec", "graph", "yaml"]);
+const VALID_TABS = new Set(["graph", "yaml"]);
 const DEFAULT_TAB = "graph";
 const REDIRECT_TOAST_DISMISSED_KEY = "elspeth_redirect_toast_dismissed";
 const REMOVED_TAB_MESSAGES: Record<string, string> = {

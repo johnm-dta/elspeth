@@ -196,6 +196,17 @@ describe("App banner roles", () => {
     ).toBeInTheDocument();
   });
 
+  it("surfaces the stale Spec hash redirect toast", async () => {
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    window.history.replaceState(null, "", "#/session-1/spec");
+
+    render(<App />);
+
+    expect(
+      await screen.findByText(/Spec tab was removed/i),
+    ).toBeInTheDocument();
+  });
+
   it("dispatches an open-catalog event on Ctrl+Shift+P", async () => {
     const onOpenCatalog = vi.fn();
     window.addEventListener("open-catalog", onOpenCatalog);

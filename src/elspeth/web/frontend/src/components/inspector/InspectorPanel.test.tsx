@@ -526,14 +526,23 @@ describe("InspectorPanel Runs tab removal", () => {
     });
   });
 
-  it("keeps Spec, Graph, and YAML while removing Runs from the tab strip", () => {
+  it("keeps Graph and YAML while removing Spec and Runs from the tab strip", () => {
     render(<InspectorPanel />);
 
     const tablist = screen.getByRole("tablist", { name: /Inspector tabs/ });
-    expect(within(tablist).getByRole("tab", { name: "Spec" })).toBeInTheDocument();
     expect(within(tablist).getByRole("tab", { name: "Graph" })).toBeInTheDocument();
     expect(within(tablist).getByRole("tab", { name: "YAML" })).toBeInTheDocument();
+    expect(within(tablist).queryByRole("tab", { name: "Spec" })).not.toBeInTheDocument();
     expect(within(tablist).queryByRole("tab", { name: "Runs" })).not.toBeInTheDocument();
+  });
+
+  it("defaults the inspector to the Graph tab", () => {
+    render(<InspectorPanel />);
+
+    expect(screen.getByRole("tab", { name: "Graph" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("does not switch to a removed Runs tab after Execute starts a run", async () => {
@@ -553,6 +562,36 @@ describe("InspectorPanel Runs tab removal", () => {
     );
     expect(screen.queryByRole("tab", { name: "Runs" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "YAML" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("selects the node and moves validation component clicks to Graph", async () => {
+    const user = userEvent.setup();
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        summary: "Validation failed",
+        checks: [],
+        errors: [
+          {
+            component_id: "t1",
+            component_type: "transform",
+            message: "Bad transform",
+            suggestion: null,
+          },
+        ],
+        warnings: [],
+      },
+    });
+
+    render(<InspectorPanel />);
+    await user.click(screen.getByRole("tab", { name: "YAML" }));
+    await user.click(screen.getByRole("button", { name: /transform:t1/ }));
+
+    expect(useSessionStore.getState().selectedNodeId).toBe("t1");
+    expect(screen.getByRole("tab", { name: "Graph" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
@@ -645,9 +684,8 @@ describe("AuditReadinessPanel mount in InspectorPanel", () => {
 
   it("panel remains present when every tab is activated in turn", async () => {
     // The panel mounts above the tab strip (not inside any tab panel), so it
-    // must survive tab switching. InspectorPanel has 4 tabs: Spec, Graph, YAML,
-    // Runs. We iterate dynamically over whatever tabs are rendered, so this
-    // test is resilient to future tab-list changes.
+    // must survive tab switching. We iterate dynamically over whatever tabs
+    // are rendered, so this test is resilient to future tab-list changes.
     const user = userEvent.setup();
     render(<InspectorPanel />);
     // Wait for initial mount and panel to appear.

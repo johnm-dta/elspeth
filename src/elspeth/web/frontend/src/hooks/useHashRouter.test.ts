@@ -38,6 +38,29 @@ describe("useHashRouter removed tab redirects", () => {
     }
   });
 
+  it("redirects stale Spec hashes to Graph and exposes a migration toast", async () => {
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    window.history.replaceState(null, "", "#/session-1/spec");
+    const tabRequests: string[] = [];
+    const recordTabRequest = (event: Event) => {
+      tabRequests.push((event as CustomEvent<string>).detail);
+    };
+    window.addEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+
+    try {
+      const { result } = renderHook(() => useHashRouter());
+
+      await waitFor(() => {
+        expect(tabRequests).toEqual(["graph"]);
+      });
+      await waitFor(() => {
+        expect(result.current.redirectToast?.message).toMatch(/Spec tab was removed/i);
+      });
+    } finally {
+      window.removeEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+    }
+  });
+
   it("does not show the removed-tab toast after the user dismisses it", async () => {
     useSessionStore.setState({ activeSessionId: "session-1" });
     window.history.replaceState(null, "", "#/session-1/runs");

@@ -172,7 +172,7 @@ interface SessionState {
   recoveryError: ComposerRecoveryError | null;
   recoveryStartedCompositionVersion: number | null;
 
-  // Shared selection state for cross-component sync (GraphView <-> SpecView)
+  // Shared selection state for GraphView component focus.
   selectedNodeId: string | null;
   selectNode: (nodeId: string | null) => void;
 

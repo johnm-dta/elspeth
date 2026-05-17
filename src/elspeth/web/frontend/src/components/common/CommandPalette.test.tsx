@@ -100,4 +100,12 @@ describe("CommandPalette guided-mode commands", () => {
       screen.queryByRole("option", { name: /Switch to Runs Tab/i }),
     ).toBeNull();
   });
+
+  it("does not offer navigation to the removed Spec tab", () => {
+    render(<CommandPalette isOpen onClose={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("option", { name: /Switch to Spec Tab/i }),
+    ).toBeNull();
+  });
 });

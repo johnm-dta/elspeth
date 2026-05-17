@@ -7,8 +7,7 @@
 // Auto-layout using dagre (@dagrejs/dagre) for hierarchical top-to-bottom.
 //
 // ARIA: container has aria-label describing the pipeline structure.
-// "Pipeline graph with N components. Use the Spec tab for keyboard-accessible
-// detail."
+// "Pipeline graph with N components."
 //
 // Empty state when no nodes.
 // ============================================================================
@@ -570,7 +569,7 @@ export function GraphView() {
   }
 
   const nodeCount = nodes.length;
-  const ariaLabel = `Pipeline graph with ${nodeCount} component${nodeCount !== 1 ? "s" : ""} (source, transforms, sinks). Use the Spec tab for keyboard-accessible detail.`;
+  const ariaLabel = `Pipeline graph with ${nodeCount} component${nodeCount !== 1 ? "s" : ""} (source, transforms, sinks).`;
 
   return (
     <div

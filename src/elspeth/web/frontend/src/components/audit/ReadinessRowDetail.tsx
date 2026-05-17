@@ -30,7 +30,7 @@ export function ReadinessRowDetail({ row, onClose }: ReadinessRowDetailProps) {
 
   function handleJump(componentId: string) {
     selectNode(componentId);
-    window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "spec" }));
+    window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "graph" }));
     // Phase 8 deferral: emit telemetry here.
     onClose();
   }

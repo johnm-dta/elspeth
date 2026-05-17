@@ -70,7 +70,7 @@ describe("ReadinessRowDetail", () => {
     expect(selectNode).toHaveBeenCalledWith("select_columns");
   });
 
-  it("requests the Spec tab when jumping to a component", async () => {
+  it("requests the Graph tab when jumping to a component", async () => {
     const user = userEvent.setup();
     const tabRequests: string[] = [];
     function recordTabRequest(event: Event) {
@@ -80,7 +80,7 @@ describe("ReadinessRowDetail", () => {
     try {
       render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />);
       await user.click(screen.getByRole("button", { name: /Jump to select_columns/ }));
-      expect(tabRequests).toEqual(["spec"]);
+      expect(tabRequests).toEqual(["graph"]);
     } finally {
       window.removeEventListener(SWITCH_TAB_EVENT, recordTabRequest);
     }

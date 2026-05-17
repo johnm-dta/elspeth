@@ -5,7 +5,7 @@
 //
 // Row 1: VersionSelector (custom dropdown with separate revert action) + ValidationDot
 //         on the left; Catalog + Execute buttons on the right.
-// Row 2: Tab strip (Spec, Graph, YAML) navigable by arrow keys.
+// Row 2: Tab strip (Graph, YAML) navigable by arrow keys.
 //
 // Validation result banner renders between header and tab content.
 // Tab content area is wrapped in an ARIA live region.
@@ -18,7 +18,6 @@ import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
 import { TAB_CHANGED_EVENT } from "@/hooks/useHashRouter";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
-import { SpecView } from "./SpecView";
 import { GraphView } from "./GraphView";
 import { YamlView } from "./YamlView";
 import { ValidationResultBanner } from "@/components/execution/ValidationResult";
@@ -27,10 +26,9 @@ import { AuditReadinessPanel } from "@/components/audit/AuditReadinessPanel";
 import type { CompositionStateVersion } from "@/types/index";
 import { relativeTime } from "@/utils/time";
 
-type TabId = "spec" | "graph" | "yaml";
+type TabId = "graph" | "yaml";
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: "spec", label: "Spec" },
   { id: "graph", label: "Graph" },
   { id: "yaml", label: "YAML" },
 ];
@@ -316,14 +314,14 @@ function VersionSelector({
 // ---------------------------------------------------------------------------
 
 export function InspectorPanel() {
-  const [activeTab, setActiveTab] = useState<TabId>("spec");
+  const [activeTab, setActiveTab] = useState<TabId>("graph");
   const [catalogOpen, setCatalogOpen] = useState(false);
 
   // Listen for tab switch requests from the command palette or hash router.
   useEffect(() => {
     function handleSwitchTab(e: Event) {
       const tab = (e as CustomEvent<string>).detail;
-      if (tab === "spec" || tab === "graph" || tab === "yaml") {
+      if (tab === "graph" || tab === "yaml") {
         setActiveTab(tab);
       }
     }
@@ -390,16 +388,16 @@ export function InspectorPanel() {
     [revertToVersion],
   );
 
-  // Handle click on validation error/warning — select node and switch to Spec tab
-  // Only navigate for actual nodes; source/sink entries can't be highlighted in SpecView
+  // Handle click on validation error/warning — select node and switch to Graph.
+  // Only navigate for actual nodes; source/sink entries cannot be highlighted there.
   const handleValidationComponentClick = useCallback(
     (componentId: string) => {
       const isNode = compositionState?.nodes.some((n) => n.id === componentId);
       if (isNode) {
         selectNode(componentId);
-        setActiveTab("spec");
+        setActiveTab("graph");
       }
-      // For source/sink, don't switch tabs — SpecView only renders nodes
+      // For source/sink, don't switch tabs; there is no graph node to highlight.
     },
     [selectNode, compositionState],
   );
@@ -578,11 +576,6 @@ export function InspectorPanel() {
         aria-labelledby={`inspector-tab-${activeTab}`}
         className="inspector-tab-content"
       >
-        {activeTab === "spec" && (
-          <ErrorBoundary label="Spec view">
-            <SpecView />
-          </ErrorBoundary>
-        )}
         {activeTab === "graph" && (
           <ErrorBoundary label="Graph view">
             <GraphView />

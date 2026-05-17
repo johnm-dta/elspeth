@@ -147,14 +147,6 @@ export function CommandPalette({
     };
 
     cmds.push({
-      id: "tab-spec",
-      title: "Switch to Spec Tab",
-      category: "navigation",
-      shortcut: "Alt+1",
-      action: () => switchTab("spec"),
-    });
-
-    cmds.push({
       id: "tab-graph",
       title: "Switch to Graph Tab",
       category: "navigation",

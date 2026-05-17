@@ -1,7 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "./CommandPalette";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
 import type { GuidedSession } from "@/types/guided";
@@ -106,6 +110,39 @@ describe("CommandPalette guided-mode commands", () => {
 
     expect(
       screen.queryByRole("option", { name: /Switch to Spec Tab/i }),
+    ).toBeNull();
+  });
+
+  it("opens the graph modal via the command 'Open graph view'", () => {
+    const handler = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
+
+    render(<CommandPalette isOpen onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText(/open graph view/i));
+
+    expect(handler).toHaveBeenCalled();
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
+  });
+
+  it("opens the yaml export modal via the command 'Export YAML'", () => {
+    const handler = vi.fn();
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
+
+    render(<CommandPalette isOpen onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText(/export yaml/i));
+
+    expect(handler).toHaveBeenCalled();
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
+  });
+
+  it("does not offer the old Graph or YAML tab commands", () => {
+    render(<CommandPalette isOpen onClose={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("option", { name: /Switch to Graph Tab/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("option", { name: /Switch to YAML Tab/i }),
     ).toBeNull();
   });
 });

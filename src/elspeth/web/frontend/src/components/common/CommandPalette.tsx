@@ -16,6 +16,10 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { fuzzyMatch } from "@/utils/fuzzyScore";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "@/lib/composer-events";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -137,29 +141,26 @@ export function CommandPalette({
       });
     }
 
-    // Navigation (inspector tabs) — dispatched via custom DOM event so
-    // InspectorPanel can listen without prop threading through Layout.
-    const switchTab = (tab: string) => {
-      window.dispatchEvent(
-        new CustomEvent(SWITCH_TAB_EVENT, { detail: tab }),
-      );
-      onClose();
-    };
-
     cmds.push({
-      id: "tab-graph",
-      title: "Switch to Graph Tab",
+      id: "open-graph-modal",
+      title: "Open graph view",
       category: "navigation",
-      shortcut: "Alt+2",
-      action: () => switchTab("graph"),
+      shortcut: "Ctrl+Shift+G",
+      action: () => {
+        window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
+        onClose();
+      },
     });
 
     cmds.push({
-      id: "tab-yaml",
-      title: "Switch to YAML Tab",
+      id: "open-yaml-export",
+      title: "Export YAML",
       category: "navigation",
-      shortcut: "Alt+3",
-      action: () => switchTab("yaml"),
+      shortcut: "Ctrl+Shift+Y",
+      action: () => {
+        window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
+        onClose();
+      },
     });
 
     // Sessions (up to 10 recent)

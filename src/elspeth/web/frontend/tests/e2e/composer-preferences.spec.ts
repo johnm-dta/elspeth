@@ -2,8 +2,7 @@
 //
 // Exercises the four user journeys from plan 13 Task 9 Step 3 against the
 // local Playwright webServer. Each test resets the account-level
-// preferences row via REST before driving the UI, so the tests are
-// order-independent.
+// preferences row before driving the UI, so the tests are order-independent.
 //
 // Mirrors the project's existing E2E discipline (see smoke.spec.ts):
 //   - REST helpers for state setup (no "Testing Through the UI" antipattern).
@@ -16,6 +15,10 @@
 // elspeth.foundryside.dev (and the storageState would need to carry a
 // staging-issued token). This spec ships green against the local
 // playwright environment.
+
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
@@ -30,6 +33,10 @@ type ComposerMode = "guided" | "freeform";
 interface PrefsPayload {
   default_mode: ComposerMode;
   banner_dismissed_at: string | null;
+}
+
+interface CurrentUserPayload {
+  user_id: string;
 }
 
 async function patchPreferences(
@@ -55,6 +62,88 @@ async function getPreferences(ctx: APIRequestContext): Promise<PrefsPayload> {
   return (await resp.json()) as PrefsPayload;
 }
 
+async function getCurrentUserId(ctx: APIRequestContext): Promise<string> {
+  const resp = await ctx.get("/api/auth/me");
+  if (!resp.ok()) {
+    throw new Error(
+      `GET /api/auth/me failed (${resp.status()}): ${(await resp.text()).slice(0, 500)}`,
+    );
+  }
+  return ((await resp.json()) as CurrentUserPayload).user_id;
+}
+
+function sessionDbPathForDirectCleanup(): string | null {
+  const configured = process.env.PLAYWRIGHT_SESSION_DB_PATH;
+  if (configured) return resolve(configured);
+
+  // Local Playwright config starts the backend from the repo root with
+  // ELSPETH_WEB__data_dir=./.e2e-data. Source-checkout staging on this host
+  // uses /home/john/elspeth/data/sessions.db; other staging targets should set
+  // PLAYWRIGHT_SESSION_DB_PATH explicitly when a reused account needs reset.
+  if (process.env.PLAYWRIGHT_BACKEND_BASE_URL) {
+    const sourceCheckoutStagingDb = "/home/john/elspeth/data/sessions.db";
+    const stagingBase =
+      process.env.STAGING_BASE_URL ??
+      process.env.PLAYWRIGHT_BACKEND_BASE_URL;
+    return stagingBase.includes("elspeth.foundryside.dev") &&
+      existsSync(sourceCheckoutStagingDb)
+      ? sourceCheckoutStagingDb
+      : null;
+  }
+  return resolve(process.cwd(), "../../../..", ".e2e-data", "sessions.db");
+}
+
+async function clearBannerDismissalDirectly(
+  ctx: APIRequestContext,
+): Promise<boolean> {
+  const dbPath = sessionDbPathForDirectCleanup();
+  if (dbPath === null || !existsSync(dbPath)) return false;
+
+  const userId = await getCurrentUserId(ctx);
+  execFileSync(
+    "python3",
+    [
+      "-c",
+      [
+        "import sqlite3, sys",
+        "conn = sqlite3.connect(sys.argv[1])",
+        "sql = 'UPDATE user_preferences SET banner_dismissed_at = NULL WHERE user_id = ?'",
+        "conn.execute(sql, (sys.argv[2],))",
+        "conn.commit()",
+      ].join("; "),
+      dbPath,
+      userId,
+    ],
+    { stdio: "pipe" },
+  );
+  return true;
+}
+
+async function resetPreferences(
+  ctx: APIRequestContext,
+  defaultMode: ComposerMode,
+): Promise<void> {
+  // The backend PATCH contract intentionally treats JSON null like an absent
+  // banner_dismissed_at field, so REST alone cannot un-dismiss the banner.
+  await patchPreferences(ctx, { default_mode: defaultMode });
+  const afterPatch = await getPreferences(ctx);
+  if (afterPatch.banner_dismissed_at === null) return;
+
+  if (!(await clearBannerDismissalDirectly(ctx))) {
+    throw new Error(
+      "composer-preferences E2E setup could not clear banner_dismissed_at. " +
+        "Use a fresh test account or set PLAYWRIGHT_SESSION_DB_PATH to the sessions.db file.",
+    );
+  }
+
+  const afterCleanup = await getPreferences(ctx);
+  if (afterCleanup.banner_dismissed_at !== null) {
+    throw new Error(
+      "composer-preferences E2E setup ran direct cleanup, but banner_dismissed_at is still set.",
+    );
+  }
+}
+
 // Serial execution: every test in this file mutates the SAME
 // account-level preferences row (the storageState carries a single
 // e2e-tester user across all tests). Under the project default
@@ -73,10 +162,7 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     const ctx = await authedContext(token);
     try {
       // Reset to a known baseline: guided default, banner not dismissed.
-      await patchPreferences(ctx, {
-        default_mode: "guided",
-        banner_dismissed_at: null,
-      });
+      await resetPreferences(ctx, "guided");
     } finally {
       await ctx.dispose();
     }
@@ -112,10 +198,7 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     const token = tokenFromStorageState(storageState);
     const ctx = await authedContext(token);
     try {
-      await patchPreferences(ctx, {
-        default_mode: "freeform",
-        banner_dismissed_at: null,
-      });
+      await resetPreferences(ctx, "freeform");
     } finally {
       await ctx.dispose();
     }

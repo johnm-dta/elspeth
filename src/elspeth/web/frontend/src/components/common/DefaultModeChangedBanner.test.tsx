@@ -5,6 +5,7 @@ import { DefaultModeChangedBanner } from "./DefaultModeChangedBanner";
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
+import { updateUserComposerPreferences } from "@/api/client";
 
 vi.mock("@/api/client", () => ({
   fetchUserComposerPreferences: vi.fn(),
@@ -128,6 +129,35 @@ describe("DefaultModeChangedBanner", () => {
       screen.getByRole("button", { name: /got it|dismiss/i }),
     );
     expect(dismiss).toHaveBeenCalled();
+  });
+
+  it("surfaces dismiss failures in the visible banner", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    vi.mocked(updateUserComposerPreferences).mockRejectedValueOnce(
+      new Error("503 Service Unavailable"),
+    );
+    usePreferencesStore.setState({
+      defaultMode: "freeform",
+      loaded: true,
+      bannerDismissedAt: null,
+      writing: false,
+      writeError: null,
+      optedOutAtSessionId: null,
+    });
+
+    render(<DefaultModeChangedBanner />);
+    await userEvent.click(
+      screen.getByRole("button", { name: /got it|dismiss/i }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        /couldn't dismiss the banner: 503 service unavailable/i,
+      );
+    });
+    consoleError.mockRestore();
   });
 
   it("on dismiss, moves focus to the chat input (WCAG 2.4.3 — no stranded focus)", async () => {

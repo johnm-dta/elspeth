@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { UserProfile, ApiError } from "../types/index";
 import * as api from "../api/client";
+import { usePreferencesStore } from "./preferencesStore";
 
 const TOKEN_KEY = "auth_token";
 
@@ -68,11 +69,13 @@ export const useAuthStore = create<AuthState>((set) => ({
     ]);
     useSessionStore.getState().reset?.();
     useExecutionStore.getState().reset?.();
+    usePreferencesStore.getState().reset();
   },
 
   async loadFromStorage() {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) {
+      usePreferencesStore.getState().reset();
       set({ isLoading: false });
       return;
     }
@@ -83,6 +86,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     } catch {
       // Token invalid or expired -- clear it
       localStorage.removeItem(TOKEN_KEY);
+      usePreferencesStore.getState().reset();
       set({ token: null, user: null, isLoading: false });
     }
   },

@@ -29,6 +29,7 @@ export function DefaultModeChangedBanner(): JSX.Element | null {
   const optedOutAtSessionId = usePreferencesStore(
     (s) => s.optedOutAtSessionId,
   );
+  const writeError = usePreferencesStore((s) => s.writeError);
   const dismiss = usePreferencesStore((s) => s.dismissDefaultChangedBanner);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
 
@@ -93,6 +94,11 @@ export function DefaultModeChangedBanner(): JSX.Element | null {
         switch to guided anytime from the chat panel header, or re-enable as
         your default in Composer preferences.
       </p>
+      {writeError ? (
+        <p role="alert" className="composer-preferences-error">
+          {writeError}
+        </p>
+      ) : null}
       <button type="button" onClick={onDismiss} style={{ minHeight: 24 }}>
         Got it
       </button>

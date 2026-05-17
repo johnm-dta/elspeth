@@ -133,6 +133,8 @@ describe("App banner roles", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(useSessionStore);
+    localStorage.clear();
+    window.history.replaceState(null, "", "/");
     // Restore the default (backend up, composer available) after any
     // per-test override.
     vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
@@ -181,6 +183,17 @@ describe("App banner roles", () => {
     const root = banner.closest(".alert-banner") as HTMLElement | null;
     expect(root).not.toBeNull();
     expect(root!.getAttribute("role")).toBe("status");
+  });
+
+  it("surfaces the stale Runs hash redirect toast", async () => {
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    window.history.replaceState(null, "", "#/session-1/runs");
+
+    render(<App />);
+
+    expect(
+      await screen.findByText(/Runs tab was removed/i),
+    ).toBeInTheDocument();
   });
 
   it("dispatches an open-catalog event on Ctrl+Shift+P", async () => {

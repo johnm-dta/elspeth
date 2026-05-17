@@ -1151,6 +1151,17 @@ summary:focus-visible {
   flex-shrink: 0;
 }
 
+.alert-banner--info {
+  background-color: var(--color-info-bg);
+  color: var(--color-info);
+  border-bottom-color: var(--color-info-border);
+}
+
+.alert-banner--info .alert-banner-action {
+  border-color: var(--color-info-border);
+  color: var(--color-info);
+}
+
 .app-main {
   flex: 1;
   min-height: 0;

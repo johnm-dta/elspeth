@@ -14,7 +14,7 @@
  * from the API regardless. Once sessions load, we re-check.
  */
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
 
@@ -24,16 +24,30 @@ export const TAB_CHANGED_EVENT = "elspeth-tab-changed";
 interface HashState {
   sessionId: string | null;
   tab: string | null;
+  staleTab: string | null;
 }
 
-const VALID_TABS = new Set(["spec", "graph", "yaml", "runs"]);
+const VALID_TABS = new Set(["spec", "graph", "yaml"]);
+const DEFAULT_TAB = "graph";
+const REDIRECT_TOAST_DISMISSED_KEY = "elspeth_redirect_toast_dismissed";
+const REMOVED_TAB_MESSAGES: Record<string, string> = {
+  runs: "The Runs tab was removed in this update. Showing Graph instead.",
+  spec: "The Spec tab was removed in this update. Showing Graph instead.",
+};
+
+interface RedirectToast {
+  message: string;
+  dismiss: () => void;
+}
 
 function parseHash(): HashState {
   const hash = window.location.hash;
   const match = hash.match(/^#\/([^/]+?)(?:\/([a-z]+))?$/);
-  if (!match) return { sessionId: null, tab: null };
-  const tab = match[2] && VALID_TABS.has(match[2]) ? match[2] : null;
-  return { sessionId: match[1], tab };
+  if (!match) return { sessionId: null, tab: null, staleTab: null };
+  const rawTab = match[2] ?? null;
+  const tab = rawTab && VALID_TABS.has(rawTab) ? rawTab : null;
+  const staleTab = rawTab && !VALID_TABS.has(rawTab) ? rawTab : null;
+  return { sessionId: match[1], tab, staleTab };
 }
 
 function buildHash(sessionId: string | null, tab: string | null): string {
@@ -41,7 +55,8 @@ function buildHash(sessionId: string | null, tab: string | null): string {
   return tab ? `#/${sessionId}/${tab}` : `#/${sessionId}`;
 }
 
-export function useHashRouter(): void {
+export function useHashRouter(): { redirectToast: RedirectToast | null } {
+  const [redirectMessage, setRedirectMessage] = useState<string | null>(null);
   // Track what we last wrote to avoid reacting to our own updates
   const lastWrittenHash = useRef<string>("");
   // Track the current tab from hash (for preserving across session changes)
@@ -49,18 +64,33 @@ export function useHashRouter(): void {
   // Flag to suppress hash write during initial application
   const applying = useRef(false);
 
+  const dismissRedirectToast = useCallback(() => {
+    localStorage.setItem(REDIRECT_TOAST_DISMISSED_KEY, "1");
+    setRedirectMessage(null);
+  }, []);
+
+  const maybeShowRedirectToast = (staleTab: string | null) => {
+    if (!staleTab) return;
+    const message = REMOVED_TAB_MESSAGES[staleTab];
+    if (!message) return;
+    if (localStorage.getItem(REDIRECT_TOAST_DISMISSED_KEY) === "1") return;
+    setRedirectMessage(message);
+  };
+
   // ── Apply hash state to the app ──────────────────────────────────────
   const applyHash = (state: HashState) => {
     applying.current = true;
 
-    const { sessionId, tab } = state;
+    const { sessionId, tab, staleTab } = state;
     const store = useSessionStore.getState();
 
     if (sessionId && sessionId !== store.activeSessionId) {
       store.selectSession(sessionId);
     }
 
-    const resolvedTab = tab ?? "spec";
+    maybeShowRedirectToast(staleTab);
+
+    const resolvedTab = tab ?? DEFAULT_TAB;
     currentTab.current = resolvedTab;
     window.dispatchEvent(
       new CustomEvent(SWITCH_TAB_EVENT, { detail: resolvedTab }),
@@ -170,4 +200,10 @@ export function useHashRouter(): void {
     });
     return unsub;
   }, []);
+
+  return {
+    redirectToast: redirectMessage
+      ? { message: redirectMessage, dismiss: dismissRedirectToast }
+      : null,
+  };
 }

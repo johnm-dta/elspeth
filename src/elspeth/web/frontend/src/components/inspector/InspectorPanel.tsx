@@ -5,7 +5,7 @@
 //
 // Row 1: VersionSelector (custom dropdown with separate revert action) + ValidationDot
 //         on the left; Catalog + Execute buttons on the right.
-// Row 2: Tab strip (Spec, Graph, YAML, Runs) navigable by arrow keys.
+// Row 2: Tab strip (Spec, Graph, YAML) navigable by arrow keys.
 //
 // Validation result banner renders between header and tab content.
 // Tab content area is wrapped in an ARIA live region.
@@ -21,20 +21,18 @@ import { useExecutionStore } from "@/stores/executionStore";
 import { SpecView } from "./SpecView";
 import { GraphView } from "./GraphView";
 import { YamlView } from "./YamlView";
-import { RunsView } from "./RunsView";
 import { ValidationResultBanner } from "@/components/execution/ValidationResult";
 import { CatalogDrawer } from "@/components/catalog/CatalogDrawer";
 import { AuditReadinessPanel } from "@/components/audit/AuditReadinessPanel";
 import type { CompositionStateVersion } from "@/types/index";
 import { relativeTime } from "@/utils/time";
 
-type TabId = "spec" | "graph" | "yaml" | "runs";
+type TabId = "spec" | "graph" | "yaml";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "spec", label: "Spec" },
   { id: "graph", label: "Graph" },
   { id: "yaml", label: "YAML" },
-  { id: "runs", label: "Runs" },
 ];
 
 export const OPEN_CATALOG_EVENT = "open-catalog";
@@ -325,7 +323,7 @@ export function InspectorPanel() {
   useEffect(() => {
     function handleSwitchTab(e: Event) {
       const tab = (e as CustomEvent<string>).detail;
-      if (tab === "spec" || tab === "graph" || tab === "yaml" || tab === "runs") {
+      if (tab === "spec" || tab === "graph" || tab === "yaml") {
         setActiveTab(tab);
       }
     }
@@ -377,10 +375,7 @@ export function InspectorPanel() {
 
   const handleExecute = useCallback(async () => {
     if (activeSessionId && canExecute) {
-      const runId = await execute(activeSessionId);
-      if (runId) {
-        setActiveTab("runs");
-      }
+      await execute(activeSessionId);
     }
   }, [activeSessionId, canExecute, execute]);
 
@@ -596,11 +591,6 @@ export function InspectorPanel() {
         {activeTab === "yaml" && (
           <ErrorBoundary label="YAML view">
             <YamlView />
-          </ErrorBoundary>
-        )}
-        {activeTab === "runs" && (
-          <ErrorBoundary label="Runs view">
-            <RunsView />
           </ErrorBoundary>
         )}
       </div>

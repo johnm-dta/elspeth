@@ -92,4 +92,12 @@ describe("CommandPalette guided-mode commands", () => {
       screen.queryByRole("option", { name: /re-enter guided mode/i }),
     ).toBeNull();
   });
+
+  it("does not offer navigation to the removed Runs tab", () => {
+    render(<CommandPalette isOpen onClose={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("option", { name: /Switch to Runs Tab/i }),
+    ).toBeNull();
+  });
 });

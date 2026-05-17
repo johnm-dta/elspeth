@@ -170,14 +170,6 @@ export function CommandPalette({
       action: () => switchTab("yaml"),
     });
 
-    cmds.push({
-      id: "tab-runs",
-      title: "Switch to Runs Tab",
-      category: "navigation",
-      shortcut: "Alt+4",
-      action: () => switchTab("runs"),
-    });
-
     // Sessions (up to 10 recent)
     const recentSessions = sessions
       .filter((s) => s.id !== activeSessionId)

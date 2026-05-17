@@ -58,7 +58,7 @@ function App() {
   const healthCheckRef = useRef<number | null>(null);
 
   // Sync URL hash ↔ session/tab state for deep linking & back/forward
-  useHashRouter();
+  const { redirectToast } = useHashRouter();
 
   const createSession = useSessionStore((s) => s.createSession);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -85,10 +85,7 @@ function App() {
   const closeSecrets = useCallback(() => setShowSecrets(false), []);
   const closePalette = useCallback(() => setShowPalette(false), []);
   const confirmFanoutExecution = useCallback(async () => {
-    const runId = await useExecutionStore.getState().confirmFanoutExecution();
-    if (runId) {
-      window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "runs" }));
-    }
+    await useExecutionStore.getState().confirmFanoutExecution();
   }, []);
   const dismissFanoutGuard = useCallback(() => {
     useExecutionStore.getState().dismissFanoutGuard();
@@ -228,6 +225,20 @@ function App() {
           Skip to main content
         </a>
         <h1 className="sr-only">ELSPETH Pipeline Composer</h1>
+
+        {redirectToast && (
+          <div role="status" className="alert-banner alert-banner--info">
+            <span>{redirectToast.message}</span>
+            <button
+              onClick={redirectToast.dismiss}
+              aria-label="Dismiss redirect notice"
+              title="Dismiss"
+              className="alert-banner-action"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Backend unavailable banner.
             role=alert (assertive) because backend-down is a hard outage that

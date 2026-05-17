@@ -473,7 +473,7 @@ describe("InspectorPanel execution feedback", () => {
     });
   });
 
-  it("switches to Runs after Execute starts a run", async () => {
+  it("keeps the current tab after Execute starts a run", async () => {
     const { executePipeline } = await import("@/api/client");
     (executePipeline as ReturnType<typeof vi.fn>).mockResolvedValue({
       run_id: "run-1",
@@ -493,11 +493,68 @@ describe("InspectorPanel execution feedback", () => {
     await waitFor(() =>
       expect(executePipeline).toHaveBeenCalledWith("session-1"),
     );
+    expect(screen.queryByRole("tab", { name: "Runs" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "YAML" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+});
+
+describe("InspectorPanel Runs tab removal", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeState(),
+      stateVersions: [],
+      isLoadingVersions: false,
+    });
+    useExecutionStore.setState({
+      runs: [],
+      activeRunId: null,
+      validationResult: {
+        is_valid: true,
+        summary: "All checks passed",
+        checks: [],
+        errors: [],
+        warnings: [],
+      },
+      isValidating: false,
+      isExecuting: false,
+      progress: null,
+      error: null,
+    });
+  });
+
+  it("keeps Spec, Graph, and YAML while removing Runs from the tab strip", () => {
+    render(<InspectorPanel />);
+
+    const tablist = screen.getByRole("tablist", { name: /Inspector tabs/ });
+    expect(within(tablist).getByRole("tab", { name: "Spec" })).toBeInTheDocument();
+    expect(within(tablist).getByRole("tab", { name: "Graph" })).toBeInTheDocument();
+    expect(within(tablist).getByRole("tab", { name: "YAML" })).toBeInTheDocument();
+    expect(within(tablist).queryByRole("tab", { name: "Runs" })).not.toBeInTheDocument();
+  });
+
+  it("does not switch to a removed Runs tab after Execute starts a run", async () => {
+    const { executePipeline } = await import("@/api/client");
+    (executePipeline as ReturnType<typeof vi.fn>).mockResolvedValue({
+      run_id: "run-1",
+    });
+
+    render(<InspectorPanel />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("tab", { name: "YAML" }));
+    await user.click(screen.getByRole("button", { name: "Execute pipeline" }));
+
     await waitFor(() =>
-      expect(screen.getByRole("tab", { name: "Runs" })).toHaveAttribute(
-        "aria-selected",
-        "true",
-      ),
+      expect(executePipeline).toHaveBeenCalledWith("session-1"),
+    );
+    expect(screen.queryByRole("tab", { name: "Runs" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "YAML" })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
   });
 });

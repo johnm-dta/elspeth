@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { UserMenu } from "./UserMenu";
@@ -9,6 +9,12 @@ import { UserMenu } from "./UserMenu";
 // the arrow-key/Home/End/type-ahead keyboard contract that the menu
 // pattern demands. See UserMenu.tsx module comment.
 describe("UserMenu", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    document.documentElement.removeAttribute("data-theme");
+    document.documentElement.style.colorScheme = "";
+  });
+
   it("is closed by default — action buttons not in the document", () => {
     render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
     expect(
@@ -16,9 +22,12 @@ describe("UserMenu", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows Composer preferences + Sign out items when opened", async () => {
+  it("shows theme, Composer preferences, and Sign out items when opened", async () => {
     render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    expect(
+      screen.getByRole("button", { name: /switch to light theme/i }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /composer preferences/i }),
     ).toBeInTheDocument();
@@ -38,6 +47,18 @@ describe("UserMenu", () => {
     expect(
       screen.queryByRole("button", { name: /composer preferences/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("toggles the theme from the account menu", async () => {
+    render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /account/i }));
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /switch to light theme/i }),
+    );
+
+    expect(localStorage.getItem("elspeth_theme")).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
   it("calls onSignOut when Sign out is clicked", async () => {
@@ -82,6 +103,10 @@ describe("UserMenu", () => {
   it("Tab navigates between action buttons (project convention: Tab not arrows)", async () => {
     render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    await userEvent.tab();
+    expect(
+      screen.getByRole("button", { name: /switch to light theme/i }),
+    ).toHaveFocus();
     await userEvent.tab();
     expect(
       screen.getByRole("button", { name: /composer preferences/i }),

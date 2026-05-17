@@ -12,7 +12,6 @@
   /* ── Backgrounds — DTA deep teal family ──────────────────────────────────── */
   --color-bg:                #0f2d35;
   --color-surface:           #122f37;
-  --color-surface-sidebar:   #0c2830;
   --color-surface-inspector: #112e36;
   --color-surface-elevated:  #1a3d47;
   --color-surface-hover:     rgba(255, 255, 255, 0.04);
@@ -124,8 +123,6 @@
   --color-scrollbar-thumb-hover: rgba(143, 200, 200, 0.28);
 
   /* ── Sizing ──────────────────────────────────────────────────────────────── */
-  --sidebar-expanded-width:  200px;
-  --sidebar-collapsed-width: 40px;
   --inspector-default-width: 320px;
   --inspector-min-width:     240px;
 
@@ -390,7 +387,6 @@ summary:focus-visible {
   transition: background-color var(--transition-normal);
 }
 
-/* Pulse dot for active-run indicator in session sidebar. */
 @keyframes pulse-dot {
   0%,
   100% {
@@ -399,15 +395,6 @@ summary:focus-visible {
   50% {
     opacity: 0.3;
   }
-}
-
-.run-indicator-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background-color: var(--color-status-running);
-  flex-shrink: 0;
-  animation: pulse-dot 1.5s ease-in-out infinite;
 }
 
 /* Spinner for button loading states (Validate, etc.) */
@@ -447,11 +434,6 @@ summary:focus-visible {
     animation: none;
     border-top-color: var(--color-text-muted);
     opacity: 0.6;
-  }
-
-  .run-indicator-dot {
-    animation: none;
-    opacity: 1;
   }
 
   .progress-bar-complete {
@@ -1243,78 +1225,15 @@ summary:focus-visible {
 .app-layout {
   display: grid;
   grid-template-rows: 100%;
-  grid-template-areas: "sidebar chat siderail";
+  grid-template-areas: "chat siderail";
   height: 100%;
   min-width: 640px;
   overflow: hidden;
 }
 
-/* When inspector is hidden, the grid only has sidebar + chat */
+/* When the side rail is hidden or overlayed, the grid only has chat. */
 .app-layout--overlay {
-  grid-template-areas: "sidebar chat";
-}
-
-.layout-sidebar {
-  grid-area: sidebar;
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--color-border);
-  background-color: var(--color-surface-sidebar);
-  overflow: hidden;
-  transition: width var(--transition-normal);
-}
-
-.layout-sidebar-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.layout-sidebar-toolbar--collapsed {
-  flex-direction: column;
-  justify-content: center;
-}
-
-.layout-sidebar-toolbar--collapsed .sidebar-toggle,
-.layout-sidebar-toolbar--collapsed .theme-toggle {
-  width: var(--sidebar-collapsed-width);
-  min-width: var(--sidebar-collapsed-width);
-  margin-right: 0;
-}
-
-.sidebar-toggle,
-.theme-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  min-width: 44px;
-  border: none;
-  background-color: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-}
-
-.sidebar-toggle {
-  font-size: var(--font-size-base);
-}
-
-.theme-toggle {
-  font-size: var(--font-size-lg);
-  margin-right: var(--space-xs);
-}
-
-.layout-sidebar-content {
-  flex: 1;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.layout-sidebar-content--hidden {
-  display: none;
+  grid-template-areas: "chat";
 }
 
 .layout-chat {
@@ -1641,7 +1560,6 @@ summary:focus-visible {
   /* ── Backgrounds — light teal family ──────────────────────────────────── */
   --color-bg:                #f4f8f9;
   --color-surface:           #ffffff;
-  --color-surface-sidebar:   #eaf2f3;
   --color-surface-inspector: #f0f6f7;
   --color-surface-elevated:  #ffffff;
   --color-surface-hover:     rgba(0, 45, 53, 0.04);
@@ -2339,243 +2257,6 @@ summary:focus-visible {
 .inspector-tab-content {
   flex: 1;
   overflow: auto;
-}
-
-/* ---------------------------------------------------------------------------
-   Session Sidebar
-   --------------------------------------------------------------------------- */
-.session-sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-md) var(--space-md) var(--space-sm);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.session-sidebar-title {
-  font-weight: 600;
-  font-size: var(--font-size-base);
-  color: var(--color-text);
-}
-
-.session-sidebar-filter {
-  padding: var(--space-xs) var(--space-sm);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.session-sidebar-filter-input {
-  width: 100%;
-  padding: var(--space-xs) var(--space-sm);
-  font-size: var(--font-size-xs);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-surface-elevated);
-  color: var(--color-text);
-  box-sizing: border-box;
-}
-
-.session-list {
-  flex: 1;
-  overflow-y: auto;
-}
-
-.session-list-empty {
-  padding: var(--space-lg);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  text-align: center;
-}
-
-.session-list-ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.session-list-item {
-  display: flex;
-  align-items: stretch;
-}
-
-.session-list-item--renaming {
-  padding: var(--space-xs);
-}
-
-.session-rename-form {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  width: 100%;
-}
-
-.session-rename-input {
-  flex: 1;
-  min-width: 0;
-  min-height: 44px;
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
-  font: inherit;
-}
-
-.session-rename-input:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-.session-rename-action-btn {
-  min-height: 44px;
-  padding: var(--space-xs) var(--space-sm);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--font-size-xs);
-}
-
-.session-rename-action-btn:hover:not(:disabled) {
-  background: var(--color-surface-hover);
-}
-
-.session-rename-action-btn:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-.session-rename-action-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.session-list-btn {
-  display: block;
-  flex: 1;
-  min-width: 0;
-  padding: var(--space-sm) var(--space-md);
-  border: none;
-  background-color: transparent;
-  cursor: pointer;
-  text-align: left;
-  font-size: var(--font-size-sm);
-  color: var(--color-text);
-}
-
-.session-list-btn--active {
-  border-left: 3px solid var(--color-accent);
-  background-color: var(--color-surface-hover);
-}
-
-.session-list-btn--inactive {
-  border-left: 3px solid transparent;
-}
-
-.session-list-btn-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-}
-
-.session-list-btn-title--active {
-  font-weight: 600;
-}
-
-.session-list-fork-icon {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  flex-shrink: 0;
-}
-
-.session-list-btn-time {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  margin-top: 2px;
-}
-
-.session-archive-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  min-height: 44px;
-  border: none;
-  background-color: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  font-size: var(--font-size-base);
-  opacity: 0.5;
-  flex-shrink: 0;
-}
-
-.session-archive-btn:hover {
-  opacity: 1;
-  color: var(--color-error);
-}
-
-.session-new-btn-wrap {
-  padding: var(--space-sm);
-  border-top: 1px solid var(--color-border);
-}
-
-.session-new-btn {
-  display: block;
-  width: 100%;
-  padding: var(--space-sm) var(--space-md);
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-}
-
-.session-new-btn:not(:disabled) {
-  background-color: var(--color-accent);
-  color: var(--color-text-inverse);
-}
-
-.session-new-btn:disabled {
-  background-color: var(--color-surface-elevated);
-  color: var(--color-text-muted);
-  cursor: not-allowed;
-}
-
-.session-user-bar {
-  padding: var(--space-sm) var(--space-md);
-  border-top: 1px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-}
-
-.session-user-name {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.session-signout-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: var(--radius-sm);
-  white-space: nowrap;
-  flex-shrink: 0;
-  min-height: 36px;
-  min-width: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 
 /* ---------------------------------------------------------------------------
@@ -3332,160 +3013,6 @@ summary:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
-   SpecView
-   --------------------------------------------------------------------------- */
-.spec-container {
-  padding: var(--space-md);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-sm);
-}
-
-.spec-validation-error-block {
-  padding: var(--space-sm) var(--space-md);
-  background-color: var(--color-error-bg);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  color: var(--color-error);
-  border: 1px solid var(--color-error-border);
-}
-
-.spec-validation-warning-block {
-  padding: var(--space-sm) var(--space-md);
-  background-color: var(--color-warning-bg);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  color: var(--color-warning);
-  border: 1px solid var(--color-warning-border);
-}
-
-.spec-validation-title {
-  font-weight: 600;
-  margin-bottom: var(--space-xs);
-}
-
-.spec-validation-list {
-  margin: 0;
-  padding-left: var(--space-lg);
-}
-
-.spec-validation-item {
-  margin-bottom: 2px;
-}
-
-.spec-card-header {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  margin-bottom: var(--space-xs);
-}
-
-.spec-card-name {
-  font-weight: 600;
-  font-size: var(--font-size-sm);
-}
-
-.spec-card-plugin {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  margin-top: 2px;
-}
-
-.spec-card-connections {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--color-text-muted);
-}
-
-.spec-card-error {
-  margin-top: 6px;
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-error-bg);
-  border: 1px solid var(--color-error-border);
-  font-size: 11px;
-  color: var(--color-error);
-}
-
-.spec-card-error-suggestion {
-  color: var(--color-text-muted);
-  margin-top: 2px;
-}
-
-.spec-card-warning {
-  margin-top: 6px;
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-warning-bg);
-  border: 1px solid var(--color-warning-border);
-  font-size: 11px;
-  color: var(--color-warning);
-}
-
-.spec-card-warning-suggestion {
-  color: var(--color-text-muted);
-  margin-top: 2px;
-}
-
-.spec-suggestion-banner {
-  padding: var(--space-sm) var(--space-md);
-  background-color: var(--color-info-bg);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  color: var(--color-info);
-  border: 1px solid var(--color-info-border);
-}
-
-.spec-suggestion-header {
-  font-weight: 600;
-  cursor: pointer;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.spec-suggestion-expand {
-  font-size: 11px;
-}
-
-.spec-suggestion-list {
-  margin: 0;
-  padding-left: var(--space-lg);
-}
-
-.spec-suggestion-item {
-  margin-bottom: var(--space-xs);
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-}
-
-.spec-suggestion-item-text {
-  flex: 1;
-}
-
-.spec-suggestion-apply-btn {
-  padding: 2px var(--space-sm);
-  font-size: 11px;
-  border: none;
-  border-radius: var(--radius-sm);
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-
-.spec-suggestion-apply-btn--active {
-  background-color: var(--color-accent);
-  color: var(--color-text-inverse);
-  cursor: pointer;
-}
-
-.spec-suggestion-apply-btn--disabled {
-  background-color: var(--color-surface);
-  color: var(--color-text-muted);
-  cursor: not-allowed;
-}
-
-/* ---------------------------------------------------------------------------
    ProgressView
    --------------------------------------------------------------------------- */
 .progress-container {
@@ -3853,21 +3380,6 @@ summary:focus-visible {
 .plugin-card-no-fields {
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-}
-
-/* ---------------------------------------------------------------------------
-   SessionSidebar — extra classes (most are already in App.css)
-   --------------------------------------------------------------------------- */
-.session-sidebar-container {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
-
-.session-title-overflow {
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* ---------------------------------------------------------------------------

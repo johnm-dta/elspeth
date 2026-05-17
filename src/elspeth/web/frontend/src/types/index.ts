@@ -45,7 +45,7 @@ export interface UserProfile {
 
 // ── Sessions ────────────────────────────────────────────────────────────────
 
-/** Session summary for sidebar listing. */
+/** Session summary for session switcher listings. */
 export interface Session {
   id: string;
   title: string;

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTheme } from "@/hooks/useTheme";
 
 interface UserMenuProps {
   onOpenSettings: () => void;
@@ -6,7 +7,7 @@ interface UserMenuProps {
 }
 
 /**
- * Account dropdown in the sidebar toolbar. Click-outside, Escape-to-close
+ * Account dropdown in the app header. Click-outside, Escape-to-close
  * with focus return to the trigger, and Tab/Shift+Tab navigation (the
  * project convention; CommandPalette.tsx uses the same pattern).
  *
@@ -33,6 +34,9 @@ export function UserMenu({
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const { resolvedTheme, toggleTheme } = useTheme();
+  const themeLabel =
+    resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme";
 
   // Click-outside closes
   useEffect(() => {
@@ -101,6 +105,30 @@ export function UserMenu({
             zIndex: 50,
           }}
         >
+          <li style={{ margin: 0 }}>
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={themeLabel}
+              title={themeLabel}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "6px 12px",
+                textAlign: "left",
+                background: "transparent",
+                border: 0,
+                cursor: "pointer",
+                font: "inherit",
+                minHeight: 24,
+              }}
+            >
+              <span aria-hidden="true">
+                {resolvedTheme === "dark" ? "\u2600" : "\u263E"}
+              </span>{" "}
+              {themeLabel}
+            </button>
+          </li>
           <li style={{ margin: 0 }}>
             <button
               type="button"

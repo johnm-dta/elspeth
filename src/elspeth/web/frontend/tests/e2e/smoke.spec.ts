@@ -38,7 +38,7 @@ test.describe("smoke — boot + auth + empty composer", () => {
     // Empty-state copy from ChatPanel.tsx when there is no active session.
     await expect(
       page.getByText(
-        /Select a session from the sidebar, or create a new one to get started\./i,
+        /Use the session switcher to select a session or create a new one\./i,
       ),
     ).toBeVisible();
   });
@@ -67,7 +67,7 @@ test.describe("smoke — boot + auth + empty composer", () => {
   }) => {
     // Seed a session via API, then navigate the SPA to its hash route.
     // This proves the hash router resolves a session id without depending
-    // on the SessionSidebar UI.
+    // on the header session-switcher UI.
     const storageState = await page.context().storageState();
     const token = tokenFromStorageState(storageState);
 

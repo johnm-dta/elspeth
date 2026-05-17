@@ -107,6 +107,7 @@ coverage.xml
 .venv
 .node_modules
 node_modules/
+*.tsbuildinfo
 env/
 venv/
 ENV/

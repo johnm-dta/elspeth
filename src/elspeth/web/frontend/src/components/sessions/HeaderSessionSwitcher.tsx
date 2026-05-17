@@ -2,7 +2,7 @@
 // HeaderSessionSwitcher
 //
 // Top-left header dropdown listing every session, plus a "New session" verb.
-// Replaces the always-on SessionSidebar as the primary session switcher.
+// Primary session switcher for the app header.
 // ============================================================================
 
 import {

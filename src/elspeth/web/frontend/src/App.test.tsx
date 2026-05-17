@@ -13,29 +13,22 @@ import type {
 } from "./types/index";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
-// App renders many heavy children (Layout, SessionSidebar, ChatPanel, …).
+// App renders many heavy children (Layout, ChatPanel, …).
 // Stub them out so the test focuses solely on App's own banner DOM.
 
 vi.mock("./components/common/Layout", () => ({
   Layout: ({
-    sidebar,
     chat,
     siderail,
   }: {
-    sidebar: React.ReactNode;
     chat: React.ReactNode;
     siderail: React.ReactNode;
   }) => (
     <div data-testid="layout-stub">
-      {sidebar}
       {chat}
       {siderail}
     </div>
   ),
-}));
-
-vi.mock("./components/sessions/SessionSidebar", () => ({
-  SessionSidebar: () => <div data-testid="session-sidebar-stub" />,
 }));
 
 vi.mock("./components/chat/ChatPanel", () => ({
@@ -205,6 +198,26 @@ describe("App banner roles", () => {
     expect(
       await screen.findByText(/Spec tab was removed/i),
     ).toBeInTheDocument();
+  });
+
+  it("does not mount the retired sessions sidebar", async () => {
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    expect(screen.queryByLabelText(/sessions sidebar/i)).not.toBeInTheDocument();
+  });
+
+  it("removes the retired sidebar collapsed preference on startup", async () => {
+    localStorage.setItem("elspeth_sidebar_collapsed", "true");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    expect(localStorage.getItem("elspeth_sidebar_collapsed")).toBeNull();
   });
 
   it("dispatches an open-catalog event on Ctrl+Shift+P", async () => {
@@ -466,8 +479,7 @@ describe("App preferences bootstrap (Phase 1B)", () => {
     // App chrome remains rendered. The Layout/ChatPanel stubs are still
     // present — proves the bootstrap rejection didn't unmount the tree.
     // Using the chat-panel-stub testid (App.test.tsx wires its own stubs
-    // for the sub-components; this assertion does not depend on real
-    // SessionSidebar content which isn't rendered in the stub world).
+    // for the sub-components).
     expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
 
     consoleError.mockRestore();

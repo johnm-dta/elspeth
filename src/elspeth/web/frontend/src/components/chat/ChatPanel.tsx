@@ -211,8 +211,7 @@ export function ChatPanel({
         className="chat-panel chat-panel--empty"
         aria-label="Chat panel"
       >
-        Select a session from the sidebar, or create a new one to get
-        started.
+        Use the session switcher to select a session or create a new one.
       </div>
     );
   }

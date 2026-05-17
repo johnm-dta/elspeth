@@ -8,7 +8,6 @@ import { SideRail } from "./components/common/SideRail";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
-import { SessionSidebar } from "./components/sessions/SessionSidebar";
 import { ChatPanel } from "./components/chat/ChatPanel";
 import { InspectorPanel, OPEN_CATALOG_EVENT } from "./components/inspector/InspectorPanel";
 import { RecoveryPanel } from "./components/recovery/RecoveryPanel";
@@ -26,6 +25,7 @@ import type { SystemStatus } from "./types/index";
 
 // Health check interval in milliseconds (30 seconds)
 const HEALTH_CHECK_INTERVAL = 30_000;
+const RETIRED_SIDEBAR_COLLAPSED_KEY = "elspeth_sidebar_collapsed";
 
 // Wire up cross-store subscriptions once at module load time.
 // This must run before any component renders so that version-change
@@ -36,7 +36,7 @@ initStoreSubscriptions();
  * Top-level application component.
  *
  * Single composition root: AuthGuard gates the entire app behind authentication,
- * then Layout renders the three-panel grid with SessionSidebar, ChatPanel, and
+ * then AppHeader and Layout render the composer shell with ChatPanel and
  * InspectorPanel. No router in v1 -- the entire application is a single page.
  */
 function App() {
@@ -69,6 +69,10 @@ function App() {
   const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
   const { isAuthenticated } = useAuth();
   const bootstrapPrefs = usePreferencesStore((s) => s.bootstrap);
+
+  useEffect(() => {
+    localStorage.removeItem(RETIRED_SIDEBAR_COLLAPSED_KEY);
+  }, []);
 
   // Phase 1B: load account-level composer preferences once authenticated.
   // Failure is non-fatal — the store stays at its initial state (guided,
@@ -285,7 +289,6 @@ function App() {
         />
         <div className="app-main" role="main">
           <Layout
-            sidebar={<SessionSidebar />}
             chat={
               <ChatPanel
                 onOpenSecrets={openSecrets}

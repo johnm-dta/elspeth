@@ -24,7 +24,6 @@ describe("Layout", () => {
   it("uses approximately 50% of remaining space for side rail by default", () => {
     const { container } = render(
       <Layout
-        sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
         siderail={<div>Side rail</div>}
       />,
@@ -34,9 +33,9 @@ describe("Layout", () => {
     const match = columns.match(/(\d+)px$/);
     expect(match).not.toBeNull();
     const sideRailWidth = Number(match![1]);
-    // With 1600px viewport and 200px sidebar, half of remaining = 700px
-    expect(sideRailWidth).toBeGreaterThanOrEqual(600);
-    expect(sideRailWidth).toBeLessThanOrEqual(800);
+    // With no sidebar, half of the 1600px viewport is 800px.
+    expect(sideRailWidth).toBe(800);
+    expect(columns.trim()).toBe("1fr 800px");
   });
 
   it("restores persisted side-rail width from localStorage", () => {
@@ -46,7 +45,6 @@ describe("Layout", () => {
     });
     const { container } = render(
       <Layout
-        sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
         siderail={<div>Side rail</div>}
       />,
@@ -56,26 +54,30 @@ describe("Layout", () => {
     expect(columns).toContain("500px");
   });
 
-  it("keeps the theme toggle available when the sidebar is collapsed", () => {
+  it("does not render the removed sidebar chrome or persist the retired collapse key", () => {
+    const setItem = vi.spyOn(localStorageMock, "setItem");
     localStorageMock.getItem.mockImplementation((key: string) => {
       if (key === "elspeth_sidebar_collapsed") return "true";
       return null;
     });
 
-    render(
+    const { container } = render(
       <Layout
-        sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
         siderail={<div>Side rail</div>}
       />,
     );
 
+    expect(container.querySelector(".layout-sidebar")).toBeNull();
     expect(
-      screen.getByRole("button", { name: /expand sessions sidebar/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /sessions sidebar/i }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /switch to light theme/i }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: /switch to light theme/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      setItem.mock.calls.some(([key]) => key === "elspeth_sidebar_collapsed"),
+    ).toBe(false);
   });
 
   describe("Layout resize handle keyboard arrows", () => {
@@ -89,10 +91,13 @@ describe("Layout", () => {
     it("ArrowLeft decreases by 10px and ArrowRight increases by 10px (per-keypress step)", async () => {
       const user = userEvent.setup();
       const setItem = vi.spyOn(localStorageMock, "setItem");
+      localStorageMock.getItem.mockImplementation((key: string) => {
+        if (key === "elspeth_inspector_width") return "700";
+        return null;
+      });
 
       const { container } = render(
         <Layout
-          sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
         />,
@@ -131,7 +136,6 @@ describe("Layout", () => {
 
       render(
         <Layout
-          sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
         />,
@@ -157,7 +161,6 @@ describe("Layout", () => {
 
       render(
         <Layout
-          sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
         />,
@@ -174,7 +177,6 @@ describe("Layout", () => {
     it("exposes aria-valuenow/min/max so AT can announce current width", () => {
       render(
         <Layout
-          sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
         />,
@@ -197,7 +199,6 @@ describe("Layout", () => {
 
     const { container } = render(
       <Layout
-        sidebar={<div>Sidebar</div>}
         chat={<div data-testid="chat" />}
         siderail={<div data-testid="siderail" />}
       />,

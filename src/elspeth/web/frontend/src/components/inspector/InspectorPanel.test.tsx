@@ -610,3 +610,49 @@ describe("AuditReadinessPanel mount in InspectorPanel", () => {
     expect(screen.getByRole("tablist", { name: /Inspector tabs/ })).toBeInTheDocument();
   });
 });
+
+describe("Validate button removal (Phase 2C)", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      activeSessionId: "s-1",
+      compositionState: makeComposition(1, { nodes: [] }),
+    } as never);
+    useExecutionStore.setState({
+      validationResult: null,
+      isValidating: false,
+      isExecuting: false,
+      progress: null,
+      error: null,
+    });
+  });
+
+  it("does not render a button labelled 'Validate' (subsumed by audit-readiness panel)", () => {
+    render(<InspectorPanel />);
+    expect(
+      screen.queryByRole("button", { name: /^Validate$/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^Validate pipeline$/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still renders Execute and Catalog buttons", () => {
+    render(<InspectorPanel />);
+    expect(screen.getByRole("button", { name: /^Execute pipeline$/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Catalog/ })).toBeInTheDocument();
+  });
+
+  it("the tab strip still renders and arrow navigation still works", () => {
+    render(<InspectorPanel />);
+    const tablist = screen.getByRole("tablist", { name: /Inspector tabs/ });
+    expect(tablist).toBeInTheDocument();
+    const tabs = within(tablist).getAllByRole("tab");
+    expect(tabs.length).toBeGreaterThan(1);
+    tabs[0].focus();
+    fireEvent.keyDown(tabs[0], { key: "ArrowRight" });
+    // The next tab should be focused after arrow navigation; the focus
+    // assertion verifies the keyboard navigation hasn't regressed when the
+    // header layout changed.
+    expect(document.activeElement).toBe(tabs[1]);
+  });
+});

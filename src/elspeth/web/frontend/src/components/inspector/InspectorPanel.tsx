@@ -354,14 +354,10 @@ export function InspectorPanel() {
   const isLoadingVersions = useSessionStore((s) => s.isLoadingVersions);
   const revertToVersion = useSessionStore((s) => s.revertToVersion);
   const loadStateVersions = useSessionStore((s) => s.loadStateVersions);
-  const injectSystemMessage = useSessionStore((s) => s.injectSystemMessage);
-  const sendValidationFeedback = useSessionStore((s) => s.sendValidationFeedback);
   const selectNode = useSessionStore((s) => s.selectNode);
 
   const validationResult = useExecutionStore((s) => s.validationResult);
-  const isValidating = useExecutionStore((s) => s.isValidating);
   const isExecuting = useExecutionStore((s) => s.isExecuting);
-  const validate = useExecutionStore((s) => s.validate);
   const execute = useExecutionStore((s) => s.execute);
   const progress = useExecutionStore((s) => s.progress);
   const error = useExecutionStore((s) => s.error);
@@ -378,51 +374,6 @@ export function InspectorPanel() {
     (compositionState.source !== null ||
       compositionState.nodes.length > 0 ||
       compositionState.outputs.length > 0);
-
-  const canValidate =
-    !!activeSessionId &&
-    hasCompositionContent &&
-    !isValidating &&
-    !isExecuting;
-
-  const handleValidate = useCallback(async () => {
-    if (!activeSessionId || !canValidate) return;
-
-    // Store handles the API call and stores the result.
-    await validate(activeSessionId);
-
-    // Read the result and orchestrate side effects at the component level.
-    // This keeps the store focused on state and the component in control
-    // of cross-store interactions.
-    const result = useExecutionStore.getState().validationResult;
-    if (!result) return;
-
-    const VALIDATION_MSG_ID = "system-validation-current";
-
-    if (!result.is_valid && result.errors.length > 0) {
-      const lines = ["**Validation failed** — the following errors were sent to the agent:"];
-      for (const err of result.errors) {
-        lines.push(`- **[${err.component_type ?? "unknown"}] ${err.component_id ?? "unknown"}:** ${err.message}`);
-      }
-      injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
-
-      // Send to the LLM so it can attempt fixes.
-      // Await so errors are surfaced, not silently swallowed.
-      try {
-        await sendValidationFeedback(result);
-      } catch {
-        // Feedback send failed — user still sees the system message,
-        // but the agent didn't receive it. The error banner from
-        // sendMessage's catch block will surface this.
-      }
-    } else if (result.is_valid && result.warnings && result.warnings.length > 0) {
-      const lines = ["**Validation passed with warnings:**"];
-      for (const warn of result.warnings) {
-        lines.push(`- **[${warn.component_type ?? "unknown"}] ${warn.component_id ?? "unknown"}:** ${warn.message}`);
-      }
-      injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
-    }
-  }, [activeSessionId, canValidate, validate, injectSystemMessage, sendValidationFeedback]);
 
   const handleExecute = useCallback(async () => {
     if (activeSessionId && canExecute) {
@@ -552,24 +503,6 @@ export function InspectorPanel() {
             >
               <span aria-hidden="true">▦</span>{" "}
               Catalog
-            </button>
-
-            {/* Validate button with spinner */}
-            <button
-              onClick={handleValidate}
-              disabled={!canValidate}
-              aria-label={isValidating ? "Validating" : "Validate pipeline"}
-              className="btn inspector-action-btn"
-            >
-              {isValidating ? (
-                <span
-                  className="spinner"
-                  role="status"
-                  aria-label="Validating"
-                />
-              ) : (
-                "Validate"
-              )}
             </button>
 
             {/* Execute button with spinner */}

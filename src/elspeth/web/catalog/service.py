@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
-from elspeth.contracts.enums import Determinism
+from elspeth.contracts.enums import AuditCharacteristic, DerivedAuditCharacteristics, Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.plugins.infrastructure.discovery import get_plugin_description
 from elspeth.plugins.infrastructure.manager import PluginManager, PluginNotFoundError
@@ -40,7 +40,7 @@ _DEFS_REF_PREFIX = "#/$defs/"
 # until a batch pre-emission dispatch site exists.
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 
-# Map Determinism enum values to the audit-characteristic flag they
+# Map Determinism enum values to the AuditCharacteristic flag they
 # imply. The catalog surfaces these as visual cues on the plugin card so
 # a compliance-focused user (Linda persona) can see at a glance which
 # audit traits apply without reading the technical description.
@@ -49,49 +49,23 @@ _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
 # Determinism value is added to contracts/enums.py without updating this
 # table, the KeyError surfaces immediately at catalog-build time rather
 # than silently returning None and dropping the inferred flag.
-_DETERMINISM_TO_AUDIT_FLAG: dict[Determinism, str] = {
-    Determinism.IO_READ: "io_read",
-    Determinism.IO_WRITE: "io_write",
-    Determinism.EXTERNAL_CALL: "external_call",
-    Determinism.DETERMINISTIC: "deterministic",
-    Determinism.SEEDED: "seeded",
-    Determinism.NON_DETERMINISTIC: "non_deterministic",
+#
+# The closed vocabulary of audit-characteristic strings is the
+# AuditCharacteristic enum itself (defined in contracts/enums.py).  A typo
+# at a plugin's `audit_characteristics` declaration site (e.g. attempting
+# `frozenset({"io-read"})` as a bare string) fails mypy rather than
+# silently disappearing from the rendered catalog card.
+_DETERMINISM_TO_AUDIT_FLAG: dict[Determinism, AuditCharacteristic] = {
+    Determinism.IO_READ: AuditCharacteristic.IO_READ,
+    Determinism.IO_WRITE: AuditCharacteristic.IO_WRITE,
+    Determinism.EXTERNAL_CALL: AuditCharacteristic.EXTERNAL_CALL,
+    Determinism.DETERMINISTIC: AuditCharacteristic.DETERMINISTIC,
+    Determinism.SEEDED: AuditCharacteristic.SEEDED,
+    Determinism.NON_DETERMINISTIC: AuditCharacteristic.NON_DETERMINISTIC,
 }
 
-# Closed vocabulary of valid audit-characteristic strings. Every token
-# a plugin author places in `audit_characteristics: frozenset[str]`
-# must appear in this set. Typos (e.g. "io-read", "quarentine") fail CI
-# via test_all_plugin_audit_characteristics_are_valid rather than
-# silently disappearing from the rendered card. Extend this set together
-# with 08-catalog-reshape.md when new visual cues are added to the UI.
-#
-# Members:
-#   Determinism-derived (inferred by _derive_audit_characteristics):
-#     io_read, io_write, external_call, deterministic, seeded, non_deterministic
-#   Author-declared (from 08-catalog-reshape.md §"Audit-characteristic icons"):
-#     provenance, retention, quarantine, coerce, signed, network, credentials
-VALID_AUDIT_CHARACTERISTICS: frozenset[str] = frozenset(
-    {
-        # Determinism-derived
-        "io_read",
-        "io_write",
-        "external_call",
-        "deterministic",
-        "seeded",
-        "non_deterministic",
-        # Author-declared (08-catalog-reshape.md vocabulary)
-        "provenance",
-        "retention",
-        "quarantine",
-        "coerce",
-        "signed",
-        "network",
-        "credentials",
-    }
-)
 
-
-def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: PluginKind) -> tuple[str, ...]:
+def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: PluginKind) -> DerivedAuditCharacteristics:
     """Compose declared + inferred audit characteristics for a plugin.
 
     The declared set comes from the plugin class's `audit_characteristics`
@@ -122,17 +96,19 @@ def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: Plugi
     the correct response, not defensive fallback.
     """
     del plugin_kind  # reserved for future per-kind inferences
-    declared: frozenset[str] = plugin_cls.audit_characteristics
+    declared: frozenset[AuditCharacteristic] = plugin_cls.audit_characteristics
     determinism = plugin_cls.determinism
 
     # Subscript raises KeyError if a future Determinism value is added
     # to contracts/enums.py without updating _DETERMINISM_TO_AUDIT_FLAG.
     # That crash is correct: silent None return would drop the inferred
     # flag with no test failure and no audit-trail signal.
-    inferred: frozenset[str] = frozenset({_DETERMINISM_TO_AUDIT_FLAG[determinism]})
+    inferred: frozenset[AuditCharacteristic] = frozenset({_DETERMINISM_TO_AUDIT_FLAG[determinism]})
 
     # Sort for stable wire-format ordering; the response model exposes
-    # this as a tuple[str, ...] consumed by the frontend as string[].
+    # this as a tuple[AuditCharacteristic, ...] which serialises to a
+    # flat list of flag strings on the wire (StrEnum members serialise
+    # as their str value).
     return tuple(sorted(declared | inferred))
 
 

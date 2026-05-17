@@ -15,7 +15,11 @@ Plugin Types:
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from elspeth.contracts.enums import Determinism
+from elspeth.contracts.enums import (
+    DataTrustTier,
+    DeclaredAuditCharacteristics,
+    Determinism,
+)
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.schema import SchemaConfig
 
@@ -102,8 +106,8 @@ class SourceProtocol(Protocol):
     usage_when_not_to_use: str | None
     example_use: str | None
     capability_tags: tuple[str, ...]
-    audit_characteristics: frozenset[str]
-    data_trust_tier: int | None
+    audit_characteristics: DeclaredAuditCharacteristics
+    data_trust_tier: DataTrustTier | None
 
     # Sink name for quarantined rows, or "discard" to drop invalid rows
     # All sources must set this - config-based sources get it from SourceDataConfig
@@ -288,8 +292,8 @@ class TransformProtocol(Protocol):
     usage_when_not_to_use: str | None
     example_use: str | None
     capability_tags: tuple[str, ...]
-    audit_characteristics: frozenset[str]
-    data_trust_tier: int | None
+    audit_characteristics: DeclaredAuditCharacteristics
+    data_trust_tier: DataTrustTier | None
 
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # The TransformExecutor checks _on_start_called before process() to ensure
@@ -505,8 +509,8 @@ class BatchTransformProtocol(Protocol):
     usage_when_not_to_use: str | None
     example_use: str | None
     capability_tags: tuple[str, ...]
-    audit_characteristics: frozenset[str]
-    data_trust_tier: int | None
+    audit_characteristics: DeclaredAuditCharacteristics
+    data_trust_tier: DataTrustTier | None
 
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # Batch transforms inherit BaseTransform which manages these. Contract tests
@@ -672,8 +676,8 @@ class SinkProtocol(Protocol):
     usage_when_not_to_use: str | None
     example_use: str | None
     capability_tags: tuple[str, ...]
-    audit_characteristics: frozenset[str]
-    data_trust_tier: int | None
+    audit_characteristics: DeclaredAuditCharacteristics
+    data_trust_tier: DataTrustTier | None
 
     # Resume capability
     supports_resume: bool  # Can this sink append to existing output on resume?

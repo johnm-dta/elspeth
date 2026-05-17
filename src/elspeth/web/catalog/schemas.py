@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
+
+from elspeth.contracts.enums import DataTrustTier, DerivedAuditCharacteristics
 
 PluginKind = Literal["source", "transform", "sink"]
 
@@ -61,8 +63,8 @@ class PluginSummary(_StrictResponse):
     usage_when_not_to_use: str | None = None
     example_use: str | None = None
     capability_tags: tuple[str, ...] = ()
-    audit_characteristics: tuple[str, ...] = ()
-    data_trust_tier: int | None = Field(default=None, ge=1, le=3)
+    audit_characteristics: DerivedAuditCharacteristics = ()
+    data_trust_tier: DataTrustTier | None = None
 
 
 class PluginSchemaInfo(_StrictResponse):

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from elspeth.contracts import Determinism, TransformResult, propagate_contract
+from elspeth.contracts import DataTrustTier, Determinism, TransformResult, propagate_contract
 from elspeth.contracts.errors import FrameworkBugError, RetrievalNotReadyError, TransformErrorReason
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema_contract import PipelineRow
@@ -54,11 +54,11 @@ class RAGRetrievalTransform(BaseTransform):
 
     name = "rag_retrieval"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e0ca4b6f0b30a6a2"
+    source_file_hash: str | None = "sha256:830d19a34b1d6d70"
     determinism: Determinism = Determinism.EXTERNAL_CALL
     config_model = RAGRetrievalConfig
     passes_through_input = True
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Crosses a Tier-3 external boundary (retrieval API). See CLAUDE.md
     # "Data Manifesto" for tier definitions. Declaration required for
     # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).

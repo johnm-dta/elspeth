@@ -16,6 +16,7 @@ from typing import Any, TypedDict
 
 from pydantic import BaseModel, Field
 
+from elspeth.contracts import DataTrustTier
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -121,10 +122,10 @@ class AzureContentSafety(BaseAzureSafetyTransform):
 
     name = "azure_content_safety"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:81b30f5e650b2e67"
+    source_file_hash: str | None = "sha256:210c42dedab13d01"
     config_model = AzureContentSafetyConfig
     passes_through_input = True
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Crosses a Tier-3 external boundary (Azure Content Safety API).
     # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
     # required for trust.py deletion per Phase 7A No-Legacy commitment

@@ -18,7 +18,7 @@ import structlog
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import elspeth.contracts.errors as contract_errors
-from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema
+from elspeth.contracts import CallStatus, CallType, DataTrustTier, Determinism, PluginSchema
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.contexts import LifecycleContext, SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
@@ -223,12 +223,12 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f2ad1060d3bd44d5"
+    source_file_hash: str | None = "sha256:04532b5aa97f1503"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
     supports_resume = False  # Dataverse writes are not locally staged
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Crosses a Tier-3 external boundary (Dataverse REST write).
     # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
     # required for trust.py deletion per Phase 7A No-Legacy commitment

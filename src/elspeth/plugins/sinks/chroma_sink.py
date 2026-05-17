@@ -19,7 +19,7 @@ import structlog
 from pydantic import BaseModel, Field, model_validator
 
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.enums import CallStatus, CallType
+from elspeth.contracts.enums import CallStatus, CallType, DataTrustTier
 from elspeth.contracts.errors import (
     AuditIntegrityError,
     DuplicateDocumentError,
@@ -172,10 +172,10 @@ class ChromaSink(BaseSink):
 
     name = "chroma_sink"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:519aef9054f82218"
+    source_file_hash: str | None = "sha256:3a13aeb00d829da9"
     config_model = ChromaSinkConfig
     supports_resume = False
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Crosses a Tier-3 external boundary (ChromaDB write). See CLAUDE.md
     # "Data Manifesto" for tier definitions. Declaration required for
     # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).

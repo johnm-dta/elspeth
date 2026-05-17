@@ -148,7 +148,13 @@ class TestTransformProtocol:
     """Transform plugin protocol (stateless row processing)."""
 
     def test_transform_implementation(self) -> None:
-        from elspeth.contracts import Determinism, PluginSchema, TransformProtocol
+        from elspeth.contracts import (
+            DataTrustTier,
+            DeclaredAuditCharacteristics,
+            Determinism,
+            PluginSchema,
+            TransformProtocol,
+        )
         from elspeth.contracts.plugin_context import PluginContext
         from elspeth.plugins.infrastructure.results import TransformResult
 
@@ -188,8 +194,8 @@ class TestTransformProtocol:
             usage_when_not_to_use: str | None = None
             example_use: str | None = None
             capability_tags: tuple[str, ...] = ()
-            audit_characteristics: frozenset[str] = frozenset()
-            data_trust_tier: int | None = None
+            audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+            data_trust_tier: DataTrustTier | None = None
             # Lifecycle guards managed by BaseTransform; declared here for the
             # hand-rolled structural fake to satisfy TransformProtocol's
             # @runtime_checkable structural typing.

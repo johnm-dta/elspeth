@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import Field, ValidationError, field_validator
 
-from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts import DataTrustTier, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -71,9 +71,9 @@ class TextSource(BaseSource):
 
     name = "text"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d9b471c7467ba5a9"
+    source_file_hash: str | None = "sha256:4cd35654692d39b5"
     config_model = TextSourceConfig
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
     # for tier definitions. Declaration required for trust.py deletion
     # per Phase 7A No-Legacy commitment (trust.py:31-35).

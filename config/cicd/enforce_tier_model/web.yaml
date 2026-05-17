@@ -58,57 +58,57 @@ allow_hits:
   safety: Raises ValueError on blank string input; non-string values pass through to Pydantic's normal path validation; no
     silent coercion
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_extract_config_fields:fp=3d4e5fd71f36517d
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_extract_config_fields:fp=d048e850610ad52b
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 Pydantic-generated JSON schema 'properties' key may be absent"
   safety: Default empty dict; no properties means no config fields
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_extract_config_fields:fp=2075e65b87cac224
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_extract_config_fields:fp=4d75aa397fe1f9b7
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 Pydantic JSON schema 'required' key may be absent"
   safety: Default empty list; no required fields
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=aeabbad53cff9b3e
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=d70e51ec95845b83
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 JSON Schema oneOf entry may carry inline schema instead of $ref"
   safety: Default empty string fails the startswith(prefix) guard and the branch is skipped
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=1bef59e967b48713
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=3ccb7575c927d84d
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 variant $defs entry may declare no 'properties' (empty config)"
   safety: Default empty dict; variant contributes no field names to the union
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=d9fb48164e7b942d
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=cc7660f732595787
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 variant $defs entry may declare no 'required' list (no mandatory fields)"
   safety: Default empty list; variant's required set is empty; intersection-required handles correctly
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=c0c500c7dcfe2b16
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=1aa019939fefc9a6
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 JSON schema field 'type' may be absent (e.g. anyOf unions)"
   safety: Default 'object'; conservative fallback
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=2d0066cd7cd7d023
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=3cd764d2afd44ce1
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 JSON schema anyOf branch may lack 'type' at top level"
   safety: Checked before use; null branch skipped
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=8f53262f3a66384a
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=8d31bfc783f26681
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 JSON schema branch 'type' checked for null filtering"
   safety: Skips null branches; extracts real type from remaining
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=c395e351479aa427
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=40f84a23fffbd249
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 fallback type extraction from anyOf branch"
   safety: Default 'object'; conservative
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=b807b551debe239c
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=5e16abd417ba3052
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 JSON schema field 'description' is optional"
   safety: Returns None; ConfigFieldSummary.description accepts None
   expires: null
-- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=dece51ee3df005ab
+- key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=7606dd1dbed44ba4
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 JSON schema field 'default' is optional"
   safety: Returns None; ConfigFieldSummary.default accepts None

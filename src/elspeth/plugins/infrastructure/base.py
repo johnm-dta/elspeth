@@ -37,7 +37,13 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from elspeth.contracts import Determinism, PluginSchema, SourceRow
+from elspeth.contracts import (
+    DataTrustTier,
+    DeclaredAuditCharacteristics,
+    Determinism,
+    PluginSchema,
+    SourceRow,
+)
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -185,22 +191,26 @@ class BaseTransform(ABC):
     are non-exhaustive; pick the two or three most useful for a user
     who is searching the catalog."""
 
-    audit_characteristics: frozenset[str] = frozenset()
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
     """Declared audit characteristics that the framework cannot derive
     from other attributes. The catalog service composes this set with
     the characteristic derived from `determinism` at summary-build time.
-    Declare flags like 'signed', 'credentials', 'quarantine', 'provenance'
-    (only for plugins that do extra provenance work beyond the standard
-    pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
-    in catalog/service.py."""
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
 
-    data_trust_tier: int | None = None
+    data_trust_tier: DataTrustTier | None = None
     """Which tier of data this plugin handles at its boundary. 1 = our
     own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
-    external data (source input, external API responses). Sources and
-    external-call transforms = 3; pure row transforms = 2; sinks = 2
-    (they emit, they don't ingest). See CLAUDE.md "Data Manifesto" for
-    the tier definitions. Leave None to render as 'tier unspecified.'"""
+    external data (source input, external API responses, external-boundary
+    sinks that write to non-ELSPETH systems). Sources and external-call
+    transforms = 3; pure row transforms = 2; sinks that write to external
+    systems = 3; internal sinks (CSVSink, JSONSink for local file output)
+    = 2. See CLAUDE.md "Data Manifesto" for the tier definitions. Leave
+    None to render as 'tier unspecified.'"""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
@@ -836,22 +846,26 @@ class BaseSink(ABC):
     are non-exhaustive; pick the two or three most useful for a user
     who is searching the catalog."""
 
-    audit_characteristics: frozenset[str] = frozenset()
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
     """Declared audit characteristics that the framework cannot derive
     from other attributes. The catalog service composes this set with
     the characteristic derived from `determinism` at summary-build time.
-    Declare flags like 'signed', 'credentials', 'quarantine', 'provenance'
-    (only for plugins that do extra provenance work beyond the standard
-    pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
-    in catalog/service.py."""
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
 
-    data_trust_tier: int | None = None
+    data_trust_tier: DataTrustTier | None = None
     """Which tier of data this plugin handles at its boundary. 1 = our
     own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
-    external data (source input, external API responses). Sources and
-    external-call transforms = 3; pure row transforms = 2; sinks = 2
-    (they emit, they don't ingest). See CLAUDE.md "Data Manifesto" for
-    the tier definitions. Leave None to render as 'tier unspecified.'"""
+    external data (source input, external API responses, external-boundary
+    sinks that write to non-ELSPETH systems). Sources and external-call
+    transforms = 3; pure row transforms = 2; sinks that write to external
+    systems = 3; internal sinks (CSVSink, JSONSink for local file output)
+    = 2. See CLAUDE.md "Data Manifesto" for the tier definitions. Leave
+    None to render as 'tier unspecified.'"""
 
     # Config model — each subclass sets this to its Pydantic config class.
     config_model: ClassVar[type[PluginConfig] | None] = None
@@ -1182,22 +1196,26 @@ class BaseSource(ABC):
     are non-exhaustive; pick the two or three most useful for a user
     who is searching the catalog."""
 
-    audit_characteristics: frozenset[str] = frozenset()
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
     """Declared audit characteristics that the framework cannot derive
     from other attributes. The catalog service composes this set with
     the characteristic derived from `determinism` at summary-build time.
-    Declare flags like 'signed', 'credentials', 'quarantine', 'provenance'
-    (only for plugins that do extra provenance work beyond the standard
-    pipeline). All tokens must be members of VALID_AUDIT_CHARACTERISTICS
-    in catalog/service.py."""
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
 
-    data_trust_tier: int | None = None
+    data_trust_tier: DataTrustTier | None = None
     """Which tier of data this plugin handles at its boundary. 1 = our
     own data (audit, checkpoints); 2 = pipeline data (post-source); 3 =
-    external data (source input, external API responses). Sources and
-    external-call transforms = 3; pure row transforms = 2; sinks = 2
-    (they emit, they don't ingest). See CLAUDE.md "Data Manifesto" for
-    the tier definitions. Leave None to render as 'tier unspecified.'"""
+    external data (source input, external API responses, external-boundary
+    sinks that write to non-ELSPETH systems). Sources and external-call
+    transforms = 3; pure row transforms = 2; sinks that write to external
+    systems = 3; internal sinks (CSVSink, JSONSink for local file output)
+    = 2. See CLAUDE.md "Data Manifesto" for the tier definitions. Leave
+    None to render as 'tier unspecified.'"""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # NullSource sets this to None (no config validation needed).

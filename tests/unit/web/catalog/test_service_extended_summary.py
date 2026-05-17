@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from elspeth.contracts.enums import Determinism
+from elspeth.contracts.enums import AuditCharacteristic, DataTrustTier, Determinism
 from elspeth.web.catalog.service import CatalogServiceImpl
 
 
@@ -29,8 +29,8 @@ class _BareTransform:
     usage_when_not_to_use: ClassVar[str | None] = None
     example_use: ClassVar[str | None] = None
     capability_tags: ClassVar[tuple[str, ...]] = ()
-    audit_characteristics: ClassVar[frozenset[str]] = frozenset()
-    data_trust_tier: ClassVar[int | None] = None
+    audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset()
+    data_trust_tier: ClassVar[DataTrustTier | None] = None
     config_model = None
     is_batch_aware = False
 
@@ -60,8 +60,10 @@ class _FilledSource:
     # Declare both "coerce" (Tier-3 boundary trait) and "quarantine"
     # (runtime quarantine routing) explicitly; the catalog service does
     # not infer either, because `_on_validation_failure` is per-instance.
-    audit_characteristics: ClassVar[frozenset[str]] = frozenset({"coerce", "quarantine"})
-    data_trust_tier: ClassVar[int | None] = 3
+    audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset(
+        {AuditCharacteristic.COERCE, AuditCharacteristic.QUARANTINE}
+    )
+    data_trust_tier: ClassVar[DataTrustTier | None] = 3
     config_model = None
 
     @classmethod

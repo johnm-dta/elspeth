@@ -18,11 +18,8 @@ exist on the class object.
 
 from __future__ import annotations
 
-from elspeth.contracts.enums import Determinism
-from elspeth.web.catalog.service import (
-    VALID_AUDIT_CHARACTERISTICS,
-    _derive_audit_characteristics,
-)
+from elspeth.contracts.enums import AuditCharacteristic, Determinism
+from elspeth.web.catalog.service import _derive_audit_characteristics
 
 
 class _FakeSource:
@@ -30,43 +27,43 @@ class _FakeSource:
     determinism = Determinism.IO_READ
     # quarantine is author-declared (not inferred from _on_validation_failure,
     # which is a per-instance attribute set in __init__).
-    audit_characteristics = frozenset({"provenance", "quarantine"})
+    audit_characteristics = frozenset({AuditCharacteristic.PROVENANCE, AuditCharacteristic.QUARANTINE})
 
 
 class _FakeSourceWithoutQuarantine:
     name = "fake_no_quarantine"
     determinism = Determinism.IO_READ
-    audit_characteristics = frozenset()
+    audit_characteristics: frozenset[AuditCharacteristic] = frozenset()
 
 
 class _FakeTransformWithNetwork:
     name = "fake_xfm"
     determinism = Determinism.EXTERNAL_CALL
-    audit_characteristics = frozenset({"credentials"})
+    audit_characteristics = frozenset({AuditCharacteristic.CREDENTIALS})
 
 
 class _FakeTransformDeterministic:
     name = "fake_deterministic"
     determinism = Determinism.DETERMINISTIC
-    audit_characteristics = frozenset()
+    audit_characteristics: frozenset[AuditCharacteristic] = frozenset()
 
 
 class _FakeSink:
     name = "fake_sink"
     determinism = Determinism.IO_WRITE
-    audit_characteristics = frozenset({"signed"})
+    audit_characteristics = frozenset({AuditCharacteristic.SIGNED})
 
 
 class _FakeSeeded:
     name = "fake_seeded"
     determinism = Determinism.SEEDED
-    audit_characteristics = frozenset()
+    audit_characteristics: frozenset[AuditCharacteristic] = frozenset()
 
 
 class _FakeNonDeterministic:
     name = "fake_non_deterministic"
     determinism = Determinism.NON_DETERMINISTIC
-    audit_characteristics = frozenset()
+    audit_characteristics: frozenset[AuditCharacteristic] = frozenset()
 
 
 def test_source_declared_quarantine_passes_through() -> None:
@@ -126,7 +123,7 @@ def test_quarantine_inference_is_not_attempted_from_instance_attribute() -> None
     class _NoInstanceAttr:
         name = "no_instance_attr"
         determinism = Determinism.IO_READ
-        audit_characteristics = frozenset()
+        audit_characteristics: frozenset[AuditCharacteristic] = frozenset()
 
     derived = _derive_audit_characteristics(_NoInstanceAttr, plugin_kind="source")
     assert "io_read" in derived
@@ -141,10 +138,10 @@ def test_plugin_without_audit_characteristics_attr_does_not_crash() -> None:
     class _NoDeclaredChars:
         name = "no_declared"
         determinism = Determinism.DETERMINISTIC
-        audit_characteristics = frozenset()  # the default from the base
+        audit_characteristics: frozenset[AuditCharacteristic] = frozenset()  # the default from the base
 
     derived = _derive_audit_characteristics(_NoDeclaredChars, plugin_kind="transform")
-    assert derived == ("deterministic",)
+    assert derived == (AuditCharacteristic.DETERMINISTIC,)
 
 
 def test_returns_sorted_tuple() -> None:
@@ -181,29 +178,8 @@ def test_determinism_to_audit_flag_covers_all_enum_values() -> None:
     assert set(_DETERMINISM_TO_AUDIT_FLAG.keys()) == set(Determinism)
 
 
-def test_all_plugin_audit_characteristics_are_valid() -> None:
-    """Every string in every plugin's audit_characteristics must belong
-    to the closed audit-characteristic vocabulary maintained alongside
-    08-catalog-reshape.md and codified as VALID_AUDIT_CHARACTERISTICS
-    in catalog/service.py.
-
-    This catches typos (e.g. 'io-read' instead of 'io_read') at CI time
-    rather than letting them silently disappear from the rendered catalog
-    card with no error raised. The test iterates all registered plugins
-    (sources + transforms + sinks) so any new plugin with a misspelled
-    characteristic fails CI immediately without any additional wiring.
-    """
-    from elspeth.plugins.infrastructure.manager import PluginManager
-
-    manager = PluginManager()
-    manager.register_builtin_plugins()
-
-    all_plugin_classes = list(manager.get_sources()) + list(manager.get_transforms()) + list(manager.get_sinks())
-
-    violations: list[str] = []
-    for cls in all_plugin_classes:
-        for token in cls.audit_characteristics:
-            if token not in VALID_AUDIT_CHARACTERISTICS:
-                violations.append(f"{cls.name}: {token!r} not in VALID_AUDIT_CHARACTERISTICS")
-
-    assert not violations, "\n".join(violations)
+# Note: The legacy validity-loop test (test_all_plugin_audit_characteristics_are_valid)
+# was deleted when the closed vocabulary was promoted from a runtime-only set
+# (VALID_AUDIT_CHARACTERISTICS) into the AuditCharacteristic StrEnum in
+# contracts/enums.py. Typos at declaration sites now fail mypy at edit time
+# rather than at CI time, removing the need for the runtime sweep.

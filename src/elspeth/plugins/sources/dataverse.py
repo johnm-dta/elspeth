@@ -18,7 +18,7 @@ from typing import Any, ClassVar, Self
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 import elspeth.contracts.errors as contract_errors
-from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, SourceRow
+from elspeth.contracts import CallStatus, CallType, DataTrustTier, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import LifecycleContext, SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
@@ -185,10 +185,10 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:770ba79756bd0c81"
+    source_file_hash: str | None = "sha256:f56c797b385a5f0b"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
     # for tier definitions. Declaration required for trust.py deletion
     # per Phase 7A No-Legacy commitment (trust.py:31-35).

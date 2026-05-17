@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeEngine
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, DataTrustTier, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
@@ -100,10 +100,10 @@ class DatabaseSink(BaseSink):
 
     name = "database"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:faf499dcd694f715"
+    source_file_hash: str | None = "sha256:0b13dadb7328ba27"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Crosses a Tier-3 external boundary (database write via SQLAlchemy).
     # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
     # required for trust.py deletion per Phase 7A No-Legacy commitment

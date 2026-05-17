@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.enums import AuditCharacteristic
 from elspeth.web.catalog.schemas import PluginSummary
 
 
@@ -19,11 +20,15 @@ def test_plugin_summary_accepts_all_new_fields() -> None:
         usage_when_not_to_use="Small inline data — use 'Inline data from chat' instead.",
         example_use="source:\n  plugin: csv\n  options:\n    path: data/input.csv",
         capability_tags=("csv", "file", "batch"),
-        audit_characteristics=("coerce", "io_read", "quarantine"),
+        audit_characteristics=(
+            AuditCharacteristic.COERCE,
+            AuditCharacteristic.IO_READ,
+            AuditCharacteristic.QUARANTINE,
+        ),
         data_trust_tier=3,
     )
     assert summary.capability_tags == ("csv", "file", "batch")
-    assert "io_read" in summary.audit_characteristics
+    assert AuditCharacteristic.IO_READ in summary.audit_characteristics
     assert summary.data_trust_tier == 3
 
 
@@ -44,43 +49,44 @@ def test_plugin_summary_defaults_for_unfilled_plugin() -> None:
 
 
 def test_plugin_summary_rejects_invalid_trust_tier() -> None:
-    """Tier-1 strictness: data_trust_tier must be 1, 2, 3, or None."""
+    """Tier-1 strictness: data_trust_tier is a Literal[1, 2, 3] | None — 7 is
+    outside the closed set and must be rejected by pydantic's literal check."""
     with pytest.raises(ValidationError):
         PluginSummary(
             name="csv",
             description="...",
             plugin_type="source",
             config_fields=[],
-            data_trust_tier=7,
+            data_trust_tier=7,  # type: ignore[arg-type]
         )
 
 
 def test_plugin_summary_rejects_trust_tier_zero() -> None:
-    """0 is below the ge=1 floor and must be rejected."""
+    """0 is outside the closed Literal[1, 2, 3] set and must be rejected."""
     with pytest.raises(ValidationError):
         PluginSummary(
             name="csv",
             description="...",
             plugin_type="source",
             config_fields=[],
-            data_trust_tier=0,
+            data_trust_tier=0,  # type: ignore[arg-type]
         )
 
 
 def test_plugin_summary_rejects_negative_trust_tier() -> None:
-    """-1 is below the ge=1 floor and must be rejected."""
+    """-1 is outside the closed Literal[1, 2, 3] set and must be rejected."""
     with pytest.raises(ValidationError):
         PluginSummary(
             name="csv",
             description="...",
             plugin_type="source",
             config_fields=[],
-            data_trust_tier=-1,
+            data_trust_tier=-1,  # type: ignore[arg-type]
         )
 
 
 def test_plugin_summary_accepts_trust_tier_one() -> None:
-    """1 is the lower bound (ge=1) and must be accepted."""
+    """1 is a member of Literal[1, 2, 3] and must be accepted."""
     summary = PluginSummary(
         name="csv",
         description="...",
@@ -92,7 +98,7 @@ def test_plugin_summary_accepts_trust_tier_one() -> None:
 
 
 def test_plugin_summary_accepts_trust_tier_three() -> None:
-    """3 is the upper bound (le=3) and must be accepted."""
+    """3 is a member of Literal[1, 2, 3] and must be accepted."""
     summary = PluginSummary(
         name="csv",
         description="...",
@@ -119,13 +125,14 @@ def test_audit_characteristics_serializes_as_list_for_json() -> None:
     """Pydantic emits tuple as a list in JSON. The derivation helper sorts
     before constructing the tuple, so the wire order is deterministic and
     matches `sorted(...)`; the frontend's `string[]` typing reads this
-    directly."""
+    directly.  AuditCharacteristic is a StrEnum so members serialise as
+    their string value on the wire."""
     summary = PluginSummary(
         name="csv",
         description="...",
         plugin_type="source",
         config_fields=[],
-        audit_characteristics=("io_read", "quarantine"),
+        audit_characteristics=(AuditCharacteristic.IO_READ, AuditCharacteristic.QUARANTINE),
     )
     payload = summary.model_dump(mode="json")
     assert isinstance(payload["audit_characteristics"], list)

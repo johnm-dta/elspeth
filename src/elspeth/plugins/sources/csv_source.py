@@ -13,7 +13,13 @@ from typing import Any
 
 from pydantic import Field, ValidationError, field_validator
 
-from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts import (
+    AuditCharacteristic,
+    DataTrustTier,
+    DeclaredAuditCharacteristics,
+    PluginSchema,
+    SourceRow,
+)
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -76,7 +82,7 @@ class CSVSource(BaseSource):
 
     name = "csv"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:266d2d9c00858f6a"
+    source_file_hash: str | None = "sha256:64728f751a3ff343"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -110,7 +116,7 @@ class CSVSource(BaseSource):
 
     capability_tags: tuple[str, ...] = ("csv", "file", "batch", "tabular")
 
-    audit_characteristics: frozenset[str] = frozenset({"coerce", "quarantine"})
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset({AuditCharacteristic.COERCE, AuditCharacteristic.QUARANTINE})
     # "io_read" is *inferred* by the catalog service from
     # determinism=IO_READ. "coerce" and "quarantine" are declared here:
     #   - "coerce" describes the CSV source's Tier-3 boundary behaviour
@@ -123,7 +129,7 @@ class CSVSource(BaseSource):
     #     attribute. Authors of sources that support non-discard
     #     quarantine routing must declare `"quarantine"` themselves.
 
-    data_trust_tier: int | None = 3
+    data_trust_tier: DataTrustTier | None = 3
     # Sources surface Tier 3 (external) data at their boundary. See
     # CLAUDE.md "Data Manifesto" for the tier definitions.
 

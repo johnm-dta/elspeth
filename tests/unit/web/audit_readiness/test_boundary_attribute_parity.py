@@ -33,29 +33,26 @@ import pytest
 
 from elspeth.contracts.enums import Determinism
 
-# Sinks — named EXTERNAL_BOUNDARY_SINKS allowlist from trust.py:73-80.
+# Plugin class imports — flat, alphabetised by ruff. Authoritative membership
+# of each plugin in either the BOUNDARY or INTERNAL bucket lives in
+# ``_BOUNDARY_PLUGIN_CLASSES`` / ``_INTERNAL_PLUGIN_CLASSES`` below — the
+# imports themselves intentionally do not annotate membership (a Sink
+# imported here may be either boundary-tier or internal; the literals carry
+# that signal). All six sources are BOUNDARY; sinks and transforms split.
 from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
 from elspeth.plugins.sinks.chroma_sink import ChromaSink
-
-# Negative-coverage sinks — INTERNAL plugins that MUST NOT declare data_trust_tier == 3.
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.database_sink import DatabaseSink
 from elspeth.plugins.sinks.dataverse import DataverseSink
 from elspeth.plugins.sinks.json_sink import JSONSink
-
-# Sources — all sources are BOUNDARY unconditionally per trust.py:117-118.
 from elspeth.plugins.sources.azure_blob_source import AzureBlobSource
 from elspeth.plugins.sources.csv_source import CSVSource
 from elspeth.plugins.sources.dataverse import DataverseSource
 from elspeth.plugins.sources.json_source import JSONSource
 from elspeth.plugins.sources.null_source import NullSource
 from elspeth.plugins.sources.text_source import TextSource
-
-# Transforms — named EXTERNAL_BOUNDARY_TRANSFORMS allowlist from trust.py:61-69.
 from elspeth.plugins.transforms.azure.content_safety import AzureContentSafety
 from elspeth.plugins.transforms.azure.prompt_shield import AzurePromptShield
-
-# Negative-coverage transforms — INTERNAL plugins that MUST NOT declare data_trust_tier == 3.
 from elspeth.plugins.transforms.field_mapper import FieldMapper
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.plugins.transforms.passthrough import PassThrough

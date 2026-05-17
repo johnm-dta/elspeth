@@ -101,12 +101,20 @@ def test_closes_with_evidence_promise():
 
 
 def test_calls_out_dataverse_sink_as_boundary():
-    """Dataverse is a BOUNDARY sink in the registered catalog
-    (DataverseSink.data_trust_tier == 3, post-Phase-7A successor to the
-    EXTERNAL_BOUNDARY_SINKS allowlist in the now-deleted trust.py). The
-    Explain narrative MUST name the boundary crossing — falling back to
-    the generic per-row hash sentence silently omits that the write
-    leaves ELSPETH for an external Microsoft system.
+    """Pins that ``explain.py`` emits a Tier-3 boundary narrative when the
+    plugin name is ``'dataverse'``. The production code dispatches by
+    plugin name (``if plugin == "dataverse":`` in
+    ``audit_readiness/explain.py``) rather than by ``data_trust_tier``
+    because the narrative text is plugin-specific — each external-boundary
+    sink has tailored prose naming the receiving system (Dataverse
+    instance, Azure Blob container, etc.). A future refactor of
+    ``explain.py`` to consult ``data_trust_tier`` for the boundary fork
+    would change this dispatch — at which point this test's docstring
+    and assertion shape should be updated together.
+
+    The boundary-attribute correctness of DataverseSink itself
+    (``data_trust_tier == 3``) is guarded separately by
+    ``tests/unit/web/audit_readiness/test_boundary_attribute_parity.py``.
     """
     text = build_narrative(_state(sinks=(("primary", "dataverse"),)), retention_days=90)
     assert "Dataverse" in text

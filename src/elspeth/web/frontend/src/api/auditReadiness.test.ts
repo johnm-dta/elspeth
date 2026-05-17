@@ -206,6 +206,33 @@ describe("auditReadiness API client", () => {
     expect(localStorage.getItem("auth_token")).toBeNull();
   });
 
+  // Defuses the token-wipe race: a 401 response that arrives AFTER a successful
+  // login (token swapped in by another caller) must not call logout() and wipe
+  // the fresh token. The guard at client.ts inside parseResponse() short-
+  // circuits when the store already shows no token at the moment the
+  // interceptor runs. Here we simulate the inverse — a 401 fired while token
+  // is null — and confirm no spurious state change occurs.
+  it("does not invoke logout when a 401 arrives with no token in the store", async () => {
+    // Start with no token (the cold-load / pre-auth scenario).
+    expect(useAuthStore.getState().token).toBeNull();
+    const logoutSpy = vi.fn();
+    useAuthStore.setState({ logout: logoutSpy } as never);
+
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: "Unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expect(fetchAuditReadiness(SESSION_ID)).rejects.toMatchObject({ status: 401 });
+
+    // The 401 is still propagated to the caller as an ApiError (above), but
+    // the interceptor must not have called logout — there was nothing to log
+    // out from.
+    expect(logoutSpy).not.toHaveBeenCalled();
+  });
+
   it("fetchAuditReadiness throws when the response body has wrong shape", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       new Response(JSON.stringify({ unexpected: "shape" }), {

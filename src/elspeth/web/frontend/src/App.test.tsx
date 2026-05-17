@@ -6,6 +6,7 @@ import * as api from "./api/client";
 import { resetStore } from "@/test/store-helpers";
 import { useSessionStore } from "./stores/sessionStore";
 import { useExecutionStore } from "./stores/executionStore";
+import { useAuthStore } from "./stores/authStore";
 import {
   OPEN_GRAPH_MODAL_EVENT,
   OPEN_YAML_MODAL_EVENT,
@@ -142,6 +143,22 @@ describe("App banner roles", () => {
     vi.clearAllMocks();
     resetStore(useSessionStore);
     useExecutionStore.getState().reset();
+    // Seed authStore as authenticated. useSessionLifecycle now reads
+    // useAuthStore(selectIsAuthenticated) directly and skips loadSessions
+    // when not authenticated — without this seed, the post-AuthGuard
+    // integration tests below would never trigger session load. The
+    // useAuth() mock above only covers consumers of that hook; the
+    // lifecycle reads the store directly.
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-001",
+        username: "test-operator",
+        display_name: null,
+        email: null,
+        groups: [],
+      } as never,
+    } as never);
     localStorage.clear();
     window.history.replaceState(null, "", "/");
     // Restore the default (backend up, composer available) after any

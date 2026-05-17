@@ -104,9 +104,18 @@ export async function parseResponse<T>(response: Response): Promise<T> {
     // Global 401 interceptor -- trigger logout on any auth failure.
     // Dynamic import avoids circular dependency at module load time
     // (authStore imports from client, client imports authStore for logout).
+    //
+    // Skip the logout call when the store already shows no token. Otherwise a
+    // 401 from an unauthenticated request (e.g., a pre-login probe) calls
+    // logout() against an already-empty session — harmless on its own, but if
+    // the response arrives AFTER a successful login completes, it would wipe
+    // the freshly-acquired token. Guarding on token!==null defuses that race
+    // without changing the legitimate "token expired mid-session" path.
     if (response.status === 401) {
       const { useAuthStore } = await import("@/stores/authStore");
-      await useAuthStore.getState().logout();
+      if (useAuthStore.getState().token !== null) {
+        await useAuthStore.getState().logout();
+      }
     }
 
     // Parse the error envelope. All backend errors use `detail` (not

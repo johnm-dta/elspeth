@@ -1,7 +1,8 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetStore } from "@/test/store-helpers";
+import { useAuthStore } from "@/stores/authStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSessionLifecycle } from "./useSession";
@@ -139,5 +140,89 @@ describe("useSessionLifecycle — reset-effect guard", () => {
     expect(loadRunsMock).toHaveBeenCalledWith("sess-1");
     expect(loadRunsMock).not.toHaveBeenCalledWith(null);
     expect(loadRunsMock).not.toHaveBeenCalledWith(undefined);
+  });
+});
+
+// ── Auth-gated loadSessions ──────────────────────────────────────────────
+//
+// Phase 3A.7 hoisted useSessionLifecycle from inside SessionSidebar (which was
+// rendered only after AuthGuard authenticated) to App.tsx body, where it fires
+// on every render regardless of auth. The fix re-introduces gating via the
+// isAuthenticated selector. These tests prove the gate fires the load only
+// when authenticated AND that the effect re-runs on the unauth→auth transition.
+
+describe("useSessionLifecycle — auth gating", () => {
+  let loadSessionsMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    resetStore(useExecutionStore);
+    resetStore(useSessionStore);
+    resetStore(useAuthStore);
+
+    loadSessionsMock = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ loadSessions: loadSessionsMock } as never);
+    useExecutionStore.setState({
+      reset: vi.fn(),
+      loadRuns: vi.fn().mockResolvedValue(undefined),
+    } as never);
+  });
+
+  // Under the bug (no auth guard): loadSessions fires on mount even without
+  // a token. Under the fix: loadSessions stays unfired.
+
+  it("does NOT call loadSessions when not authenticated", () => {
+    // Default authStore state has token: null, user: null → not authenticated.
+
+    renderHook(() => useSessionLifecycle());
+
+    expect(loadSessionsMock).not.toHaveBeenCalled();
+  });
+
+  // Under the bug (deps `[loadSessions]`): the effect runs once on mount
+  // (firing an unauthenticated request) and never reruns. A subsequent login
+  // leaves the session list empty until page refresh. Under the fix
+  // (deps `[isAuthenticated, loadSessions]`): the effect reruns when
+  // isAuthenticated flips false→true, and loadSessions fires once.
+
+  it("fires loadSessions when authentication transitions to authenticated", async () => {
+    const { rerender } = renderHook(() => useSessionLifecycle());
+
+    expect(loadSessionsMock).not.toHaveBeenCalled();
+
+    act(() => {
+      useAuthStore.setState({
+        token: "fresh-token",
+        user: { user_id: "u-1", email: "u@example.com" } as never,
+      });
+    });
+
+    rerender();
+
+    await waitFor(() => expect(loadSessionsMock).toHaveBeenCalledTimes(1));
+  });
+
+  // Symmetric guard: if the user logs out while the hook is still mounted,
+  // a subsequent loadSessions selector reference change must not retrigger
+  // an unauthenticated load. Under the fix the !isAuthenticated guard
+  // returns early.
+
+  it("does NOT refire loadSessions on logout", async () => {
+    useAuthStore.setState({
+      token: "starting-token",
+      user: { user_id: "u-1", email: "u@example.com" } as never,
+    });
+
+    const { rerender } = renderHook(() => useSessionLifecycle());
+
+    await waitFor(() => expect(loadSessionsMock).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      useAuthStore.setState({ token: null, user: null });
+    });
+
+    rerender();
+
+    // Still exactly one call — the logout transition does not refire.
+    expect(loadSessionsMock).toHaveBeenCalledTimes(1);
   });
 });

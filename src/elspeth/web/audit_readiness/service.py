@@ -76,8 +76,6 @@ def _is_registered_plugin(kind: PluginKind, name: str) -> bool:
 def _get_plugin_class_for_kind(kind: PluginKind, name: str) -> type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol]:
     """Return the registered plugin class for (kind, name).
 
-    Raises StopIteration when the name is not in the catalog — caller
-    must guard with _is_registered_plugin() first (as _record() does).
     Layer: L3. Called only after _is_registered_plugin() confirms the
     name is present.
 
@@ -86,6 +84,18 @@ def _get_plugin_class_for_kind(kind: PluginKind, name: str) -> type[SourceProtoc
     for the same (kind, name) pair return the same class. The sibling
     ``_registered_plugin_names`` uses the same caching strategy; the
     pair stays symmetric.
+
+    Raises:
+        StopIteration: when ``name`` is not in the catalog for ``kind``.
+            Caller must guard with ``_is_registered_plugin()`` first
+            (as ``_record()`` does). Under correct usage this is
+            unreachable because the two helpers share a stable catalog
+            snapshot.
+        ValueError: when ``kind`` is not one of "source", "transform",
+            or "sink". Unreachable under the ``PluginKind`` Literal
+            type; retained as an offensive-programming guard so a
+            non-typed caller crashes loudly rather than returning a
+            wrong-kind class. Mirrors ``_is_registered_plugin``.
     """
     from elspeth.plugins.infrastructure.manager import PluginManager
 

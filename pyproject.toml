@@ -292,30 +292,20 @@ plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-# Third-party modules without type stubs (or not installed in the dev extra).
-# `dev` install is deliberately lean; webui/llm/rag/web extras are only present
-# under `.[all]`. mypy needs explicit permission to treat absent libraries as
-# Any rather than failing on the import.
+# Third-party modules without inline type information (no py.typed marker
+# in the installed distribution). mypy needs explicit permission to treat
+# imports of these as Any rather than failing on the import. Verified by
+# walking each package's installed directory in the worktree venv on
+# 2026-05-18. CI installs `.[all]`, so absence-from-extras is no longer a
+# justification — the only entries here are genuinely stubless packages
+# (or packages that may legitimately be missing because they require
+# system libraries that aren't always present in the build environment,
+# e.g. sqlcipher3 → libsqlcipher).
 module = [
-    "pluggy.*",
-    "rfc8785.*",
-    "pyrate_limiter.*",
-    "deepdiff.*",
-    "textual.*",
     "opentelemetry.*",
-    "hypothesis.*",
     "azure.*",
-    "mcp.*",
     "ddtrace.*",
     "sqlcipher3.*",
-    "langfuse.*",
-    "chromadb.*",
-    "fastapi.*",
-    "litellm.*",
-    "openai.*",
-    "bcrypt",
-    "html2text",
-    "bs4",
 ]
 ignore_missing_imports = true
 

@@ -76,10 +76,56 @@ class CSVSource(BaseSource):
 
     name = "csv"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9f3618e6d858c0a9"
+    source_file_hash: str | None = "sha256:266d2d9c00858f6a"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
+
+    # ── Reference content (Phase 7A canonical example) ──────────────────
+    # This block is the canonical pattern for future plugin authors.
+    # Copy this shape; replace the prose with your plugin's specifics.
+    # The catalog drawer renders these fields as a persona-facing
+    # reference card. Empty / None entries fall back to "see the technical
+    # description" rather than blocking display — but the goal for every
+    # plugin is to have these filled in eventually so the catalog is
+    # useful as orientation material (per docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md).
+
+    usage_when_to_use: str | None = (
+        "A reasonably large dataset (more than ~20 rows) that already "
+        "exists as a CSV file. The source validates and coerces types "
+        "at the boundary and quarantines malformed rows to a sink so the "
+        "rest of the pipeline keeps running on the clean rows."
+    )
+
+    usage_when_not_to_use: str | None = (
+        "Small inline data — type it into chat instead (the composer "
+        "creates a one-row source from your message). Streaming data — "
+        "CSV is batch-only; no row is emitted until the full file is "
+        "read. Data that arrives over HTTP — fetch it first, then point "
+        "the CSV source at the downloaded file."
+    )
+
+    example_use: str | None = "source:\n  plugin: csv\n  options:\n    path: data/input.csv\n    on_validation_failure: quarantine"
+
+    capability_tags: tuple[str, ...] = ("csv", "file", "batch", "tabular")
+
+    audit_characteristics: frozenset[str] = frozenset({"coerce", "quarantine"})
+    # "io_read" is *inferred* by the catalog service from
+    # determinism=IO_READ. "coerce" and "quarantine" are declared here:
+    #   - "coerce" describes the CSV source's Tier-3 boundary behaviour
+    #     (string cells -> typed columns) and cannot be inferred from
+    #     determinism alone.
+    #   - "quarantine" describes the runtime behaviour configured via
+    #     `on_validation_failure`. The catalog service cannot infer this
+    #     from the class because `_on_validation_failure` is a
+    #     per-instance attribute set in `__init__`, not a class
+    #     attribute. Authors of sources that support non-discard
+    #     quarantine routing must declare `"quarantine"` themselves.
+
+    data_trust_tier: int | None = 3
+    # Sources surface Tier 3 (external) data at their boundary. See
+    # CLAUDE.md "Data Manifesto" for the tier definitions.
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

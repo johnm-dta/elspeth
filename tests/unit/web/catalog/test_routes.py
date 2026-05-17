@@ -57,6 +57,19 @@ class TestListSources:
         names = [e["name"] for e in resp.json()]
         assert "text" in names
 
+    def test_csv_source_summary_includes_reference_content(self, client: TestClient) -> None:
+        """Wire-shape pin: catalog API returns canonical CSV reference content."""
+        resp = client.get("/api/catalog/sources")
+        assert resp.status_code == 200
+        sources = resp.json()
+        csv = next(s for s in sources if s["name"] == "csv")
+        assert csv["usage_when_to_use"] is not None
+        assert "tabular" in csv["capability_tags"]
+        assert "io_read" in csv["audit_characteristics"]  # inferred from determinism
+        assert "coerce" in csv["audit_characteristics"]  # author-declared
+        assert "quarantine" in csv["audit_characteristics"]  # author-declared
+        assert csv["data_trust_tier"] == 3
+
 
 class TestListTransforms:
     """GET /api/catalog/transforms"""

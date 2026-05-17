@@ -45,14 +45,21 @@ export interface AuditReadinessState {
   isLoadingExplainBySession: Record<string, boolean>;
   errorBySession: Record<string, string | null>;
   explainErrorBySession: Record<string, string | null>;
+  /** Per-session user-expand preference. Migrated from AuditReadinessPanel's
+   *  component-local useState so that the preference survives the Phase 3B
+   *  remount when <AuditReadinessPanel /> relocates from InspectorPanel to
+   *  SideRail.auditReadinessSlot. Keyed-by-sessionId mirrors the other six
+   *  per-session maps; clearSession drops the entry alongside them. */
+  userExpandedBySession: Record<string, boolean>;
 
   loadSnapshot: (sessionId: string, compositionVersion: number) => Promise<void>;
   loadExplain: (sessionId: string, compositionVersion: number) => Promise<void>;
   clearSession: (sessionId: string) => void;
   reset: () => void;
+  setUserExpanded: (sessionId: string, value: boolean) => void;
 }
 
-export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "loadExplain" | "clearSession" | "reset"> => ({
+export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "loadExplain" | "clearSession" | "reset" | "setUserExpanded"> => ({
   snapshotsBySession: {},
   explainsBySession: {},
   abortControllers: {},
@@ -61,6 +68,7 @@ export const getInitialState = (): Omit<AuditReadinessState, "loadSnapshot" | "l
   isLoadingExplainBySession: {},
   errorBySession: {},
   explainErrorBySession: {},
+  userExpandedBySession: {},
 });
 
 export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => ({
@@ -228,6 +236,7 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
       const { [sessionId]: _ilx, ...restILX } = state.isLoadingExplainBySession;
       const { [sessionId]: _err, ...restErr } = state.errorBySession;
       const { [sessionId]: _errx, ...restErrX } = state.explainErrorBySession;
+      const { [sessionId]: _ue, ...restUE } = state.userExpandedBySession;
       return {
         snapshotsBySession: restSnap,
         explainsBySession: restExpl,
@@ -237,11 +246,18 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
         isLoadingExplainBySession: restILX,
         errorBySession: restErr,
         explainErrorBySession: restErrX,
+        userExpandedBySession: restUE,
       };
     });
   },
 
   reset() {
     set(getInitialState());
+  },
+
+  setUserExpanded(sessionId: string, value: boolean) {
+    set((s) => ({
+      userExpandedBySession: { ...s.userExpandedBySession, [sessionId]: value },
+    }));
   },
 }));

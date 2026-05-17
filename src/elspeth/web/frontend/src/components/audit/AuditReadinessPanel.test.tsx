@@ -299,6 +299,36 @@ describe("AuditReadinessPanel", () => {
     // version-advances tests in auditReadinessStore.test.ts.
   });
 
+  it("preserves the user's expand preference across component unmount/remount (Phase 3B remount safety)", async () => {
+    // Seed a cached all-green snapshot directly — no fetch needed; the
+    // component reads from the store, and version parity means loadSnapshot
+    // is a no-op. This isolates the test to userExpanded behaviour only.
+    useAuditReadinessStore.setState({
+      snapshotsBySession: { [SESSION_ID]: allGreenSnapshot(1) },
+    });
+
+    const user = userEvent.setup();
+
+    // Mount the panel; with an all-green snapshot it collapses to "Audit ready".
+    const { unmount } = render(<AuditReadinessPanel />);
+    expect(await screen.findByRole("button", { name: /Audit ready/i })).toBeInTheDocument();
+
+    // User clicks to expand — sets userExpanded=true via the toggle.
+    await user.click(screen.getByRole("button", { name: /Audit ready/i }));
+    // Confirm expansion: the full row list is visible.
+    expect(screen.getByText("Validation")).toBeInTheDocument();
+
+    // Simulate the Phase 3B remount: unmount the current tree, then render a fresh instance.
+    unmount();
+    render(<AuditReadinessPanel />);
+
+    // The panel must still be expanded — userExpanded survived the remount via the store.
+    // With component-local useState this test FAILS: the new instance starts with
+    // useState(false), anyActionable is false (all-green), and showExpanded = false.
+    expect(screen.getByText("Validation")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Audit ready/i })).not.toBeInTheDocument();
+  });
+
   it("auto-collapses when a subsequent refetch returns all-green (no sticky expansion)", async () => {
     // Arrange: render with an actionable snapshot at version 1; the panel
     // auto-expands because anyActionable is true.

@@ -121,7 +121,15 @@ export function AuditReadinessPanel() {
   // extra render cycle a derived-state effect would cause, and makes the
   // panel auto-collapse when a later snapshot returns all-green (unless the
   // user explicitly clicked Expand).
-  const [userExpanded, setUserExpanded] = useState(false);
+  //
+  // Stored per-session in auditReadinessStore so the preference survives the
+  // Phase 3B remount of <AuditReadinessPanel /> from InspectorPanel to
+  // SideRail.auditReadinessSlot. Component-local useState would reset on
+  // remount.
+  const userExpanded = useAuditReadinessStore((s) =>
+    activeSessionId ? (s.userExpandedBySession[activeSessionId] ?? false) : false,
+  );
+  const setUserExpandedInStore = useAuditReadinessStore((s) => s.setUserExpanded);
   const [selectedRowId, setSelectedRowId] = useState<ReadinessRowId | null>(null);
   const [explainOpen, setExplainOpen] = useState(false);
 
@@ -171,7 +179,7 @@ export function AuditReadinessPanel() {
         <button
           type="button"
           className="audit-readiness-summary"
-          onClick={() => setUserExpanded(true)}
+          onClick={() => setUserExpandedInStore(activeSessionId, true)}
           aria-expanded={false}
           aria-label="Audit ready. Show details."
         >
@@ -199,7 +207,7 @@ export function AuditReadinessPanel() {
               <button
                 type="button"
                 className="btn audit-readiness-action-btn audit-readiness-action-btn--ghost"
-                onClick={() => setUserExpanded(false)}
+                onClick={() => setUserExpandedInStore(activeSessionId, false)}
                 aria-label="Collapse audit readiness"
               >
                 Collapse

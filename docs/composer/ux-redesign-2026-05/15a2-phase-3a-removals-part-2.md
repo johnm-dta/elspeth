@@ -829,6 +829,8 @@ Final pre-execution sweep landed three small doc-only clarifications; this file 
 
 **IMPORTANT (Handoff) — Task 7 owns the Playwright shell spec.** `phase-3a-shell.spec.ts` is now in the Task 7 file list and Step 6a, matching the risks-table acceptance criteria.
 
+**IMPORTANT (Handoff) — `useHashRouter` return widening called out.** Task 5 Step 6 now tells implementers to change `App.tsx` from bare `useHashRouter();` to `const { redirectToast } = useHashRouter();`.
+
 ### 2026-05-17 — P3A-008 — Retired RunsView capabilities (decision: not returning in 15b/3B)
 
 The deletion of `RunsView.test.tsx` (579 lines, commit `66748edb9`) removed test coverage for a set of behaviours that have no successor tests anywhere in the current suite. This entry records the operator-gate decision on their disposition.
@@ -856,5 +858,3 @@ The deletion of `RunsView.test.tsx` (579 lines, commit `66748edb9`) removed test
 **Override path:** If any of the listed capabilities is intended to return in 15b/3B, the plan for that phase must (1) include the capability explicitly in scope and (2) add a tests-rehoming sub-task that recreates the corresponding coverage. The synthesis file at `.review/synthesis.md` (Agent D Finding 5) preserves the full missing-test inventory as the rehoming checklist.
 
 **Operator note:** This entry records the orchestrator's reasonable-call default. Operator may override at merge review by selecting option (b) — deferred to 15b/3B — in which case the missing-tests list above becomes a mandatory 15b/3B sub-task checklist item.
-
-**IMPORTANT (Handoff) — `useHashRouter` return widening called out.** Task 5 Step 6 now tells implementers to change `App.tsx` from bare `useHashRouter();` to `const { redirectToast } = useHashRouter();`.

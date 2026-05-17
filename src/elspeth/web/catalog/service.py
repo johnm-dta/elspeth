@@ -64,16 +64,41 @@ _DETERMINISM_TO_AUDIT_FLAG: dict[Determinism, AuditCharacteristic] = {
     Determinism.NON_DETERMINISTIC: AuditCharacteristic.NON_DETERMINISTIC,
 }
 
+# Default Determinism value per plugin kind — mirrors the class-level
+# `determinism = Determinism.<X>` declared on BaseSource / BaseTransform /
+# BaseSink (`plugins/infrastructure/base.py`).
+#
+# Used by `_derive_audit_characteristics` to suppress emission of the
+# determinism-derived AuditCharacteristic flag when the plugin inherits
+# the kind default unchanged. The principle: a card surfaces metadata
+# only when the author made a meaningful per-plugin choice. Every
+# Source inheriting Determinism.IO_READ is a kind-constant signal that
+# teaches the user nothing about CSV-vs-JSON-vs-Dataverse; an explicit
+# override (NullSource → DETERMINISTIC, DataverseSource → EXTERNAL_CALL)
+# is a deliberate author claim and *is* worth surfacing.
+#
+# Subscript access is deliberate: a future PluginKind addition or
+# Determinism rebase on the base classes that drifts from this table
+# fails fast at catalog-build time instead of silently mis-suppressing.
+_KIND_DEFAULT_DETERMINISM: dict[PluginKind, Determinism] = {
+    "source": Determinism.IO_READ,
+    "transform": Determinism.DETERMINISTIC,
+    "sink": Determinism.IO_WRITE,
+}
+
 
 def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: PluginKind) -> DerivedAuditCharacteristics:
     """Compose declared + inferred audit characteristics for a plugin.
 
     The declared set comes from the plugin class's `audit_characteristics`
-    attribute (defaulting to `frozenset()` on the base). The inferred
-    set is derived purely from `determinism` (a class-level attribute on
-    every plugin base): each Determinism value maps to a corresponding
-    audit flag describing the plugin's reproducibility / side-effect
-    surface.
+    attribute (defaulting to `frozenset()` on the base). The inferred set
+    is derived from `determinism` *only when the subclass overrode the
+    kind default*. A plugin that inherits its kind's default determinism
+    contributes no inferred flag, because surfacing it on every card of
+    that kind teaches the user nothing per-plugin — the architectural
+    fact (every Source reads I/O, every Sink writes I/O, every Transform
+    defaults to deterministic) belongs in category-level documentation,
+    not in a flag repeated 6+ times.
 
     Quarantine behaviour is **author-declared, not inferred.** The
     source-quarantine signal lives in `_on_validation_failure`, which is
@@ -84,10 +109,6 @@ def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: Plugi
     declare `"quarantine"` in their `audit_characteristics` frozenset
     (the CSV canonical example does this).
 
-    `plugin_kind` is retained in the signature to keep the boundary
-    explicit and to allow future per-kind inferences without a signature
-    change. It is unused in the current implementation.
-
     Direct attribute access (`plugin_cls.audit_characteristics`,
     `plugin_cls.determinism`) is correct here: the bases and protocols
     declare these with sensible defaults, so every plugin reachable via
@@ -95,15 +116,17 @@ def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: Plugi
     malformed system plugin (Tier 1 bug); crash via AttributeError is
     the correct response, not defensive fallback.
     """
-    del plugin_kind  # reserved for future per-kind inferences
     declared: frozenset[AuditCharacteristic] = plugin_cls.audit_characteristics
     determinism = plugin_cls.determinism
 
-    # Subscript raises KeyError if a future Determinism value is added
-    # to contracts/enums.py without updating _DETERMINISM_TO_AUDIT_FLAG.
-    # That crash is correct: silent None return would drop the inferred
-    # flag with no test failure and no audit-trail signal.
-    inferred: frozenset[AuditCharacteristic] = frozenset({_DETERMINISM_TO_AUDIT_FLAG[determinism]})
+    inferred: frozenset[AuditCharacteristic] = frozenset()
+    if determinism is not _KIND_DEFAULT_DETERMINISM[plugin_kind]:
+        # Author overrode the kind default — emit the corresponding flag.
+        # Subscript raises KeyError if a future Determinism value is added
+        # to contracts/enums.py without updating _DETERMINISM_TO_AUDIT_FLAG;
+        # that crash is correct (silent None would drop the flag with no
+        # test failure and no audit-trail signal).
+        inferred = frozenset({_DETERMINISM_TO_AUDIT_FLAG[determinism]})
 
     # Sort for stable wire-format ordering; the response model exposes
     # this as a tuple[AuditCharacteristic, ...] which serialises to a

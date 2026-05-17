@@ -99,9 +99,10 @@ def test_bare_plugin_summary_uses_defaults() -> None:
     assert s.usage_when_not_to_use is None
     assert s.example_use is None
     assert s.capability_tags == ()
-    # Derived: DETERMINISTIC -> {"deterministic"}; no declared chars.
-    # The response model exposes the composed set as a sorted tuple.
-    assert s.audit_characteristics == ("deterministic",)
+    # _BareTransform.determinism = Determinism.DETERMINISTIC, which is the
+    # transform kind-default. The catalog suppresses default-derived flags
+    # so an unfilled, default-determinism transform shows nothing.
+    assert s.audit_characteristics == ()
 
 
 def test_filled_source_summary_propagates_all_fields() -> None:
@@ -114,8 +115,9 @@ def test_filled_source_summary_propagates_all_fields() -> None:
     assert s.usage_when_not_to_use == "When the data is inline; use chat instead."
     assert s.example_use == "source:\n  plugin: filled"
     assert s.capability_tags == ("file", "csv")
-    # Composed: declared {"coerce", "quarantine"} + inferred {"io_read"}.
-    # quarantine is author-declared, not inferred from instance state.
+    # _FilledSource.determinism = Determinism.IO_READ, which is the source
+    # kind-default — the catalog suppresses default-derived flags so
+    # `io_read` is NOT inferred. Only author-declared flags remain.
     assert "coerce" in s.audit_characteristics
-    assert "io_read" in s.audit_characteristics
+    assert "io_read" not in s.audit_characteristics
     assert "quarantine" in s.audit_characteristics

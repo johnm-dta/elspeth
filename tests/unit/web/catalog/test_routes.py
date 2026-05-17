@@ -65,7 +65,10 @@ class TestListSources:
         csv = next(s for s in sources if s["name"] == "csv")
         assert csv["usage_when_to_use"] is not None
         assert "tabular" in csv["capability_tags"]
-        assert "io_read" in csv["audit_characteristics"]  # inferred from determinism
+        # io_read is the kind-default determinism for sources; the catalog
+        # suppresses default-derived flags so the strip only shows author
+        # decisions. csv inherits the default, so no determinism flag.
+        assert "io_read" not in csv["audit_characteristics"]
         assert "coerce" in csv["audit_characteristics"]  # author-declared
         assert "quarantine" in csv["audit_characteristics"]  # author-declared
 

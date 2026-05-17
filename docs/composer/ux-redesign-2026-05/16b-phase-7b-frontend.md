@@ -1,5 +1,18 @@
 # Phase 7B — Frontend: Catalog primitives + PluginCard rewrite
 
+> **⚠️ HISTORICAL — `TrustTierBadge` + `data_trust_tier` rescinded
+> 2026-05-18.** Operator review concluded the field was kind-derived
+> metadata that failed the "every tag must represent a meaningful
+> per-plugin decision" test. Commit `c76ecc0f2` deleted the field, the
+> `DataTrustTier` type alias, and every fixture reference. The
+> `TrustTierBadge` component referenced below was never built (the
+> Phase 7C frontend authors recognised the issue mid-implementation
+> and silently dropped it from the rendered card; an e2e assertion of
+> its absence was kept until commit `c76ecc0f2` deleted that
+> assertion as vacuous). The `data_trust_tier: 3` lines in test
+> fixtures below are preserved as historical record; do not copy
+> them into new tests.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps

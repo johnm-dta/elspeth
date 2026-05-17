@@ -1,5 +1,31 @@
 # Phase 7A — Backend: Plugin metadata schema extension + catalog API surface
 
+> **⚠️ HISTORICAL — `data_trust_tier` scope rescinded 2026-05-18.**
+>
+> The original Phase 7A scope included a per-plugin `data_trust_tier`
+> field (`int | None` with values `1`, `2`, `3`) and authored
+> declarations on all 15 boundary plugins. **That scope was rescinded
+> in commit `c76ecc0f2`** (operator review 2026-05-18) because the
+> field failed the "each tag must represent a meaningful per-plugin
+> decision" test — `data_trust_tier == 3` was structurally constant
+> across every Source and every external-call Transform, and
+> `data_trust_tier == 2` was structurally constant across every pure
+> Transform. Authors were copy-pasting a value the kind already
+> determined.
+>
+> The boundary predicate in
+> `src/elspeth/web/audit_readiness/service.py` was rewritten to derive
+> boundary status from `(kind, determinism)`, and the field + enum
+> type + all 15 declarations + the `_INTERNAL_PLUGIN_CLASSES` parity
+> test were deleted. A successor parity test
+> (`test_boundary_predicate_parity.py`) exercises the new predicate
+> against the same expected-boundary lists.
+>
+> Sections below referencing `data_trust_tier` are preserved as
+> historical record of the Phase 7A planning state. New work should
+> not re-introduce the field — see commit `c76ecc0f2` rationale and
+> `feedback_catalog_is_reference_not_toolkit` memory.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps

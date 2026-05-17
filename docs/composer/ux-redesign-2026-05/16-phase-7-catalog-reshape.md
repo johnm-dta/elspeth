@@ -17,10 +17,10 @@ large enough that a single plan would exceed the 1500-line budget:
 - **[16b-phase-7b-frontend.md](16b-phase-7b-frontend.md)** — Frontend
   primitives: extended `PluginSummary` types, the centralised
   `auditCharacteristics` metadata table, `AuditCharacteristicIcon`,
-  `TrustTierBadge`, and the `PluginCard.tsx` rewrite (removing the
-  "Use in pipeline" toolkit affordance).
+  and the `PluginCard.tsx` rewrite (removing the "Use in pipeline"
+  toolkit affordance).
 - **[16c-phase-7c-frontend-integration.md](16c-phase-7c-frontend-integration.md)**
-  — Drawer integration: `FilterChipStrip` (capability / trust tier /
+  — Drawer integration: `FilterChipStrip` (capability +
   audit-characteristic filter chips), synthetic `InlineChatSourceEntry`
   at the top of the Sources tab, `CatalogDrawer.tsx` wire-up with
   extended `scorePlugin` across prose + tags, and the `ShortcutsHelp`
@@ -100,26 +100,23 @@ follows the same backend/frontend split as Phase 1 (plans 12 / 13). When
 reading 16a or 16b, the sibling-pattern reference is plan 12 and plan 13;
 the design reference is [08-catalog-reshape.md](08-catalog-reshape.md).
 
-## Trust-tier semantics for this phase
+## Trust-tier scope (rescinded 2026-05-18)
 
-Two readings of "trust tier" exist; only one is in scope:
+The original Phase 7A scope included a per-plugin `data_trust_tier`
+field rendered as a tier badge on each card. **That scope was
+rescinded on 2026-05-18** after operator review concluded the field
+failed the "each tag must represent a meaningful per-plugin decision"
+test: every Source surfaces Tier 3 data because the kind requires it
+(not a per-plugin choice); every external-call Transform is Tier 3
+because the author's `Determinism.EXTERNAL_CALL` declaration already
+says so; pure Transforms are Tier 2 because their kind requires it.
 
-| Reading | In scope? | What it means |
-|---|---|---|
-| (a) "What tier of data does this plugin handle?" | **Yes** | Sources and external-call transforms surface Tier 3 data at their boundary; pure transforms operate on Tier 2 data; sinks emit Tier 2 data |
-| (b) "How trusted is the plugin itself?" | No | All plugins are Tier 1 system code (per CLAUDE.md "Plugin Ownership"); this is uniform and uninteresting to display |
-
-The badge in the design spec (08 — "Tier 3" on the CSV card) is reading (a):
-it documents *what the user is dealing with at this boundary* so a
-compliance-oriented user (Linda) can scan a card and see "this source reads
-external Tier 3 data; it will coerce and validate; here are the audit
-characteristics that follow from that." Reading (b) is enforced by the
-no-user-plugins policy and is not surfaced in the catalog UI.
-
-The plan refers to this throughout as `data_trust_tier` (an `int | None`
-with values `1`, `2`, or `3`) to avoid conflation. The frontend renders
-this as `Tier {n}` text on the card, with a tooltip explaining what the
-tier means in plain language.
+Boundary classification for the audit-readiness panel is derived from
+`(kind, determinism)` directly — see `_build_plugin_trust_row` in
+`src/elspeth/web/audit_readiness/service.py`. The catalog drawer
+surfaces author-declared `audit_characteristics` plus determinism-
+derived flags that **vary across plugins of the same kind**; kind-
+default determinism does not emit a flag.
 
 ## What 7a is *not* doing
 

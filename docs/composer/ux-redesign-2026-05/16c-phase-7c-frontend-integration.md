@@ -1,5 +1,13 @@
 # Phase 7C — Frontend: Catalog drawer integration (filters, synthetic entry, shortcuts)
 
+> **⚠️ HISTORICAL — trust-tier filter scope rescinded 2026-05-18.**
+> The plan body below preserves the OD-C decision NOT to surface trust
+> tier as a filter dimension (which proved prescient); commit
+> `c76ecc0f2` extended that rationale to delete the underlying
+> `data_trust_tier` field entirely. The `data_trust_tier` lines in
+> test fixtures below are preserved as historical record; do not copy
+> them into new tests — `PluginSummary` no longer carries the field.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps

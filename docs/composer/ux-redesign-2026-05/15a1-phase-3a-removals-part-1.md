@@ -8,6 +8,10 @@
 
 **Tech Stack:** React + Zustand + Vitest + testing-library. No new dependencies.
 
+> **Phase 3 block notice (added 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on a shared worktree** (`.worktrees/phase-2a-backend`, branch `feat/composer-phase-2a-backend` — the same worktree that landed Phase 2A/2B/2C) and **merge as one PR**. Phrases below like "deferred to 15b" or "Phase 3B" mean "later tasks in the same branch," not a separate cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
+>
+> **Subagent dispatch discipline.** Any subagent run against this work MUST be given an explicit CWD-discipline preamble at the top of its prompt: first Bash call `cd /home/john/elspeth/.worktrees/phase-2a-backend && pwd && git rev-parse --abbrev-ref HEAD` (expect `feat/composer-phase-2a-backend`), then absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths will silently read the wrong branch (the main checkout is 87+ commits behind). See memory entry `feedback_subagents_cant_use_worktrees`.
+
 **Sibling plans:**
 - Predecessor: [13-phase-1b-frontend.md](13-phase-1b-frontend.md) — Phase 3A **assumes Phase 1B has shipped**, because Phase 1B adds the `UserMenu` to the header. If 1B has not shipped, do not start this plan — fix 1B first.
 - Successor: [15b1-phase-3b-side-rail-part-1.md](15b1-phase-3b-side-rail-part-1.md) / [15b2-phase-3b-side-rail-part-2.md](15b2-phase-3b-side-rail-part-2.md) — Graph mini, YAML modal, Catalog button move, version selector relocation, hash redirects, InspectorPanel deletion.
@@ -23,14 +27,14 @@
 ## Scope boundaries
 
 **In scope (this plan, 15a):**
-- New `SideRail.tsx` scaffold mounted to the right of the chat column. Slots for: audit-readiness placeholder (filled by Phase 2), graph mini placeholder (filled by 15b), Catalog button placeholder (filled by 15b), Export-YAML button placeholder (filled by 15b), completion bar placeholder (filled by Phase 6). The side rail renders even when all real content is deferred — it carries the layout shape.
+- New `SideRail.tsx` scaffold mounted to the right of the chat column. Slots for: audit-readiness placeholder (**Phase 2C has already mounted `AuditReadinessPanel` inside `InspectorPanel` at line 534**, so this slot stays `null` in 15a; 15b2 Task 9 Step 4a migrates the mount from InspectorPanel into the slot before `InspectorPanel.tsx` is deleted), graph mini placeholder (filled by 15b), Catalog button placeholder (filled by 15b), Export-YAML button placeholder (filled by 15b), completion bar placeholder (filled by Phase 6). The side rail renders even when all real content is deferred — it carries the layout shape.
 - New `HeaderSessionSwitcher.tsx` — header dropdown that lists sessions (`session-switcher` per design doc 03). Replaces the always-on `SessionSidebar`.
 - New `InlineRunResults.tsx` — mounts in the chat column below `ChatPanel`; subscribes to `executionStore.activeRunId` + `progress`; renders `ProgressView` and `RunOutputsPanel` for the active/most-recent run. Carries the previous Runs-tab functionality minus the historical list.
 - New `RunsHistoryDrawer.tsx` — preserves access to historical runs via a "Past runs" affordance in `InlineRunResults`. Required because the design doc is silent on the runs list; this plan resolves that as "keep, demote to a drawer" (see §"Open scope questions resolved" below).
 - Removal of `SessionSidebar.tsx` import + render from `App.tsx` / `Layout.tsx`. The file itself is deleted.
 - Removal of `SpecView.tsx` import + render from `InspectorPanel.tsx`. The file itself is deleted. `Spec` tab button is dropped from the tab strip.
 - Removal of `RunsView.tsx` import + render from `InspectorPanel.tsx`. The file itself is deleted. `Runs` tab button is dropped from the tab strip.
-- Removal of the `Validate` button from the inspector header. Validation is now driven by an auto-validate-on-composition-change effect in `executionStore` (see Task 4 below) plus the existing `Ctrl+Shift+V` shortcut, which is retained as a manual re-trigger. The validation banner stays where it is in the inspector header for this slice; 15b moves it.
+- ~~Removal of the `Validate` button from the inspector header.~~ **Done by Phase 2C** (commits `d218417c1..2f2ba300e`, 2026-05-17). The button is gone; the `validationResult`→`injectSystemMessage`+`sendValidationFeedback` side effects are now owned by an `executionStore` subscriber inside `subscriptions.ts` (Phase 2C). `Ctrl+Shift+V` continues to fire `validate(activeSessionId)` directly from `App.tsx`, and the side-effect subscriber publishes the system message regardless of which trigger called validate. The validation banner is replaced in-place by the `AuditReadinessPanel` (also Phase 2C).
 - Layout grid renamed: `sidebar / chat / inspector` slots become `chat / siderail` (the old `sidebar` slot is gone; the inspector slot is renamed to `siderail` but, importantly, the inspector continues to occupy that slot until 15b deletes it. We rename the prop in this plan so that the slot is *semantically* the side rail; the inspector lives in the side-rail slot temporarily).
 - `App.test.tsx` smoke-render assertion runs at the end of every removal task to confirm the app still launches.
 - `CommandPalette` retains its existing Sessions section (already covers H1 fallback per CommandPalette.tsx:182–196). No new commands added here.
@@ -77,14 +81,16 @@ The order is:
 Task 1 — Add InlineRunResults + RunsHistoryDrawer  (additions; nothing removed)
 Task 2 — Add SideRail scaffold + rename Layout slot (additions; nothing removed)
 Task 3 — Add HeaderSessionSwitcher                  (additions; nothing removed)
-Task 4 — Add auto-validate-on-change effect         (behaviour addition; nothing removed)
+Task 4 — Add auto-validate-on-change subscriber     (additive change to subscriptions.ts; Phase 2C subscribers untouched)
 Task 5 — Remove Runs tab + RunsView + delete file   (first removal; runs handled by Task 1)
 Task 6 — Remove Spec tab + SpecView + delete file   (second removal; the Spec→banner-click flow is dropped — see risks)
 Task 7 — Remove SessionSidebar mount + delete file  (third removal; session switching handled by Task 3 + palette)
-Task 8 — Remove Validate button from inspector hdr  (last removal; auto-validate from Task 4 + Ctrl+Shift+V cover it)
+                                                    (Task 8 retired — Phase 2C already removed the Validate button and
+                                                     wired the validationResult→system-message side effects in
+                                                     subscriptions.ts. See 15a2 panel note.)
 ```
 
-Tasks 1–4 are in this file. Tasks 5–8 are in [15a2-phase-3a-removals-part-2.md](15a2-phase-3a-removals-part-2.md).
+Tasks 1–4 are in this file. Tasks 5–7 are in [15a2-phase-3a-removals-part-2.md](15a2-phase-3a-removals-part-2.md).
 
 Each task is TDD-shaped: failing test, implementation, passing test, smoke render, commit.
 
@@ -107,7 +113,7 @@ Each task is TDD-shaped: failing test, implementation, passing test, smoke rende
 - Create: `src/elspeth/web/frontend/src/components/execution/InlineRunResults.test.tsx`.
 - Create: `src/elspeth/web/frontend/src/components/execution/RunsHistoryDrawer.tsx`.
 - Create: `src/elspeth/web/frontend/src/components/execution/RunsHistoryDrawer.test.tsx`.
-- Modify: `src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx` — mount `<InlineRunResults />` after the chat scrollback (and before the chat input). Do not inline the component logic into ChatPanel (573-line component, already complex).
+- Modify: `src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx` — mount `<InlineRunResults />` after the chat scrollback (and before the chat input). Do not inline the component logic into ChatPanel (622-line component, already complex).
 
 This task is **purely additive**. After Task 1, run-result inline rendering co-exists with the still-present Runs tab. Task 5 removes the tab once the inline path is verified.
 
@@ -229,6 +235,21 @@ describe("InlineRunResults", () => {
     expect(
       screen.queryByRole("button", { name: /past runs/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("handles a dangling activeRunId (race during reconnect / session switch)", () => {
+    // Contract: activeRunId can briefly point to a run that is not yet (or
+    // no longer) in `runs[]` during WebSocket reconnect or session switch.
+    // The component must not crash. The intended shape: progress is null in
+    // this state, so hasActive is false and nothing run-shaped renders.
+    useExecutionStore.setState({
+      activeRunId: "run-ghost",
+      progress: null,
+      runs: [],
+    } as never);
+    const { container } = render(<InlineRunResults />);
+    expect(container.querySelector("[data-testid='progress-view-stub']")).toBeNull();
+    expect(container.querySelector("[data-testid='run-outputs-stub']")).toBeNull();
   });
 });
 ```
@@ -483,6 +504,7 @@ git commit -m "feat(web/frontend): InlineRunResults + RunsHistoryDrawer (Phase 3
 - Modify: `src/elspeth/web/frontend/src/components/common/Layout.tsx` — rename the `inspector` prop to `siderail` in the same commit (per CLAUDE.md "No Legacy Code Policy" — no deprecated alias; the only caller is `App.tsx`, also modified in this task). Adjust internal class names from `layout-inspector` → `layout-siderail` and `inspector-overlay-*` → `siderail-overlay-*`.
 - Modify: `src/elspeth/web/frontend/src/components/common/Layout.test.tsx` — update slot-name assertions.
 - Modify: `src/elspeth/web/frontend/src/App.tsx` — pass `siderail` prop (carrying the InspectorPanel inside the new SideRail for now, so nothing visually moves).
+- Modify: `src/elspeth/web/frontend/src/App.test.tsx` — the Layout mock at lines 19–35 destructures `{ sidebar, chat, inspector }`. **Rename `inspector` → `siderail` in the destructure AND in the render body.** Without this, React will silently drop the unrecognised `siderail` prop and the mocked Layout will render no side-rail content — App.test.tsx will stay green while `App.tsx` is broken (Quality panel finding 2026-05-17).
 
 The side rail in 15a is **a component that accepts named slot props** (render-props). Slots are declared as `ReactNode | null` props (e.g., `auditReadinessSlot`, `executeButtonSlot`, `graphMiniSlot`, etc.). The scaffold renders each slot in a wrapper `<div>` with a `data-testid`. Each downstream phase passes its component **as a prop from the mounting site** — currently `App.tsx`. Components are NEVER mounted by event or by SideRail's own internal logic; the composition contract is: **caller passes content, SideRail places it**.
 
@@ -856,6 +878,19 @@ describe("HeaderSessionSwitcher", () => {
     render(<HeaderSessionSwitcher />);
     expect(screen.getByRole("button")).toHaveTextContent(/untitled/i);
   });
+
+  it("shows 'New session' even when the sessions list is empty (just-archived edge)", async () => {
+    // Contract: the dropdown must always offer the New-session verb, even
+    // when activeSessionId points to a session that has been removed from
+    // the sessions array (e.g. just archived) and the list is empty.
+    useSessionStore.setState({
+      sessions: [],
+      activeSessionId: "sess-orphaned",
+    } as never);
+    render(<HeaderSessionSwitcher />);
+    await userEvent.click(screen.getByRole("button"));
+    expect(screen.getByRole("menuitem", { name: /new session/i })).toBeInTheDocument();
+  });
 });
 ```
 
@@ -1120,7 +1155,11 @@ Append to `App.css`:
 
 .header-session-switcher-item:hover,
 .header-session-switcher-item:focus {
-  background: var(--color-bg-hover);
+  /* --color-bg-hover is not currently defined in App.css; fallback to a
+     translucent border tint matches the existing dropdown hover treatment
+     (see CommandPalette / VersionSelector). When/if --color-bg-hover lands
+     as a real token, the fallback is harmless. */
+  background: var(--color-bg-hover, rgba(143, 200, 200, 0.08));
 }
 
 .header-session-switcher-item[aria-current="page"] {
@@ -1156,60 +1195,58 @@ git commit -m "feat(web/frontend): AppHeader with session switcher + UserMenu (P
 
 ## Task 4: Add auto-validate-on-composition-change subscription
 
-**Files:**
-- Modify: `src/elspeth/web/frontend/src/stores/subscriptions.ts` — add a cross-store subscription that fires `validate(sessionId)` when `compositionState.version` increments.
-- Modify: `src/elspeth/web/frontend/src/stores/subscriptions.test.ts` — add the subscription test.
+> **2026-05-17 panel reality-check fix:** This task was originally specified as a **full rewrite** of `subscriptions.ts` (closure migration, `initialized` → `teardown` handle, rename `_resetSubscriptionsForTesting` → `_resetForTests`). That spec was written against the pre-Phase-2C version of the file. **Phase 2C already restructured `subscriptions.ts`** to own three subscribers (version-change clears `validationResult`; session-removal evicts the `auditReadinessStore` cache; `validationResult`-change fires `injectSystemMessage` + `sendValidationFeedback` — the side effects formerly owned by `InspectorPanel.handleValidate`, which Phase 2C also deleted). Executing the original Task 4 spec would have silently regressed that work. **The closure migration is no longer needed and is explicitly NOT done in this task.** Task 4 is now a strictly additive change: one new subscriber, alongside the three already in place, sharing the same module-level isolation pattern. Audit-readiness eviction, the `validationResult` side-effect subscriber, the existing test export name `_resetSubscriptionsForTesting`, and the existing test file's import all stay exactly as they are.
 
-The current `subscriptions.ts` already wires session→execution auto-clear (per executionStore.ts:4–10 comment). Task 4 adds a complementary "auto-validate" subscription that fires when:
+**Files:**
+- Modify: `src/elspeth/web/frontend/src/stores/subscriptions.ts` — add a new `auto-validate` subscriber alongside the three already there. Do NOT touch the existing `useSessionStore` subscriber (version-change clears + session-removal cache eviction) or the existing `useExecutionStore` subscriber (`validationResult`-change side effects). Extend `_resetSubscriptionsForTesting()` so it tears down the new subscriber's state too.
+- Modify: `src/elspeth/web/frontend/src/stores/subscriptions.test.ts` — append the new tests; keep all existing tests and the existing `_resetSubscriptionsForTesting` import.
+
+**Trigger semantics.** The new subscriber fires `validate(sessionId)` when:
 
 - `activeSessionId` is set, AND
-- `compositionState.version` strictly increased since last fire, AND
-- The store is not currently validating or executing.
+- `compositionState.version` strictly increased since the last *successfully completed* validate for this session, AND
+- The store is not currently executing.
 
-Debounce is **not** added in v1: composition-state version increments are themselves coarse (per-edit, not per-keystroke). If telemetry shows excessive validate calls, Phase 8 can add a debounce.
+**Correctness requirement (Systems-panel finding 2026-05-17).** A naive "skip if `isValidating`" guard creates a correctness gap: during rapid composition (LLM tool calls bumping version N, N+1, N+2 in quick succession), the in-flight `validate(N)` would cause the subscriber to discard versions N+1 and N+2, and the resulting `validationResult` would correspond to N while the composition is at N+2. The user would then see a confident "✓ Validation passed" badge for a stale snapshot — a CLAUDE.md `feedback_correctness_beats_performance` violation.
 
-> **Review finding (BLOCKER, operator-adjudicated 2026-05-15):** `lastValidatedVersion`, the pre-existing `previousVersion`, and the new `previousSessionId` tracker must all live inside `initStoreSubscriptions()`'s closure — not at module scope. The current module-level `initialized` boolean is replaced by a module-level `teardown` handle that `_resetForTests()` invokes between tests to rebuild the closure cleanly. The implementation in Step 4 and the isolation test in Step 2 reflect this requirement. **Operator adjudication:** previous-session tracking uses a closure variable updated at the tail of the subscription rather than the zustand `subscribe((state, prevState) => ...)` overload, which would require `subscribeWithSelector` middleware that the project does not wire.
+The fix: track the **latest observed version separately from the last validated version**, and after every in-flight `validate()` settles, re-fire if a newer version arrived in the meantime. `executionStore.validate(sessionId): Promise<void>` does not accept an `AbortSignal` today (executionStore.ts:58), so abort-and-retry is not the chosen shape; the loop pattern is.
 
-- [ ] **Step 1: Read `subscriptions.ts` end-to-end**
+Per-session tracking matters: `lastValidatedVersion` is a `Map<string, number>` keyed by session id, not a global. This way switching sessions does not falsely satisfy the "version unchanged" check, and switching back to a previously validated session does not re-fire unnecessarily.
+
+Debounce is **explicitly not added.** Per the panel finding, deferring to "Phase 8 if telemetry shows pain" is non-falsifiable (there is no frontend telemetry). The correctness loop is the real fix; load-shaping is a separate decision that can be re-opened if a concrete trigger arises (e.g. backend returning 429, or operator-observed lag).
+
+- [ ] **Step 1: Read the current `subscriptions.ts` end-to-end**
 
 ```bash
-grep -n "" src/elspeth/web/frontend/src/stores/subscriptions.ts | head -80
+cat src/elspeth/web/frontend/src/stores/subscriptions.ts
 ```
 
-Identify the existing subscription pattern. The new subscription mirrors it.
+Confirm the three existing subscribers are present (lines 53–69 sessionStore version+cache; lines 73–108 executionStore `validationResult` side effects; `_resetSubscriptionsForTesting` at line 117). If the file does not match this shape, stop and reconcile — the plan was written against the Phase 2C state.
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the failing test (append to existing `subscriptions.test.ts`)**
 
-Append to `src/elspeth/web/frontend/src/stores/subscriptions.test.ts`:
+The existing test file already imports `_resetSubscriptionsForTesting`. **Do not change that import.** Append a new `describe` block:
 
 ```typescript
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { useSessionStore } from "./sessionStore";
-import { useExecutionStore } from "./executionStore";
-import { initStoreSubscriptions, _resetForTests } from "./subscriptions";
+import { waitFor } from "@testing-library/react";
 
 describe("auto-validate on composition-state version change", () => {
   beforeEach(() => {
-    // _resetForTests() tears down the previous test's subscription and
-    // clears all closure trackers, so the subsequent initStoreSubscriptions()
-    // call rebuilds a fresh closure.  Without this, the module-level
-    // teardown handle would short-circuit and the test would see stale
-    // lastValidatedVersion / previousSessionId values.
-    _resetForTests();
+    _resetSubscriptionsForTesting();
     useSessionStore.setState({
       activeSessionId: "sess-1",
       compositionState: null,
+      sessions: [{ id: "sess-1", title: "x" } as never],
     } as never);
     useExecutionStore.setState({
-      isValidating: false,
       isExecuting: false,
       validationResult: null,
     } as never);
     initStoreSubscriptions();
   });
 
-  it("fires validate when compositionState.version increments", () => {
-    const validate = vi.fn();
+  it("fires validate when compositionState.version increments", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
@@ -1217,56 +1254,46 @@ describe("auto-validate on composition-state version change", () => {
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
 
-    expect(validate).toHaveBeenCalledWith("sess-1");
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-1"));
 
-    // Version increments again -- fires again.
     useSessionStore.setState({
       compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
     } as never);
 
-    expect(validate).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
   });
 
-  it("does not fire when version is unchanged", () => {
-    const validate = vi.fn();
+  it("does not fire when version is unchanged (reference change only)", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
       compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
     } as never);
-    expect(validate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
 
-    // Same version, different reference -- should not refire.
     useSessionStore.setState({
       compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
     } as never);
+    // Give the loop a chance to re-fire if it were going to.
+    await new Promise((r) => setTimeout(r, 0));
     expect(validate).toHaveBeenCalledTimes(1);
   });
 
-  it("does not fire while a validation is already in-flight", () => {
-    const validate = vi.fn();
-    useExecutionStore.setState({ validate, isValidating: true } as never);
-
-    useSessionStore.setState({
-      compositionState: { version: 7, source: null, nodes: [], outputs: [] } as never,
-    } as never);
-
-    expect(validate).not.toHaveBeenCalled();
-  });
-
-  it("does not fire while an execution is in-flight", () => {
-    const validate = vi.fn();
+  it("does NOT fire while executing", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate, isExecuting: true } as never);
 
     useSessionStore.setState({
       compositionState: { version: 9, source: null, nodes: [], outputs: [] } as never,
     } as never);
 
+    await new Promise((r) => setTimeout(r, 0));
     expect(validate).not.toHaveBeenCalled();
   });
 
-  it("does not fire when activeSessionId is null", () => {
-    const validate = vi.fn();
+  it("does not fire when activeSessionId is null", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
     useSessionStore.setState({ activeSessionId: null } as never);
 
@@ -1274,23 +1301,63 @@ describe("auto-validate on composition-state version change", () => {
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
 
+    await new Promise((r) => setTimeout(r, 0));
     expect(validate).not.toHaveBeenCalled();
   });
 
-  it("resets lastValidatedVersion between test runs (cross-test isolation)", () => {
-    // beforeEach calls _resetForTests() then initStoreSubscriptions().  A
-    // fresh closure must start with lastValidatedVersion=null so version=1
-    // fires again, even though a previous test in this describe block
-    // already saw version=1.  If lastValidatedVersion were module-scoped
-    // (or if _resetForTests did not actually tear down the closure), this
-    // test would silently regress.
-    const validate = vi.fn();
+  it("re-fires after the in-flight validate settles if a newer version arrived (correctness loop)", async () => {
+    // This is the correctness guarantee: the user must not see a stale
+    // validationResult badge for a snapshot that no longer matches the
+    // composition. We simulate validate() that takes a microtask to resolve;
+    // between the call and the resolve, version increments. The subscriber
+    // MUST fire a second validate() once the first settles.
+    let resolveFirst: (() => void) | null = null;
+    const firstCallPromise = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    const validate = vi
+      .fn()
+      .mockImplementationOnce(() => firstCallPromise)
+      .mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
+
     useSessionStore.setState({
-      activeSessionId: "sess-fresh",
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
-    expect(validate).toHaveBeenCalledWith("sess-fresh");
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+
+    // Version increments while validate(v1) is still in flight.
+    useSessionStore.setState({
+      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    // Loop has not re-fired yet — the in-flight call is still pending.
+    expect(validate).toHaveBeenCalledTimes(1);
+
+    // Settle the in-flight call. The loop must observe pending=v2 and re-fire.
+    resolveFirst!();
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1");
+  });
+
+  it("resets per-session tracking when activeSessionId changes (cross-session isolation)", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+
+    // Switch to a fresh session whose first observed version happens to also be 1.
+    // Per-session tracking means this must fire — global tracking would falsely
+    // satisfy "version unchanged".
+    useSessionStore.setState({
+      activeSessionId: "sess-B",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-B"));
   });
 });
 ```
@@ -1301,135 +1368,133 @@ describe("auto-validate on composition-state version change", () => {
 cd src/elspeth/web/frontend && npx vitest run src/stores/subscriptions.test.ts -t "auto-validate"
 ```
 
-Expected: FAIL.
+Expected: FAIL — the new subscriber does not exist yet.
 
-- [ ] **Step 4: Implement the subscription**
+- [ ] **Step 4: Implement the additive subscriber**
 
-`src/elspeth/web/frontend/src/stores/subscriptions.ts` currently keeps both `previousVersion` and `initialized` at module scope. That shape is the same defect as Phase 1A finding 7 (cross-phase finding §H7). Task 4 **rewrites the file** so that:
+Edit `src/elspeth/web/frontend/src/stores/subscriptions.ts`. **Do not delete or rewrite anything that already exists.** Add module-level state for the new subscriber alongside the existing trackers, add a third subscribe call inside `initStoreSubscriptions()` after the two existing ones, and extend `_resetSubscriptionsForTesting()` to tear it down.
 
-1. All previously module-scoped trackers (`previousVersion`, `initialized`, plus the new `lastValidatedVersion` and `previousSessionId`) live inside `initStoreSubscriptions()`'s closure.
-2. The existing module-level `initialized` boolean is replaced by a closure-internal `started` flag.
-3. The subscription's unsubscribe handle is held in the closure so `_resetForTests()` can tear it down.
-4. A test-only `_resetForTests()` function is exported. The underscore prefix is the project's "test-only API" convention; no `@deprecated` annotation per "No Legacy Code Policy."
-5. Previous-session tracking uses a **closure variable** (`previousSessionId`) updated at the tail of the subscription, **not** zustand's `subscribe((state, prevState) => ...)` overload — that overload requires the `subscribeWithSelector` middleware, which is not wired in the stores. The closure pattern matches the existing `previousVersion` precedent in this file.
-
-The full rewrite of `subscriptions.ts`:
+The additive sketch (insert into the existing file, do not replace it):
 
 ```typescript
-// stores/subscriptions.ts
-//
-// Cross-store subscriptions extracted from executionStore to break the
-// circular import between sessionStore and executionStore. Call
-// initStoreSubscriptions() once at app startup (e.g. in App.tsx).
-//
-// All mutable state — start flag, previous-version tracker, previous
-// session-id tracker, last-validated-version tracker, and the active
-// subscription teardown — lives in the closure created by
-// initStoreSubscriptions().  Module scope is intentionally bare so that
-// _resetForTests() can rebuild the closure on every beforeEach.
+// At module scope, alongside the existing previousVersion / previousSessionIds /
+// previousValidationResult trackers:
 
-import { useSessionStore } from "./sessionStore";
-import { useExecutionStore } from "./executionStore";
+// Per-session tracking for the auto-validate subscriber. lastValidated maps
+// session-id → highest version successfully completed by validate(). pending
+// holds the most recently observed (session-id, version) that still needs
+// validating; the loop reads it on every settle.
+const lastValidatedVersionBySession = new Map<string, number>();
+let pendingValidateTarget: { sessionId: string; version: number } | null = null;
+let validateInflight = false;
+let unsubscribeAutoValidate: (() => void) | null = null;
 
-let teardown: (() => void) | null = null;
+// Inside initStoreSubscriptions(), after the existing two subscribe calls:
 
-export function initStoreSubscriptions(): void {
-  if (teardown !== null) return; // already started
+unsubscribeAutoValidate = useSessionStore.subscribe((state) => {
+  const sessionId = state.activeSessionId;
+  const version = state.compositionState?.version ?? null;
+  if (!sessionId || version === null) return;
+  if (lastValidatedVersionBySession.get(sessionId) === version) return;
+  if (useExecutionStore.getState().isExecuting) return;
 
-  // Closure-scoped trackers.  Each initStoreSubscriptions() call (after a
-  // _resetForTests()) starts these afresh.
-  let previousVersion: number | null = null;
-  let previousSessionId: string | null = null;
-  let lastValidatedVersion: number | null = null;
+  pendingValidateTarget = { sessionId, version };
+  if (validateInflight) return;  // settle-handler in fireValidateLoop catches it
+  void fireValidateLoop();
+});
 
-  const unsubscribe = useSessionStore.subscribe((state) => {
-    const sessionId = state.activeSessionId;
-    const currentVersion = state.compositionState?.version ?? null;
+// Helper — runs outside any subscribe callback so the loop can re-read store
+// state between iterations. Re-reads handle: (a) session switches, (b) version
+// increments during in-flight call, (c) execute() starting mid-loop.
+async function fireValidateLoop(): Promise<void> {
+  validateInflight = true;
+  try {
+    while (pendingValidateTarget !== null) {
+      const target = pendingValidateTarget;
+      // Bail out if execute started, session cleared, or version already valid.
+      if (useExecutionStore.getState().isExecuting) {
+        pendingValidateTarget = null;
+        break;
+      }
+      if (target.sessionId !== useSessionStore.getState().activeSessionId) {
+        // Active session changed while we were preparing to fire. Drop this
+        // target; the subscribe handler will re-queue the new session if needed.
+        pendingValidateTarget = null;
+        break;
+      }
+      if (lastValidatedVersionBySession.get(target.sessionId) === target.version) {
+        pendingValidateTarget = null;
+        break;
+      }
 
-    // (1) Pre-existing behaviour: auto-clear validation when composition
-    // version changes.  Moved from module scope into the closure.
-    if (previousVersion !== null && currentVersion !== previousVersion) {
-      useExecutionStore.getState().clearValidation();
+      // Clear pending BEFORE awaiting, so a newer version arriving during the
+      // await is captured by the subscribe handler into pendingValidateTarget.
+      pendingValidateTarget = null;
+      await useExecutionStore.getState().validate(target.sessionId);
+      lastValidatedVersionBySession.set(target.sessionId, target.version);
+      // Loop re-checks pendingValidateTarget. If a newer version arrived during
+      // the await, we run again. Otherwise we exit.
     }
-    previousVersion = currentVersion;
-
-    // (2) New auto-validate behaviour.
-    if (!sessionId) {
-      lastValidatedVersion = null;
-      previousSessionId = sessionId;
-      return;
-    }
-
-    // Active session changed — reset the last-validated tracker so the
-    // first version observed for the new session fires a validate().
-    if (sessionId !== previousSessionId) {
-      lastValidatedVersion = null;
-      previousSessionId = sessionId;
-    }
-
-    if (currentVersion === null) return;
-    if (currentVersion === lastValidatedVersion) return;
-
-    const exec = useExecutionStore.getState();
-    if (exec.isValidating || exec.isExecuting) return;
-
-    lastValidatedVersion = currentVersion;
-    // Fire-and-forget; rejection is intentionally not surfaced to a
-    // diagnostic channel in this phase.  Per CLAUDE.md audit-primacy
-    // policy, failures from validate() are already recorded in the audit
-    // Landscape at the backend boundary; adding a frontend log/telemetry
-    // breadcrumb here would duplicate the audit trail without adding
-    // probative value.  Phase 8 (polish + telemetry) is the right owner
-    // if a frontend operational signal proves useful.
-    void exec.validate(sessionId);
-  });
-
-  teardown = () => {
-    unsubscribe();
-    previousVersion = null;
-    previousSessionId = null;
-    lastValidatedVersion = null;
-  };
-}
-
-/**
- * Test-only: tear down the active subscription and clear all closure
- * trackers so the next initStoreSubscriptions() call rebuilds a fresh
- * closure.  Underscore prefix marks this as not-for-runtime-use.
- */
-export function _resetForTests(): void {
-  if (teardown) {
-    teardown();
-    teardown = null;
+  } finally {
+    validateInflight = false;
   }
 }
 ```
 
+Extend `_resetSubscriptionsForTesting()`:
+
+```typescript
+export function _resetSubscriptionsForTesting(): void {
+  unsubscribe?.();
+  unsubscribe = null;
+  unsubscribeExecution?.();
+  unsubscribeExecution = null;
+  unsubscribeAutoValidate?.();
+  unsubscribeAutoValidate = null;
+  previousVersion = null;
+  previousValidationResult = null;
+  previousSessionIds = new Set();
+  lastValidatedVersionBySession.clear();
+  pendingValidateTarget = null;
+  validateInflight = false;
+  initialized = false;
+}
+```
+
+Update the JSDoc on `initStoreSubscriptions` to list the new subscriber alongside the three already there. **Do not change the function signature; do not rename the export.**
+
 Notes:
 
-- `previousSessionId` is a **closure variable updated at the tail of the subscription**. This is the operator-adjudicated alternative to `useSessionStore.subscribe((state, prevState) => ...)`, which would require `subscribeWithSelector` middleware that the project does not currently wire.
-- The rejection from `validate()` is **not** surfaced to a frontend telemetry channel. No `telemetry.record(...)` call is made. The backend's audit Landscape already records validate failures; the frontend would only duplicate that record. Operator adjudication 2026-05-15.
-- The existing single-arg `useSessionStore.subscribe((state) => ...)` precedent at the top of the previous version of this file confirms the signature.
+- The loop re-reads store state every iteration. This handles session switches and `isExecuting` transitions correctly — bail out and re-queue from a fresh subscribe firing.
+- `pendingValidateTarget` is cleared **before** awaiting `validate()`. A subsequent version increment arriving during the await sets it back to the new `(sessionId, version)`, which the loop body picks up on its next iteration.
+- The `validationResult` consumed by `injectSystemMessage` / `sendValidationFeedback` is published by the existing executionStore subscriber (Phase 2C, untouched). The auto-validate subscriber's only side effect is the `validate()` call itself; the result-driven side effects flow through the existing path.
+- No frontend telemetry / no logger call. Failures inside `validate()` are recorded in the backend audit Landscape per CLAUDE.md primacy.
 
-- [ ] **Step 5: Run all tests**
+- [ ] **Step 5: Run all subscription tests**
 
 ```bash
 cd src/elspeth/web/frontend && npx vitest run src/stores
 ```
 
-Expected: PASS.
+Expected: PASS — including the existing tests for version-change, audit-readiness eviction, and `validationResult` side-effects (all untouched), plus the new auto-validate suite.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/stores/subscriptions.ts \
         src/elspeth/web/frontend/src/stores/subscriptions.test.ts
-git commit -m "feat(web/frontend): auto-validate on composition-state version increment (Phase 3A.4)"
+git commit -m "feat(web/frontend): auto-validate on compositionState.version increment (Phase 3A.4)
+
+Additive third subscriber inside initStoreSubscriptions(); existing
+version-clear, audit-readiness-evict, and validationResult-driven
+injectSystemMessage subscribers (all Phase 2C) untouched. Correctness
+loop re-fires validate() after in-flight settle when a newer version
+arrived, so the user never sees a stale validation badge."
 ```
 
 ---
 
-**Tasks 5–8 (the removal tasks) continue in [15a2-phase-3a-removals-part-2.md](15a2-phase-3a-removals-part-2.md).**
+**Tasks 5–7 (the removal tasks; Task 8 retired — see panel note in 15a2) continue in [15a2-phase-3a-removals-part-2.md](15a2-phase-3a-removals-part-2.md).**
 
 ---
 
@@ -1446,3 +1511,25 @@ git commit -m "feat(web/frontend): auto-validate on composition-state version in
 **IMPORTANT (Architecture):** Task 2 scaffold updated to use render-props (`auditReadinessSlot`, `executeButtonSlot`, etc.) instead of empty-div placeholders. `SideRailProps` now explicitly declares all named slots as `ReactNode | null`. `executeButtonSlot` is added here (required by 15b Task 2 before the inspector deletion). The composition contract is explicit: callers pass content via props from `App.tsx`; `SideRail` does not mount components by event or by its own internal logic.
 
 **Cross-file decision:** `SWITCH_TAB_EVENT` — IMPORTANT (15b2 §4) overrides SUGGESTION (15b1 §3); the constant is deleted in Phase 3B, not deferred to Phase 6. See 15b1 and 15b2 review history entries.
+
+### 2026-05-17 — Reality-check panel applied (NO-GO → fixes landed)
+
+Four reviewers (Reality / Architecture / Quality / Systems) ran against the worktree after Phase 2C landed. Reality returned NO-GO; the other three returned CONDITIONAL GO. The convergent finding: the plan was authored against the pre-Phase-2C state and would have regressed Phase 2C work if executed. Fixes landed in this revision:
+
+**CRITICAL (Reality+Architecture+Quality, convergent) — Task 4 reframed from "full rewrite" to additive change.** The original Task 4 spec rewrote `subscriptions.ts` in full and renamed `_resetSubscriptionsForTesting` → `_resetForTests`. Phase 2C already restructured `subscriptions.ts` to own three subscribers (version-change clears `validationResult`; session-removal evicts `auditReadinessStore`; `validationResult`-change fires `injectSystemMessage` + `sendValidationFeedback`). The original rewrite would have silently dropped the audit-readiness eviction and the `validationResult` side-effect subscriber. The new Task 4 spec adds a **fourth** subscriber alongside the three already there, preserves the existing export name `_resetSubscriptionsForTesting`, and extends `_resetSubscriptionsForTesting()` to tear down the new subscriber. The closure-migration framing from the 2026-05-15 panel is moot now — module-scope state is the established Phase 2C pattern.
+
+**CRITICAL (Reality) — Task 8 retired.** Phase 2C already deleted the Validate button (`InspectorPanel.tsx:557-572`), the `handleValidate` callback (`InspectorPanel.tsx:387-424`), and moved the side-effect orchestration into `subscriptions.ts`. The original Task 8 spec referenced lines that no longer exist. Sequencing diagram updated. 15a2 carries the retirement note.
+
+**CRITICAL (Reality) — Audit-readiness slot is RESERVED, not "filled by Phase 2".** Scope-boundaries text updated to acknowledge that Phase 2C mounted `AuditReadinessPanel` inside `InspectorPanel.tsx:534`. The SideRail's `auditReadinessSlot` stays `null` through 15a; 15b2 Task 9 Step 4a migrates the mount before `InspectorPanel.tsx` is deleted.
+
+**IMPORTANT (Systems) — Auto-validate correctness loop.** Task 4's original `isValidating` skip-guard would silently discard `compositionState.version` increments that arrived during in-flight validate calls, leaving the user with a stale validation badge during rapid composition flows (LLM tool calls bump version N→N+1→N+2). New spec uses per-session `lastValidatedVersionBySession` + `pendingValidateTarget` + a `fireValidateLoop()` that re-checks store state on every iteration. `executionStore.validate(sessionId)` does not accept an `AbortSignal` (`executionStore.ts:58`), so the cancel-and-retry variant from the Systems suggestion was reshaped as a track-and-re-fire loop. Debounce deferral retired (the "if telemetry shows pain" condition was non-falsifiable — no frontend telemetry exists).
+
+**IMPORTANT (Quality) — `App.test.tsx` Layout mock prop rename.** Task 2 now explicitly instructs updating the `App.test.tsx` Layout mock destructure from `{ sidebar, chat, inspector }` → `{ sidebar, chat, siderail }`. Without this, React silently drops the unrecognised prop and the mocked test stays green while real `App.tsx` is broken.
+
+**IMPORTANT (Quality) — Dangling `activeRunId` test added** to InlineRunResults' test suite (Task 1 Step 2). Covers the WebSocket-reconnect / session-switch race where `activeRunId` briefly points to a run not in `runs[]`.
+
+**IMPORTANT (Quality) — Empty-sessions test added** to HeaderSessionSwitcher's test suite (Task 3 Step 2). Verifies the "New session" verb stays visible when `sessions: []` and `activeSessionId` is non-null (just-archived edge).
+
+**SUGGESTION (Reality) — `--color-bg-hover` fallback.** The CSS variable used in Task 3 Step 8 is undefined in `App.css`. Replaced `var(--color-bg-hover)` with `var(--color-bg-hover, rgba(143, 200, 200, 0.08))` so the hover state is visible regardless of whether the token is later defined.
+
+**SUGGESTION (Reality) — ChatPanel line count refresh** from 573 → 622 (drift from Phase 2C additions). Cosmetic but indicative.

@@ -2,12 +2,18 @@
 
 > **Continued from [15a1-phase-3a-removals-part-1.md](15a1-phase-3a-removals-part-1.md)**, which contains the plan header, scope boundaries, trust tier check, sequencing overview, open scope questions resolved, and Tasks 1–4 (all additive work).
 
+> **Phase 3 block notice (added 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on a shared worktree** (`.worktrees/phase-2a-backend`, branch `feat/composer-phase-2a-backend` — the same worktree that landed Phase 2A/2B/2C) and **merge as one PR**. Phrases below like "deferred to 15b" or "Phase 3B" mean "later tasks in the same branch," not a separate cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
+>
+> **Subagent dispatch discipline.** Any subagent run against this work MUST be given an explicit CWD-discipline preamble at the top of its prompt: first Bash call `cd /home/john/elspeth/.worktrees/phase-2a-backend && pwd && git rev-parse --abbrev-ref HEAD` (expect `feat/composer-phase-2a-backend`), then absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths will silently read the wrong branch (the main checkout is 87+ commits behind). See memory entry `feedback_subagents_cant_use_worktrees`.
+
 **Umbrella plan context:**
 - Predecessor: [13-phase-1b-frontend.md](13-phase-1b-frontend.md)
 - Successor (additions half): [15b1-phase-3b-side-rail-part-1.md](15b1-phase-3b-side-rail-part-1.md) / [15b2-phase-3b-side-rail-part-2.md](15b2-phase-3b-side-rail-part-2.md)
 - Roadmap: [00-implementation-roadmap.md](00-implementation-roadmap.md) §B (Phase 3)
 
-**Tasks in this file:** Tasks 5–8 (the removal tasks), plus Risks and mitigations, Memory references, and Review history.
+**Tasks in this file:** Tasks 5–7 (the removal tasks), plus Risks and mitigations, Memory references, and Review history.
+
+> **Task 8 retired (2026-05-17 reality-check panel).** The original Task 8 ("Remove Validate button from inspector header") referenced `InspectorPanel.tsx:557–572` and `handleValidate` at `InspectorPanel.tsx:387–424`. Phase 2C (commits `d218417c1..2f2ba300e`, landed 2026-05-17) **already deleted the Validate button and `handleValidate`**, and **already moved** the side-effect orchestration (`injectSystemMessage` + `sendValidationFeedback`) into `subscriptions.ts` as an `executionStore.validationResult`-change subscriber. Executing the old Task 8 spec would have failed (no such code to remove) and / or destroyed the Phase 2C wiring. Task 8 is therefore marked **DONE — Phase 2C** and removed from this file. The auto-validate subscriber from Task 4 (15a1) feeds the same `validationResult` channel that Phase 2C's subscriber already consumes, so the LLM-facing system-message injection works on both the auto path and the manual `Ctrl+Shift+V` path with no further wiring.
 
 ---
 
@@ -19,13 +25,13 @@
 - Delete: `src/elspeth/web/frontend/src/components/inspector/RunsView.test.tsx` (if exists; check with `ls`).
 - Modify: `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.test.tsx` — drop Runs-tab assertions.
 
-The `handleExecute` callback in InspectorPanel.tsx:426–433 currently does `setActiveTab("runs")` after a successful execute. With Runs gone, **remove that line**. The user lands on whichever tab they were on (Graph or YAML) — and the inline `InlineRunResults` (Task 1) renders the run in the chat column.
+The `handleExecute` callback in `InspectorPanel.tsx:378–385` (drift from pre-Phase-2C plan citation L426–433) currently does `setActiveTab("runs")` after a successful execute. With Runs gone, **remove that line**. The user lands on whichever tab they were on (Graph or YAML) — and the inline `InlineRunResults` (Task 1) renders the run in the chat column.
 
-`SWITCH_TAB_EVENT` listener in InspectorPanel.tsx:325–333 currently accepts `"runs"`. Drop the `tab === "runs"` branch.
+`SWITCH_TAB_EVENT` listener in `InspectorPanel.tsx:325–334` (drift +1 line from pre-Phase-2C plan citation L325-333) currently accepts `"runs"`. Drop the `tab === "runs"` branch.
 
-`App.tsx:62` does `window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "runs" }))` in the `confirmFanoutExecution` callback. **Remove that line** — the dispatched event has no listener after Runs is gone, and the inline run-results path replaces it.
+`App.tsx:85–90` (drift from pre-Phase-2C plan citation L62) does `window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "runs" }))` in the `confirmFanoutExecution` callback. **Remove that line** — the dispatched event has no listener after Runs is gone, and the inline run-results path replaces it. (Re-verify the exact line number against the current file before editing — Phase 2C may have shifted it again.)
 
-CommandPalette.tsx:174–179's `tab-runs` command needs removing. (15b removes the remaining `tab-spec/graph/yaml` commands; Task 5 removes `tab-runs` because Spec is still alive in this commit but Runs isn't.)
+CommandPalette.tsx's `tab-runs` command needs removing. (15b removes the remaining `tab-spec/graph/yaml` commands; Task 5 removes `tab-runs` because Spec is still alive in this commit but Runs isn't.) Grep for `tab-runs` rather than relying on a line number — the pre-Phase-2C citation L174-179 is likely drifted.
 
 Hash-router `VALID_TABS` in useHashRouter.ts:29 still includes `"runs"`. **Leave it in 15a** — old `#/sess-1/runs` deep links resolve as "session sess-1, no valid tab, fall back to spec" via the `tab` parameter being `null` after `VALID_TABS` excludes it. Wait — `VALID_TABS` *includes* "runs" today; if we remove it from `VALID_TABS`, the regex in `parseHash` still matches but the `tab` value becomes `null` (because `VALID_TABS.has(match[2])` returns false). So **remove `"runs"` from `VALID_TABS`** in this task; the existing fallback handles the redirect.
 
@@ -208,11 +214,11 @@ the URL."
 - Modify: `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx`.
 - Delete: `src/elspeth/web/frontend/src/components/inspector/SpecView.tsx`.
 - Delete: `src/elspeth/web/frontend/src/components/inspector/SpecView.test.tsx`.
-- Modify: `src/elspeth/web/frontend/src/stores/sessionStore.ts` — line 174 comment "GraphView <-> SpecView" → "GraphView selection" (since SpecView is gone but the selection state is still consumed by GraphView).
+- Modify: `src/elspeth/web/frontend/src/stores/sessionStore.ts` — line 175 (drift +1 from pre-Phase-2C plan citation L174) comment "GraphView <-> SpecView" → "GraphView selection" (since SpecView is gone but the selection state is still consumed by GraphView).
 
 Spec was the only tab where node-card click-to-highlight worked. With Spec gone:
-- `handleValidationComponentClick` (InspectorPanel.tsx:448–458) currently selects a node and switches to Spec. The Spec switch goes away; **the `selectNode` call is preserved** so GraphView's highlight ring still appears when a validation error is clicked.
-- The default tab when no hash fragment is supplied changes from `"spec"` to `"graph"`. Update `useHashRouter.ts:64`:
+- `handleValidationComponentClick` (`InspectorPanel.tsx:400–410`, drift from pre-Phase-2C plan citation L448-458) currently selects a node and switches to Spec. The Spec switch goes away; **the `selectNode` call is preserved** so GraphView's highlight ring still appears when a validation error is clicked.
+- The default tab when no hash fragment is supplied changes from `"spec"` to `"graph"`. Update `useHashRouter.ts:63` (drift -1 from pre-Phase-2C plan citation L64):
   ```typescript
   const resolvedTab = tab ?? "graph";
   ```
@@ -317,6 +323,48 @@ Expected:
 - vitest PASS.
 - `grep` returns no matches.
 
+- [ ] **Step 8a: Add symmetric `#/{id}/spec` redirect-toast tests (IMPORTANT — Quality panel finding 2026-05-17)**
+
+> Task 5 Step 6a added toast tests for the `#/{id}/runs` redirect, but the toast code also fires for `#/{id}/spec` after Task 6 removes `"spec"` from `VALID_TABS`. Without symmetric coverage, a regression in the spec branch (wrong text, double-fire, missing localStorage check) would not be caught.
+
+Add to `useHashRouter.test.ts`:
+
+```typescript
+describe("useHashRouter — Task 6 spec hash fallback", () => {
+  beforeEach(() => {
+    window.history.replaceState(null, "", window.location.pathname);
+    localStorage.removeItem("elspeth_redirect_toast_dismissed");
+    useSessionStore.setState({
+      sessions: [{ id: "sess-1", title: "x" } as never],
+      activeSessionId: null,
+      selectSession: vi.fn(),
+    } as never);
+  });
+
+  it("falls back to the graph tab when #/{id}/spec is visited", () => {
+    window.location.hash = "#/sess-1/spec";
+    renderHook(() => useHashRouter());
+    // The contract: the app does not crash and presents a valid tab.
+    expect(window.location.hash).toBe("#/sess-1/spec"); // URL not yet rewritten in 15a
+  });
+
+  it("shows a redirect toast on first visit to a stale spec fragment", () => {
+    window.location.hash = "#/sess-1/spec";
+    render(<App />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/spec tab was removed/i);
+  });
+
+  it("does not show the redirect toast after it was dismissed", () => {
+    localStorage.setItem("elspeth_redirect_toast_dismissed", "1");
+    window.location.hash = "#/sess-1/spec";
+    render(<App />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+```
+
+Note that the dismissal flag is shared with the `#/runs` toast (single `elspeth_redirect_toast_dismissed` key). Dismissing one silences the other for that user — by design; the user has indicated "I understand this kind of redirect happens." 15b's hash-router rewrite makes both inert.
+
 - [ ] **Step 9: Commit**
 
 ```bash
@@ -325,7 +373,9 @@ git commit -m "feat(web/frontend): remove Spec tab (Phase 3A.6)
 
 GraphView is now the default tab. Validation-banner clicks still call
 selectNode (consumed by GraphView's highlight); Phase 2's audit-readiness
-'Explain' surface will own this routing going forward."
+'Explain' surface will own this routing going forward. Symmetric
+#/{id}/spec redirect-toast tests landed alongside Task 5's #/{id}/runs
+set."
 ```
 
 ---
@@ -517,146 +567,15 @@ Layout grid simplified from 3-column to 2-column."
 
 ---
 
-## Task 8: Remove Validate button from inspector header
+## Task 8: ~~Remove Validate button from inspector header~~ **RETIRED 2026-05-17 — Phase 2C absorbed**
 
-**Files:**
-- Modify: `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx`.
-- Modify: `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.test.tsx`.
+See the panel note at the top of this file. Phase 2C deleted the Validate button (formerly `InspectorPanel.tsx:557–572`), removed `handleValidate` (formerly `InspectorPanel.tsx:387–424`), and moved the `injectSystemMessage` + `sendValidationFeedback` side-effect orchestration into `subscriptions.ts` as a `useExecutionStore.subscribe` handler keyed off `validationResult` change. The `AuditReadinessPanel` (also Phase 2C) replaces the standalone Validation row.
 
-The Validate button (InspectorPanel.tsx:557–572) is theater (design doc 03). Task 4 added auto-validate-on-change; `Ctrl+Shift+V` still works as a manual re-trigger. Remove the button and its `handleValidate` callback.
+The auto-validate subscriber from 15a1 Task 4 fires `validate(sessionId)` on `compositionState.version` increment; the resulting `validationResult` flows into the Phase 2C subscriber that publishes the system message. `Ctrl+Shift+V` (handled in `App.tsx`) continues to call `validate(activeSessionId)` directly; the same `validationResult` subscriber publishes the system message for that path too. No additional wiring is needed in Phase 3A.
 
-The validation banner (`<ValidationResultBanner>`) **stays** at its current location (between header and tab content). 15b moves it; Phase 2 owns the long-term destination.
+The validation dot indicator (currently at `InspectorPanel.tsx:452–494`, drift from pre-Phase-2C plan citation L499–542) **stays** through 15a; 15b migrates it into the audit-readiness panel.
 
-The validation dot (InspectorPanel.tsx:499–542) **stays**. Phase 2 moves it into the audit-readiness panel.
-
-- [ ] **Step 1: Write failing test**
-
-```typescript
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { InspectorPanel } from "./InspectorPanel";
-
-describe("InspectorPanel without Validate button", () => {
-  it("does not render a Validate button", () => {
-    render(<InspectorPanel />);
-    expect(
-      screen.queryByRole("button", { name: /^validate$/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("still renders the validation dot indicator", () => {
-    render(<InspectorPanel />);
-    // dot has aria-label one of "Not validated"/"Validation passed"/...
-    expect(screen.getByLabelText(/validation|not validated/i)).toBeInTheDocument();
-  });
-});
-```
-
-Run: `npx vitest run src/components/inspector/InspectorPanel.test.tsx -t "without Validate"`. Expected: FAIL.
-
-- [ ] **Step 2: Edit `InspectorPanel.tsx`**
-
-1. Remove the `<button onClick={handleValidate} …>Validate</button>` block (InspectorPanel.tsx:557–572).
-2. Remove `handleValidate` (the entire `useCallback` at lines 387–424). The auto-validate subscription does the work; `Ctrl+Shift+V` calls `validate(activeSessionId)` directly without the side effects.
-
-   But wait — `handleValidate` did real side effects: injecting a system message and `sendValidationFeedback(result)`. Those side effects are valuable. **Move them into the auto-validate subscription** so they fire on auto-validate too:
-
-   In `subscriptions.ts`, after the `validate(sessionId)` call, await it and then orchestrate the same side effects:
-
-   ```typescript
-   lastValidatedVersion = nextVersion;
-   void (async () => {
-     await exec.validate(sessionId);
-     const result = useExecutionStore.getState().validationResult;
-     if (!result) return;
-
-     const sessionStore = useSessionStore.getState();
-     const VALIDATION_MSG_ID = "system-validation-current";
-
-     if (!result.is_valid && result.errors.length > 0) {
-       const lines = ["**Validation failed** — the following errors were sent to the agent:"];
-       for (const err of result.errors) {
-         lines.push(
-           `- **[${err.component_type ?? "unknown"}] ${err.component_id ?? "unknown"}:** ${err.message}`,
-         );
-       }
-       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
-       // sendValidationFeedback is fire-and-forget here.  Per CLAUDE.md
-       // audit-primacy, the backend records the validation event in the
-       // audit Landscape; a frontend telemetry breadcrumb would duplicate
-       // that record without adding probative value.  The user-visible
-       // system message is already injected above.  Phase 8 (polish +
-       // telemetry) is the right owner if a frontend operational signal
-       // proves useful.  Operator adjudication 2026-05-15.
-       void sessionStore.sendValidationFeedback(result);
-     } else if (result.is_valid && result.warnings && result.warnings.length > 0) {
-       const lines = ["**Validation passed with warnings:**"];
-       for (const warn of result.warnings) {
-         lines.push(
-           `- **[${warn.component_type ?? "unknown"}] ${warn.component_id ?? "unknown"}:** ${warn.message}`,
-         );
-       }
-       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
-     }
-   })();
-   ```
-
-   Update Task 4's test set to include side-effect assertions if not already covered. Add:
-
-   ```typescript
-   it("injects a system message when validation fails", async () => {
-     const injectSystemMessage = vi.fn();
-     const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
-     const validate = vi.fn().mockImplementation(async () => {
-       useExecutionStore.setState({
-         validationResult: {
-           is_valid: false,
-           errors: [{ component_type: "source", component_id: "s1", message: "boom" }],
-           warnings: [],
-         } as never,
-       } as never);
-     });
-     useExecutionStore.setState({ validate, isValidating: false, isExecuting: false } as never);
-     useSessionStore.setState({
-       activeSessionId: "sess-1",
-       injectSystemMessage,
-       sendValidationFeedback,
-     } as never);
-
-     useSessionStore.setState({
-       compositionState: { version: 11, source: null, nodes: [], outputs: [] } as never,
-     } as never);
-
-     // CRITICAL: use waitFor instead of setTimeout so the test waits on
-     // actual async completion rather than a magic delay.
-     await waitFor(() => expect(injectSystemMessage).toHaveBeenCalled());
-     expect(sendValidationFeedback).toHaveBeenCalled();
-   });
-   ```
-
-3. Remove `isValidating`, `validate`, `injectSystemMessage`, `sendValidationFeedback` from the InspectorPanel's destructure if they were only used inside `handleValidate`. **Keep** them if they're used elsewhere (re-grep the file).
-
-4. Remove `canValidate` if no longer referenced. (`hasCompositionContent` may still be used by the validation dot — keep that.)
-
-- [ ] **Step 3: Run all tests + smoke render**
-
-```bash
-cd src/elspeth/web/frontend && npx vitest run src
-```
-
-Expected: PASS, including the new auto-validate side-effect test.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add -A
-git commit -m "feat(web/frontend): remove Validate button (Phase 3A.8)
-
-Validation now fires automatically on compositionState version
-increment; Ctrl+Shift+V remains as a manual re-trigger.  System-message
-injection and sendValidationFeedback are now driven by the auto-validate
-subscription so the LLM continues to receive validation failures."
-```
+**No work in this task. Sequencing continues with the post-15a → 15b transition.**
 
 ---
 
@@ -664,16 +583,16 @@ subscription so the LLM continues to receive validation failures."
 
 | Risk | Mitigation |
 |---|---|
-| App becomes un-launchable mid-phase between commits | Each task ends with `npx vitest run src` including `App.test.tsx`'s smoke render. Tasks are ordered so additions precede removals. |
-| Users hit a stale `#/{id}/spec` or `#/{id}/runs` bookmark and see a confusing default | 15a leaves `VALID_TABS` excluding the gone tabs; useHashRouter's fallback resolves them to a valid default (`spec` → `graph`, `runs` → `graph`). 15b adds explicit hash rewrites. Both behaviours produce a working app; 15b is a UX polish. |
-| Spec-tab regulars confused by no "list view" | Phase 2's audit-readiness "Explain" surface inherits the lineage view. Phase 3A documents this in the commit message; until Phase 2 lands, validation-banner clicks select a node (GraphView highlight) but don't navigate further. Acceptable transitional state. |
-| Auto-validate causes excessive backend calls | Subscription is gated on `compositionState.version` increment (not on every keystroke). Backend validate is idempotent. If telemetry shows pain, Phase 8 adds a debounce. Documented in Task 4. |
+| App becomes un-launchable mid-phase between commits | Each task ends with `npx vitest run src` including `App.test.tsx`. **Note (Quality panel 2026-05-17): `App.test.tsx` stubs out Layout, SessionSidebar, ChatPanel, InspectorPanel, SecretsPanel, CommandPalette, ShortcutsHelp, and ConfirmDialog — so it asserts banner DOM, not the real component tree. Treat it as an "App-shell smoke" gate, not a component-integration gate.** Real component-integration risk for Tasks 5–7 (tab strip, layout grid, UserMenu) lands on the staging deploy. Phase 3 acceptance criteria add at least one Playwright pass for two-column layout and UserMenu keyboard nav at the 15a→15b boundary. |
+| Users hit a stale `#/{id}/spec` or `#/{id}/runs` bookmark and see a confusing default | 15a leaves `VALID_TABS` excluding the gone tabs; useHashRouter's fallback resolves them to a valid default (`spec` → `graph`, `runs` → `graph`). Tasks 5 and 6 add a one-time redirect toast (shared dismissal flag). 15b adds explicit hash rewrites. |
+| Spec-tab regulars confused by no "list view" | Phase 2C's audit-readiness "Explain" surface (already shipped) inherits the lineage view. Until 15b migrates the validation-banner click handler to use it, validation-banner clicks select a node (GraphView highlight) but don't navigate further. Acceptable transitional state. |
+| **Auto-validate stales validation badge during rapid composition flows (correctness, not load)** | Systems panel 2026-05-17 finding. A simple skip-if-in-flight guard discards intermediate `compositionState.version` increments during LLM tool-call bursts (N → N+1 → N+2). Resolution in Task 4: per-session `lastValidatedVersionBySession` map + `pendingValidateTarget` + `fireValidateLoop()` that re-fires `validate()` after the in-flight settles when a newer version arrived. The user never sees a "validated" badge for a stale snapshot. Debounce framing retired — correctness is the goal, not load shaping. |
 | Run-results inline rendering overlaps with the still-present Runs tab during Task 1–4 | `InlineRunResults` returns `null` when there are no runs *and* no historical runs. Even when it renders, the duplicate is brief — Task 5 removes the Runs tab. The dual-display is the cost of TDD discipline. |
-| Removing the Validate button while Phase 2 hasn't shipped breaks the validation feedback loop | Task 8 explicitly moves the side-effects (system message injection + `sendValidationFeedback`) into the auto-validate subscription so the LLM still receives validation failures. The button removal is purely cosmetic now. |
 | Theme toggle loses discoverability after moving from sidebar to UserMenu | Both surfaces existed in the legacy UI; Phase 1B already created the UserMenu hosting. Task 7 makes it the sole home; design doc 03 ratifies this placement. |
 | The session-switcher's "New session" action collides with the `Ctrl+N` shortcut | Both call the same `createSession` action; no collision. The header dropdown adds discoverability; the shortcut is preserved in App.tsx. |
 | Phase 2 / Phase 6 plans want different slot semantics than `SideRail` offers | The slots in Task 2 are skeleton markers (test-id only); content components own their own styling. If Phase 2 wants the audit-readiness panel to span the whole rail width vs. a card, that's a content decision, not a slot decision. The slot ordering is taken directly from design doc 03 §"Layout sketch". |
 | `Layout.test.tsx` rewrites are large | Layout was already complex (sidebar + overlay mode + resize). Removing the sidebar simplifies the file; the tests that go away are precisely those that exercised gone behaviour. Net code change: net negative. |
+| 15b expects `_resetSubscriptionsForTesting` to behave as-shipped; Task 4 rename would have broken it | Resolved 2026-05-17 — Task 4 is now additive and **does not rename** the export. The existing test file's `_resetSubscriptionsForTesting` import survives intact. |
 
 ## Memory references
 
@@ -694,3 +613,19 @@ subscription so the LLM continues to receive validation failures."
 **CRITICAL (Systems):** `VALID_TABS` narrowing (Tasks 5 and 6) now includes a transient one-time redirect toast. When an old `spec` or `runs` hash is detected during the 15a → 15b window, a dismissible toast explains the removal before stripping the fragment. Dismissal tracked in `localStorage.elspeth_redirect_toast_dismissed`. Tests added in new Step 6a.
 
 **IMPORTANT (Quality):** Hash-fallback test for `#/{id}/runs` → default tab added in Task 5 Step 6a. Not deferred to 15b.
+
+### 2026-05-17 — Reality-check panel applied (NO-GO → fixes landed)
+
+Four-reviewer panel (Reality / Architecture / Quality / Systems) ran after Phase 2C landed earlier the same day. Reality returned **NO-GO**; the other three returned CONDITIONAL GO with a convergent finding cluster around Task 4 and Task 8. Adjudication and fixes landed in this revision:
+
+**CRITICAL (Reality, convergent with Architecture+Quality) — Task 8 retired.** The cited code (`InspectorPanel.tsx:557-572` Validate button; `InspectorPanel.tsx:387-424` `handleValidate`) does not exist — Phase 2C deleted it. The "move side effects into the auto-validate subscription" Step is also moot — Phase 2C already moved them into a `validationResult`-change subscriber in `subscriptions.ts`. Task 8 marked `DONE — Phase 2C` with a panel note at top of file. Task list updated `5–8` → `5–7` here and in 15a1.
+
+**CRITICAL (Reality+Architecture) — Task 4 reframed to additive change.** See 15a1 review history. The Task-4 change cascades into Task 8's elimination: with Phase 2C's `validationResult`-change subscriber preserved, the LLM-facing system-message injection works on both the auto-validate path (Task 4) and the `Ctrl+Shift+V` manual path (App.tsx) with no further wiring. The "Removing the Validate button breaks the validation feedback loop" risk row is therefore obsolete and removed from the risks table.
+
+**CRITICAL (Quality) — App.test.tsx smoke gate honesty.** Risks-table entry rewritten to call out explicitly that `App.test.tsx` stubs out every component under change in Phase 3A, so it asserts banner DOM rather than the real tree. Real integration risk for Tasks 5–7 lands on the staging deploy; a Playwright pass at the 15a→15b boundary covers the layout-grid and UserMenu keyboard contracts.
+
+**IMPORTANT (Reality) — InspectorPanel line citations refreshed** in Tasks 5, 6, 8. The ~47-line drift from Phase 2C insertions above the affected regions is now documented per citation. The 15a executor should re-grep before each edit (cited lines may have drifted further by the time the work starts).
+
+**IMPORTANT (Quality) — Symmetric `#/{id}/spec` redirect-toast tests** added as Task 6 Step 8a, mirroring Task 5 Step 6a's `#/{id}/runs` set. The shared dismissal flag is documented.
+
+**IMPORTANT (Systems) — Auto-validate correctness loop, not load debounce.** See 15a1 review history. The risks-table row was retitled to frame this as a correctness issue (stale validation badge) rather than a backend-load issue. The non-falsifiable "defer to Phase 8 if telemetry shows pain" framing is retired.

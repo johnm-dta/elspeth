@@ -294,7 +294,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
                     type="button"
                     role="menuitem"
                     tabIndex={focusIndex === renameIndex ? 0 : -1}
-                    aria-label="Rename"
+                    aria-label={`Rename ${title}`}
                     onClick={() => startRename(session)}
                     className="header-session-switcher-action"
                   >
@@ -307,7 +307,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
                     type="button"
                     role="menuitem"
                     tabIndex={focusIndex === archiveIndex ? 0 : -1}
-                    aria-label="Archive"
+                    aria-label={`Archive ${title}`}
                     onClick={() => setArchiveTarget(session)}
                     className="header-session-switcher-action"
                   >

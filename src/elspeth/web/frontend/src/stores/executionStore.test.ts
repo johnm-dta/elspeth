@@ -22,7 +22,10 @@ describe("executionStore.validate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
-    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] },
+    } as never);
   });
 
   it("stores validation result on success", async () => {
@@ -109,6 +112,41 @@ describe("executionStore.validate", () => {
     await validatePromise;
 
     const state = useExecutionStore.getState();
+    expect(state.validationResult).toBeNull();
+    expect(state.isValidating).toBe(false);
+  });
+
+  it("does not store a validation result after the composition version changes", async () => {
+    const staleResult: ValidationResult = {
+      is_valid: false,
+      summary: "Stale version result",
+      checks: [],
+      errors: [
+        {
+          component_id: "source",
+          component_type: "source",
+          message: "Missing path on the old snapshot",
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    };
+    let resolveValidation: (result: ValidationResult) => void = () => {};
+    const pendingValidation = new Promise<ValidationResult>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const { validatePipeline } = await import("@/api/client");
+    (validatePipeline as ReturnType<typeof vi.fn>).mockReturnValue(pendingValidation);
+
+    const validatePromise = useExecutionStore.getState().validate("session-1");
+    useSessionStore.setState({
+      compositionState: { version: 2, source: null, nodes: [], outputs: [] },
+    } as never);
+    resolveValidation(staleResult);
+    const applied = await validatePromise;
+
+    const state = useExecutionStore.getState();
+    expect(applied).toBe(false);
     expect(state.validationResult).toBeNull();
     expect(state.isValidating).toBe(false);
   });

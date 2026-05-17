@@ -48,8 +48,7 @@ export function InlineRunResults(): JSX.Element | null {
   const displayRun = activeRun ?? mostRecentRun;
   const progressBelongsToActiveRun = activeRunId !== null && progress !== null;
   const displayStatus = progressBelongsToActiveRun ? progress.status : displayRun?.status ?? null;
-  const showProgress =
-    progressBelongsToActiveRun && !isTerminalRunStatus(progress.status);
+  const showProgress = progressBelongsToActiveRun;
   const outputRunId =
     activeRunId && progress && isTerminalRunStatus(progress.status)
       ? activeRunId

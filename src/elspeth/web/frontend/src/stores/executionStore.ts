@@ -55,7 +55,7 @@ interface ExecutionState {
   wsDisconnected: boolean;
   error: string | null;
 
-  validate: (sessionId: string) => Promise<void>;
+  validate: (sessionId: string, options?: ValidateOptions) => Promise<boolean>;
   setValidationResult: (result: ValidationResult | null) => void;
   execute: (sessionId: string, fanoutAck?: ExecutionFanoutAck) => Promise<string | null>;
   confirmFanoutExecution: () => Promise<string | null>;
@@ -69,10 +69,35 @@ interface ExecutionState {
   reset: () => void;
 }
 
+interface ValidateOptions {
+  expectedVersion?: number;
+}
+
 // The WebSocket connection handle is held outside Zustand state
 // because it's not serialisable and components don't need to read it.
 let wsConnection: WebSocketConnection | null = null;
 let validationRequestSeq = 0;
+
+function currentCompositionVersion(): number | null {
+  return useSessionStore.getState().compositionState?.version ?? null;
+}
+
+function shouldApplyValidationResult(
+  sessionId: string,
+  expectedVersion: number | null,
+): boolean {
+  const sessionState = useSessionStore.getState();
+  if (sessionState.activeSessionId !== sessionId) {
+    return false;
+  }
+  if (
+    expectedVersion !== null &&
+    sessionState.compositionState?.version !== expectedVersion
+  ) {
+    return false;
+  }
+  return true;
+}
 
 /**
  * Derive the run status from a RunEvent.
@@ -256,22 +281,24 @@ const initialExecutionState = {
 export const useExecutionStore = create<ExecutionState>((set, get) => ({
   ...initialExecutionState,
 
-  async validate(sessionId: string) {
+  async validate(sessionId: string, options: ValidateOptions = {}) {
     const requestSeq = ++validationRequestSeq;
+    const expectedVersion = options.expectedVersion ?? currentCompositionVersion();
     set({ isValidating: true, validationResult: null, error: null });
     try {
       const result = await api.validatePipeline(sessionId);
-      if (requestSeq !== validationRequestSeq) return;
-      if (useSessionStore.getState().activeSessionId !== sessionId) {
+      if (requestSeq !== validationRequestSeq) return false;
+      if (!shouldApplyValidationResult(sessionId, expectedVersion)) {
         set({ isValidating: false });
-        return;
+        return false;
       }
       set({ validationResult: result, isValidating: false });
+      return true;
     } catch (err) {
-      if (requestSeq !== validationRequestSeq) return;
-      if (useSessionStore.getState().activeSessionId !== sessionId) {
+      if (requestSeq !== validationRequestSeq) return false;
+      if (!shouldApplyValidationResult(sessionId, expectedVersion)) {
         set({ isValidating: false });
-        return;
+        return false;
       }
       const apiErr = err as ApiError;
       const message =
@@ -282,6 +309,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         isValidating: false,
         error: message,
       });
+      return true;
     }
   },
 

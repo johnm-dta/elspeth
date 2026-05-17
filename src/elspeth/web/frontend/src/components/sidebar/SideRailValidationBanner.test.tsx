@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SideRailValidationBanner } from "./SideRailValidationBanner";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
@@ -53,11 +54,13 @@ describe("SideRailValidationBanner", () => {
     ).toBeInTheDocument();
   });
 
-  it("selects node ids without dispatching retired inspector tab events", async () => {
+  it("selects node ids and opens the graph modal without dispatching retired inspector tab events", async () => {
     const user = userEvent.setup();
     const selectNode = vi.fn();
     const onSwitchTab = vi.fn();
+    const onOpenGraph = vi.fn();
     window.addEventListener("elspeth-switch-tab", onSwitchTab);
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
     useSessionStore.setState({
       compositionState: makeComposition(1),
       selectNode,
@@ -85,7 +88,9 @@ describe("SideRailValidationBanner", () => {
     );
 
     expect(selectNode).toHaveBeenCalledWith("select_columns");
+    expect(onOpenGraph).toHaveBeenCalledTimes(1);
     expect(onSwitchTab).not.toHaveBeenCalled();
     window.removeEventListener("elspeth-switch-tab", onSwitchTab);
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
   });
 });

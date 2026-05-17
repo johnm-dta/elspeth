@@ -73,6 +73,25 @@ describe("InlineRunResults", () => {
     );
   });
 
+  it("keeps terminal active run status visible", () => {
+    useExecutionStore.setState({
+      activeRunId: "run-failed",
+      progress: {
+        status: "failed",
+        recent_errors: [{ message: "boom", node_id: "llm", row_id: null }],
+      } as never,
+      runs: [],
+    } as never);
+
+    render(<InlineRunResults />);
+
+    expect(screen.getByTestId("progress-view-stub")).toBeInTheDocument();
+    expect(screen.getByTestId("run-outputs-stub")).toHaveAttribute(
+      "data-run-id",
+      "run-failed",
+    );
+  });
+
   it("renders RunOutputsPanel for the most recent terminal run when there is no active run", () => {
     useExecutionStore.setState({
       activeRunId: null,

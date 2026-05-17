@@ -1,4 +1,5 @@
 import { ValidationResultBanner } from "@/components/execution/ValidationResult";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 
@@ -16,6 +17,7 @@ export function SideRailValidationBanner(): JSX.Element | null {
       compositionState?.nodes.some((node) => node.id === componentId) ?? false;
     if (isNode) {
       useSessionStore.getState().selectNode(componentId);
+      window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
     }
   }
 

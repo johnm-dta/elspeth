@@ -23,7 +23,7 @@ const lastValidatedVersionBySession = new Map<string, number>();
 let pendingValidateTarget: { sessionId: string; version: number } | null = null;
 let validateInflight = false;
 let unsubscribeAutoValidate: (() => void) | null = null;
-let inflightValidateSessionId: string | null = null;
+let inflightValidateTarget: { sessionId: string; version: number } | null = null;
 
 function validationFingerprint(result: ValidationResult | null): string | null {
   if (!result) return null;
@@ -103,10 +103,9 @@ export function initStoreSubscriptions(): void {
       return;
     }
 
-    const currentSessionId = useSessionStore.getState().activeSessionId;
     if (
-      inflightValidateSessionId !== null &&
-      inflightValidateSessionId !== currentSessionId
+      inflightValidateTarget !== null &&
+      inflightValidateTarget.sessionId !== useSessionStore.getState().activeSessionId
     ) {
       return;
     }
@@ -180,13 +179,17 @@ async function fireValidateLoop(): Promise<void> {
       // compositionState.version that arrives during the await is re-queued
       // by the subscription and picked up by the next loop iteration.
       pendingValidateTarget = null;
-      inflightValidateSessionId = target.sessionId;
+      inflightValidateTarget = target;
       try {
-        await useExecutionStore.getState().validate(target.sessionId);
+        const validationApplied = await useExecutionStore
+          .getState()
+          .validate(target.sessionId, { expectedVersion: target.version });
+        if (validationApplied !== false) {
+          lastValidatedVersionBySession.set(target.sessionId, target.version);
+        }
       } finally {
-        inflightValidateSessionId = null;
+        inflightValidateTarget = null;
       }
-      lastValidatedVersionBySession.set(target.sessionId, target.version);
     }
   } finally {
     validateInflight = false;
@@ -212,6 +215,6 @@ export function _resetSubscriptionsForTesting(): void {
   lastValidatedVersionBySession.clear();
   pendingValidateTarget = null;
   validateInflight = false;
-  inflightValidateSessionId = null;
+  inflightValidateTarget = null;
   initialized = false;
 }

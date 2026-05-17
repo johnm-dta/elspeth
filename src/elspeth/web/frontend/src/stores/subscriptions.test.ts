@@ -233,7 +233,9 @@ describe("auto-validate on composition-state version change", () => {
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
 
-    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 1 }),
+    );
 
     useSessionStore.setState({
       compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
@@ -249,7 +251,9 @@ describe("auto-validate on composition-state version change", () => {
     useSessionStore.setState({
       compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
     } as never);
-    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 5 }),
+    );
 
     useSessionStore.setState({
       compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
@@ -316,7 +320,7 @@ describe("auto-validate on composition-state version change", () => {
 
     resolveFirst!();
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
-    expect(validate).toHaveBeenLastCalledWith("sess-1");
+    expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 2 });
   });
 
   it("resets per-session tracking when activeSessionId changes (cross-session isolation)", async () => {
@@ -327,13 +331,44 @@ describe("auto-validate on composition-state version change", () => {
       activeSessionId: "sess-A",
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
-    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-A", { expectedVersion: 1 }),
+    );
 
     useSessionStore.setState({
       activeSessionId: "sess-B",
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
-    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-B"));
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-B", { expectedVersion: 1 }),
+    );
+  });
+
+  it("does not cache a version as validated when validation suppresses a stale result", async () => {
+    const validate = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    useSessionStore.setState({ activeSessionId: null } as never);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
   });
 
   it("does not inject system message when the user switched sessions mid-validate (cross-session guard)", async () => {
@@ -366,7 +401,9 @@ describe("auto-validate on composition-state version change", () => {
     useSessionStore.setState({
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
-    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-A", { expectedVersion: 1 }),
+    );
 
     useSessionStore.setState({ activeSessionId: "sess-B" } as never);
 
@@ -413,7 +450,9 @@ describe("auto-validate on composition-state version change", () => {
     useSessionStore.setState({
       compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
     } as never);
-    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-A", { expectedVersion: 1 }),
+    );
     useSessionStore.setState({ activeSessionId: "sess-B" } as never);
 
     useExecutionStore.setState({ validationResult: sameContentResult as never } as never);

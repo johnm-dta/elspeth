@@ -1290,7 +1290,7 @@ def _collect_ownership_call_site_identities(module: ModuleType, helper_name: str
 
 
 class TestIDORCoverageDrift:
-    """Drift guard: every session-scoped endpoint across all three routers must invoke an ownership check.
+    """Drift guard: every session-scoped endpoint across all four routers must invoke an ownership check.
 
     ``TestIDORProtection.test_idor_session_crud`` walks one
     cross-session request for each session-scoped endpoint.  The risk
@@ -1299,26 +1299,33 @@ class TestIDORCoverageDrift:
     ownership primitive is in place, but its coverage in this suite
     silently rots.
 
-    Session-scoped endpoints live in three routers, each with its
+    Session-scoped endpoints live in four routers, each with its
     own ownership-check helper:
 
     * ``sessions/routes.py`` via ``_verify_session_ownership`` — the
       chat-and-state endpoints (``GET``/``DELETE``/``POST`` under
-      ``/api/sessions/{id}``).
-    * ``execution/routes.py`` via ``_verify_session_ownership`` —
-      ``/validate`` and ``/execute``.  Also hosts run-scoped endpoints
-      which use ``_verify_run_ownership`` (not a session-ownership
-      helper, but the same drift risk for run identities; covered by
-      a separate inventory).
+      ``/api/sessions/{id}``).  This router still hosts a file-local
+      helper; the shared extraction landed only for the routers that
+      were rewritten in Task 5.
+    * ``execution/routes.py`` via ``verify_session_ownership`` —
+      ``/validate`` and ``/execute``.  Calls the shared helper
+      extracted to ``elspeth.web.sessions.ownership``.  Also hosts
+      run-scoped endpoints which use ``_verify_run_ownership`` (not a
+      session-ownership helper, but the same drift risk for run
+      identities; covered by a separate inventory).
     * ``blobs/routes.py`` via ``_verify_session_and_get_blob_service``
       — blob upload/list/metadata/download/delete.  This helper is
       dual-role (checks ownership AND returns the service); both
       branches of its callers depend on the ownership check for
       IDOR safety.
+    * ``audit_readiness/routes.py`` via ``verify_session_ownership``
+      — snapshot and explain endpoints under
+      ``/api/sessions/{id}/audit-readiness``.  Uses the shared helper
+      from ``elspeth.web.sessions.ownership``.
 
     Each (module, helper, inventory) tuple is pinned independently so
     a failure message names exactly which router's audit drifted.  A
-    pure count across all three would satisfy ``{add endpoint X in
+    pure count across all four would satisfy ``{add endpoint X in
     router A, drop endpoint Y in router B}`` — the count stays
     constant while the audit silently swaps a covered endpoint for an
     uncovered one in a different router.
@@ -1383,6 +1390,13 @@ class TestIDORCoverageDrift:
         }
     )
 
+    EXPECTED_AUDIT_READINESS_OWNERSHIP_ENDPOINTS: frozenset[str] = frozenset(
+        {
+            "snapshot",
+            "explain",
+        }
+    )
+
     @staticmethod
     def _assert_inventory(router_label: str, helper_name: str, expected: frozenset[str], found: set[str]) -> None:
         """Render the drift-diagnostic message and assert set-equality."""
@@ -1415,19 +1429,22 @@ class TestIDORCoverageDrift:
         )
 
     def test_execution_routes_session_ownership_call_sites(self) -> None:
-        """execution/routes.py — _verify_session_ownership inventory.
+        """execution/routes.py — verify_session_ownership inventory.
 
-        Independent from the sessions/ inventory because the two
-        helpers — while presently sharing a name — are file-local
-        symbols.  A symbol rename in one router must not silently
-        pass because the other router still uses the old name.
+        Phase 2A.5 extracted the session-ownership helper into
+        ``elspeth.web.sessions.ownership.verify_session_ownership`` so
+        ``execution/routes.py`` and ``audit_readiness/routes.py`` share a
+        single IDOR-safe implementation.  ``execution/routes.py`` no
+        longer hosts a file-local ``_verify_session_ownership`` symbol;
+        the drift guard now walks calls to the imported
+        ``verify_session_ownership`` name.
         """
         from elspeth.web.execution import routes
 
-        found = _collect_ownership_call_site_identities(routes, "_verify_session_ownership")
+        found = _collect_ownership_call_site_identities(routes, "verify_session_ownership")
         self._assert_inventory(
             "execution/routes.py",
-            "_verify_session_ownership",
+            "verify_session_ownership",
             self.EXPECTED_EXECUTION_SESSION_OWNERSHIP_ENDPOINTS,
             found,
         )
@@ -1470,6 +1487,29 @@ class TestIDORCoverageDrift:
             "blobs/routes.py",
             "_verify_session_and_get_blob_service",
             self.EXPECTED_BLOBS_OWNERSHIP_ENDPOINTS,
+            found,
+        )
+
+    def test_audit_readiness_routes_session_ownership_call_sites(self) -> None:
+        """audit_readiness/routes.py — verify_session_ownership inventory.
+
+        Both audit-readiness endpoints (snapshot + explain) are
+        session-scoped under ``/api/sessions/{session_id}/audit-readiness``
+        and depend on the shared ``verify_session_ownership`` helper
+        from ``web/sessions/ownership.py`` for IDOR safety.  Any new
+        endpoint added to this router must call the helper AND be
+        added to the inventory above.
+        """
+        # The router-factory closure is defined inside
+        # ``create_audit_readiness_router``; the AST walker needs the
+        # module source, which it loads from the module's __file__.
+        from elspeth.web.audit_readiness import routes
+
+        found = _collect_ownership_call_site_identities(routes, "verify_session_ownership")
+        self._assert_inventory(
+            "audit_readiness/routes.py",
+            "verify_session_ownership",
+            self.EXPECTED_AUDIT_READINESS_OWNERSHIP_ENDPOINTS,
             found,
         )
 
@@ -3769,6 +3809,7 @@ class TestYamlEndpoint:
                         component_type="source",
                         message="runtime preflight failed for captured state",
                         suggestion=None,
+                        error_code=None,
                     )
                 ],
             )
@@ -3829,7 +3870,7 @@ class TestYamlEndpoint:
         failure = ValidationResult(
             is_valid=False,
             checks=[],
-            errors=[ValidationError(component_id=None, component_type=None, message="bad runtime", suggestion=None)],
+            errors=[ValidationError(component_id=None, component_type=None, message="bad runtime", suggestion=None, error_code=None)],
         )
 
         async def fail_preflight(state, *, settings, secret_service, user_id):
@@ -5220,6 +5261,8 @@ def test_runtime_preflight_errors_are_used_for_composition_state_persistence() -
                 name="plugin_instantiation",
                 passed=False,
                 detail="Invalid configuration for transform 'batch_stats'",
+                affected_nodes=(),
+                outcome_code=None,
             )
         ],
         errors=[
@@ -5228,6 +5271,7 @@ def test_runtime_preflight_errors_are_used_for_composition_state_persistence() -
                 component_type="transform",
                 message="Invalid configuration for transform 'batch_stats'",
                 suggestion="Remove required_input_fields from batch-aware transform options.",
+                error_code=None,
             )
         ],
     )
@@ -5553,6 +5597,8 @@ def _runtime_preflight_failed_result(message: str = "runtime preflight blocked e
                 name="plugin_instantiation",
                 passed=False,
                 detail=message,
+                affected_nodes=(),
+                outcome_code=None,
             )
         ],
         errors=[
@@ -5561,6 +5607,7 @@ def _runtime_preflight_failed_result(message: str = "runtime preflight blocked e
                 component_type=None,
                 message=message,
                 suggestion=None,
+                error_code=None,
             )
         ],
     )
@@ -6357,6 +6404,7 @@ def test_assistant_raw_content_is_persisted_but_not_returned(tmp_path) -> None:
                     component_type=None,
                     message="bad config",
                     suggestion=None,
+                    error_code=None,
                 )
             ],
         ),

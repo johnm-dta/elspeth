@@ -352,6 +352,7 @@ class TestComposerResultPairingInvariant:
                     component_type=None,
                     message="boom",
                     suggestion=None,
+                    error_code=None,
                 ),
             ],
         )

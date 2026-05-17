@@ -9,13 +9,15 @@ against whatever connection they have.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import Connection, event, insert
 from sqlalchemy.engine import Engine
@@ -24,10 +26,18 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.state import (
+    CompositionState,
+    NodeSpec,
+    OutputSpec,
+    PipelineMetadata,
+    SourceSpec,
+)
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions import models
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -136,6 +146,353 @@ def session_with_composer_state(session_with_pending_compose_request: dict[str, 
     """Session fixture used by failed-turn route tests."""
 
     return session_with_pending_compose_request
+
+
+# ---------------------------------------------------------------------------
+# Audit-readiness integration fixtures (Phase 2A Task 5)
+# ---------------------------------------------------------------------------
+#
+# These fixtures stand up the full ELSPETH web app via ``create_app`` so the
+# audit-readiness routes exercise the real validate_pipeline / scoped secret
+# resolver / sessions paths.  ``TestClient`` as a context manager runs the
+# FastAPI lifespan so ``app.state.execution_service`` and
+# ``app.state.readiness_service`` are constructed.
+#
+# Auth is bypassed by overriding ``get_current_user``: the auth provider is
+# still created by ``create_app`` but the token-validation path is never
+# exercised, matching ``test_preferences_routes.py``'s ``client_anonymous``
+# pattern.
+#
+# Cross-user IDOR fixture: ``audit_readiness_other_user_session_id``
+# inserts a session for ``user_id="bob"`` on the SAME engine the
+# alice-authenticated TestClient hits, with a saved composition state.  The
+# ownership check returns 404 because of the user_id mismatch, not because
+# the row is absent (the route would otherwise 404 for either reason; we
+# want the mismatch path specifically).
+
+_TEST_AUTHED_USER_ID = "alice"
+
+
+def _build_audit_readiness_app(
+    tmp_path: Path,
+    *,
+    authed_user_id: str | None,
+) -> FastAPI:
+    """Construct a real FastAPI app for audit-readiness route tests.
+
+    ``authed_user_id`` of ``None`` installs an override that raises
+    ``HTTPException(401)`` — the anonymous fixture variant.
+    """
+    from elspeth.web.app import create_app
+
+    settings = WebSettings(
+        data_dir=tmp_path,
+        landscape_url=f"sqlite:///{tmp_path}/runs/audit.db",
+        payload_store_path=tmp_path / "payloads",
+        composer_max_composition_turns=15,
+        composer_max_discovery_turns=10,
+        composer_timeout_seconds=85.0,
+        composer_rate_limit_per_minute=10,
+    )
+    app = create_app(settings=settings)
+
+    if authed_user_id is None:
+
+        async def _unauthenticated() -> UserIdentity:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        app.dependency_overrides[get_current_user] = _unauthenticated
+    else:
+        identity = UserIdentity(user_id=authed_user_id, username=authed_user_id)
+
+        async def _mock_user() -> UserIdentity:
+            return identity
+
+        app.dependency_overrides[get_current_user] = _mock_user
+
+    return app
+
+
+def _passthrough_composition_state(data_dir: Path) -> CompositionState:
+    """Build a source → passthrough → sink composition.
+
+    The passthrough node MUST trigger ``identity_node_advisory`` in
+    ``execution/validation.py`` so the audit-readiness panel's
+    ``provenance`` row surfaces as ``status == "warning"`` with a
+    populated ``component_ids`` tuple (C1 guard).
+
+    Source / sink paths are anchored to ``data_dir/blobs`` and
+    ``data_dir/outputs`` respectively so they satisfy
+    ``allowed_source_directories`` / ``allowed_sink_directories`` in
+    ``web/paths.py`` — otherwise validation reports a path-traversal
+    error and the happy-path advisory never emits.
+    """
+    source_path = str(data_dir / "blobs" / "audit_readiness_fixture.csv")
+    sink_path = str(data_dir / "outputs" / "audit_readiness_fixture_out.csv")
+    return CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="src_out",
+            # schema={mode: observed} satisfies the CSV plugin's
+            # required schema field without anchoring a fixed contract;
+            # combined with an absent schema block on the passthrough
+            # and an observed sink, this is the canonical identity-shaped
+            # repro that fires identity_node_advisory.
+            options={"path": source_path, "schema": {"mode": "observed"}},
+            # "discard" avoids needing a sink named "quarantine"; this
+            # is purely a fixture pragmatism choice and does not affect
+            # the path the advisory check exercises.
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="pass",
+                node_type="transform",
+                plugin="passthrough",
+                input="src_out",
+                on_success="out",
+                # on_error must be a sink name (or "discard") — the YAML
+                # generator hard-fails on None, mirroring the
+                # mutation-boundary default contract.
+                on_error="discard",
+                # schema={mode: observed} (no fields) is the canonical
+                # identity-shaped case from
+                # test_passthrough_with_schema_mode_only_is_flagged in
+                # tests/unit/web/execution/test_identity_node_advisory.py:
+                # the plugin's required-schema constraint is satisfied
+                # but Rule 5's fields anchor is absent, so the advisory
+                # still fires.
+                options={"schema": {"mode": "observed"}},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="out",
+                plugin="csv",
+                # Sink uses observed schema mode so the advisory's
+                # sink_schema_mode field is reported, completing the
+                # canonical repro from
+                # tests/unit/web/execution/test_identity_node_advisory.py.
+                options={"path": sink_path, "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(
+            name="audit-readiness fixture",
+            description="Fixture used by audit-readiness route tests.",
+        ),
+        version=1,
+    )
+
+
+def _seed_session_with_state(
+    client: TestClient,
+    *,
+    user_id: str,
+) -> UUID:
+    """Create a session and persist the passthrough composition state.
+
+    Runs against the live ``app.state.session_service`` so the route
+    handler later observes the same DB.
+    """
+    session_service = client.app.state.session_service
+    settings: WebSettings = client.app.state.settings
+    # Ensure path-allowlisted directories exist so source/sink option
+    # paths inside the persisted CompositionState satisfy
+    # web/paths.py's resolve_data_path() invariants.
+    (settings.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
+
+    async def _seed() -> UUID:
+        record = await session_service.create_session(
+            user_id=user_id,
+            title="audit-readiness fixture",
+            auth_provider_type=settings.auth_provider,
+        )
+        state = _passthrough_composition_state(settings.data_dir)
+        state_d = state.to_dict()
+        await session_service.save_composition_state(
+            record.id,
+            CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=True,
+                validation_errors=None,
+            ),
+            provenance="session_seed",
+        )
+        return record.id
+
+    return asyncio.run(_seed())
+
+
+def _seed_session_without_state(
+    client: TestClient,
+    *,
+    user_id: str,
+) -> UUID:
+    """Create a session but DO NOT persist any composition state."""
+    session_service = client.app.state.session_service
+    settings: WebSettings = client.app.state.settings
+
+    async def _seed() -> UUID:
+        record = await session_service.create_session(
+            user_id=user_id,
+            title="audit-readiness empty fixture",
+            auth_provider_type=settings.auth_provider,
+        )
+        return record.id
+
+    return asyncio.run(_seed())
+
+
+@pytest.fixture
+def audit_readiness_test_client(tmp_path: Path) -> Iterator[TestClient]:
+    """Full app with audit-readiness routes wired; auth bypassed to ``alice``."""
+    app = _build_audit_readiness_app(tmp_path, authed_user_id=_TEST_AUTHED_USER_ID)
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture
+def audit_readiness_client_with_state(
+    audit_readiness_test_client: TestClient,
+) -> tuple[TestClient, UUID]:
+    """Client + a session owned by ``alice`` with a passthrough composition.
+
+    The passthrough triggers ``identity_node_advisory`` so the
+    audit-readiness panel's ``provenance`` row is ``status="warning"``
+    with a non-empty ``component_ids`` (C1 integration guard).
+    """
+    session_id = _seed_session_with_state(
+        audit_readiness_test_client,
+        user_id=_TEST_AUTHED_USER_ID,
+    )
+    return audit_readiness_test_client, session_id
+
+
+@pytest.fixture
+def audit_readiness_client_without_state(
+    audit_readiness_test_client: TestClient,
+) -> tuple[TestClient, UUID]:
+    """Client + a session owned by ``alice`` with no composition state.
+
+    The audit-readiness routes must return 404 on this session because
+    ``get_current_state`` returns ``None``.  Ownership check passes
+    first; the 404 comes from the missing-state branch.
+    """
+    session_id = _seed_session_without_state(
+        audit_readiness_test_client,
+        user_id=_TEST_AUTHED_USER_ID,
+    )
+    return audit_readiness_test_client, session_id
+
+
+@pytest.fixture
+def audit_readiness_client_anonymous(tmp_path: Path) -> Iterator[TestClient]:
+    """Full app + ``get_current_user`` override raising ``HTTPException(401)``.
+
+    The real ``get_current_user`` reads ``app.state.auth_audit_recorder``
+    and ``app.state.settings`` before the Authorization header is
+    consulted; the override sidesteps that machinery so the test
+    asserts route-layer auth-required behaviour without standing up
+    the full auth surface.
+    """
+    app = _build_audit_readiness_app(tmp_path, authed_user_id=None)
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.fixture
+def audit_readiness_other_user_session_id(
+    audit_readiness_test_client: TestClient,
+) -> UUID:
+    """A session_id owned by ``bob`` (not the authenticated ``alice``).
+
+    Used for the IDOR guard: ``alice``'s GET against ``bob``'s session
+    MUST return 404 (not 403) so session existence is not leaked.  The
+    session has a persisted composition state so the route would
+    otherwise be able to compute a snapshot — the user_id mismatch
+    branch in ``verify_session_ownership`` is what produces the 404.
+    """
+    return _seed_session_with_state(
+        audit_readiness_test_client,
+        user_id="bob",
+    )
+
+
+def _seed_session_with_mismatched_auth_provider(
+    client: TestClient,
+    *,
+    user_id: str,
+    auth_provider_type: str,
+) -> UUID:
+    """Seed a session whose ``auth_provider_type`` differs from
+    ``settings.auth_provider``.
+
+    Used by the second-comparator IDOR test. The session is owned by
+    ``user_id`` (typically the authenticated user) so the user_id
+    branch of the ownership check passes — only the
+    ``auth_provider_type`` branch flips, isolating that comparator.
+    """
+    session_service = client.app.state.session_service
+    settings: WebSettings = client.app.state.settings
+    (settings.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
+
+    async def _seed() -> UUID:
+        record = await session_service.create_session(
+            user_id=user_id,
+            title="audit-readiness mismatched-provider fixture",
+            auth_provider_type=auth_provider_type,  # type: ignore[arg-type]
+        )
+        state = _passthrough_composition_state(settings.data_dir)
+        state_d = state.to_dict()
+        await session_service.save_composition_state(
+            record.id,
+            CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=True,
+                validation_errors=None,
+            ),
+            provenance="session_seed",
+        )
+        return record.id
+
+    return asyncio.run(_seed())
+
+
+@pytest.fixture
+def audit_readiness_mismatched_provider_session_id(
+    audit_readiness_test_client: TestClient,
+) -> UUID:
+    """A session owned by ``alice`` but bound to ``auth_provider_type="oidc"``.
+
+    The test client authenticates as ``alice`` with
+    ``settings.auth_provider == "local"`` (the default). The user_id
+    branch of ``verify_session_ownership`` passes; only the
+    ``auth_provider_type`` branch flips the access decision, isolating
+    that comparator for an IDOR-branch regression test.
+    """
+    return _seed_session_with_mismatched_auth_provider(
+        audit_readiness_test_client,
+        user_id=_TEST_AUTHED_USER_ID,
+        auth_provider_type="oidc",
+    )
 
 
 @pytest.fixture

@@ -161,7 +161,73 @@ No new trust boundary is introduced.
 | Removing the Validate button strands users mid-keystroke | Phase 2B Task 4 wires auto-validate to `compositionState.version`; the Validation row reflects status without an explicit click. Phase 2C Task 8 verifies the keyboard navigation across the inspector tabs still works after the button is gone. |
 | Phase 3 layout change breaks the panel | Phase 2C mounts the component inside `InspectorPanel.tsx` as a fixed section above the tab strip — pure presentation. Phase 3 relocates the mount point only. |
 | Recomputing on every composition change is expensive | Phase 2B caches by `(session_id, composition_version)` in the Zustand store; only fires when the version changes. The aggregator calls existing routes — same order as the standalone Validate button it replaces. |
-| Per-row "jump to component" requires `component_ids` to be accurate | Phase 2A populates `component_ids` from `ValidationResult.errors[*].component_id` and the identity-advisory check string. Phase 2C's click handler resolves these via `compositionState.nodes` and calls `selectNode` + `setActiveTab("spec")` — the same pattern `ValidationResult.tsx` already uses. |
+| Per-row "jump to component" requires `component_ids` to be accurate | Phase 2A populates `component_ids` from `ValidationResult.errors[*].component_id` and the identity-advisory check string. Phase 2C's click handler resolves these via `compositionState.nodes`, calls `selectNode`, and dispatches `SWITCH_TAB_EVENT` for `"spec"` — the same tab-switch pattern `InspectorPanel.tsx` already listens for. |
+
+## Rollout coordination
+
+Phase 2A introduces two new required fields without Python defaults
+(per CLAUDE.md No-Legacy — no compat-shim defaults permitted):
+
+- `ValidationError.error_code: str`
+- `ValidationCheck.affected_nodes: tuple[str, ...]`
+
+Every call site that constructs a `ValidationCheck` or `ValidationError`
+must be updated in the same commit as the dataclass change. The call-site
+sweep is owned by [14a-phase-2a-backend.md](14a-phase-2a-backend.md)
+§Task 1 Step 3.
+
+### Deployment ordering
+
+Pick exactly one:
+
+**Option A (recommended):** Backend (Phase 2A) ships first. Frontend
+(Phase 2B) ships in a subsequent deploy once Phase 2A is confirmed stable
+on staging. Frontend types may temporarily be wider than what the backend
+returns — this is acceptable for a short deploy window.
+
+**Option B:** Backend (Phase 2A) and frontend (Phase 2B) co-ship in a
+single deploy. Safer for the schema co-update because the API contract
+widens and narrows in lockstep.
+
+**Forbidden:** Frontend before backend. Phase 2B's TypeScript types
+reference `error_code` and `affected_nodes` — consuming these fields from
+a backend that has not yet deployed Phase 2A will produce `undefined`
+values at every call site that reads them.
+
+### DB wipe requirement
+
+Per project DB migration policy (`project_db_migration_policy.md` —
+"no Alembic, no schema-version probes, no migration scripts; operator
+deletes the old sessions/audit DB"):
+
+- The operator **must** delete the sessions DB on staging before
+  deploying Phase 2A.
+- `src/elspeth/web/guided/audit.py:249` persists
+  `dict(validation_result)` — records written before Phase 2A do not
+  contain `error_code` or `affected_nodes`. Attempting to deserialize
+  those records into the updated dataclasses will raise `TypeError` at
+  every construction site.
+- There is no migration path. There is no fallback. Delete the DB.
+
+### Staging gate (before merging Phase 2A to main)
+
+1. Confirm the operator has deleted the staging sessions DB.
+2. Confirm `mypy` and `ruff` pass on the full call-site sweep (see 14a
+   Task 1 Step 3 — coverage must include `execution/service.py`,
+   `composer/service.py`, `guided/audit.py`, and the affected test files).
+3. Confirm at least one `curl` against
+   `/api/sessions/{id}/audit-readiness` returns a payload containing
+   `composition_version`, `checked_at`, and the six canonical readiness rows.
+
+### Cross-references
+
+- [14a-phase-2a-backend.md](14a-phase-2a-backend.md) §Task 1 Step 3 —
+  owns the call-site sweep and git-add enumeration.
+- [14b-phase-2b-frontend.md](14b-phase-2b-frontend.md) — owns the
+  frontend type widening; must not ship before Phase 2A (see ordering
+  above).
+- Project memory `project_db_migration_policy.md` — authoritative source
+  for the DB-wipe-vs-migrate decision.
 
 ## Review history
 

@@ -1204,10 +1204,12 @@ class TestValidatePipelineSecretRefs:
         assert result.is_valid is False
         secret_check = next(c for c in result.checks if c.name == "secret_refs")
         assert secret_check.passed is False
+        assert secret_check.outcome_code == "secret_refs.unresolved"
         assert "MISSING_KEY" in secret_check.detail
         assert any("MISSING_KEY" in e.message for e in result.errors)
         # Downstream checks should be skipped
         assert any("Skipped" in c.detail for c in result.checks if c.name == "settings_load")
+        assert _check(result, "settings_load").outcome_code == "validation.skipped_after_failure"
 
     def test_all_refs_present_passes(self) -> None:
         """Validation passes when all secret refs are resolvable."""
@@ -1231,7 +1233,30 @@ class TestValidatePipelineSecretRefs:
 
         secret_check = next(c for c in result.checks if c.name == "secret_refs")
         assert secret_check.passed is True
+        assert secret_check.outcome_code == "secret_refs.resolved"
         assert "1 secret reference(s) resolved" in secret_check.detail
+
+    def test_no_secret_refs_emits_structured_no_refs_outcome(self) -> None:
+        """A composition with no secret markers records that fact structurally."""
+        state = _make_state(source_options={})
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
+        secret_svc = FakeSecretService(available_refs=set())
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                secret_service=secret_svc,
+                user_id="user-1",
+            )
+
+        secret_check = next(c for c in result.checks if c.name == "secret_refs")
+        assert secret_check.passed is True
+        assert secret_check.outcome_code == "secret_refs.no_refs"
 
     def test_no_secret_service_skips_check(self) -> None:
         """Without secret_service, the check is skipped (passed=True)."""
@@ -1248,6 +1273,7 @@ class TestValidatePipelineSecretRefs:
 
         secret_check = next(c for c in result.checks if c.name == "secret_refs")
         assert secret_check.passed is True
+        assert secret_check.outcome_code == "secret_refs.skipped_no_service"
         assert "skipped" in secret_check.detail.lower()
 
     def test_refs_in_node_options_detected(self) -> None:

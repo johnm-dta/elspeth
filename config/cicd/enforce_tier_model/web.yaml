@@ -49,7 +49,7 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 plugin_type from URL path parameter, lookup in constant dict"
   safety: Returns None on miss, handled by 404 response
   expires: null
-- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=a069ba82649ae6eb
+- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=c2b299b5af04fa75
   owner: architecture
   reason: "Pydantic before-validator at Tier 3 config boundary \u2014 isinstance(v, str) distinguishes raw YAML string input\
     \ (which may be all-whitespace) from already-coerced Path values or None, rejecting blank strings before Pydantic's str\u2192\
@@ -259,12 +259,12 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 isinstance check on username from external IdP JWT payload (preferred_username is Any)"
   safety: Raises AuthenticationError on non-string; validated at construction time
   expires: null
-- key: web/app.py:R5:_settings_from_env:fp=a583af24e8a41ce2  # fp rotated 2026-05-16 (was 7005fcaaf4870147) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged
+- key: web/app.py:R5:_settings_from_env:fp=7e7237a7b73c5015  # fp rotated 2026-05-16 (was 7005fcaaf4870147) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-app
   reason: "Tier 3 boundary \u2014 JSON-parsed env var may be a list; isinstance check classifies for tuple conversion"
   safety: isinstance used only for type dispatch; no contract masking
   expires: null
-- key: web/app.py:R6:_settings_from_env:fp=feec06936001455d  # fp rotated 2026-05-16 (was 1383fb34dd416d9c) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged
+- key: web/app.py:R6:_settings_from_env:fp=f30eddcbf70e29e1  # fp rotated 2026-05-16 (was 1383fb34dd416d9c) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-app
   reason: "Tier 3 boundary \u2014 env var value that isn't valid JSON is treated as plain string (the common case)"
   safety: JSONDecodeError caught only to fall back to raw string; no silent data loss
@@ -800,7 +800,7 @@ allow_hits:
   safety: Type dispatch only selects richer error formatting; all GraphValidationError cases still append a failed validation
     check and surface to the caller.
   expires: null
-- key: web/app.py:R1:create_app:fp=d675fd1a21ee8244  # fp rotated 2026-05-16 (was 88307d5d1c848839) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (WEB_CONCURRENCY env var)
+- key: web/app.py:R1:create_app:fp=8c2ae7b63deabcb1  # fp rotated 2026-05-16 (was 88307d5d1c848839) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (WEB_CONCURRENCY env var) (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional WEB_CONCURRENCY env var"
   safety: Defaults to "1" when absent
@@ -865,7 +865,7 @@ allow_hits:
 
     correct API to use; no caller can silently misuse the primitive.'
   expires: null
-- key: web/app.py:R1:create_app:fp=6b91fcfc2ffb63ab  # fp rotated 2026-05-16 (was ac4def58895142ba) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (ELSPETH_ENV env var)
+- key: web/app.py:R1:create_app:fp=84c9db4a31739d2b  # fp rotated 2026-05-16 (was ac4def58895142ba) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (ELSPETH_ENV env var) (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional ELSPETH_ENV"
   safety: Returns None when absent; only used for test guard
@@ -952,12 +952,12 @@ allow_hits:
   safety: Closes with 1011 and exits the loop; programming and infrastructure errors outside the validation/integrity union
     still propagate to the outer handler.
   expires: null
-- key: web/app.py:R1:lifespan:fp=184bbd3e67693825  # fp rotated 2026-05-16 (was 2da537fe227f2e1f) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged
+- key: web/app.py:R1:lifespan:fp=4407dec3d0231969  # fp rotated 2026-05-16 (was 2da537fe227f2e1f) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-app
   reason: "False positive \u2014 httpx.AsyncClient.get() is an HTTP GET request, not dict.get()"
   safety: HTTP errors caught by raise_for_status(); failure now raises SystemExit
   expires: null
-- key: web/app.py:R7:lifespan:fp=33e84126a1ea28ca  # fp rotated 2026-05-16 (was f54eafec6d004ac2) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged
+- key: web/app.py:R7:lifespan:fp=c2bec72835642392  # fp rotated 2026-05-16 (was f54eafec6d004ac2) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-execution
   reason: contextlib.suppress(CancelledError) is the expected shutdown path for the periodic orphan cleanup task
   safety: Clean cancellation during app shutdown; no error suppression
@@ -1065,7 +1065,7 @@ allow_hits:
     \ the general PLUGIN_CRASH path, so the audit row still lands recording \"the dispatch produced an unrecordable result\"\
     \ \u2014 rather than the alternative of silently writing zero into the audit trail."
   expires: null
-- key: web/app.py:R6:_periodic_orphan_cleanup:fp=836d7aea3e89593e  # fp rotated 2026-05-16 (was 891711143f3fbeef) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged
+- key: web/app.py:R6:_periodic_orphan_cleanup:fp=f36daeada65b800f  # fp rotated 2026-05-16 (was 891711143f3fbeef) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-execution
   reason: "Audit/IO-cleanup narrow catch \u2014 except (SQLAlchemyError, OSError) absorbs recoverable failures of cancel_all_orphaned_runs\
     \ (transient DB loss, lock contention, SQLite file I/O) so the periodic loop retries on the next interval. Catch is intentionally\
@@ -1290,7 +1290,7 @@ allow_hits:
   reason: "Tier 3 \u2014 isinstance check on pipeline_yaml argument type"
   safety: Raises TypeError with diagnostic; no silent default
   expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=002730cd5e76b620  # fp rotated 2026-05-16 (was b70a21188e4a6164) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged
+- key: web/app.py:R2:create_app:_request_id:fp=ae8fcbfd36d20f6c  # fp rotated 2026-05-16 (was b70a21188e4a6164) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan)
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
 
@@ -1429,30 +1429,34 @@ allow_hits:
   safety: Exception is stored on RuntimePreflightFailure.original_exc and re-raised at the caller site with full chain preservation;
     no silent swallowing
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=d8ea1726a1736cdb
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=927e50c1805d88ef
+- key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=2c02f8924e73db14
+  owner: web-execution
+  reason: "Pydantic before-validator at WebSocket JSON round-trip boundary — isinstance(v, (datetime, str)) allows real datetimes and ISO strings while rejecting Unix epoch integers before lax datetime parsing can coerce them."
+  safety: Raises ValueError for non-datetime/non-string timestamps; no fallback timestamp is fabricated.
+  expires: null
+- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=a98e3006866ec802
   owner: web-execution
   reason: "Pydantic before-validator \u2014 isinstance(values, dict) gates JSON round-trip path; non-dict values handled by\
     \ Pydantic"
   safety: Structural dispatch for deserialization, not error suppression
   expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=34675317a9847e1f
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=ed314e0fdc5c4326
   owner: web-execution
   reason: "Pydantic before-validator \u2014 .get() on pre-validated Tier 3 input from JSON round-trip"
   safety: Missing keys fall through to Pydantic field validation downstream
   expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=571c10f5f47d3562
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=8d879a0dc99d8c5b
   owner: web-execution
   reason: "Pydantic before-validator \u2014 .get() on pre-validated Tier 3 input from JSON round-trip"
   safety: Missing keys fall through to Pydantic field validation downstream
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=1407480257889325
+- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=d63f3e89ba34fb0b
   owner: web-execution
   reason: "Pydantic before-validator \u2014 isinstance(values, dict) gates JSON round-trip path; non-dict values handled by\
     \ Pydantic"
   safety: Structural dispatch for deserialization, not error suppression
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_enforce_data_type:fp=14758d6c80092a7e
+- key: web/execution/schemas.py:R5:RunEvent:_enforce_data_type:fp=8252ea31744de4ae
   owner: web-execution
   reason: "Offensive programming \u2014 isinstance enforces event_type/data type correspondence at construction time"
   safety: Raises ValueError on mismatch; belt-and-suspenders with before-validator

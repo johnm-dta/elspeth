@@ -497,6 +497,20 @@ class InvalidForkTargetError(Exception):
         super().__init__(f"Can only fork from user messages, got role '{role}' for message {message_id}")
 
 
+class SessionNotFoundError(ValueError):
+    """Raised when a session id has no matching sessions row.
+
+    Subclasses ``ValueError`` so older callers that still catch
+    ``ValueError`` retain compatibility. New IDOR-sensitive route helpers
+    catch this narrower type so unrelated value-construction failures do
+    not collapse into not-found responses.
+    """
+
+    def __init__(self, session_id: UUID) -> None:
+        self.session_id = session_id
+        super().__init__(f"Session not found: {session_id}")
+
+
 class IllegalRunTransitionError(ValueError):
     """Raised when ``update_run_status`` receives a transition forbidden by
     ``LEGAL_RUN_TRANSITIONS``.

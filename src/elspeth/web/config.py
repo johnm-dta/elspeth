@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.core.config import PayloadStoreSettings
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -17,6 +18,12 @@ from elspeth.web.validation import (
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS = 300.0
 _DEFAULT_COMPOSER_TRANSPORT_HEADROOM_SECONDS = 30.0
+# Mechanical link to core retention default: if
+# core/config.py:PayloadStoreSettings.retention_days changes, this value
+# tracks it automatically. Prevents the silent divergence called out in
+# docs/composer/ux-redesign-2026-05/14a-phase-2a-backend.md
+# §"Retention default divergence guard".
+_DEFAULT_PAYLOAD_STORE_RETENTION_DAYS: int = PayloadStoreSettings.model_fields["retention_days"].default
 
 
 class WebSettings(BaseModel):
@@ -97,6 +104,19 @@ class WebSettings(BaseModel):
     landscape_url: str | None = None
     landscape_passphrase: str | None = None
     payload_store_path: Path | None = None
+    payload_store_retention_days: int = Field(
+        default=_DEFAULT_PAYLOAD_STORE_RETENTION_DAYS,
+        ge=1,
+        description=(
+            "Payload retention in days surfaced by the audit-readiness "
+            "panel. Mirrors the core default sourced from "
+            "src/elspeth/core/config.py:PayloadStoreSettings.retention_days "
+            "via _DEFAULT_PAYLOAD_STORE_RETENTION_DAYS (mechanical link, "
+            "not a hand-copied literal). The panel row is informational "
+            "only in Phase 2A — there is no user-stated requirement to "
+            "compare against yet."
+        ),
+    )
 
     # OIDC / Entra-specific (optional)
     oidc_issuer: str | None = None

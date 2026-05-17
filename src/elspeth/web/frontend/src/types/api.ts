@@ -36,6 +36,11 @@ export type {
   BlobMetadata,
   BlobCategory,
   SecretInventoryItem,
+  ReadinessRowId,
+  ReadinessStatus,
+  ReadinessRow,
+  AuditReadinessSnapshot,
+  AuditReadinessExplain,
 } from "./index";
 export type {
   ComposerRecoveryErrorFields,

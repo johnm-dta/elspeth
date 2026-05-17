@@ -56,6 +56,7 @@ interface ExecutionState {
   error: string | null;
 
   validate: (sessionId: string) => Promise<void>;
+  setValidationResult: (result: ValidationResult | null) => void;
   execute: (sessionId: string, fanoutAck?: ExecutionFanoutAck) => Promise<string | null>;
   confirmFanoutExecution: () => Promise<string | null>;
   dismissFanoutGuard: () => void;
@@ -270,6 +271,10 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
         error: message,
       });
     }
+  },
+
+  setValidationResult(result: ValidationResult | null) {
+    set({ validationResult: result });
   },
 
   async execute(sessionId: string, fanoutAck?: ExecutionFanoutAck) {

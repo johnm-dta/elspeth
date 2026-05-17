@@ -274,6 +274,17 @@ _TRANSFORM_REJECTION_CASES = [
         "content_field and fingerprint_field must differ",
         id="web_scrape-field-collision",
     ),
+    # ── report_assemble ───────────────────────────────────────────────────
+    pytest.param(
+        "report_assemble",
+        {
+            "schema": _make_observed_schema(),
+            "text_field": "line",
+            "output_field": "report_format",  # collides with reserved report-metadata key
+        },
+        "collides with a reserved report metadata field",
+        id="report_assemble-output_field-metadata-collision",
+    ),
 ]
 
 _SOURCE_REJECTION_CASES = [

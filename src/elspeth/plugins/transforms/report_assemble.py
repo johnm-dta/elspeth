@@ -42,7 +42,10 @@ class ReportAssembleConfig(TransformDataConfig):
 
     text_field: str = Field(description="Name of the string field to collate")
     output_field: str = Field(default="report_body", description="Output field for assembled text")
-    format: Literal["plain_text", "markdown", "html_fragment"] = Field(default="plain_text")
+    format: Literal["plain_text", "markdown", "html_fragment"] = Field(
+        default="plain_text",
+        description="Output rendering format: 'plain_text' for newline-joined text, 'markdown' for # title prefix, or 'html_fragment' for <h1>/<p> block elements (escaped).",
+    )
     join_with: str = Field(default="\n", description="Separator used between input rows")
     title: str | None = Field(default=None, description="Optional report title")
 
@@ -79,7 +82,7 @@ class ReportAssemble(BaseTransform):
 
     name = "report_assemble"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3c7bc6b5e7c26f31"
+    source_file_hash: str | None = "sha256:eeecec2d86041064"
     config_model = ReportAssembleConfig
     is_batch_aware = True
 

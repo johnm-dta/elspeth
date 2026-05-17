@@ -217,6 +217,7 @@ Invalid text-column keyword example:
 | `rag_retrieval` | Retrieve from vector store | no | yes | depends | Adds retrieval results |
 | `type_coerce` | Convert field types | no | no | no | Coerces in-place |
 | `value_transform` | Compute fields via expressions | no | no | no | Adds/modifies fields |
+| `report_assemble` | Aggregate flushed batch rows into a paginated report body | **yes** | no | no | Emits one report row per flush with `report_body` + metadata |
 
 ### Sinks
 

@@ -1113,6 +1113,7 @@ If the user's intent matches a known pattern, use its safe defaults and build im
 | `rag_retrieval` | Retrieve similar documents from vector store | no | yes | depends | Adds retrieval results field |
 | `type_coerce` | Convert field types (str→int/float/bool, *→str) | no | no | no | Coerces specified fields in-place |
 | `value_transform` | Compute new/modified fields via expressions | no | no | no | Adds or modifies fields per expression |
+| `report_assemble` | Aggregate flushed batch rows into a paginated report body | **yes** | no | no | Emits one report row per flush with `report_body` + metadata (`report_format`, `report_index`, `line_start`, `line_end`, `line_count`, `lines_seen_total`, `flush_trigger`, `is_end_of_source_report`) |
 
 ### Sinks
 

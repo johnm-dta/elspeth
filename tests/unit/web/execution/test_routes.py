@@ -166,7 +166,7 @@ class TestValidateEndpoint:
             return_value=ValidationResult(
                 is_valid=True,
                 checks=[
-                    ValidationCheck(name="settings_load", passed=True, detail="OK", affected_nodes=()),
+                    ValidationCheck(name="settings_load", passed=True, detail="OK", affected_nodes=(), outcome_code=None),
                 ],
                 errors=[],
             )
@@ -197,7 +197,13 @@ class TestValidateEndpoint:
             return_value=ValidationResult(
                 is_valid=False,
                 checks=[
-                    ValidationCheck(name="settings_load", passed=False, detail="Bad YAML", affected_nodes=()),
+                    ValidationCheck(
+                        name="settings_load",
+                        passed=False,
+                        detail="Bad YAML",
+                        affected_nodes=(),
+                        outcome_code=None,
+                    ),
                 ],
                 errors=[],
             )

@@ -20,7 +20,7 @@ from fastapi import HTTPException, Request
 
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.config import WebSettings
-from elspeth.web.sessions.protocol import SessionServiceProtocol
+from elspeth.web.sessions.protocol import SessionNotFoundError, SessionServiceProtocol
 
 
 async def verify_session_ownership(
@@ -43,7 +43,7 @@ async def verify_session_ownership(
     settings: WebSettings = request.app.state.settings
     try:
         session = await session_service.get_session(session_id)
-    except ValueError:
+    except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found") from None
 
     if session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:

@@ -28,7 +28,10 @@ export function ExplainDialog({
   // `s.isLoadingExplain` / `s.explainError` would evaluate to `undefined`
   // at runtime — the dialog would never show loading or error. The correct
   // accessors key by sessionId.
-  const explain = useAuditReadinessStore((s) => s.explainsBySession[sessionId]);
+  const explain = useAuditReadinessStore((s) => {
+    const cached = s.explainsBySession[sessionId];
+    return cached?.composition_version === compositionVersion ? cached : undefined;
+  });
   const isLoading = useAuditReadinessStore(
     (s) => s.isLoadingExplainBySession[sessionId] ?? false,
   );

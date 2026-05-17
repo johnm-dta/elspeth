@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.web.audit_readiness.service import ReadinessService
 from elspeth.web.composer.state import (
     CompositionState,
@@ -265,6 +266,7 @@ def test_provenance_warning_on_identity_advisory():
                 passed=True,
                 detail=("Node 'pass' is an identity-shaped passthrough between 'source' and sink 'out'."),
                 affected_nodes=("pass",),  # structured field; no prose parse needed
+                outcome_code=None,
             )
         ],
         errors=[],
@@ -281,6 +283,43 @@ def test_provenance_warning_on_identity_advisory():
     assert row.status == "warning"
     assert "pass" in (row.detail or "")
     assert "pass" in row.component_ids
+
+
+def test_provenance_not_applicable_when_identity_advisory_check_was_skipped():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name="identity_node_advisory",
+                passed=False,
+                detail="Skipped: path_allowlist failed",
+                affected_nodes=(),
+                outcome_code="validation.skipped_after_failure",
+            )
+        ],
+        errors=[
+            ValidationError(
+                component_id="source",
+                component_type="source",
+                message="Path traversal blocked",
+                suggestion="Use a file within the blobs directory.",
+                error_code=None,
+            )
+        ],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    row = _row(snap, "provenance")
+    assert row.status == "not_applicable"
+    assert row.summary == "Provenance check did not run"
+    assert row.detail == "Skipped: path_allowlist failed"
 
 
 def test_retention_row_reports_system_value():
@@ -318,6 +357,66 @@ def test_secrets_not_applicable_when_no_refs():
     assert _row(snap, "secrets").status == "not_applicable"
 
 
+def test_secrets_not_applicable_when_secret_refs_check_reports_no_refs():
+    result = ValidationResult(
+        is_valid=True,
+        checks=[
+            ValidationCheck(
+                name="secret_refs",
+                passed=True,
+                detail="Secret scan completed without references",
+                affected_nodes=(),
+                outcome_code="secret_refs.no_refs",
+            )
+        ],
+        errors=[],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result, inventory=())
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    row = _row(snap, "secrets")
+    assert row.status == "not_applicable"
+    assert row.summary == "No secret references in this composition"
+
+
+def test_secrets_not_applicable_when_no_ref_check_has_unrelated_inventory():
+    result = ValidationResult(
+        is_valid=True,
+        checks=[
+            ValidationCheck(
+                name="secret_refs",
+                passed=True,
+                detail="Secret scan completed without references",
+                affected_nodes=(),
+                outcome_code="secret_refs.no_refs",
+            )
+        ],
+        errors=[],
+        semantic_contracts=[],
+    )
+    svc = _make_service(
+        _state(),
+        result,
+        inventory=(SecretInventoryItem(name="UNRELATED_API_KEY", scope="user", available=True),),
+    )
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    row = _row(snap, "secrets")
+    assert row.status == "not_applicable"
+    assert row.summary == "No secret references in this composition"
+
+
 def test_secrets_error_on_missing_refs():
     result = ValidationResult(
         is_valid=False,
@@ -327,6 +426,7 @@ def test_secrets_error_on_missing_refs():
                 passed=False,
                 detail="Missing secret references: openai_key",
                 affected_nodes=(),  # no node attribution for secret check
+                outcome_code="secret_refs.unresolved",
             )
         ],
         errors=[
@@ -348,6 +448,34 @@ def test_secrets_error_on_missing_refs():
         )
     )
     assert _row(snap, "secrets").status == "error"
+
+
+def test_secrets_error_when_secret_refs_check_failed_without_typed_error():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name="secret_refs",
+                passed=False,
+                detail="Secret reference validation failed",
+                affected_nodes=(),
+                outcome_code="secret_refs.unresolved",
+            )
+        ],
+        errors=[],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    row = _row(snap, "secrets")
+    assert row.status == "error"
+    assert row.summary == "Secret reference check failed"
 
 
 # The three values in service.py:262 _SECRET_ERROR_CODES are
@@ -409,6 +537,68 @@ def test_secrets_error_on_disallowed_secret_ref():
     assert _row(snap, "secrets").status == "error"
 
 
+def test_secrets_not_applicable_when_secret_check_was_skipped():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name="path_allowlist",
+                passed=False,
+                detail="Source path is outside allowed source directories",
+                affected_nodes=(),
+                outcome_code=None,
+            ),
+            ValidationCheck(
+                name="secret_refs",
+                passed=False,
+                detail="Skipped: path_allowlist failed",
+                affected_nodes=(),
+                outcome_code="validation.skipped_after_failure",
+            ),
+        ],
+        errors=[
+            ValidationError(
+                component_id="source",
+                component_type="source",
+                message="Path traversal blocked",
+                suggestion="Use a file within the blobs directory.",
+                error_code=None,
+            )
+        ],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    row = _row(snap, "secrets")
+    assert row.status == "not_applicable"
+    assert row.summary == "Secret reference check did not run"
+    assert row.detail == "Skipped: path_allowlist failed"
+
+
+def test_plugin_trust_row_errors_on_non_catalog_plugin_name():
+    svc = _make_service(
+        _state(transforms=(("bad", "lmm"),)),
+        _OK,
+    )
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    row = _row(snap, "plugin_trust")
+    assert row.status == "error"
+    assert row.summary == "Unknown plugin in composition"
+    assert row.component_ids == ("bad",)
+
+
 def test_snapshot_raises_when_no_state():
     exec_svc = MagicMock()
     exec_svc.validate = AsyncMock(return_value=_OK)
@@ -423,7 +613,7 @@ def test_snapshot_raises_when_no_state():
         scoped_secret_resolver=scoped_resolver,
         settings=settings,
     )
-    with pytest.raises(LookupError, match="no composition state"):
+    with pytest.raises(LookupError, match="No composition state"):
         asyncio.run(
             svc.compute_snapshot(
                 session_id=UUID("11111111-1111-1111-1111-111111111111"),

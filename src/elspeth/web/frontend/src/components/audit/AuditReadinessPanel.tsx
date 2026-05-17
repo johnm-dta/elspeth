@@ -15,11 +15,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
+import { useExecutionStore } from "../../stores/executionStore";
 import { relativeTime } from "../../utils/time";
 import type {
+  AuditReadinessSnapshot,
   ReadinessRow,
   ReadinessRowId,
   ReadinessStatus,
+  ValidationResult,
 } from "../../types/api";
 import { ReadinessRowDetail } from "./ReadinessRowDetail";
 import { ExplainDialog } from "./ExplainDialog";
@@ -71,13 +74,68 @@ function isActionable(status: ReadinessStatus): boolean {
   return status === "warning" || status === "error";
 }
 
+function validationResultFromSnapshot(snapshot: AuditReadinessSnapshot): ValidationResult {
+  const row = snapshot.rows.find((candidate) => candidate.id === "validation");
+  if (!row) {
+    throw new Error("audit-readiness snapshot missing validation row");
+  }
+  const isValid = row.status === "ok";
+  return {
+    is_valid: isValid,
+    checks: [
+      {
+        name: "audit_readiness.validation",
+        passed: isValid,
+        detail: row.detail ?? row.summary,
+        affected_nodes: [],
+        outcome_code: null,
+      },
+    ],
+    errors: isValid
+      ? []
+      : [
+          {
+            component_id: row.component_ids[0] ?? null,
+            component_type: null,
+            message: row.detail ?? row.summary,
+            suggestion: null,
+          },
+        ],
+    warnings: [],
+    semantic_contracts: [],
+  };
+}
+
+function projectMatchingSnapshotToExecution(
+  sessionId: string,
+  compositionVersion: number,
+  setValidationResult: (result: ValidationResult) => void,
+): void {
+  const currentSnapshot =
+    useAuditReadinessStore.getState().snapshotsBySession[sessionId];
+  const activeSessionId = useSessionStore.getState().activeSessionId;
+  const activeVersion =
+    useSessionStore.getState().compositionState?.version ?? null;
+  if (
+    activeSessionId !== sessionId ||
+    activeVersion !== compositionVersion ||
+    currentSnapshot?.composition_version !== compositionVersion
+  ) {
+    return;
+  }
+  setValidationResult(validationResultFromSnapshot(currentSnapshot));
+}
+
 export function AuditReadinessPanel() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const compositionState = useSessionStore((s) => s.compositionState);
 
-  const snapshot = useAuditReadinessStore((s) =>
-    activeSessionId ? s.snapshotsBySession[activeSessionId] : undefined,
-  );
+  const currentCompositionVersion = compositionState?.version ?? null;
+  const snapshot = useAuditReadinessStore((s) => {
+    if (!activeSessionId || currentCompositionVersion === null) return undefined;
+    const cached = s.snapshotsBySession[activeSessionId];
+    return cached?.composition_version === currentCompositionVersion ? cached : undefined;
+  });
   const isLoading = useAuditReadinessStore((s) =>
     activeSessionId ? !!s.isLoadingBySession[activeSessionId] : false,
   );
@@ -85,6 +143,7 @@ export function AuditReadinessPanel() {
     activeSessionId ? s.errorBySession[activeSessionId] ?? null : null,
   );
   const loadSnapshot = useAuditReadinessStore((s) => s.loadSnapshot);
+  const setValidationResult = useExecutionStore((s) => s.setValidationResult);
 
   const hasCompositionContent =
     !!compositionState &&
@@ -94,9 +153,18 @@ export function AuditReadinessPanel() {
 
   useEffect(() => {
     if (!activeSessionId || !compositionState || !hasCompositionContent) return;
+    let cancelled = false;
     // Fire and forget; store handles errors.
-    void loadSnapshot(activeSessionId, compositionState.version);
+    void loadSnapshot(activeSessionId, compositionState.version).then(() => {
+      if (cancelled) return;
+      projectMatchingSnapshotToExecution(
+        activeSessionId,
+        compositionState.version,
+        setValidationResult,
+      );
+    });
     return () => {
+      cancelled = true;
       // Unmount-during-fetch cleanup: abort the in-flight controller for this
       // session. The store's AbortError catch arm clears
       // isLoadingBySession[activeSessionId] and preserves cached snapshot/error.
@@ -109,7 +177,7 @@ export function AuditReadinessPanel() {
   // Using the reference would re-run the effect on every render-cycle that re-creates the object
   // without changing the version. The linter flags `compositionState` as missing; suppress here.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, compositionState?.version, hasCompositionContent, loadSnapshot]);
+  }, [activeSessionId, compositionState?.version, hasCompositionContent, loadSnapshot, setValidationResult]);
 
   const anyActionable = useMemo(
     () => snapshot?.rows.some((r) => isActionable(r.status)) ?? false,
@@ -231,9 +299,19 @@ export function AuditReadinessPanel() {
               type="button"
               className="btn audit-readiness-action-btn audit-readiness-action-btn--ghost"
               onClick={() =>
-                void loadSnapshot(activeSessionId, compositionState.version, {
-                  force: true,
-                })
+                void loadSnapshot(
+                  activeSessionId,
+                  compositionState.version,
+                  {
+                    force: true,
+                  },
+                ).then(() =>
+                  projectMatchingSnapshotToExecution(
+                    activeSessionId,
+                    compositionState.version,
+                    setValidationResult,
+                  ),
+                )
               }
               aria-label="Refresh audit check now"
             >

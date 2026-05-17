@@ -64,6 +64,32 @@ describe("ExplainDialog", () => {
     expect(api.fetchAuditReadinessExplain).not.toHaveBeenCalled();
   });
 
+  it("does not render a cached narrative when its version differs from the requested version", async () => {
+    useAuditReadinessStore.setState({
+      explainsBySession: {
+        [SESSION_ID]: {
+          session_id: SESSION_ID,
+          composition_version: 1,
+          narrative: "stale v1 narrative",
+        },
+      },
+    } as never);
+    vi.mocked(api.fetchAuditReadinessExplain).mockReturnValueOnce(
+      new Promise(() => {}),
+    );
+
+    render(
+      <ExplainDialog
+        sessionId={SESSION_ID}
+        compositionVersion={2}
+        onClose={() => {}}
+      />,
+    );
+
+    await screen.findByText(/Generating explanation/i);
+    expect(screen.queryByText("stale v1 narrative")).not.toBeInTheDocument();
+  });
+
   it("renders a loading state while the fetch is pending, then transitions to content on resolve", async () => {
     let resolve!: (v: { session_id: string; composition_version: number; narrative: string }) => void;
     vi.mocked(api.fetchAuditReadinessExplain).mockReturnValueOnce(

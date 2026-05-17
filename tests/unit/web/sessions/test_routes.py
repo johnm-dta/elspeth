@@ -5262,6 +5262,7 @@ def test_runtime_preflight_errors_are_used_for_composition_state_persistence() -
                 passed=False,
                 detail="Invalid configuration for transform 'batch_stats'",
                 affected_nodes=(),
+                outcome_code=None,
             )
         ],
         errors=[
@@ -5597,6 +5598,7 @@ def _runtime_preflight_failed_result(message: str = "runtime preflight blocked e
                 passed=False,
                 detail=message,
                 affected_nodes=(),
+                outcome_code=None,
             )
         ],
         errors=[

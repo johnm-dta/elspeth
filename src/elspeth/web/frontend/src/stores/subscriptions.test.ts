@@ -177,4 +177,33 @@ describe("subscriptions — validation result side effects", () => {
     // Exactly one call — not zero (first fire happened), not two (second blocked).
     expect(injectSystemMessage).toHaveBeenCalledTimes(1);
   });
+
+  it("does not repeat side effects for a fresh object with the same validation outcome", () => {
+    const injectSystemMessage = vi.fn();
+    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendValidationFeedback,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    const first = {
+      is_valid: false,
+      errors: [{ component_type: "source", component_id: "s1", message: "boom" }],
+      warnings: [],
+    };
+    const second = {
+      is_valid: false,
+      errors: [{ component_type: "source", component_id: "s1", message: "boom" }],
+      warnings: [],
+    };
+
+    useExecutionStore.setState({ validationResult: first } as never);
+    useExecutionStore.setState({ validationResult: second } as never);
+
+    expect(injectSystemMessage).toHaveBeenCalledTimes(1);
+    expect(sendValidationFeedback).toHaveBeenCalledTimes(1);
+  });
 });

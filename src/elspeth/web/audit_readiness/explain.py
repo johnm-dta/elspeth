@@ -62,7 +62,8 @@ def _describe_transform(node: NodeSpec) -> str:
     # (state.py docstring, line 113), `plugin` is None only for gates and
     # coalesces. If None ever appears here, that's a Tier-1 invariant breach.
     plugin = node.plugin
-    assert plugin is not None, f"transform node {name!r} has plugin=None — Tier-1 invariant breach"
+    if plugin is None:
+        raise RuntimeError(f"transform node {name!r} has plugin=None — Tier-1 invariant breach")
     if plugin == "llm":
         return (
             f"- {name} (LLM transform) — for each row: the full prompt "

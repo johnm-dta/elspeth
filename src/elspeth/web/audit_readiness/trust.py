@@ -38,6 +38,7 @@ replacement.
 from __future__ import annotations
 
 from enum import StrEnum
+from functools import lru_cache
 from typing import Literal
 
 PluginKind = Literal["source", "transform", "sink"]
@@ -71,9 +72,38 @@ EXTERNAL_BOUNDARY_TRANSFORMS: frozenset[str] = frozenset(
 # Adding a new entry: follow the same 3-step process as transforms above.
 EXTERNAL_BOUNDARY_SINKS: frozenset[str] = frozenset(
     {
+        "azure_blob",  # plugins/sinks/azure_blob_sink.py — external Azure Blob Storage write
+        "chroma_sink",  # plugins/sinks/chroma_sink.py — ChromaDB itself is an external system
+        "database",  # plugins/sinks/database_sink.py — writes rows to a database table using SQLAlchemy Core
         "dataverse",  # plugins/sinks/dataverse.py — Determinism.EXTERNAL_CALL
     }
 )
+
+
+@lru_cache(maxsize=1)
+def _registered_plugin_names() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Return source/transform/sink plugin names from the live builtin catalog."""
+    from elspeth.plugins.infrastructure.manager import PluginManager
+
+    manager = PluginManager()
+    manager.register_builtin_plugins()
+    return (
+        frozenset(cls.name for cls in manager.get_sources()),
+        frozenset(cls.name for cls in manager.get_transforms()),
+        frozenset(cls.name for cls in manager.get_sinks()),
+    )
+
+
+def is_registered_plugin(kind: PluginKind, name: str) -> bool:
+    """Return True when ``name`` exists in the live catalog for ``kind``."""
+    sources, transforms, sinks = _registered_plugin_names()
+    if kind == "source":
+        return name in sources
+    if kind == "transform":
+        return name in transforms
+    if kind == "sink":
+        return name in sinks
+    raise ValueError(f"unknown plugin kind: {kind!r}")
 
 
 def classify_plugin(kind: PluginKind, name: str) -> PluginTrust:

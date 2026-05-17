@@ -7248,6 +7248,7 @@ class TestPreviewPipeline:
                         passed=False,
                         detail="Forbidden name: 'end_of_source'",
                         affected_nodes=(),
+                        outcome_code=None,
                     )
                 ],
                 errors=[

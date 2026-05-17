@@ -31,6 +31,16 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
+from elspeth.web.composer.state import (
+    CompositionState,
+    NodeSpec,
+    OutputSpec,
+    PipelineMetadata,
+    SourceSpec,
+)
+from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.sessions.protocol import CompositionStateData
+
 
 def test_snapshot_returns_six_canonical_rows(
     audit_readiness_client_with_state: tuple[TestClient, UUID],
@@ -208,3 +218,111 @@ def test_secrets_row_uses_scoped_resolver(
     assert response.status_code == 200, response.text
     rows = {r["id"]: r for r in response.json()["rows"]}
     assert rows["secrets"]["status"] in ("ok", "error", "not_applicable")
+
+
+def test_secrets_row_surfaces_disallowed_secret_ref_from_real_validate_pipeline(
+    audit_readiness_test_client: TestClient,
+) -> None:
+    settings = audit_readiness_test_client.app.state.settings
+    (settings.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
+    session_service = audit_readiness_test_client.app.state.session_service
+    session_id = uuid.uuid4()
+
+    async def _seed() -> None:
+        record = await session_service.create_session(
+            user_id="alice",
+            title="audit-readiness disallowed secret-ref fixture",
+            auth_provider_type=settings.auth_provider,
+        )
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="src_out",
+                options={
+                    "path": str(settings.data_dir / "blobs" / "audit_readiness_fixture.csv"),
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="scrape",
+                    node_type="transform",
+                    plugin="web_scrape",
+                    input="src_out",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "url_field": "url",
+                        "http": {
+                            "abuse_contact": {"secret_ref": "ANY_SECRET"},
+                            "scraping_reason": "research",
+                            "allowed_hosts": ["example.com"],
+                        },
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="out",
+                    plugin="csv",
+                    options={
+                        "path": str(settings.data_dir / "outputs" / "audit_readiness_fixture_out.csv"),
+                        "schema": {"mode": "observed"},
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(
+                name="audit-readiness disallowed secret-ref fixture",
+                description="Fixture used by audit-readiness route tests.",
+            ),
+            version=1,
+        )
+        state_d = state.to_dict()
+        await session_service.save_composition_state(
+            record.id,
+            CompositionStateData(
+                source=state_d["source"],
+                nodes=state_d["nodes"],
+                edges=state_d["edges"],
+                outputs=state_d["outputs"],
+                metadata_=state_d["metadata"],
+                is_valid=True,
+                validation_errors=None,
+            ),
+            provenance="session_seed",
+        )
+        nonlocal session_id
+        session_id = record.id
+
+    import asyncio
+
+    asyncio.run(_seed())
+    response = audit_readiness_test_client.get(f"/api/sessions/{session_id}/audit-readiness")
+    assert response.status_code == 200, response.text
+    rows = {r["id"]: r for r in response.json()["rows"]}
+    assert rows["secrets"]["status"] == "error"
+    assert "credential-bearing fields" in (rows["secrets"]["detail"] or "")
+    assert "scrape" in rows["secrets"]["component_ids"]
+
+
+def test_audit_readiness_routes_are_rate_limited(
+    audit_readiness_client_with_state: tuple[TestClient, UUID],
+) -> None:
+    client, session_id = audit_readiness_client_with_state
+
+    for suffix in ("", "/explain"):
+        client.app.state.rate_limiter = ComposerRateLimiter(limit=1)
+        first_response = client.get(f"/api/sessions/{session_id}/audit-readiness{suffix}")
+        assert first_response.status_code == 200
+        response = client.get(f"/api/sessions/{session_id}/audit-readiness{suffix}")
+        assert response.status_code == 429

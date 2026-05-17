@@ -1068,7 +1068,7 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
     )
     return ValidationResult(
         is_valid=False,
-        checks=[ValidationCheck(name="state_exists", passed=False, detail=detail, affected_nodes=())],
+        checks=[ValidationCheck(name="state_exists", passed=False, detail=detail, affected_nodes=(), outcome_code=None)],
         errors=[
             ValidationError(
                 component_id=None,

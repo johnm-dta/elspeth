@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from elspeth.web.audit_readiness.explain import build_narrative
 from elspeth.web.composer.state import (
     CompositionState,
@@ -109,3 +111,10 @@ def test_calls_out_dataverse_sink_as_boundary():
     assert "Dataverse" in text
     assert "external boundary" in text.lower()
     assert "Dataverse instance" in text
+
+
+def test_transform_node_with_none_plugin_raises_runtime_error():
+    state = _state(transforms=(("bad_transform", None),))
+
+    with pytest.raises(RuntimeError, match=r"bad_transform.*plugin=None"):
+        build_narrative(state, retention_days=90)

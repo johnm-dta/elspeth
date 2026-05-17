@@ -24,10 +24,11 @@ from elspeth.web.audit_readiness.models import (
     AuditReadinessExplain,
     AuditReadinessSnapshot,
 )
-from elspeth.web.audit_readiness.service import ReadinessService
+from elspeth.web.audit_readiness.service import CompositionStateNotFoundError, ReadinessService
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.config import WebSettings
+from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import SessionServiceProtocol
@@ -47,8 +48,10 @@ def create_audit_readiness_router() -> APIRouter:
         session_id: UUID,
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
     ) -> JSONResponse:
         """Return the six-row audit-readiness snapshot for ``session_id``."""
+        await rate_limiter.check(user.user_id)
         await verify_session_ownership(session_id, user, request)
         service: ReadinessService = request.app.state.readiness_service
         try:
@@ -56,7 +59,7 @@ def create_audit_readiness_router() -> APIRouter:
                 session_id=session_id,
                 user_id=user.user_id,
             )
-        except LookupError as exc:
+        except CompositionStateNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return JSONResponse(
             content=result.model_dump(mode="json"),
@@ -71,6 +74,7 @@ def create_audit_readiness_router() -> APIRouter:
         session_id: UUID,
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
     ) -> JSONResponse:
         """Return the narrative prose form for the Explain detail view.
 
@@ -80,6 +84,7 @@ def create_audit_readiness_router() -> APIRouter:
         narrative). Tune if profiling shows the cost; the simpler
         contract is worth the second read until then.
         """
+        await rate_limiter.check(user.user_id)
         await verify_session_ownership(session_id, user, request)
         session_service: SessionServiceProtocol = request.app.state.session_service
         settings: WebSettings = request.app.state.settings
@@ -99,7 +104,7 @@ def create_audit_readiness_router() -> APIRouter:
             ),
         )
         return JSONResponse(
-            content=result.model_dump(),
+            content=result.model_dump(mode="json"),
             headers={"Cache-Control": _NO_STORE},
         )
 

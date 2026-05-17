@@ -16,8 +16,27 @@ let unsubscribe: (() => void) | null = null;
 
 // Module-level state for the executionStore subscriber.
 // Must be reset in _resetSubscriptionsForTesting().
-let previousValidationResult: ValidationResult | null = null;
+let previousValidationFingerprint: string | null = null;
 let unsubscribeExecution: (() => void) | null = null;
+
+function validationFingerprint(result: ValidationResult | null): string | null {
+  if (!result) return null;
+  return JSON.stringify({
+    is_valid: result.is_valid,
+    errors: result.errors.map((err) => ({
+      component_type: err.component_type ?? null,
+      component_id: err.component_id ?? null,
+      message: err.message,
+      suggestion: err.suggestion ?? null,
+    })),
+    warnings: (result.warnings ?? []).map((warn) => ({
+      component_type: warn.component_type ?? null,
+      component_id: warn.component_id ?? null,
+      message: warn.message,
+      suggestion: warn.suggestion ?? null,
+    })),
+  });
+}
 
 /**
  * Wire up cross-store subscriptions. Must be called exactly once at
@@ -72,11 +91,12 @@ export function initStoreSubscriptions(): void {
 
   unsubscribeExecution = useExecutionStore.subscribe((state) => {
     const result = state.validationResult;
-    // Reference-equality guard: fire only on result change, not on every
-    // store update. Prevents duplicate injectSystemMessage / sendValidationFeedback
-    // calls when validate() is invoked in quick succession.
-    if (result === previousValidationResult) return;
-    previousValidationResult = result;
+    const fingerprint = validationFingerprint(result);
+    // Content guard: fire only when the validation outcome changes, not when
+    // the same result is re-created as a fresh object during hydration or
+    // auto-validation refreshes.
+    if (fingerprint === previousValidationFingerprint) return;
+    previousValidationFingerprint = fingerprint;
 
     if (!result) return;
 
@@ -120,7 +140,7 @@ export function _resetSubscriptionsForTesting(): void {
   unsubscribeExecution?.();
   unsubscribeExecution = null;
   previousVersion = null;
-  previousValidationResult = null;
+  previousValidationFingerprint = null;
   previousSessionIds = new Set();
   initialized = false;
 }

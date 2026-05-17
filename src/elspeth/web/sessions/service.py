@@ -59,6 +59,7 @@ from elspeth.web.sessions.protocol import (
     ProposalLifecycleStatus,
     RunAlreadyActiveError,
     RunRecord,
+    SessionNotFoundError,
     SessionRecord,
     SessionRunStatus,
     StaleComposeStateError,
@@ -1121,7 +1122,7 @@ class SessionServiceImpl:
         )
 
     async def get_session(self, session_id: UUID) -> SessionRecord:
-        """Fetch a session by ID. Raises ValueError if not found."""
+        """Fetch a session by ID. Raises SessionNotFoundError if not found."""
 
         def _sync() -> Any:
             with self._engine.begin() as conn:
@@ -1130,7 +1131,7 @@ class SessionServiceImpl:
         row = await self._run_sync(_sync)
 
         if row is None:
-            raise ValueError(f"Session not found: {session_id}")
+            raise SessionNotFoundError(session_id)
 
         return SessionRecord(
             id=UUID(row.id),
@@ -1152,7 +1153,7 @@ class SessionServiceImpl:
             with self._engine.begin() as conn:
                 result = conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(title=title, updated_at=now))
                 if result.rowcount == 0:
-                    raise ValueError(f"Session not found: {session_id}")
+                    raise SessionNotFoundError(session_id)
                 return conn.execute(select(sessions_table).where(sessions_table.c.id == sid)).one()
 
         row = await self._run_sync(_sync)

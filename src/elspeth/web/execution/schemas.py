@@ -9,7 +9,7 @@ values or dropping unknown fields.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, ClassVar, Literal, Self, get_args
+from typing import Any, ClassVar, Final, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -28,6 +28,21 @@ from elspeth.web.sessions.protocol import (
 # comment block at ``audit_access_log_table`` for the same posture.
 RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
+
+ValidationCheckOutcomeCode = Literal[
+    "secret_refs.no_refs",
+    "secret_refs.resolved",
+    "secret_refs.unresolved",
+    "secret_refs.skipped_no_service",
+    "validation.skipped_after_failure",
+]
+VALIDATION_CHECK_OUTCOME_CODE_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckOutcomeCode))
+
+CHECK_OUTCOME_SECRET_REFS_NO_REFS: Final[ValidationCheckOutcomeCode] = "secret_refs.no_refs"
+CHECK_OUTCOME_SECRET_REFS_RESOLVED: Final[ValidationCheckOutcomeCode] = "secret_refs.resolved"
+CHECK_OUTCOME_SECRET_REFS_UNRESOLVED: Final[ValidationCheckOutcomeCode] = "secret_refs.unresolved"
+CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE: Final[ValidationCheckOutcomeCode] = "secret_refs.skipped_no_service"
+CHECK_OUTCOME_SKIPPED_AFTER_FAILURE: Final[ValidationCheckOutcomeCode] = "validation.skipped_after_failure"
 
 
 class _StrictResponse(BaseModel):
@@ -50,6 +65,17 @@ class _StrictResponse(BaseModel):
 class ValidationCheck(_StrictResponse):
     """Individual check result from dry-run validation."""
 
+    _SECRET_REFS_CHECK_NAME: ClassVar[str] = "secret_refs"
+    _SECRET_REFS_OUTCOME_CODES: ClassVar[frozenset[str]] = frozenset(
+        {
+            CHECK_OUTCOME_SECRET_REFS_NO_REFS,
+            CHECK_OUTCOME_SECRET_REFS_RESOLVED,
+            CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
+            CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
+            CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
+        }
+    )
+
     name: str
     passed: bool
     detail: str
@@ -58,6 +84,16 @@ class ValidationCheck(_StrictResponse):
     # commit that adds this field — no compat-shim default per CLAUDE.md
     # No-Legacy policy.
     affected_nodes: tuple[str, ...]
+    # Machine-readable producer signal for checks whose detail is display prose.
+    # Required-but-nullable: every construction site must either record a
+    # structured outcome or explicitly say this check has none.
+    outcome_code: ValidationCheckOutcomeCode | None
+
+    @model_validator(mode="after")
+    def _check_secret_refs_outcome_code(self) -> Self:
+        if self.name == self._SECRET_REFS_CHECK_NAME and self.outcome_code not in self._SECRET_REFS_OUTCOME_CODES:
+            raise ValueError("secret_refs checks must carry a secret_refs.* outcome_code or validation.skipped_after_failure")
+        return self
 
 
 class ValidationError(_StrictResponse):

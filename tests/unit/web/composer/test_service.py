@@ -4270,6 +4270,7 @@ class TestComposerRuntimePreflightFinalGate:
                     passed=False,
                     detail="Forbidden name: 'end_of_source'",
                     affected_nodes=(),
+                    outcome_code=None,
                 )
             ],
             errors=[
@@ -4338,6 +4339,7 @@ class TestComposerRuntimePreflightFinalGate:
                     passed=False,
                     detail="Forbidden name: 'end_of_source'",
                     affected_nodes=(),
+                    outcome_code=None,
                 )
             ],
             errors=[
@@ -4796,6 +4798,7 @@ class TestEmptyStateFinalizePassthrough:
                     passed=False,
                     detail="Pipeline state is empty",
                     affected_nodes=(),
+                    outcome_code=None,
                 )
             ],
             errors=[

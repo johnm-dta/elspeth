@@ -659,6 +659,7 @@ class ExecutionServiceImpl:
                         passed=False,
                         detail="No composition state exists for this session",
                         affected_nodes=(),
+                        outcome_code=None,
                     )
                 ],
                 errors=[

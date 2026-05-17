@@ -144,7 +144,9 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
           if (state.abortControllers[sessionId] !== controller) {
             return state;
           }
+          const { [sessionId]: _ctrl, ...restCtrl } = state.abortControllers;
           return {
+            abortControllers: restCtrl,
             isLoadingBySession: { ...state.isLoadingBySession, [sessionId]: false },
           };
         });
@@ -212,7 +214,9 @@ export const useAuditReadinessStore = create<AuditReadinessState>((set, get) => 
           if (state.explainAbortControllers[sessionId] !== explainController) {
             return state;
           }
+          const { [sessionId]: _ctrl, ...restCtrl } = state.explainAbortControllers;
           return {
+            explainAbortControllers: restCtrl,
             isLoadingExplainBySession: { ...state.isLoadingExplainBySession, [sessionId]: false },
           };
         });

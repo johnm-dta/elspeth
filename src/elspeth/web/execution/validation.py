@@ -68,6 +68,11 @@ from elspeth.web.execution.preflight import (
 )
 from elspeth.web.execution.protocol import ValidationSettings, YamlGenerator
 from elspeth.web.execution.schemas import (
+    CHECK_OUTCOME_SECRET_REFS_NO_REFS,
+    CHECK_OUTCOME_SECRET_REFS_RESOLVED,
+    CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
+    CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
+    CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
     ValidationCheck,
     ValidationError,
     ValidationResult,
@@ -369,6 +374,7 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                     passed=False,
                     detail=f"Skipped: {from_check} failed",
                     affected_nodes=(),
+                    outcome_code=CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
                 )
             )
     return result
@@ -588,6 +594,7 @@ def validate_pipeline(
                             passed=False,
                             detail=f"Source {key} '{value}' is outside allowed source directories",
                             affected_nodes=(),
+                            outcome_code=None,
                         ),
                         *_skipped_checks(_CHECK_PATH_ALLOWLIST),
                     ],
@@ -618,6 +625,7 @@ def validate_pipeline(
                                 passed=False,
                                 detail=f"Sink '{output.name}' {key} '{value}' is outside allowed output directories",
                                 affected_nodes=(),
+                                outcome_code=None,
                             ),
                             *_skipped_checks(_CHECK_PATH_ALLOWLIST),
                         ],
@@ -640,6 +648,7 @@ def validate_pipeline(
                 passed=True,
                 detail="All paths within allowed directories",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
     else:
@@ -649,6 +658,7 @@ def validate_pipeline(
                 passed=True,
                 detail="No path option — check skipped",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
 
@@ -776,6 +786,7 @@ def validate_pipeline(
                     passed=False,
                     detail="; ".join(detail_parts),
                     affected_nodes=(),
+                    outcome_code=CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
                 )
             )
             checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
@@ -786,6 +797,7 @@ def validate_pipeline(
                 passed=True,
                 detail=f"All {len(all_refs)} secret reference(s) resolved" if all_refs else "No secret references found",
                 affected_nodes=(),
+                outcome_code=CHECK_OUTCOME_SECRET_REFS_RESOLVED if all_refs else CHECK_OUTCOME_SECRET_REFS_NO_REFS,
             )
         )
     else:
@@ -795,6 +807,7 @@ def validate_pipeline(
                 passed=True,
                 detail="No secret service — check skipped",
                 affected_nodes=(),
+                outcome_code=CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
             )
         )
 
@@ -806,6 +819,7 @@ def validate_pipeline(
                 passed=False,
                 detail="Semantic contract check failed",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         for entry in semantic_errors:
@@ -836,6 +850,7 @@ def validate_pipeline(
                 f"All {len(semantic_contracts)} semantic contract(s) satisfied" if semantic_contracts else "No semantic contracts to check"
             ),
             affected_nodes=(),
+            outcome_code=None,
         )
     )
 
@@ -857,6 +872,7 @@ def validate_pipeline(
                 passed=False,
                 detail="Batch-aware transform option check failed",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         for node_id, message in batch_option_errors:
@@ -885,6 +901,7 @@ def validate_pipeline(
             passed=True,
             detail="Batch-aware transform options are compatible with ADR-013",
             affected_nodes=(),
+            outcome_code=None,
         )
     )
 
@@ -928,6 +945,7 @@ def validate_pipeline(
                 passed=True,
                 detail="Settings loaded successfully",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
     except (PydanticValidationError, ValueError, TypeError) as exc:
@@ -937,6 +955,7 @@ def validate_pipeline(
                 passed=False,
                 detail=str(exc),
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -979,6 +998,7 @@ def validate_pipeline(
                 passed=True,
                 detail="All plugins instantiated",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         checks.append(
@@ -987,6 +1007,7 @@ def validate_pipeline(
                 passed=True,
                 detail="All declared value sources satisfied",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
     except ValueSourceValidationError as exc:
@@ -999,6 +1020,7 @@ def validate_pipeline(
                 passed=True,
                 detail="All plugins instantiated",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         checks.append(
@@ -1007,6 +1029,7 @@ def validate_pipeline(
                 passed=False,
                 detail=str(exc),
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         # Each finding names a single ``component_id`` field-violation —
@@ -1050,6 +1073,7 @@ def validate_pipeline(
                 passed=False,
                 detail=detail,
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -1094,6 +1118,7 @@ def validate_pipeline(
                 passed=False,
                 detail=detail,
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -1123,6 +1148,7 @@ def validate_pipeline(
                 passed=True,
                 detail="Graph structure is valid",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
     except GraphValidationError as exc:
@@ -1132,6 +1158,7 @@ def validate_pipeline(
                 passed=False,
                 detail=str(exc),
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -1182,6 +1209,7 @@ def validate_pipeline(
                 passed=True,
                 detail="All route targets resolve to existing sinks",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
     except RouteValidationError as exc:
@@ -1191,6 +1219,7 @@ def validate_pipeline(
                 passed=False,
                 detail=str(exc),
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -1219,6 +1248,7 @@ def validate_pipeline(
                 passed=True,
                 detail="All edge schemas compatible",
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
     except GraphValidationError as exc:
@@ -1233,6 +1263,7 @@ def validate_pipeline(
                 passed=False,
                 detail=str(exc),
                 affected_nodes=(),
+                outcome_code=None,
             )
         )
         if isinstance(exc, EdgeContractError):
@@ -1296,6 +1327,7 @@ def validate_pipeline(
                 # provenance row (see docs/composer/ux-redesign-2026-05/14a
                 # §"Six rows — projection mapping").
                 affected_nodes=(identity_finding.node_id,),
+                outcome_code=None,
             )
         )
 

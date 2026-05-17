@@ -19,9 +19,17 @@ from elspeth.web.audit_readiness.trust import (
     PluginKind,
     PluginTrust,
     classify_plugin,
+    is_registered_plugin,
 )
 from elspeth.web.composer.state import CompositionState
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import (
+    CHECK_OUTCOME_SECRET_REFS_NO_REFS,
+    CHECK_OUTCOME_SECRET_REFS_RESOLVED,
+    CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
+    CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
+    CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
+    ValidationResult,
+)
 from elspeth.web.sessions.converters import (
     state_from_record as _default_state_from_record,
 )
@@ -30,6 +38,14 @@ from elspeth.web.sessions.converters import (
 # dependency unidirectional (audit_readiness depends on the result shape,
 # not on validation's internal naming).
 _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+
+
+class CompositionStateNotFoundError(LookupError):
+    """Raised when a session has no current composition state."""
+
+    def __init__(self, session_id: UUID) -> None:
+        self.session_id = session_id
+        super().__init__("No composition state for this session")
 
 
 class _ExecutionServiceLike(Protocol):
@@ -84,13 +100,13 @@ class ReadinessService:
         """Return the six-row snapshot.
 
         Raises:
-            LookupError: when the session has no composition state. The
-                route layer translates this into a 404.
+            CompositionStateNotFoundError: when the session has no composition
+                state. The route layer translates this into a 404.
         """
         checked_at = datetime.now(UTC)
         record = await self._session_service.get_current_state(session_id)
         if record is None:
-            raise LookupError(f"no composition state for session {session_id!r}")
+            raise CompositionStateNotFoundError(session_id)
         state: CompositionState = self._state_from_record(record)
         validation = await self._execution_service.validate(session_id, user_id=user_id)
         inventory = await run_sync_in_worker(
@@ -150,7 +166,7 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
     unknown: list[tuple[str, str]] = []
 
     def _record(kind: PluginKind, component_id: str, name: str | None) -> None:
-        if name is None:
+        if name is None or not is_registered_plugin(kind, name):
             unknown.append((kind, component_id))
             return
         # TODO(phase-7): delete trust.py and replace classify_plugin() callers per Phase 7 plan
@@ -207,8 +223,19 @@ def _build_provenance_row(result: ValidationResult) -> ReadinessRow:
     Node ids come from check.affected_nodes (structured tuple added by
     Finding 2). No prose parsing of the detail field.
     """
-    advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
+    advisory_checks = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
+    advisories = [c for c in advisory_checks if c.passed]
     if not advisories:
+        skipped = [c for c in advisory_checks if not c.passed]
+        if skipped:
+            return ReadinessRow(
+                id="provenance",
+                label="Provenance",
+                status="not_applicable",
+                summary="Provenance check did not run",
+                detail="\n".join(c.detail for c in skipped),
+                component_ids=(),
+            )
         return ReadinessRow(
             id="provenance",
             label="Provenance",
@@ -278,12 +305,21 @@ def _build_secrets_row(validation: ValidationResult, inventory: list[SecretInven
             status="error",
             summary="Secret references unresolved",
             detail="\n".join(err.message for err in secret_errors),
-            component_ids=tuple(err.component_id for err in secret_errors if err.component_id),
+            component_ids=tuple(err.component_id for err in secret_errors if err.component_id is not None),
         )
     secret_check = next(
         (c for c in validation.checks if c.name == "secret_refs"),
         None,
     )
+    if secret_check is not None and secret_check.outcome_code == CHECK_OUTCOME_SECRET_REFS_NO_REFS:
+        return ReadinessRow(
+            id="secrets",
+            label="Secrets",
+            status="not_applicable",
+            summary="No secret references in this composition",
+            detail=None,
+            component_ids=(),
+        )
     if secret_check is None and not inventory:
         return ReadinessRow(
             id="secrets",
@@ -293,6 +329,29 @@ def _build_secrets_row(validation: ValidationResult, inventory: list[SecretInven
             detail=None,
             component_ids=(),
         )
+    if secret_check is None or secret_check.outcome_code in {
+        CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
+        CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
+    }:
+        return ReadinessRow(
+            id="secrets",
+            label="Secrets",
+            status="not_applicable",
+            summary="Secret reference check did not run",
+            detail=secret_check.detail if secret_check is not None else "Secret reference check was not recorded",
+            component_ids=(),
+        )
+    if secret_check.outcome_code == CHECK_OUTCOME_SECRET_REFS_UNRESOLVED or not secret_check.passed:
+        return ReadinessRow(
+            id="secrets",
+            label="Secrets",
+            status="error",
+            summary="Secret reference check failed",
+            detail=secret_check.detail,
+            component_ids=(),
+        )
+    if secret_check.outcome_code != CHECK_OUTCOME_SECRET_REFS_RESOLVED:
+        raise RuntimeError(f"Unhandled secret_refs outcome_code: {secret_check.outcome_code}")
     return ReadinessRow(
         id="secrets",
         label="Secrets",

@@ -59,7 +59,7 @@ function getToken(): string | null {
  * Build headers with auth token injection and optional content type.
  * Every authenticated request includes Authorization: Bearer {token}.
  */
-function authHeaders(contentType?: string): HeadersInit {
+export function authHeaders(contentType?: string): HeadersInit {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) {
@@ -99,14 +99,14 @@ function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | 
  *   2. HTTP status code -- structural fallback
  *   3. detail text -- human-readable description
  */
-async function parseResponse<T>(response: Response): Promise<T> {
+export async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     // Global 401 interceptor -- trigger logout on any auth failure.
     // Dynamic import avoids circular dependency at module load time
     // (authStore imports from client, client imports authStore for logout).
     if (response.status === 401) {
       const { useAuthStore } = await import("@/stores/authStore");
-      useAuthStore.getState().logout();
+      await useAuthStore.getState().logout();
     }
 
     // Parse the error envelope. All backend errors use `detail` (not

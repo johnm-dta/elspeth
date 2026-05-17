@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { act } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AuditReadinessPanel } from "./AuditReadinessPanel";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
+import { useExecutionStore } from "../../stores/executionStore";
 import * as api from "../../api/auditReadiness";
 import type { AuditReadinessSnapshot } from "../../types/api";
 import { makeComposition, makeAbortablePromise } from "@/test/composerFixtures";
@@ -11,6 +13,7 @@ import { makeComposition, makeAbortablePromise } from "@/test/composerFixtures";
 vi.mock("../../api/auditReadiness");
 
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+const OTHER_SESSION_ID = "00000000-0000-0000-0000-000000000002";
 
 function allGreenSnapshot(version: number): AuditReadinessSnapshot {
   return {
@@ -75,6 +78,7 @@ describe("AuditReadinessPanel", () => {
     // pattern in auditReadinessStore.test.ts:27 and survives store-shape
     // extensions automatically.
     useAuditReadinessStore.setState(getInitialState());
+    useExecutionStore.setState({ validationResult: null } as never);
     vi.clearAllMocks();
   });
 
@@ -171,7 +175,7 @@ describe("AuditReadinessPanel", () => {
     expect(rows).toHaveAttribute("aria-atomic", "false");
   });
 
-  it("marks the panel busy during stale-cache refetch and clears busy after the new snapshot lands", async () => {
+  it("shows loading instead of stale rows during stale-cache refetch", async () => {
     useAuditReadinessStore.setState({
       snapshotsBySession: { [SESSION_ID]: snapshotWithProvenanceWarning(1) },
     });
@@ -189,11 +193,46 @@ describe("AuditReadinessPanel", () => {
 
     render(<AuditReadinessPanel />);
 
-    const panel = screen.getByRole("region", { name: /audit readiness/i });
-    await waitFor(() => expect(panel).toHaveAttribute("aria-busy", "true"));
+    expect(screen.getByText(/Checking audit readiness/i)).toBeInTheDocument();
+    expect(screen.queryByText("Identity passthrough detected")).not.toBeInTheDocument();
 
     resolve(snapshotWithProvenanceWarning(2));
-    await waitFor(() => expect(panel).not.toHaveAttribute("aria-busy"));
+    expect(await screen.findByText("Identity passthrough detected")).toBeInTheDocument();
+    const panel = screen.getByRole("region", { name: /audit readiness/i });
+    expect(panel).not.toHaveAttribute("aria-busy");
+  });
+
+  it("does not render a cached snapshot when its version differs from the current composition", async () => {
+    useAuditReadinessStore.setState({
+      snapshotsBySession: { [SESSION_ID]: allGreenSnapshot(1) },
+    });
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(2),
+    });
+
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>(() => {}),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    expect(screen.getByText(/Checking audit readiness/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Audit ready/i })).not.toBeInTheDocument();
+  });
+
+  it("projects an OK validation row into the execution validation state", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    await screen.findByRole("button", { name: /Audit ready/i });
+    expect(useExecutionStore.getState().validationResult).toMatchObject({
+      is_valid: true,
+      errors: [],
+    });
   });
 
   it("renders a freshness indicator with the checked time and composition version", async () => {
@@ -229,6 +268,102 @@ describe("AuditReadinessPanel", () => {
     );
 
     await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1));
+  });
+
+  it("projects a forced-refresh validation row into the execution validation state", async () => {
+    useAuditReadinessStore.setState({
+      snapshotsBySession: { [SESSION_ID]: allGreenSnapshot(1) },
+    });
+    useExecutionStore.getState().setValidationResult({
+      is_valid: true,
+      checks: [],
+      errors: [],
+      warnings: [],
+      semantic_contracts: [],
+    });
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(snapshotWithValidationErrorAndProvenanceWarning(1), {
+          signal,
+        }),
+    );
+
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+
+    await user.click(await screen.findByRole("button", { name: /Audit ready/i }));
+    await user.click(
+      screen.getByRole("button", { name: /refresh audit check now/i }),
+    );
+
+    await waitFor(() => {
+      expect(useExecutionStore.getState().validationResult).toMatchObject({
+        is_valid: false,
+        errors: [
+          {
+            component_id: "source",
+            message: "A source is required before execution.",
+          },
+        ],
+      });
+    });
+  });
+
+  it("does not project a forced refresh after the active session changes", async () => {
+    useAuditReadinessStore.setState({
+      snapshotsBySession: {
+        [SESSION_ID]: allGreenSnapshot(1),
+        [OTHER_SESSION_ID]: { ...allGreenSnapshot(1), session_id: OTHER_SESSION_ID },
+      },
+    });
+    const previousValidation = {
+      is_valid: true,
+      checks: [
+        {
+          name: "audit_readiness.validation",
+          passed: true,
+          detail: "All checks pass",
+          affected_nodes: [],
+          outcome_code: null,
+        },
+      ],
+      errors: [],
+      warnings: [],
+      semantic_contracts: [],
+    };
+    useExecutionStore.getState().setValidationResult(previousValidation);
+    let resolveRefresh!: (snapshot: AuditReadinessSnapshot) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+
+    const user = userEvent.setup();
+    const { rerender } = render(<AuditReadinessPanel />);
+
+    await user.click(await screen.findByRole("button", { name: /Audit ready/i }));
+    await user.click(
+      screen.getByRole("button", { name: /refresh audit check now/i }),
+    );
+    act(() => {
+      useSessionStore.setState({
+        activeSessionId: OTHER_SESSION_ID,
+        compositionState: makeComposition(1),
+      });
+    });
+    rerender(<AuditReadinessPanel />);
+
+    resolveRefresh(snapshotWithValidationErrorAndProvenanceWarning(1));
+    await waitFor(() => expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(useAuditReadinessStore.getState().snapshotsBySession[SESSION_ID]).toMatchObject({
+        rows: expect.arrayContaining([
+          expect.objectContaining({ id: "validation", status: "error" }),
+        ]),
+      }),
+    );
+    expect(useExecutionStore.getState().validationResult).toEqual(previousValidation);
   });
 
   it("renders all six rows when every row is warning or error (no collapse path)", async () => {

@@ -31,6 +31,18 @@ def test_external_sinks_are_boundary():
         assert classify_plugin("sink", name) is PluginTrust.BOUNDARY
 
 
+def test_azure_blob_sink_is_boundary():
+    assert classify_plugin("sink", "azure_blob") is PluginTrust.BOUNDARY
+
+
+def test_database_sink_is_boundary():
+    assert classify_plugin("sink", "database") is PluginTrust.BOUNDARY
+
+
+def test_chroma_sink_is_boundary():
+    assert classify_plugin("sink", "chroma_sink") is PluginTrust.BOUNDARY
+
+
 def test_internal_sinks_are_internal():
     assert classify_plugin("sink", "csv") is PluginTrust.INTERNAL
 

@@ -164,6 +164,48 @@ describe("useAuditReadinessStore", () => {
     expect(state.errorBySession[SESSION_ID]).toBeUndefined();
   });
 
+  it("tracked snapshot abort removes the controller and clears loading", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce((_sid, signal) => (
+      new Promise<AuditReadinessSnapshot>((_, reject) => {
+        signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("AbortError"), { name: "AbortError" }));
+        });
+      })
+    ));
+
+    const inFlight = useAuditReadinessStore.getState().loadSnapshot(SESSION_ID, 1);
+    const ctrl = useAuditReadinessStore.getState().abortControllers[SESSION_ID];
+    expect(ctrl).toBeDefined();
+
+    ctrl?.abort();
+    await inFlight;
+
+    const state = useAuditReadinessStore.getState();
+    expect(state.abortControllers[SESSION_ID]).toBeUndefined();
+    expect(state.isLoadingBySession[SESSION_ID]).toBe(false);
+  });
+
+  it("tracked explain abort removes the controller and clears loading", async () => {
+    vi.mocked(api.fetchAuditReadinessExplain).mockImplementationOnce((_sid, signal) => (
+      new Promise<AuditReadinessExplain>((_, reject) => {
+        signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("AbortError"), { name: "AbortError" }));
+        });
+      })
+    ));
+
+    const inFlight = useAuditReadinessStore.getState().loadExplain(SESSION_ID, 1);
+    const ctrl = useAuditReadinessStore.getState().explainAbortControllers[SESSION_ID];
+    expect(ctrl).toBeDefined();
+
+    ctrl?.abort();
+    await inFlight;
+
+    const state = useAuditReadinessStore.getState();
+    expect(state.explainAbortControllers[SESSION_ID]).toBeUndefined();
+    expect(state.isLoadingExplainBySession[SESSION_ID]).toBe(false);
+  });
+
   // --- Monotonic write-guard contract ---
   // This test exercises the version monotonicity guard (loadSnapshot discards
   // a response whose composition_version is lower than what's already cached).

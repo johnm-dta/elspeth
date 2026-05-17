@@ -1,69 +1,95 @@
 /**
  * API client for the audit-readiness panel (Phase 2).
  *
- * Two GET endpoints; both return strict Pydantic payloads. Mirrors
- * the auth/parse pattern used by api/client.ts::validatePipeline.
- *
- * Technical debt: getToken/authHeaders/parseResponse are duplicated from
- * api/client.ts (see client.ts:403–424, the account-level preferences block).
- * Phase 8 cleanup task: consolidate these helpers as exported utilities from
- * client.ts. Currently at least two API modules carry the duplicates
- * (client.ts inline + auditReadiness.ts).
+ * Two GET endpoints; both return strict Pydantic payloads. Reuses the
+ * shared parser from api/client.ts so audit-readiness calls participate in
+ * the global 401 logout interceptor.
  */
 import type {
   AuditReadinessSnapshot,
   AuditReadinessExplain,
   ApiError,
+  ReadinessRow,
+  ReadinessRowId,
+  ReadinessStatus,
 } from "../types/api";
+import { authHeaders, parseResponse } from "./client";
 
-// Token key must match src/api/client.ts (TOKEN_KEY = "auth_token") and
-// authStore.ts. Phase 8 will replace this with a shared getToken() helper.
-function getToken(): string | null {
-  return localStorage.getItem("auth_token");
+type AuditReadinessBaseEnvelope = {
+  session_id: string;
+  composition_version: number;
+} & Record<string, unknown>;
+
+const READINESS_ROW_IDS = new Set<ReadinessRowId>([
+  "validation",
+  "plugin_trust",
+  "provenance",
+  "retention",
+  "llm_interpretations",
+  "secrets",
+]);
+const READINESS_STATUSES = new Set<ReadinessStatus>(["ok", "warning", "error", "not_applicable"]);
+
+function unexpectedShape(status: number): ApiError {
+  return {
+    status,
+    detail: "Unexpected response shape from audit-readiness endpoint",
+  };
 }
 
-function authHeaders(contentType?: string): HeadersInit {
-  const headers: Record<string, string> = {};
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (contentType) headers["Content-Type"] = contentType;
-  return headers;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-async function parseResponse<T>(response: Response): Promise<T> {
-  if (!response.ok) {
-    let detail: string | undefined;
-    let error_type: string | undefined;
-    try {
-      const body = (await response.clone().json()) as Record<string, unknown>;
-      if (typeof body.detail === "string") detail = body.detail;
-      if (typeof body.error_type === "string") error_type = body.error_type;
-    } catch {
-      // body wasn't JSON; ignore
+function assertBaseEnvelope(body: unknown, status: number): asserts body is AuditReadinessBaseEnvelope {
+  if (!isRecord(body) || typeof body.session_id !== "string" || typeof body.composition_version !== "number") {
+    throw unexpectedShape(status);
+  }
+}
+
+function isReadinessRow(row: unknown): row is ReadinessRow {
+  return (
+    isRecord(row) &&
+    typeof row.id === "string" &&
+    READINESS_ROW_IDS.has(row.id as ReadinessRowId) &&
+    typeof row.label === "string" &&
+    typeof row.status === "string" &&
+    READINESS_STATUSES.has(row.status as ReadinessStatus) &&
+    typeof row.summary === "string" &&
+    (typeof row.detail === "string" || row.detail === null) &&
+    Array.isArray(row.component_ids) &&
+    row.component_ids.every((id) => typeof id === "string")
+  );
+}
+
+function validateSnapshot(body: unknown, status: number): AuditReadinessSnapshot {
+  assertBaseEnvelope(body, status);
+  if (typeof body.checked_at !== "string" || !Array.isArray(body.rows)) {
+    throw unexpectedShape(status);
+  }
+  for (const row of body.rows) {
+    if (!isReadinessRow(row)) {
+      throw unexpectedShape(status);
     }
-    const error: ApiError = {
-      status: response.status,
-      detail: detail ?? response.statusText,
-      error_type,
-    };
-    throw error;
   }
-  const body = (await response.json()) as Record<string, unknown>;
-  // Trust-boundary check: the backend's _StrictResponse model guarantees this
-  // shape, but a proxy / CDN / corrupted-body failure could deliver a
-  // different payload with a 200 status. Validate the two discriminating
-  // fields both response types share before handing the body to the caller.
-  // Both AuditReadinessSnapshot and AuditReadinessExplain carry
-  // session_id (string) and composition_version (number ≥ 1). If either
-  // is wrong we throw a synthetic ApiError so callers see a typed failure,
-  // not a runtime TypeError later in the call chain.
-  if (typeof body.session_id !== "string" || typeof body.composition_version !== "number") {
-    throw {
-      status: response.status,
-      detail: "Unexpected response shape from audit-readiness endpoint",
-    } as ApiError;
+  return {
+    session_id: body.session_id,
+    composition_version: body.composition_version,
+    checked_at: body.checked_at,
+    rows: body.rows,
+  };
+}
+
+function validateExplain(body: unknown, status: number): AuditReadinessExplain {
+  assertBaseEnvelope(body, status);
+  if (typeof body.narrative !== "string") {
+    throw unexpectedShape(status);
   }
-  return body as T;
+  return {
+    session_id: body.session_id,
+    composition_version: body.composition_version,
+    narrative: body.narrative,
+  };
 }
 
 export async function fetchAuditReadiness(
@@ -74,7 +100,7 @@ export async function fetchAuditReadiness(
     `/api/sessions/${sessionId}/audit-readiness`,
     { method: "GET", headers: authHeaders(), signal },
   );
-  return parseResponse<AuditReadinessSnapshot>(response);
+  return validateSnapshot(await parseResponse<unknown>(response), response.status);
 }
 
 export async function fetchAuditReadinessExplain(
@@ -85,5 +111,5 @@ export async function fetchAuditReadinessExplain(
     `/api/sessions/${sessionId}/audit-readiness/explain`,
     { method: "GET", headers: authHeaders(), signal },
   );
-  return parseResponse<AuditReadinessExplain>(response);
+  return validateExplain(await parseResponse<unknown>(response), response.status);
 }

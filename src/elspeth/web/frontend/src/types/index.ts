@@ -296,10 +296,22 @@ export interface PluginSchemaInfo {
  * Represents one discrete validation step (schema compatibility,
  * route validity, source path security, etc.).
  */
+export const VALIDATION_CHECK_OUTCOME_CODE_VALUES = [
+  "secret_refs.no_refs",
+  "secret_refs.resolved",
+  "secret_refs.unresolved",
+  "secret_refs.skipped_no_service",
+  "validation.skipped_after_failure",
+] as const;
+
+export type ValidationCheckOutcomeCode = (typeof VALIDATION_CHECK_OUTCOME_CODE_VALUES)[number];
+
 export interface ValidationCheck {
   name: string;
   passed: boolean;
   detail: string;
+  affected_nodes: string[];
+  outcome_code: ValidationCheckOutcomeCode | null;
 }
 
 /**

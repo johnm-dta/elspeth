@@ -137,16 +137,59 @@ class TestDiscardSummary:
 
 
 class TestValidationResult:
+    def test_secret_refs_check_requires_structured_outcome_code(self) -> None:
+        with pytest.raises(pydantic.ValidationError, match="secret_refs checks must carry"):
+            ValidationCheck(
+                name="secret_refs",
+                passed=True,
+                detail="No secret references found",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+
+    def test_secret_refs_check_accepts_no_refs_outcome_code(self) -> None:
+        check = ValidationCheck(
+            name="secret_refs",
+            passed=True,
+            detail="No secret references found",
+            affected_nodes=(),
+            outcome_code="secret_refs.no_refs",
+        )
+
+        assert check.outcome_code == "secret_refs.no_refs"
+
+    def test_non_secret_check_may_have_null_outcome_code(self) -> None:
+        check = ValidationCheck(
+            name="settings_load",
+            passed=True,
+            detail="OK",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+
+        assert check.outcome_code is None
+
+    def test_unknown_check_outcome_code_is_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            ValidationCheck(
+                name="secret_refs",
+                passed=True,
+                detail="No secret references found",
+                affected_nodes=(),
+                outcome_code="secret_refs.maybe",  # type: ignore[arg-type]
+            )
+
     def test_invalid_result_with_attributed_error(self) -> None:
         result = ValidationResult(
             is_valid=False,
             checks=[
-                ValidationCheck(name="settings_load", passed=True, detail="OK", affected_nodes=()),
+                ValidationCheck(name="settings_load", passed=True, detail="OK", affected_nodes=(), outcome_code=None),
                 ValidationCheck(
                     name="graph_structure",
                     passed=False,
                     detail="Graph validation failed",
                     affected_nodes=(),
+                    outcome_code=None,
                 ),
             ],
             errors=[
@@ -184,24 +227,28 @@ class TestValidationResult:
                     passed=False,
                     detail="Invalid YAML syntax",
                     affected_nodes=(),
+                    outcome_code=None,
                 ),
                 ValidationCheck(
                     name="plugin_instantiation",
                     passed=False,
                     detail="Skipped: settings_load failed",
                     affected_nodes=(),
+                    outcome_code="validation.skipped_after_failure",
                 ),
                 ValidationCheck(
                     name="graph_structure",
                     passed=False,
                     detail="Skipped: settings_load failed",
                     affected_nodes=(),
+                    outcome_code="validation.skipped_after_failure",
                 ),
                 ValidationCheck(
                     name="schema_compatibility",
                     passed=False,
                     detail="Skipped: settings_load failed",
                     affected_nodes=(),
+                    outcome_code="validation.skipped_after_failure",
                 ),
             ],
             errors=[
@@ -576,7 +623,7 @@ class TestStrictCoercionRejected:
 
     def test_validation_check_rejects_string_bool(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ValidationCheck(name="test", passed="true", detail="ok", affected_nodes=())  # type: ignore[arg-type]
+            ValidationCheck(name="test", passed="true", detail="ok", affected_nodes=(), outcome_code=None)  # type: ignore[arg-type]
 
     def test_validation_result_rejects_string_bool(self) -> None:
         with pytest.raises(pydantic.ValidationError):
@@ -713,7 +760,7 @@ class TestExtraFieldsRejected:
 
     def test_validation_check_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ValidationCheck(name="test", passed=True, detail="ok", affected_nodes=(), severity="high")  # type: ignore[call-arg]
+            ValidationCheck(name="test", passed=True, detail="ok", affected_nodes=(), outcome_code=None, severity="high")  # type: ignore[call-arg]
 
     def test_validation_error_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
@@ -1303,7 +1350,7 @@ def test_validation_result_accepts_semantic_contracts():
     )
     result = ValidationResult(
         is_valid=False,
-        checks=[ValidationCheck(name="semantic_contracts", passed=False, detail="failed", affected_nodes=())],
+        checks=[ValidationCheck(name="semantic_contracts", passed=False, detail="failed", affected_nodes=(), outcome_code=None)],
         errors=[],
         semantic_contracts=[contract],
     )

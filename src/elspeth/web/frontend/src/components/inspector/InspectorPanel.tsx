@@ -4,7 +4,7 @@
 // Right panel with two-row header and tab-driven content area.
 //
 // Row 1: VersionSelector (custom dropdown with separate revert action) + ValidationDot
-//         on the left; Validate + Execute buttons on the right.
+//         on the left; Catalog + Execute buttons on the right.
 // Row 2: Tab strip (Spec, Graph, YAML, Runs) navigable by arrow keys.
 //
 // Validation result banner renders between header and tab content.
@@ -433,7 +433,7 @@ export function InspectorPanel() {
           When the catalog drawer is open, backdrop covers the header;
           close via backdrop click, Escape, or the drawer's X button. */}
       <div className="inspector-header">
-        {/* Row 1: Version selector + validation dot | Validate + Execute */}
+        {/* Row 1: Version selector + validation dot | Catalog + Execute */}
         <div className="inspector-header-row">
           {/* Left: VersionSelector + ValidationDot */}
           <div className="inspector-header-left">
@@ -494,7 +494,7 @@ export function InspectorPanel() {
             })()}
           </div>
 
-          {/* Right: Catalog + Validate + Execute */}
+          {/* Right: Catalog + Execute */}
           <div className="inspector-header-right">
             {/* Catalog toggle */}
             <button

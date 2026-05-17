@@ -45,6 +45,24 @@ function snapshotWithProvenanceWarning(version: number): AuditReadinessSnapshot 
   };
 }
 
+function snapshotWithValidationErrorAndProvenanceWarning(version: number): AuditReadinessSnapshot {
+  const base = snapshotWithProvenanceWarning(version);
+  return {
+    ...base,
+    rows: base.rows.map((r) =>
+      r.id === "validation"
+        ? {
+            ...r,
+            status: "error",
+            summary: "Missing source plugin",
+            detail: "A source is required before execution.",
+            component_ids: ["source"],
+          }
+        : r,
+    ),
+  };
+}
+
 describe("AuditReadinessPanel", () => {
   beforeEach(() => {
     useSessionStore.setState({
@@ -112,6 +130,25 @@ describe("AuditReadinessPanel", () => {
     });
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText("Identity passthrough detected")).toBeInTheDocument();
+  });
+
+  it("includes status, label, and summary in actionable row button accessible names", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(snapshotWithValidationErrorAndProvenanceWarning(1), { signal }),
+    );
+    render(<AuditReadinessPanel />);
+
+    expect(
+      await screen.findByRole("button", {
+        name: /error.*validation.*missing source plugin/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: /warning.*provenance.*identity passthrough detected/i,
+      }),
+    ).toBeInTheDocument();
   });
 
   it("renders all six rows when every row is warning or error (no collapse path)", async () => {

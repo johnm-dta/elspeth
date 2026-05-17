@@ -231,7 +231,6 @@ export function AuditReadinessPanel() {
                     type="button"
                     className="audit-readiness-row-btn"
                     onClick={() => setSelectedRowId(row.id)}
-                    aria-label={heading}
                   >
                     <span
                       className="audit-readiness-glyph"

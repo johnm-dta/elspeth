@@ -1157,14 +1157,83 @@ summary:focus-visible {
   position: relative;
 }
 
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+  flex-shrink: 0;
+}
+
+.app-header-left,
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-header-brand {
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.header-session-switcher {
+  position: relative;
+}
+
+.header-session-switcher-trigger {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.header-session-switcher-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  min-width: 240px;
+  z-index: 100;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.header-session-switcher-item {
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.header-session-switcher-item:hover,
+.header-session-switcher-item:focus {
+  background: var(--color-bg-hover, rgba(143, 200, 200, 0.08));
+}
+
+.header-session-switcher-item[aria-current="page"] {
+  font-weight: 600;
+}
+
+.header-session-switcher-item-new {
+  border-bottom: 1px solid var(--color-border);
+}
+
 /* ---------------------------------------------------------------------------
    Layout Grid
    --------------------------------------------------------------------------- */
 .app-layout {
   display: grid;
-  grid-template-rows: 100vh;
+  grid-template-rows: 100%;
   grid-template-areas: "sidebar chat siderail";
-  height: 100vh;
+  height: 100%;
   min-width: 640px;
   overflow: hidden;
 }

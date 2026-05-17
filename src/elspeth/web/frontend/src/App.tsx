@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import "./App.css";
 import * as api from "./api/client";
 import { AuthGuard } from "./components/common/AuthGuard";
+import { AppHeader } from "./components/common/AppHeader";
 import { Layout } from "./components/common/Layout";
 import { SideRail } from "./components/common/SideRail";
 import { CommandPalette } from "./components/common/CommandPalette";
@@ -267,6 +268,10 @@ function App() {
             </button>
           </div>
         )}
+        <AppHeader
+          onOpenSettings={openComposerSettings}
+          onSignOut={logout}
+        />
         <div className="app-main" role="main">
           <Layout
             sidebar={<SessionSidebar />}
@@ -288,8 +293,6 @@ function App() {
                 <InspectorPanel />
               </SideRail>
             }
-            onOpenSettings={openComposerSettings}
-            onSignOut={logout}
           />
         </div>
 

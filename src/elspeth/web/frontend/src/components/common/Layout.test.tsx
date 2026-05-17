@@ -27,8 +27,6 @@ describe("Layout", () => {
         sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
         siderail={<div>Side rail</div>}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
       />,
     );
     const layoutDiv = container.querySelector(".app-layout") as HTMLElement;
@@ -51,8 +49,6 @@ describe("Layout", () => {
         sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
         siderail={<div>Side rail</div>}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
       />,
     );
     const layoutDiv = container.querySelector(".app-layout") as HTMLElement;
@@ -71,8 +67,6 @@ describe("Layout", () => {
         sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
         siderail={<div>Side rail</div>}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
       />,
     );
 
@@ -101,8 +95,6 @@ describe("Layout", () => {
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
-          onOpenSettings={() => {}}
-          onSignOut={() => {}}
         />,
       );
 
@@ -142,8 +134,6 @@ describe("Layout", () => {
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
-          onOpenSettings={() => {}}
-          onSignOut={() => {}}
         />,
       );
 
@@ -170,8 +160,6 @@ describe("Layout", () => {
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
-          onOpenSettings={() => {}}
-          onSignOut={() => {}}
         />,
       );
 
@@ -189,8 +177,6 @@ describe("Layout", () => {
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
           siderail={<div>Side rail</div>}
-          onOpenSettings={() => {}}
-          onSignOut={() => {}}
         />,
       );
 
@@ -214,8 +200,6 @@ describe("Layout", () => {
         sidebar={<div>Sidebar</div>}
         chat={<div data-testid="chat" />}
         siderail={<div data-testid="siderail" />}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
       />,
     );
 

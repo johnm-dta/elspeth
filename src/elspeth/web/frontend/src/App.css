@@ -1132,6 +1132,12 @@ summary:focus-visible {
   letter-spacing: 0.05em;
 }
 
+.app-header-separator {
+  width: 1px;
+  height: 20px;
+  background-color: var(--color-border);
+}
+
 .header-session-switcher {
   position: relative;
 }

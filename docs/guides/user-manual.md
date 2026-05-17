@@ -149,6 +149,7 @@ TRANSFORMS:
   json_explode         - Explode a JSON array field into multiple rows.
   keyword_filter       - Filter rows containing blocked content patterns.
   passthrough          - Pass rows through unchanged.
+  report_assemble      - Assemble a batch of text rows into one report row with pagination metadata.
   truncate             - Truncate string fields to specified maximum lengths.
   type_coerce          - Perform explicit, strict, per-field type normalization.
   value_transform      - Apply expressions to compute new or modified field values.

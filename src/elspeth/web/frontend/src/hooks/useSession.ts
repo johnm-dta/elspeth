@@ -17,12 +17,11 @@ export function useSessionLifecycle(): void {
     void loadSessions();
   }, [loadSessions]);
 
-  // Load runs whenever the active session changes.
-  // Reset execution state first to prevent stale progress/activeRunId from a
-  // previous session bleeding into the new one (H6).
+  // Reset always (including when activeSessionId becomes null); load runs only
+  // when there is a session to load.
   useEffect(() => {
+    useExecutionStore.getState().reset();
     if (activeSessionId) {
-      useExecutionStore.getState().reset();
       void loadRuns(activeSessionId);
     }
   }, [activeSessionId, loadRuns]);

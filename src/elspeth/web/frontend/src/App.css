@@ -1256,7 +1256,12 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   height: 100%;
-  overflow: hidden;
+  /* Variable-height slots (AuditReadiness rows, ValidationResult errors,
+     restored SuggestionList) can exceed the rail's bounded height on short
+     viewports. Without overflow-y the lower slots (ExportYaml, Execute) are
+     clipped and unreachable. The parent .layout-siderail still clips
+     horizontal overflow; this rule lets the rail scroll vertically. */
+  overflow-y: auto;
 }
 
 .side-rail-slot:empty {

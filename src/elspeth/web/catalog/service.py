@@ -269,16 +269,41 @@ class CatalogServiceImpl:
             raise ValueError(f"Unknown {plugin_type} plugin: {name}. Available: {available}") from exc
 
     def _to_summary(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> PluginSummary:
-        """Convert a plugin class to a PluginSummary."""
+        """Convert a plugin class to a PluginSummary.
+
+        Phase 7A: also emits reference-content fields. Audit
+        characteristics are the *derived* set: declared chars from
+        `audit_characteristics` composed with the flag derived from
+        `determinism`. The frontend reads audit_characteristics as a
+        flat list of flag strings.
+        """
         name: str = plugin_cls.name
         description = get_plugin_description(plugin_cls)
         schema = self._catalog_schema(plugin_cls, plugin_type)
         config_fields = self._extract_config_fields(schema)
+
+        # Direct attribute access: the bases and protocols declare every
+        # Phase-7A field with a default. A plugin missing them would be
+        # a malformed system plugin (Tier 1 bug); crash is correct.
+        usage_when_to_use = plugin_cls.usage_when_to_use
+        usage_when_not_to_use = plugin_cls.usage_when_not_to_use
+        example_use = plugin_cls.example_use
+        capability_tags = plugin_cls.capability_tags
+        data_trust_tier = plugin_cls.data_trust_tier
+
+        audit_characteristics = _derive_audit_characteristics(plugin_cls, plugin_kind=plugin_type)
+
         return PluginSummary(
             name=name,
             description=description,
             plugin_type=plugin_type,
             config_fields=config_fields,
+            usage_when_to_use=usage_when_to_use,
+            usage_when_not_to_use=usage_when_not_to_use,
+            example_use=example_use,
+            capability_tags=capability_tags,
+            audit_characteristics=audit_characteristics,
+            data_trust_tier=data_trust_tier,
         )
 
     def _catalog_schema(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> dict[str, Any]:

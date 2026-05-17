@@ -178,6 +178,14 @@ export function HeaderSessionSwitcher(): JSX.Element {
           break;
         case "Enter":
         case " ":
+          // Skip menu-level activation when the event originates inside the
+          // rename form. Save/Cancel buttons don't stopPropagation themselves,
+          // so without this guard their native Enter/Space activation is
+          // suppressed by preventDefault here and activateMenuIndex(focusIndex)
+          // fires the wrong command (typically "+ New session" at index 0).
+          if ((e.target as HTMLElement).closest("form")) {
+            return;
+          }
           e.preventDefault();
           activateMenuIndex(focusIndex);
           break;

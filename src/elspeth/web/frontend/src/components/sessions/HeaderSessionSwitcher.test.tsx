@@ -152,4 +152,65 @@ describe("HeaderSessionSwitcher", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
   });
+
+  // Under the bug: the menu-level Enter keydown handler preventDefaulted and
+  // called activateMenuIndex(focusIndex), which (focusIndex defaults to 0)
+  // fired createSession() instead of saveRename(). The Save button's native
+  // submit was suppressed. Under the fix: events originating inside the
+  // rename form are skipped, so the form's onSubmit fires renameSession.
+  it("does not swallow Enter on the rename Save button", async () => {
+    const renameSession = vi.fn().mockResolvedValue(undefined);
+    const createSession = vi.fn();
+    useSessionStore.setState({ renameSession, createSession } as never);
+    const user = userEvent.setup();
+
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /first/i }));
+    await user.click(screen.getByRole("menuitem", { name: /^rename first$/i }));
+    const input = screen.getByRole("textbox", { name: /^rename session$/i });
+    await user.clear(input);
+    await user.type(input, "Renamed via keyboard");
+    // Tab into the Save button, then press Enter on it. Under the bug the
+    // ul-level handler would intercept Enter and run createSession; under the
+    // fix the form's submit handler runs renameSession.
+    await user.tab();
+    const saveBtn = screen.getByRole("button", { name: /save session name/i });
+    expect(saveBtn).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    expect(renameSession).toHaveBeenCalledWith("s1", "Renamed via keyboard");
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  // Symmetric guard: Enter on the Cancel button must run cancelRename's
+  // onClick handler, not the menu activator. Under the bug, focusIndex=0
+  // would fire createSession. (We focus Cancel directly via .focus() because
+  // the ul's Tab handler closes the menu when Tab bubbles from a child
+  // without stopPropagation — natural keyboard navigation past Save would
+  // exit the menu before reaching Cancel.)
+  it("does not swallow Enter on the rename Cancel button", async () => {
+    const renameSession = vi.fn();
+    const createSession = vi.fn();
+    useSessionStore.setState({ renameSession, createSession } as never);
+    const user = userEvent.setup();
+
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /first/i }));
+    await user.click(screen.getByRole("menuitem", { name: /^rename first$/i }));
+    // The rename input is open; the rename form is in the DOM.
+    expect(
+      screen.getByRole("textbox", { name: /^rename session$/i }),
+    ).toBeInTheDocument();
+    const cancelBtn = screen.getByRole("button", { name: /cancel session rename/i });
+    cancelBtn.focus();
+    expect(cancelBtn).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    // Cancel closes the rename form: the textbox is gone.
+    expect(
+      screen.queryByRole("textbox", { name: /^rename session$/i }),
+    ).not.toBeInTheDocument();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(renameSession).not.toHaveBeenCalled();
+  });
 });

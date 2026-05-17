@@ -14,6 +14,7 @@ import {
 } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
+import { requestValidate } from "@/stores/subscriptions";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { fuzzyMatch } from "@/utils/fuzzyScore";
 import {
@@ -60,7 +61,6 @@ export function CommandPalette({
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const reenterGuided = useSessionStore((s) => s.reenterGuided);
 
-  const validate = useExecutionStore((s) => s.validate);
   const execute = useExecutionStore((s) => s.execute);
   const validationResult = useExecutionStore((s) => s.validationResult);
 
@@ -87,8 +87,8 @@ export function CommandPalette({
       shortcut: "Ctrl+Shift+V",
       enabled: !!compositionState && !!activeSessionId,
       action: () => {
-        if (activeSessionId) {
-          validate(activeSessionId);
+        if (activeSessionId && compositionState) {
+          requestValidate(activeSessionId, compositionState.version);
         }
         onClose();
       },
@@ -187,7 +187,6 @@ export function CommandPalette({
     createSession,
     selectSession,
     reenterGuided,
-    validate,
     execute,
     onClose,
   ]);

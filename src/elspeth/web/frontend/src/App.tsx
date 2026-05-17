@@ -22,7 +22,7 @@ import { SecretsPanel } from "./components/settings/SecretsPanel";
 import { ComposerPreferencesPanel } from "./components/settings/ComposerPreferencesPanel";
 import { SideRailValidationBanner } from "./components/sidebar/SideRailValidationBanner";
 import { useAuthStore } from "./stores/authStore";
-import { initStoreSubscriptions } from "./stores/subscriptions";
+import { initStoreSubscriptions, requestValidate } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
 import { useExecutionStore } from "./stores/executionStore";
 import { usePreferencesStore } from "./stores/preferencesStore";
@@ -199,7 +199,7 @@ function App() {
         compositionState
       ) {
         e.preventDefault();
-        useExecutionStore.getState().validate(activeSessionId);
+        requestValidate(activeSessionId, compositionState.version);
         return;
       }
 

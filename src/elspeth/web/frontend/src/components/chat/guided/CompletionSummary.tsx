@@ -21,6 +21,7 @@ import { useId } from "react";
 import { Highlight, themes } from "prism-react-renderer";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
+import { requestValidate } from "@/stores/subscriptions";
 import { useTheme } from "@/hooks/useTheme";
 import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import type { TerminalState } from "@/types/guided";
@@ -59,7 +60,7 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
 
   const exitToFreeform = useSessionStore((s) => s.exitToFreeform);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const validate = useExecutionStore((s) => s.validate);
+  const compositionState = useSessionStore((s) => s.compositionState);
   const isValidating = useExecutionStore((s) => s.isValidating);
   const { resolvedTheme } = useTheme();
 
@@ -76,8 +77,8 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
   }
 
   function handleValidate(): void {
-    if (activeSessionId === null) return;
-    void validate(activeSessionId);
+    if (activeSessionId === null || compositionState === null) return;
+    requestValidate(activeSessionId, compositionState.version);
   }
 
   return (
@@ -125,7 +126,7 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
           type="button"
           className="guided-completion-edit-btn"
           onClick={handleValidate}
-          disabled={activeSessionId === null || isValidating}
+          disabled={activeSessionId === null || compositionState === null || isValidating}
         >
           {isValidating ? "Validating" : "Validate pipeline"}
         </button>

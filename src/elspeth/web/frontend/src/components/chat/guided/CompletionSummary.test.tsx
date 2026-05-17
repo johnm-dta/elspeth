@@ -37,6 +37,11 @@ import { useExecutionStore } from "@/stores/executionStore";
 import { resetStore } from "@/test/store-helpers";
 import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import type { TerminalState } from "@/types/guided";
+import type { CompositionState } from "@/types";
+
+vi.mock("@/stores/subscriptions", () => ({
+  requestValidate: vi.fn(),
+}));
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -62,7 +67,7 @@ const EXITED_TERMINAL: TerminalState = {
 
 beforeEach(() => {
   resetStore(useSessionStore);
-  useExecutionStore.setState({ validate: vi.fn().mockResolvedValue(undefined) });
+  resetStore(useExecutionStore);
 });
 
 // ── Contract 1: YAML text rendered in highlighted block ───────────────────────
@@ -133,16 +138,16 @@ describe("CompletionSummary -- exit action", () => {
     window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
   });
 
-  it("clicking 'Validate pipeline' validates the active session", async () => {
+  it("clicking 'Validate pipeline' calls requestValidate with session id and version", async () => {
     const user = userEvent.setup();
-    const validate = vi.fn().mockResolvedValue(undefined);
-    useSessionStore.setState({ activeSessionId: "session-1" });
-    useExecutionStore.setState({ validate });
+    const { requestValidate } = await import("@/stores/subscriptions");
+    const compositionState = { id: "cs-1", version: 7 } as CompositionState;
+    useSessionStore.setState({ activeSessionId: "session-1", compositionState });
 
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     await user.click(screen.getByRole("button", { name: /validate pipeline/i }));
 
-    expect(validate).toHaveBeenCalledWith("session-1");
+    expect(requestValidate).toHaveBeenCalledWith("session-1", 7);
   });
 });
 

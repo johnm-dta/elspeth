@@ -252,6 +252,21 @@ async function fireValidateLoop(): Promise<void> {
 }
 
 /**
+ * Cache-aware manual validate request. Mirrors the auto-validate
+ * subscriber's enqueue logic so a manual trigger at an already-validated
+ * version is a no-op. Use this from keyboard shortcuts and command-palette
+ * actions instead of calling useExecutionStore.validate() directly.
+ */
+export function requestValidate(sessionId: string, version: number): void {
+  if (lastValidatedVersionBySession.get(sessionId) === version) return;
+  const exec = useExecutionStore.getState();
+  if (exec.isExecuting || exec.progress?.status === "running") return;
+  pendingValidateTarget = { sessionId, version };
+  if (validateInflight) return;
+  void fireValidateLoop();
+}
+
+/**
  * Test-only helper. Resets the module-level state so each test starts from
  * a clean slate. Unsubscribes the active zustand subscriber so stale
  * callbacks do not accumulate across beforeEach resets. Not exported from

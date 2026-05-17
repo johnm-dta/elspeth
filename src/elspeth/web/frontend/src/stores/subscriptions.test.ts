@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, waitFor } from "@testing-library/react";
-import { initStoreSubscriptions, _resetSubscriptionsForTesting } from "./subscriptions";
+import { initStoreSubscriptions, _resetSubscriptionsForTesting, requestValidate } from "./subscriptions";
 import { useSessionStore } from "./sessionStore";
 import { useExecutionStore } from "./executionStore";
 import { useAuditReadinessStore } from "./auditReadinessStore";
@@ -678,5 +678,106 @@ describe("per-user state resets on auth identity change (Fix C)", () => {
 
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
     expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
+  });
+});
+
+// ── requestValidate: cache-aware manual validate entry point ──────────────────
+//
+// Discrimination tests: requestValidate must respect the same guard conditions
+// as the auto-validate subscriber — cache hit, isExecuting, progress.status.
+// These tests also verify that requestValidate does NOT export or mutate the
+// module-level state directly; it is a controlled entry point only.
+describe("requestValidate — cache-aware manual validate entry point", () => {
+  beforeEach(() => {
+    _resetSubscriptionsForTesting();
+    useAuthStore.setState({ token: "tok", user: { user_id: "user-a" } as never });
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: null,
+      sessions: [{ id: "sess-1", title: "x" } as never],
+    } as never);
+    useExecutionStore.setState({
+      isExecuting: false,
+      progress: null,
+      validationResult: null,
+    } as never);
+    initStoreSubscriptions();
+  });
+
+  it("is a no-op at an already-validated version (cache hit)", async () => {
+    // Seed the cache by triggering an auto-validate for version 1.
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 1 }),
+    );
+    expect(validate).toHaveBeenCalledTimes(1);
+
+    // Manual trigger at the same (already-validated) version — must be a no-op.
+    requestValidate("sess-1", 1);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Still exactly one call — requestValidate short-circuited on cache hit.
+    expect(validate).toHaveBeenCalledTimes(1);
+  });
+
+  it("enqueues validate when version is unvalidated", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    // No auto-validate has fired; version 2 is unvalidated.
+    requestValidate("sess-1", 2);
+
+    await waitFor(() =>
+      expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 2 }),
+    );
+    expect(validate).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips validate when isExecuting is true", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate, isExecuting: true } as never);
+
+    requestValidate("sess-1", 3);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(validate).not.toHaveBeenCalled();
+  });
+
+  it("skips validate when progress.status is 'running'", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({
+      validate,
+      isExecuting: false,
+      progress: {
+        status: "running",
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+      } as never,
+    } as never);
+
+    requestValidate("sess-1", 4);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(validate).not.toHaveBeenCalled();
   });
 });

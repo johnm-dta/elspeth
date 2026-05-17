@@ -31,7 +31,6 @@ vi.mock("@/api/client", () => ({
 vi.mock("@/stores/executionStore", () => ({
   useExecutionStore: (selector: (state: unknown) => unknown) =>
     selector({
-      validate: vi.fn(),
       execute: vi.fn(),
       validationResult: null,
     }),

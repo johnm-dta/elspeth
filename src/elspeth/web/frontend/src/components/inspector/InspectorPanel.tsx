@@ -28,7 +28,7 @@ import { relativeTime } from "@/utils/time";
 
 type TabId = "graph" | "yaml";
 
-const TABS: { id: TabId; label: string }[] = [
+export const TABS: { id: TabId; label: string }[] = [
   { id: "graph", label: "Graph" },
   { id: "yaml", label: "YAML" },
 ];

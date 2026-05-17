@@ -6,6 +6,10 @@ import * as api from "./api/client";
 import { resetStore } from "@/test/store-helpers";
 import { useSessionStore } from "./stores/sessionStore";
 import { useExecutionStore } from "./stores/executionStore";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "./lib/composer-events";
 import type {
   ChatMessage,
   CompositionState,
@@ -58,7 +62,6 @@ vi.mock("./components/settings/SecretsPanel", () => ({
 
 vi.mock("./components/common/CommandPalette", () => ({
   CommandPalette: () => <div data-testid="command-palette-stub" />,
-  SWITCH_TAB_EVENT: "elspeth-switch-tab",
 }));
 
 vi.mock("./components/common/ShortcutsHelp", () => ({
@@ -283,6 +286,55 @@ describe("App banner roles", () => {
     expect(onOpenCatalog).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("dialog", { name: "Plugin Catalog" })).toBeInTheDocument();
     window.removeEventListener("open-catalog", onOpenCatalog);
+  });
+
+  it("dispatches graph and YAML modal events on Ctrl+Shift shortcuts", async () => {
+    const onOpenGraph = vi.fn();
+    const onOpenYaml = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, onOpenYaml);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.keyDown(document, {
+      key: "G",
+      code: "KeyG",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    fireEvent.keyDown(document, {
+      key: "Y",
+      code: "KeyY",
+      metaKey: true,
+      shiftKey: true,
+    });
+
+    expect(onOpenGraph).toHaveBeenCalledTimes(1);
+    expect(onOpenYaml).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, onOpenYaml);
+  });
+
+  it("does not dispatch retired inspector tab shortcuts on Alt+digit", async () => {
+    const onSwitchTab = vi.fn();
+    window.addEventListener("elspeth-switch-tab", onSwitchTab);
+
+    render(<App />);
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.keyDown(document, {
+      key: "1",
+      code: "Digit1",
+      altKey: true,
+    });
+
+    expect(onSwitchTab).not.toHaveBeenCalled();
+    window.removeEventListener("elspeth-switch-tab", onSwitchTab);
   });
 });
 

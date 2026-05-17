@@ -31,7 +31,10 @@ import { usePreferencesStore } from "./stores/preferencesStore";
 import { useHashRouter } from "./hooks/useHashRouter";
 import { useAuth } from "./hooks/useAuth";
 import { useSessionLifecycle } from "./hooks/useSession";
-import { SWITCH_TAB_EVENT } from "./components/common/CommandPalette";
+import {
+  OPEN_GRAPH_MODAL_EVENT,
+  OPEN_YAML_MODAL_EVENT,
+} from "./lib/composer-events";
 import type { SystemStatus } from "./types/index";
 
 // Health check interval in milliseconds (30 seconds)
@@ -42,16 +45,6 @@ const HEALTH_CHECK_INTERVAL = 30_000;
 // holds the operator's own browser state; clearing it is an operator-gated action.
 // Safe to remove once the operator confirms staging localStorage has been cleared.
 const RETIRED_SIDEBAR_COLLAPSED_KEY = "elspeth_sidebar_collapsed";
-
-/**
- * Maps Alt+digit keyboard shortcuts to inspector tab IDs.
- * Exported so that P3A-002's test guard can import this single source-of-truth
- * rather than duplicating the mapping.
- */
-export const TAB_SHORTCUT_MAP: Readonly<Record<string, string>> = {
-  "1": "graph",
-  "2": "yaml",
-} as const;
 
 // Wire up cross-store subscriptions once at module load time.
 // This must run before any component renders so that version-change
@@ -170,6 +163,28 @@ function App() {
         return;
       }
 
+      // Ctrl+Shift+G / Cmd+Shift+G: Open graph modal
+      if (
+        e.key.toLowerCase() === "g" &&
+        e.shiftKey &&
+        (e.ctrlKey || e.metaKey)
+      ) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
+        return;
+      }
+
+      // Ctrl+Shift+Y / Cmd+Shift+Y: Open YAML export modal
+      if (
+        e.key.toLowerCase() === "y" &&
+        e.shiftKey &&
+        (e.ctrlKey || e.metaKey)
+      ) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
+        return;
+      }
+
       // Ctrl+N / Cmd+N: New session
       if (e.key === "n" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
@@ -185,18 +200,6 @@ function App() {
         );
         input?.focus();
         return;
-      }
-
-      // Alt+1/2: Switch inspector tabs
-      if (e.altKey && !e.ctrlKey && !e.metaKey) {
-        const tab = TAB_SHORTCUT_MAP[e.key];
-        if (tab) {
-          e.preventDefault();
-          window.dispatchEvent(
-            new CustomEvent(SWITCH_TAB_EVENT, { detail: tab }),
-          );
-          return;
-        }
       }
 
       // Ctrl+Shift+V / Cmd+Shift+V: Validate pipeline

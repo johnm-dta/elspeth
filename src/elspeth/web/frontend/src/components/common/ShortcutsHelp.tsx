@@ -8,11 +8,12 @@ interface ShortcutsHelpProps {
 const SHORTCUTS = [
   { keys: "Ctrl+K", action: "Command palette" },
   { keys: "Ctrl/Cmd+Shift+P", action: "Open plugin catalog" },
+  { keys: "Ctrl/Cmd+Shift+G", action: "Open graph view" },
+  { keys: "Ctrl/Cmd+Shift+Y", action: "Export YAML" },
   { keys: "Ctrl+N", action: "New session" },
   { keys: "Ctrl+/", action: "Focus chat input" },
   { keys: "Ctrl+Shift+V", action: "Validate pipeline" },
   { keys: "Ctrl+E", action: "Execute pipeline" },
-  { keys: "Alt+1-2", action: "Switch inspector tab (Graph/YAML)" },
   { keys: "?", action: "Keyboard shortcuts" },
   { keys: "Escape", action: "Close dialog or drawer" },
 ];

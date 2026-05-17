@@ -1,14 +1,75 @@
+import { useState } from "react";
 import { ValidationResultBanner } from "@/components/execution/ValidationResult";
+import { useComposer } from "@/hooks/useComposer";
 import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import type { ValidationEntryDTO } from "@/types/index";
+
+interface SuggestionListProps {
+  suggestions: ValidationEntryDTO[];
+}
+
+function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
+  const { sendMessage, isComposing } = useComposer();
+  const [expanded, setExpanded] = useState(suggestions.length <= 2);
+
+  function handleApply(suggestion: ValidationEntryDTO): void {
+    const prompt = `Please apply this suggestion to the pipeline:\n\n**${suggestion.component}:** ${suggestion.message}`;
+    void sendMessage(prompt);
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent): void {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setExpanded((prev) => !prev);
+    }
+  }
+
+  return (
+    <div className="side-rail-suggestion-banner">
+      <div
+        className="side-rail-suggestion-header"
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        onClick={() => setExpanded((prev) => !prev)}
+        onKeyDown={handleKeyDown}
+      >
+        <span>Suggestions ({suggestions.length})</span>
+        <span className="side-rail-suggestion-chevron">
+          {expanded ? "▴" : "▾"}
+        </span>
+      </div>
+      {expanded && (
+        <ul className="side-rail-suggestion-list">
+          {suggestions.map((s, i) => (
+            <li key={i} className="side-rail-suggestion-item">
+              <span className="side-rail-suggestion-item-text">
+                <strong>{s.component}:</strong> {s.message}
+              </span>
+              <button
+                className="side-rail-suggestion-apply-btn"
+                disabled={isComposing}
+                onClick={() => handleApply(s)}
+              >
+                {isComposing ? "Applying..." : "Apply"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export function SideRailValidationBanner(): JSX.Element | null {
   const compositionState = useSessionStore((s) => s.compositionState);
   const validationResult = useExecutionStore((s) => s.validationResult);
   const error = useExecutionStore((s) => s.error);
+  const suggestions = compositionState?.validation_suggestions ?? [];
 
-  if (!error && !validationResult) {
+  if (!error && !validationResult && suggestions.length === 0) {
     return null;
   }
 
@@ -38,6 +99,7 @@ export function SideRailValidationBanner(): JSX.Element | null {
           onComponentClick={handleValidationComponentClick}
         />
       )}
+      {suggestions.length > 0 && <SuggestionList suggestions={suggestions} />}
     </div>
   );
 }

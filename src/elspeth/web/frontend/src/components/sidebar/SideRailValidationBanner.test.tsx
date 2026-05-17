@@ -9,6 +9,12 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
 import { makeComposition } from "@/test/composerFixtures";
 
+const SUGGESTION = {
+  component: "csv_source",
+  message: "Consider increasing batch size",
+  severity: "info",
+};
+
 describe("SideRailValidationBanner", () => {
   beforeEach(() => {
     resetStore(useSessionStore);
@@ -92,5 +98,207 @@ describe("SideRailValidationBanner", () => {
     expect(onSwitchTab).not.toHaveBeenCalled();
     window.removeEventListener("elspeth-switch-tab", onSwitchTab);
     window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+  });
+
+  describe("SuggestionList", () => {
+    it("renders suggestion text and Apply button when suggestions are present", () => {
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+      } as never);
+
+      render(<SideRailValidationBanner />);
+
+      expect(
+        screen.getByText(/Consider increasing batch size/),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Apply" }),
+      ).toBeInTheDocument();
+    });
+
+    it("banner appears when only suggestions are present (error and validationResult are null)", () => {
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+      } as never);
+      // error and validationResult remain null (store reset in beforeEach)
+
+      const { container } = render(<SideRailValidationBanner />);
+
+      expect(container.firstChild).not.toBeNull();
+      expect(
+        screen.getByText(/Consider increasing batch size/),
+      ).toBeInTheDocument();
+    });
+
+    it("Apply button shows 'Apply' when idle and 'Applying...' when composing, and is disabled while composing", () => {
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        isComposing: false,
+      } as never);
+
+      const { unmount } = render(<SideRailValidationBanner />);
+
+      expect(
+        screen.getByRole("button", { name: "Apply" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Apply" }),
+      ).not.toBeDisabled();
+
+      unmount();
+
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        isComposing: true,
+      } as never);
+
+      render(<SideRailValidationBanner />);
+
+      expect(
+        screen.getByRole("button", { name: "Applying..." }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Applying..." }),
+      ).toBeDisabled();
+    });
+
+    it("handleApply sends the correct prompt when Apply is clicked", async () => {
+      const user = userEvent.setup();
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        sendMessage,
+        isComposing: false,
+      } as never);
+
+      render(<SideRailValidationBanner />);
+      await user.click(screen.getByRole("button", { name: "Apply" }));
+
+      // useComposer wraps storeSendMessage(content, signal) — assert the exact
+      // prompt string; the second arg is an AbortSignal from the hook.
+      expect(sendMessage).toHaveBeenCalledWith(
+        "Please apply this suggestion to the pipeline:\n\n**csv_source:** Consider increasing batch size",
+        expect.any(AbortSignal),
+      );
+    });
+
+    it("Apply button activates via keyboard (Enter key)", async () => {
+      const user = userEvent.setup();
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: [SUGGESTION],
+        }),
+        sendMessage,
+        isComposing: false,
+      } as never);
+
+      render(<SideRailValidationBanner />);
+      const applyBtn = screen.getByRole("button", { name: "Apply" });
+      applyBtn.focus();
+      await user.keyboard("{Enter}");
+
+      expect(sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("collapses by default when more than 2 suggestions are present, expands on header click", async () => {
+      const user = userEvent.setup();
+      const manySuggestions = [
+        SUGGESTION,
+        { component: "sink_a", message: "Msg A", severity: "info" },
+        { component: "sink_b", message: "Msg B", severity: "info" },
+      ];
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: manySuggestions,
+        }),
+      } as never);
+
+      render(<SideRailValidationBanner />);
+
+      // Default collapsed — list items should not be visible
+      expect(
+        screen.queryByText(/Consider increasing batch size/),
+      ).not.toBeInTheDocument();
+
+      // Click the header to expand
+      await user.click(screen.getByRole("button", { name: /Suggestions \(3\)/ }));
+
+      expect(
+        screen.getByText(/Consider increasing batch size/),
+      ).toBeInTheDocument();
+    });
+
+    it("collapsible header toggles on Enter keypress", async () => {
+      const user = userEvent.setup();
+      const manySuggestions = [
+        SUGGESTION,
+        { component: "sink_a", message: "Msg A", severity: "info" },
+        { component: "sink_b", message: "Msg B", severity: "info" },
+      ];
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: manySuggestions,
+        }),
+      } as never);
+
+      render(<SideRailValidationBanner />);
+
+      const header = screen.getByRole("button", { name: /Suggestions/ });
+      expect(header).toHaveAttribute("aria-expanded", "false");
+
+      header.focus();
+      await user.keyboard("{Enter}");
+
+      expect(header).toHaveAttribute("aria-expanded", "true");
+      expect(
+        screen.getByText(/Consider increasing batch size/),
+      ).toBeInTheDocument();
+
+      await user.keyboard("{Enter}");
+
+      expect(header).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("collapsible header toggles on Space keypress", async () => {
+      const user = userEvent.setup();
+      const manySuggestions = [
+        SUGGESTION,
+        { component: "sink_a", message: "Msg A", severity: "info" },
+        { component: "sink_b", message: "Msg B", severity: "info" },
+      ];
+      useSessionStore.setState({
+        compositionState: makeComposition(1, {
+          validation_suggestions: manySuggestions,
+        }),
+      } as never);
+
+      render(<SideRailValidationBanner />);
+
+      const header = screen.getByRole("button", { name: /Suggestions/ });
+      expect(header).toHaveAttribute("aria-expanded", "false");
+
+      header.focus();
+      await user.keyboard(" ");
+
+      expect(header).toHaveAttribute("aria-expanded", "true");
+      expect(
+        screen.getByText(/Consider increasing batch size/),
+      ).toBeInTheDocument();
+
+      await user.keyboard(" ");
+
+      expect(header).toHaveAttribute("aria-expanded", "false");
+    });
   });
 });

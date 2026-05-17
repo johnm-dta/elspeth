@@ -7,7 +7,7 @@ import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
 import { useExecutionStore } from "../../stores/executionStore";
 import * as api from "../../api/auditReadiness";
-import type { AuditReadinessSnapshot } from "../../types/api";
+import type { AuditReadinessSnapshot, ValidationResult } from "../../types/api";
 import { makeComposition, makeAbortablePromise } from "@/test/composerFixtures";
 
 vi.mock("../../api/auditReadiness");
@@ -28,6 +28,13 @@ function allGreenSnapshot(version: number): AuditReadinessSnapshot {
       { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
       { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secrets", detail: null, component_ids: [] },
     ],
+    validation_result: {
+      is_valid: true,
+      checks: [],
+      errors: [],
+      warnings: [],
+      semantic_contracts: [],
+    },
   };
 }
 
@@ -64,6 +71,49 @@ function snapshotWithValidationErrorAndProvenanceWarning(version: number): Audit
           }
         : r,
     ),
+    validation_result: {
+      is_valid: false,
+      checks: [
+        {
+          name: "settings_load",
+          passed: false,
+          detail: "A source is required before execution.",
+          affected_nodes: [],
+          outcome_code: null,
+        },
+      ],
+      errors: [
+        {
+          component_id: "source",
+          component_type: "source",
+          message: "A source is required before execution.",
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+      semantic_contracts: [],
+    },
+  };
+}
+
+function snapshotWithRawValidationResult(version: number, validationResult: ValidationResult): AuditReadinessSnapshot {
+  const base = allGreenSnapshot(version);
+  return {
+    ...base,
+    rows: base.rows.map((r) =>
+      r.id === "validation"
+        ? {
+            ...r,
+            status: validationResult.is_valid ? "ok" : "error",
+            summary: validationResult.is_valid ? "All checks pass" : `${validationResult.errors.length} errors — see details`,
+            detail: validationResult.errors.map((err) => err.message).join("\n"),
+            component_ids: validationResult.errors
+              .map((err) => err.component_id)
+              .filter((id): id is string => id !== null),
+          }
+        : r,
+    ),
+    validation_result: validationResult,
   };
 }
 
@@ -235,6 +285,47 @@ describe("AuditReadinessPanel", () => {
     });
   });
 
+  it("projects the raw snapshot validation result without collapsing component attribution", async () => {
+    const rawValidation: ValidationResult = {
+      is_valid: false,
+      checks: [
+        {
+          name: "settings_load",
+          passed: false,
+          detail: "settings failed",
+          affected_nodes: [],
+          outcome_code: null,
+        },
+      ],
+      errors: [
+        {
+          component_id: "first",
+          component_type: "transform",
+          message: "First transform is invalid.",
+          suggestion: "Fix first.",
+        },
+        {
+          component_id: "second",
+          component_type: "transform",
+          message: "Second transform is invalid.",
+          suggestion: "Fix second.",
+        },
+      ],
+      warnings: [],
+      semantic_contracts: [],
+    };
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(snapshotWithRawValidationResult(1, rawValidation), { signal }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    await waitFor(() => {
+      expect(useExecutionStore.getState().validationResult).toEqual(rawValidation);
+    });
+  });
+
   it("renders a freshness indicator with the checked time and composition version", async () => {
     vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
       (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
@@ -318,15 +409,7 @@ describe("AuditReadinessPanel", () => {
     });
     const previousValidation = {
       is_valid: true,
-      checks: [
-        {
-          name: "audit_readiness.validation",
-          passed: true,
-          detail: "All checks pass",
-          affected_nodes: [],
-          outcome_code: null,
-        },
-      ],
+      checks: [],
       errors: [],
       warnings: [],
       semantic_contracts: [],
@@ -379,6 +462,20 @@ describe("AuditReadinessPanel", () => {
         { id: "llm_interpretations", label: "LLM interpretations", status: "warning", summary: "Untracked LLM output", detail: null, component_ids: ["classify"] },
         { id: "secrets", label: "Secrets", status: "error", summary: "Missing required secret", detail: "secret 'OPENAI_API_KEY' is not declared.", component_ids: [] },
       ],
+      validation_result: {
+        is_valid: false,
+        checks: [],
+        errors: [
+          {
+            component_id: "source",
+            component_type: "source",
+            message: "Missing source plugin.",
+            suggestion: null,
+          },
+        ],
+        warnings: [],
+        semantic_contracts: [],
+      },
     };
     vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
       (_sid, signal) => makeAbortablePromise(everyRowActionable, { signal }),

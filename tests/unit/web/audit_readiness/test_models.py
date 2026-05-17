@@ -13,6 +13,7 @@ from elspeth.web.audit_readiness.models import (
     ReadinessRowId,
     ReadinessStatus,
 )
+from elspeth.web.execution.schemas import ValidationResult
 
 CHECKED_AT = datetime(2026, 5, 17, 3, 30, tzinfo=UTC)
 
@@ -26,6 +27,10 @@ def _row(row_id, status="ok"):
         detail=None,
         component_ids=(),
     )
+
+
+def _validation_result():
+    return ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
 
 
 def test_row_constructs_with_minimal_fields():
@@ -65,6 +70,7 @@ def test_snapshot_emits_six_canonical_rows():
         composition_version=1,
         checked_at=CHECKED_AT,
         rows=rows,
+        validation_result=_validation_result(),
     )
     assert {row.id for row in snap.rows} == set(get_args(ReadinessRowId))
 
@@ -86,6 +92,7 @@ def test_snapshot_requires_checked_at():
             session_id="11111111-1111-1111-1111-111111111111",
             composition_version=1,
             rows=rows,
+            validation_result=_validation_result(),
         )
 
 
@@ -106,6 +113,7 @@ def test_snapshot_accepts_utc_checked_at():
         composition_version=1,
         checked_at=CHECKED_AT,
         rows=rows,
+        validation_result=_validation_result(),
     )
     assert snap.checked_at == CHECKED_AT
 
@@ -118,6 +126,7 @@ def test_snapshot_rejects_duplicate_rows():
             composition_version=1,
             checked_at=CHECKED_AT,
             rows=rows,
+            validation_result=_validation_result(),
         )
 
 
@@ -127,7 +136,9 @@ def test_snapshot_rejects_missing_rows():
         AuditReadinessSnapshot(
             session_id="11111111-1111-1111-1111-111111111111",
             composition_version=1,
+            checked_at=CHECKED_AT,
             rows=rows,
+            validation_result=_validation_result(),
         )
 
 

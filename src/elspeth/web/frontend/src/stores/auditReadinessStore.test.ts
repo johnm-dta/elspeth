@@ -20,6 +20,13 @@ function snapshot(version: number): AuditReadinessSnapshot {
       { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
       { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secrets referenced", detail: null, component_ids: [] },
     ],
+    validation_result: {
+      is_valid: true,
+      checks: [],
+      errors: [],
+      warnings: [],
+      semantic_contracts: [],
+    },
   };
 }
 

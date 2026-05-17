@@ -78,6 +78,15 @@ class ExecutionService(Protocol):
         """
         ...
 
+    async def validate_state(self, state: CompositionState, *, user_id: str | None = None) -> ValidationResult:
+        """Async dry-run validation for an already materialized composition state.
+
+        Callers that have already read a CompositionState use this overload so
+        validation and any adjacent projections are computed from the same
+        composition version.
+        """
+        ...
+
     async def execute(
         self,
         session_id: UUID,

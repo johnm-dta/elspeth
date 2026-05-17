@@ -75,35 +75,7 @@ function isActionable(status: ReadinessStatus): boolean {
 }
 
 function validationResultFromSnapshot(snapshot: AuditReadinessSnapshot): ValidationResult {
-  const row = snapshot.rows.find((candidate) => candidate.id === "validation");
-  if (!row) {
-    throw new Error("audit-readiness snapshot missing validation row");
-  }
-  const isValid = row.status === "ok";
-  return {
-    is_valid: isValid,
-    checks: [
-      {
-        name: "audit_readiness.validation",
-        passed: isValid,
-        detail: row.detail ?? row.summary,
-        affected_nodes: [],
-        outcome_code: null,
-      },
-    ],
-    errors: isValid
-      ? []
-      : [
-          {
-            component_id: row.component_ids[0] ?? null,
-            component_type: null,
-            message: row.detail ?? row.summary,
-            suggestion: null,
-          },
-        ],
-    warnings: [],
-    semantic_contracts: [],
-  };
+  return snapshot.validation_result;
 }
 
 function projectMatchingSnapshotToExecution(

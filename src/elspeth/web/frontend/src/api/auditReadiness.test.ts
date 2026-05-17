@@ -37,6 +37,13 @@ describe("auditReadiness API client", () => {
           { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms in this pipeline", detail: null, component_ids: [] },
           { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secret references in this pipeline", detail: null, component_ids: [] },
         ],
+        validation_result: {
+          is_valid: true,
+          checks: [],
+          errors: [],
+          warnings: [],
+          semantic_contracts: [],
+        },
       };
       (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
         new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
@@ -58,6 +65,57 @@ describe("auditReadiness API client", () => {
     } finally {
       localStorage.removeItem("auth_token");
     }
+  });
+
+  it("fetchAuditReadiness preserves the raw validation result from the snapshot", async () => {
+    const body = {
+      session_id: SESSION_ID,
+      composition_version: 3,
+      checked_at: new Date().toISOString(),
+      rows: [
+        { id: "validation", label: "Validation", status: "error", summary: "2 errors", detail: "first\nsecond", component_ids: ["first", "second"] },
+        { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
+        { id: "provenance", label: "Provenance", status: "not_applicable", summary: "Provenance check did not run", detail: null, component_ids: [] },
+        { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
+        { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms in this pipeline", detail: null, component_ids: [] },
+        { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secret references in this pipeline", detail: null, component_ids: [] },
+      ],
+      validation_result: {
+        is_valid: false,
+        checks: [
+          {
+            name: "settings_load",
+            passed: false,
+            detail: "settings failed",
+            affected_nodes: [],
+            outcome_code: null,
+          },
+        ],
+        errors: [
+          {
+            component_id: "first",
+            component_type: "transform",
+            message: "First transform is invalid.",
+            suggestion: "Fix first.",
+          },
+          {
+            component_id: "second",
+            component_type: "transform",
+            message: "Second transform is invalid.",
+            suggestion: "Fix second.",
+          },
+        ],
+        warnings: [],
+        semantic_contracts: [],
+      },
+    };
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+
+    const snapshot = await fetchAuditReadiness(SESSION_ID);
+
+    expect(snapshot.validation_result.errors.map((err) => err.component_id)).toEqual(["first", "second"]);
   });
 
   it("fetchAuditReadiness propagates 500 as ApiError", async () => {
@@ -169,6 +227,13 @@ describe("auditReadiness API client", () => {
         rows: [
           { id: "validation", label: "Validation", status: "danger", summary: "Nope", detail: null, component_ids: [] },
         ],
+        validation_result: {
+          is_valid: false,
+          checks: [],
+          errors: [],
+          warnings: [],
+          semantic_contracts: [],
+        },
       }), {
         status: 200,
         headers: { "content-type": "application/json" },

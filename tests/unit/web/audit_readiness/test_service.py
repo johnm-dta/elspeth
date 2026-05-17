@@ -110,12 +110,30 @@ def _state(*, source_plugin="csv", transforms=(), sinks=(("out", "csv"),)):
 
 def _make_service(state, validation_result, inventory=()):
     exec_svc = MagicMock()
-    exec_svc.validate = AsyncMock(return_value=validation_result)
+    exec_svc.validate = AsyncMock(side_effect=AssertionError("ReadinessService must validate the already-read state"))
+    exec_svc.validate_state = AsyncMock(return_value=validation_result)
     sess_svc = MagicMock()
     record = MagicMock()
     sess_svc.get_current_state = AsyncMock(return_value=record)
     # Use scoped_secret_resolver mock (list_refs(user_id) only — no auth_provider_type).
     # Matches app.py:470 precedent and the _SecretServiceLike Protocol (fix C4).
+    scoped_resolver = MagicMock()
+    scoped_resolver.list_refs = MagicMock(return_value=list(inventory))
+    settings = MagicMock()
+    settings.payload_store_retention_days = 90
+    return ReadinessService(
+        execution_service=exec_svc,
+        session_service=sess_svc,
+        scoped_secret_resolver=scoped_resolver,
+        settings=settings,
+        state_from_record=lambda _record: state,
+    )
+
+
+def _make_service_with_execution_service(state, exec_svc, inventory=()):
+    sess_svc = MagicMock()
+    record = MagicMock()
+    sess_svc.get_current_state = AsyncMock(return_value=record)
     scoped_resolver = MagicMock()
     scoped_resolver.list_refs = MagicMock(return_value=list(inventory))
     settings = MagicMock()
@@ -163,6 +181,58 @@ def test_compute_snapshot_populates_utc_checked_at():
 
     assert before <= snap.checked_at <= after
     assert snap.checked_at.tzinfo is UTC
+
+
+def test_compute_snapshot_validates_already_read_state():
+    state = _state(transforms=(("t", "passthrough"),))
+    exec_svc = MagicMock()
+    exec_svc.validate = AsyncMock(side_effect=AssertionError("must not re-read session state"))
+    exec_svc.validate_state = AsyncMock(return_value=_OK)
+    svc = _make_service_with_execution_service(state, exec_svc)
+
+    asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    exec_svc.validate.assert_not_awaited()
+    exec_svc.validate_state.assert_awaited_once_with(state, user_id="alice")
+
+
+def test_snapshot_preserves_raw_validation_result():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id="first",
+                component_type="transform",
+                message="first failed",
+                suggestion="Fix first.",
+                error_code=None,
+            ),
+            ValidationError(
+                component_id="second",
+                component_type="transform",
+                message="second failed",
+                suggestion="Fix second.",
+                error_code=None,
+            ),
+        ],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(transforms=(("first", "passthrough"), ("second", "passthrough"))), result)
+
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    assert snap.validation_result == result
 
 
 def test_validation_row_error_lists_component_ids():
@@ -320,6 +390,43 @@ def test_provenance_not_applicable_when_identity_advisory_check_was_skipped():
     assert row.status == "not_applicable"
     assert row.summary == "Provenance check did not run"
     assert row.detail == "Skipped: path_allowlist failed"
+
+
+def test_provenance_not_applicable_when_validation_failed_before_identity_advisory():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name="path_allowlist",
+                passed=False,
+                detail="Source path is outside allowed source directories",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        ],
+        errors=[
+            ValidationError(
+                component_id="source",
+                component_type="source",
+                message="Path traversal blocked",
+                suggestion="Use a file within the blobs directory.",
+                error_code=None,
+            )
+        ],
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+
+    row = _row(snap, "provenance")
+    assert row.status == "not_applicable"
+    assert row.summary == "Provenance check did not run"
+    assert row.detail == "Validation failed before provenance advisory analysis could run"
 
 
 def test_retention_row_reports_system_value():

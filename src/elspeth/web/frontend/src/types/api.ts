@@ -21,6 +21,7 @@ export type {
   MessageWithStateResponse,
   ProposalLifecycleStatus,
   PluginSummary,
+  ValidationCheck,
   ValidationResult,
   ValidationError,
   ValidationWarning,

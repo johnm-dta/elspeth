@@ -7,7 +7,7 @@ from typing import Literal, Self, get_args
 
 from pydantic import Field, model_validator
 
-from elspeth.web.execution.schemas import _StrictResponse
+from elspeth.web.execution.schemas import ValidationResult, _StrictResponse
 
 # Maps 1:1 to panel rows per docs/composer/ux-redesign-2026-05/07-audit-readiness-panel.md.
 # Adding a row requires updating ReadinessService and Phase 2B's renderer.
@@ -46,6 +46,10 @@ class AuditReadinessSnapshot(_StrictResponse):
     composition_version: int = Field(ge=1)
     checked_at: datetime
     rows: tuple[ReadinessRow, ...]
+    # Raw validation output from the same state snapshot as the summary rows.
+    # The frontend uses this for structured component attribution rather than
+    # reconstructing a lossy ValidationResult from the validation row.
+    validation_result: ValidationResult
 
     @model_validator(mode="after")
     def _check_row_completeness(self) -> Self:

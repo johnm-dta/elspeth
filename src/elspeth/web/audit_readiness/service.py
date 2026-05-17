@@ -49,9 +49,7 @@ class CompositionStateNotFoundError(LookupError):
 
 
 class _ExecutionServiceLike(Protocol):
-    # session_id is UUID to match ExecutionServiceImpl.validate (web/execution/service.py:638);
-    # the route layer constructs it from the FastAPI path-param parser.
-    async def validate(self, session_id: UUID, *, user_id: str | None = None) -> ValidationResult: ...
+    async def validate_state(self, state: CompositionState, *, user_id: str | None = None) -> ValidationResult: ...
 
 
 class _SessionServiceLike(Protocol):
@@ -108,7 +106,7 @@ class ReadinessService:
         if record is None:
             raise CompositionStateNotFoundError(session_id)
         state: CompositionState = self._state_from_record(record)
-        validation = await self._execution_service.validate(session_id, user_id=user_id)
+        validation = await self._execution_service.validate_state(state, user_id=user_id)
         inventory = await run_sync_in_worker(
             self._scoped_secret_resolver.list_refs,
             user_id,  # scoped_secret_resolver.list_refs takes user_id only
@@ -129,6 +127,7 @@ class ReadinessService:
             composition_version=state.version,
             checked_at=checked_at,
             rows=rows,
+            validation_result=validation,
         )
 
 
@@ -234,6 +233,15 @@ def _build_provenance_row(result: ValidationResult) -> ReadinessRow:
                 status="not_applicable",
                 summary="Provenance check did not run",
                 detail="\n".join(c.detail for c in skipped),
+                component_ids=(),
+            )
+        if not result.is_valid:
+            return ReadinessRow(
+                id="provenance",
+                label="Provenance",
+                status="not_applicable",
+                summary="Provenance check did not run",
+                detail="Validation failed before provenance advisory analysis could run",
                 component_ids=(),
             )
         return ReadinessRow(

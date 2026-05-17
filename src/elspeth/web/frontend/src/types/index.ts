@@ -324,6 +324,7 @@ export interface ValidationError {
   component_type: string | null;
   message: string;
   suggestion: string | null;
+  error_code?: string | null;
 }
 
 /**
@@ -874,6 +875,7 @@ export interface AuditReadinessSnapshot {
   composition_version: number;
   checked_at: string;
   rows: readonly ReadinessRow[];
+  validation_result: ValidationResult;
 }
 
 export interface AuditReadinessExplain {

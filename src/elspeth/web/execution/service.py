@@ -43,6 +43,7 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
+from elspeth.web.composer.state import CompositionState
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.errors import (
@@ -645,10 +646,6 @@ class ExecutionServiceImpl:
             session_id: Session whose current state to validate.
             user_id: Authenticated user's ID for scoped secret ref validation.
         """
-        from functools import partial
-
-        from elspeth.web.execution.validation import validate_pipeline
-
         state_record = await self._session_service.get_current_state(session_id)
         if state_record is None:
             return ValidationResult(
@@ -674,12 +671,25 @@ class ExecutionServiceImpl:
             )
 
         composition_state = state_from_record(state_record)
+        return await self.validate_state(composition_state, user_id=user_id)
+
+    async def validate_state(self, state: CompositionState, *, user_id: str | None = None) -> ValidationResult:
+        """Dry-run validation for an already-read composition state.
+
+        Snapshot-style callers use this to keep every projected row on the
+        same ``CompositionState.version`` instead of re-reading mutable session
+        state between adjacent readiness calculations.
+        """
+        from functools import partial
+
+        from elspeth.web.execution.validation import validate_pipeline
+
         return cast(
             ValidationResult,
             await run_sync_in_worker(
                 partial(
                     validate_pipeline,
-                    composition_state,
+                    state,
                     self._settings,
                     self._yaml_generator,
                     secret_service=self._secret_service,

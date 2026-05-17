@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ReadinessRowDetail } from "./ReadinessRowDetail";
+import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
 import { useSessionStore } from "../../stores/sessionStore";
 import { makeComposition } from "@/test/composerFixtures";
 import type { ReadinessRow } from "../../types/api";
@@ -67,6 +68,22 @@ describe("ReadinessRowDetail", () => {
     const btn = screen.getByRole("button", { name: /Jump to select_columns/ });
     await user.click(btn);
     expect(selectNode).toHaveBeenCalledWith("select_columns");
+  });
+
+  it("requests the Spec tab when jumping to a component", async () => {
+    const user = userEvent.setup();
+    const tabRequests: string[] = [];
+    function recordTabRequest(event: Event) {
+      tabRequests.push((event as CustomEvent<string>).detail);
+    }
+    window.addEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+    try {
+      render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />);
+      await user.click(screen.getByRole("button", { name: /Jump to select_columns/ }));
+      expect(tabRequests).toEqual(["spec"]);
+    } finally {
+      window.removeEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+    }
   });
 
   it("renders unresolved ids as plain text (no jump button)", () => {

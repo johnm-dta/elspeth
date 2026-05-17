@@ -10,11 +10,16 @@ import { GraphMiniView } from "./components/sidebar/GraphMiniView";
 import { GraphModal } from "./components/sidebar/GraphModal";
 import { ExportYamlButton } from "./components/sidebar/ExportYamlButton";
 import { ExportYamlModal } from "./components/sidebar/ExportYamlModal";
+import {
+  CatalogButton,
+  OPEN_CATALOG_EVENT,
+} from "./components/sidebar/CatalogButton";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
 import { ChatPanel } from "./components/chat/ChatPanel";
-import { InspectorPanel, OPEN_CATALOG_EVENT } from "./components/inspector/InspectorPanel";
+import { InspectorPanel } from "./components/inspector/InspectorPanel";
+import { CatalogDrawer } from "./components/catalog/CatalogDrawer";
 import { RecoveryPanel } from "./components/recovery/RecoveryPanel";
 import { SecretsPanel } from "./components/settings/SecretsPanel";
 import { ComposerPreferencesPanel } from "./components/settings/ComposerPreferencesPanel";
@@ -67,6 +72,7 @@ function App() {
   const [showPalette, setShowPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showComposerSettings, setShowComposerSettings] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
   const logout = useAuthStore((s) => s.logout);
   const openComposerSettings = useCallback(
     () => setShowComposerSettings(true),
@@ -94,6 +100,15 @@ function App() {
 
   useEffect(() => {
     localStorage.removeItem(RETIRED_SIDEBAR_COLLAPSED_KEY);
+  }, []);
+
+  useEffect(() => {
+    function handleOpenCatalog() {
+      setCatalogOpen(true);
+    }
+
+    window.addEventListener(OPEN_CATALOG_EVENT, handleOpenCatalog);
+    return () => window.removeEventListener(OPEN_CATALOG_EVENT, handleOpenCatalog);
   }, []);
 
   // Phase 1B: load account-level composer preferences once authenticated.
@@ -315,7 +330,7 @@ function App() {
               <SideRail
                 auditReadinessSlot={null}
                 graphMiniSlot={<GraphMiniView />}
-                catalogSlot={null}
+                catalogSlot={<CatalogButton />}
                 exportYamlSlot={<ExportYamlButton />}
                 executeButtonSlot={<ExecuteButton />}
                 completionBarSlot={null}
@@ -329,6 +344,10 @@ function App() {
         {showSecrets && <SecretsPanel onClose={closeSecrets} />}
         <GraphModal />
         <ExportYamlModal />
+        <CatalogDrawer
+          isOpen={catalogOpen}
+          onClose={() => setCatalogOpen(false)}
+        />
         {showComposerSettings && (
           <ComposerPreferencesPanel onClose={closeComposerSettings} />
         )}

@@ -1403,6 +1403,12 @@ summary:focus-visible {
   justify-content: center;
 }
 
+.side-rail-catalog-btn {
+  width: calc(100% - (2 * var(--space-sm)));
+  margin: var(--space-sm);
+  justify-content: center;
+}
+
 .graph-mini {
   width: calc(100% - (2 * var(--space-sm)));
   min-height: 96px;

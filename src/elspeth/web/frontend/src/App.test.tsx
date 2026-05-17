@@ -50,7 +50,6 @@ vi.mock("./components/chat/ChatPanel", () => ({
 
 vi.mock("./components/inspector/InspectorPanel", () => ({
   InspectorPanel: () => <div data-testid="inspector-panel-stub" />,
-  OPEN_CATALOG_EVENT: "open-catalog",
 }));
 
 vi.mock("./components/settings/SecretsPanel", () => ({
@@ -108,6 +107,9 @@ vi.mock("./api/client", () => ({
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchComposerProgress: vi.fn().mockResolvedValue({ phase: "idle" }),
   fetchRecoveryTranscript: vi.fn().mockResolvedValue([]),
+  listSources: vi.fn().mockResolvedValue([]),
+  listTransforms: vi.fn().mockResolvedValue([]),
+  listSinks: vi.fn().mockResolvedValue([]),
   sendMessage: vi.fn(),
   recompose: vi.fn(),
   fetchMessages: vi.fn(),
@@ -278,6 +280,7 @@ describe("App banner roles", () => {
     });
 
     expect(onOpenCatalog).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("dialog", { name: "Plugin Catalog" })).toBeInTheDocument();
     window.removeEventListener("open-catalog", onOpenCatalog);
   });
 });

@@ -349,37 +349,20 @@ describe("Version selector and catalog", () => {
     expect(screen.getByRole("alertdialog", { name: "Revert pipeline" })).toBeInTheDocument();
   });
 
-  it("catalog button toggles drawer", async () => {
-    useSessionStore.setState({
-      compositionState: makeState(),
-    });
-    render(<InspectorPanel />);
-    const user = userEvent.setup();
-
-    // Drawer should not be open initially
-    expect(screen.queryByText("Plugin Catalog")).not.toBeInTheDocument();
-
-    // Click Catalog button to open
-    const catalogBtn = screen.getByRole("button", { name: /Catalog/i });
-    await user.click(catalogBtn);
-    expect(screen.getByText("Plugin Catalog")).toBeInTheDocument();
-
-    // Click again to close
-    await user.click(catalogBtn);
-    expect(screen.queryByText("Plugin Catalog")).not.toBeInTheDocument();
-  });
-
-  it("opens the catalog drawer when the global open-catalog event fires", () => {
+  it("does not own the Catalog drawer after the side-rail handoff", () => {
     useSessionStore.setState({
       compositionState: makeState(),
     });
     render(<InspectorPanel />);
 
     expect(screen.queryByText("Plugin Catalog")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Catalog/i }),
+    ).not.toBeInTheDocument();
 
     fireEvent(window, new CustomEvent("open-catalog"));
 
-    expect(screen.getByText("Plugin Catalog")).toBeInTheDocument();
+    expect(screen.queryByText("Plugin Catalog")).not.toBeInTheDocument();
   });
 });
 
@@ -725,12 +708,14 @@ describe("Validate button removal (Phase 2C)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders Catalog while Execute is owned by the side rail", () => {
+  it("does not render Catalog or Execute after both controls move to the side rail", () => {
     render(<InspectorPanel />);
     expect(
       screen.queryByRole("button", { name: /^Execute pipeline$/ }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Catalog/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Catalog/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("the tab strip still renders and arrow navigation still works", () => {

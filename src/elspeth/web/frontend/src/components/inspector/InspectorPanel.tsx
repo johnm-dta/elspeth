@@ -4,7 +4,7 @@
 // Right panel with two-row header and tab-driven content area.
 //
 // Row 1: VersionSelector (custom dropdown with separate revert action) + ValidationDot
-//         on the left; Catalog + Execute buttons on the right.
+//         on the left.
 // Row 2: Tab strip (Graph, YAML) navigable by arrow keys.
 //
 // Validation result banner renders between header and tab content.
@@ -21,7 +21,6 @@ import { useExecutionStore } from "@/stores/executionStore";
 import { GraphView } from "./GraphView";
 import { YamlView } from "./YamlView";
 import { ValidationResultBanner } from "@/components/execution/ValidationResult";
-import { CatalogDrawer } from "@/components/catalog/CatalogDrawer";
 import { AuditReadinessPanel } from "@/components/audit/AuditReadinessPanel";
 import type { CompositionStateVersion } from "@/types/index";
 import { relativeTime } from "@/utils/time";
@@ -32,8 +31,6 @@ export const TABS: { id: TabId; label: string }[] = [
   { id: "graph", label: "Graph" },
   { id: "yaml", label: "YAML" },
 ];
-
-export const OPEN_CATALOG_EVENT = "open-catalog";
 
 // ---------------------------------------------------------------------------
 // VersionSelector — custom dropdown with separate revert action
@@ -315,7 +312,6 @@ function VersionSelector({
 
 export function InspectorPanel() {
   const [activeTab, setActiveTab] = useState<TabId>("graph");
-  const [catalogOpen, setCatalogOpen] = useState(false);
 
   // Listen for tab switch requests from the command palette or hash router.
   useEffect(() => {
@@ -327,14 +323,6 @@ export function InspectorPanel() {
     }
     window.addEventListener(SWITCH_TAB_EVENT, handleSwitchTab);
     return () => window.removeEventListener(SWITCH_TAB_EVENT, handleSwitchTab);
-  }, []);
-
-  useEffect(() => {
-    function handleOpenCatalog() {
-      setCatalogOpen(true);
-    }
-    window.addEventListener(OPEN_CATALOG_EVENT, handleOpenCatalog);
-    return () => window.removeEventListener(OPEN_CATALOG_EVENT, handleOpenCatalog);
   }, []);
 
   // Notify hash router when tab changes (for URL sync).
@@ -408,11 +396,9 @@ export function InspectorPanel() {
 
   return (
     <div className="inspector-content">
-      {/* Header — z-index above tab content but below catalog backdrop.
-          When the catalog drawer is open, backdrop covers the header;
-          close via backdrop click, Escape, or the drawer's X button. */}
+      {/* Header — z-index above tab content. */}
       <div className="inspector-header">
-        {/* Row 1: Version selector + validation dot | Catalog + Execute */}
+        {/* Row 1: Version selector + validation dot */}
         <div className="inspector-header-row">
           {/* Left: VersionSelector + ValidationDot */}
           <div className="inspector-header-left">
@@ -473,17 +459,6 @@ export function InspectorPanel() {
             })()}
           </div>
 
-          {/* Right: Catalog */}
-          <div className="inspector-header-right">
-            {/* Catalog toggle */}
-            <button
-              onClick={() => setCatalogOpen(!catalogOpen)}
-              className="btn inspector-action-btn"
-            >
-              <span aria-hidden="true">▦</span>{" "}
-              Catalog
-            </button>
-          </div>
         </div>
 
         {/* Audit-readiness panel — Phase 2.
@@ -552,8 +527,6 @@ export function InspectorPanel() {
           </ErrorBoundary>
         )}
       </div>
-
-      <CatalogDrawer isOpen={catalogOpen} onClose={() => setCatalogOpen(false)} />
     </div>
   );
 }

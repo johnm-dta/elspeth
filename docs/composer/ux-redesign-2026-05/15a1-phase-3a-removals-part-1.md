@@ -8,9 +8,9 @@
 
 **Tech Stack:** React + Zustand + Vitest + testing-library. No new dependencies.
 
-> **Phase 3 block notice (added 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on a shared worktree** (`.worktrees/phase-2a-backend`, branch `feat/composer-phase-2a-backend` — the same worktree that landed Phase 2A/2B/2C) and **merge as one PR**. Phrases below like "deferred to 15b" or "Phase 3B" mean "later tasks in the same branch," not a separate cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
+> **Phase 3 block notice (added 2026-05-17; target corrected 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on the dedicated Phase 3 worktree/branch for this IA-cleanup block** and **merge as one PR**. The canonical target for this packet is worktree `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on branch `feat/composer-phase-3-ia-cleanup`, created from `RC5.2` with `git worktree add .worktrees/composer-phase-3-ia-cleanup -b feat/composer-phase-3-ia-cleanup RC5.2` if it does not already exist. Do **not** use the old Phase 2A/2B/2C worktree or branch (`.worktrees/phase-2a-backend`, `feat/composer-phase-2a-backend`); those references are stale. Phrases below like "deferred to 15b" or "Phase 3B" mean "later tasks in the same Phase 3 branch," not a separate cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
 >
-> **Subagent dispatch discipline.** Any subagent run against this work MUST be given an explicit CWD-discipline preamble at the top of its prompt: first Bash call `cd /home/john/elspeth/.worktrees/phase-2a-backend && pwd && git rev-parse --abbrev-ref HEAD` (expect `feat/composer-phase-2a-backend`), then absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths will silently read the wrong branch (the main checkout is 87+ commits behind). See memory entry `feedback_subagents_cant_use_worktrees`.
+> **Subagent dispatch discipline.** Every subagent prompt for this packet MUST start with this CWD-discipline preamble as its first Bash call: `cd /home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup && pwd && git rev-parse --abbrev-ref HEAD`; expected branch: `feat/composer-phase-3-ia-cleanup`. If the operator explicitly chooses a different Phase 3 worktree/branch, update this notice in **all four** 15a1/15a2/15b1/15b2 files before dispatch and use the chosen concrete values in every subagent prompt. The prompt must also state that `.worktrees/phase-2a-backend` and `feat/composer-phase-2a-backend` are stale Phase 2 targets and forbidden for Phase 3 work. Use absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths can silently read the wrong branch.
 
 **Sibling plans:**
 - Predecessor: [13-phase-1b-frontend.md](13-phase-1b-frontend.md) — Phase 3A **assumes Phase 1B has shipped**, because Phase 1B adds the `UserMenu` to the header. If 1B has not shipped, do not start this plan — fix 1B first.
@@ -1217,8 +1217,9 @@ describe("AppHeader", () => {
 
   it("renders the session switcher", () => {
     render(<AppHeader onOpenSettings={() => {}} onSignOut={() => {}} />);
-    // The switcher renders a button labelled "Session: <title>".
-    expect(screen.getByRole("button", { name: /session:/i })).toBeInTheDocument();
+    // The visible "Session:" prefix is aria-hidden; the accessible name is
+    // the active title or fallback title.
+    expect(screen.getByRole("button", { name: /untitled/i })).toBeInTheDocument();
   });
 
   it("renders the user menu", () => {
@@ -1637,6 +1638,8 @@ async function fireValidateLoop(): Promise<void> {
       // await is captured by the subscribe handler into pendingValidateTarget.
       pendingValidateTarget = null;
       await useExecutionStore.getState().validate(target.sessionId);
+      // Successful-validation tracking is intentionally post-await. If validate()
+      // throws, do not mark this version validated; the next version bump retries.
       lastValidatedVersionBySession.set(target.sessionId, target.version);
       // Loop re-checks pendingValidateTarget. If a newer version arrived during
       // the await, we run again. Otherwise we exit.
@@ -1673,6 +1676,7 @@ Notes:
 
 - The loop re-reads store state every iteration. This handles session switches and `isExecuting` transitions correctly — bail out and re-queue from a fresh subscribe firing.
 - `pendingValidateTarget` is cleared **before** awaiting `validate()`. A subsequent version increment arriving during the await sets it back to the new `(sessionId, version)`, which the loop body picks up on its next iteration.
+- `lastValidatedVersionBySession.set(target.sessionId, target.version)` intentionally stays **after** the awaited `validate()` call. If `validate()` throws, the loop unwinds before recording that version as successfully validated; the next version bump retries instead of silently marking a stale snapshot complete. Do not "simplify" this by moving the set above the await.
 - The `validationResult` consumed by `injectSystemMessage` / `sendValidationFeedback` is published by the existing executionStore subscriber (Phase 2C, untouched). The auto-validate subscriber's only side effect is the `validate()` call itself; the result-driven side effects flow through the existing path.
 - No frontend telemetry / no logger call. Failures inside `validate()` are recorded in the backend audit Landscape per CLAUDE.md primacy.
 
@@ -1680,7 +1684,7 @@ Notes:
 
 > **Review finding (IMPORTANT — Section A panel fix S3):** Auto-validate widens the timing window between `validate(sessionId)` firing and the `validationResult`-change subscriber executing `injectSystemMessage`. If the user switches sessions during that window, the system message is injected into the **new** session's chat (because `injectSystemMessage` reads `useSessionStore.getState().activeSessionId` at call time). The fix is to gate the Phase 2C subscriber on a session-id match.
 
-First, inspect the `ValidationResult` shape to determine the guard's implementation:
+First, inspect the `ValidationResult` shape and confirm the current type:
 
 ```bash
 grep -n "ValidationResult\|validationResult" src/elspeth/web/frontend/src/types/index.ts \
@@ -1689,22 +1693,9 @@ grep -n "ValidationResult\|validationResult" src/elspeth/web/frontend/src/types/
   | head -40
 ```
 
-Two paths depending on what you find:
+As of the Phase 3 review, live `ValidationResult` has `is_valid`, `checks`, `errors`, and optional `warnings`; it does **not** carry `session_id`. Use the transient tracker below unless the type is deliberately changed before implementation and every caller is updated in the same commit.
 
-**Path A — `ValidationResult` already carries `session_id`.** Modify the Phase 2C subscriber to gate on it. Find the existing `validationResult`-change subscriber inside `subscriptions.ts` (the one that fires `injectSystemMessage` + `sendValidationFeedback`). Add a guard at the top of the subscriber body:
-
-```typescript
-const currentSessionId = useSessionStore.getState().activeSessionId;
-if (result.session_id !== currentSessionId) {
-  // Cross-session race: validate() completed for a session the user has
-  // since left. Do not inject the message into the new session's chat.
-  // The audit Landscape still records the validation outcome under the
-  // original session_id; this guard only suppresses the UI side effect.
-  return;
-}
-```
-
-**Path B — `ValidationResult` does NOT carry `session_id`.** Add a transient tracker in `subscriptions.ts` that captures the session id at the moment Task 4's auto-validate fires, and exposes it for the Phase 2C subscriber. Add at module scope alongside the other trackers:
+Add a transient tracker in `subscriptions.ts` that captures the session id at the moment Task 4's auto-validate fires, and exposes it for the Phase 2C subscriber. Add at module scope alongside the other trackers:
 
 ```typescript
 // Tracks the session id passed to the most recent validate() call. Used by
@@ -1715,16 +1706,25 @@ let inflightValidateSessionId: string | null = null;
 
 In `fireValidateLoop`, set `inflightValidateSessionId = target.sessionId` immediately BEFORE the `await useExecutionStore.getState().validate(target.sessionId)` line, and clear it (`inflightValidateSessionId = null`) immediately after.
 
-In the Phase 2C `validationResult`-change subscriber, add the guard at the top of the subscriber body:
+In the Phase 2C `validationResult`-change subscriber, add the guard before any non-null `validationResult` fingerprint computation or assignment:
 
 ```typescript
+const result = state.validationResult;
+if (!result) {
+  previousValidationFingerprint = null;
+  return;
+}
 const currentSessionId = useSessionStore.getState().activeSessionId;
 if (inflightValidateSessionId !== null && inflightValidateSessionId !== currentSessionId) {
   // Auto-validate fired for a session the user has since left. Suppress
   // the UI side effect; the audit Landscape still records the outcome.
   return;
 }
+
+const fingerprint = validationFingerprint(result);
 ```
+
+That ordering is load-bearing: a suppressed stale result must **not** mutate `previousValidationFingerprint`, or a later same-content result for the current session would be incorrectly suppressed.
 
 Manual `Ctrl+Shift+V` validation in App.tsx does not flow through `fireValidateLoop`, so for that path `inflightValidateSessionId` stays `null` and the guard is a no-op (preserves existing manual-validate behavior). Update `_resetSubscriptionsForTesting` to clear `inflightValidateSessionId = null` if Path B is chosen.
 
@@ -1733,6 +1733,18 @@ Add this failing test BEFORE the implementation (append to the auto-validate `de
 ```typescript
   it("does not inject system message when the user switched sessions mid-validate (cross-session guard)", async () => {
     const injectSystemMessageSpy = vi.fn();
+    const staleValidationResult = {
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_type: "source",
+          component_id: "csv_source",
+          message: "Missing path",
+        } as never,
+      ],
+      warnings: [],
+    };
     useSessionStore.setState({
       activeSessionId: "sess-A",
       sessions: [{ id: "sess-A" } as never, { id: "sess-B" } as never],
@@ -1758,7 +1770,7 @@ Add this failing test BEFORE the implementation (append to the auto-validate `de
     // Validate(sess-A) settles. The Phase 2C subscriber must NOT inject
     // a message into sess-B's chat.
     useExecutionStore.setState({
-      validationResult: { ok: true, /* session_id: "sess-A" if Path A */ } as never,
+      validationResult: staleValidationResult as never,
     } as never);
     resolveValidate!();
 
@@ -1768,6 +1780,55 @@ Add this failing test BEFORE the implementation (append to the auto-validate `de
     });
 
     expect(injectSystemMessageSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not let a suppressed stale result consume the validation fingerprint", async () => {
+    const injectSystemMessageSpy = vi.fn();
+    const sameContentResult = {
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_type: "source",
+          component_id: "csv_source",
+          message: "Missing path",
+        } as never,
+      ],
+      warnings: [],
+    };
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      sessions: [{ id: "sess-A" } as never, { id: "sess-B" } as never],
+      injectSystemMessage: injectSystemMessageSpy,
+    } as never);
+
+    let resolveValidate: (() => void) | null = null;
+    const validatePromise = new Promise<void>((r) => {
+      resolveValidate = r;
+    });
+    const validate = vi.fn().mockImplementation(() => validatePromise);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+    await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-A"));
+    useSessionStore.setState({ activeSessionId: "sess-B" } as never);
+
+    // This stale result is suppressed and must not update previousValidationFingerprint.
+    useExecutionStore.setState({ validationResult: sameContentResult as never } as never);
+    resolveValidate!();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(injectSystemMessageSpy).not.toHaveBeenCalled();
+
+    // A later same-content result for the current session must still inject once.
+    useExecutionStore.setState({
+      validationResult: { ...sameContentResult } as never,
+    } as never);
+    await waitFor(() => expect(injectSystemMessageSpy).toHaveBeenCalledTimes(1));
   });
 ```
 
@@ -1857,14 +1918,22 @@ Four reviewers (Reality / Architecture / Quality / Systems) ran against the work
 
 **OPERATOR DECISION (A3) — `RunsHistoryDrawer` preserved.** Decision recorded in the Open-Scope-Questions item 3: the audit-focused persona Linda (`project_composer_personas` memory) benefits from past-runs access. Drawer is self-contained; deletion in Phase 8 is cheap if no demand emerges.
 
-**OPERATOR DECISION (S3) — Cross-session guard on Phase 2C subscriber.** New Task 4 Step 4a adds a guard to the existing `validationResult`-change subscriber. The auto-validate path widens the cross-session timing window; the guard suppresses `injectSystemMessage` if `activeSessionId` no longer matches the session that produced the `validationResult`. Two implementation paths spec'd depending on whether `ValidationResult` carries `session_id`; executor inspects the type and picks the right path. A new failing test in `subscriptions.test.ts` locks the invariant.
+**OPERATOR DECISION (S3) — Cross-session guard on Phase 2C subscriber.** New Task 4 Step 4a adds a guard to the existing `validationResult`-change subscriber. The auto-validate path widens the cross-session timing window; the guard suppresses `injectSystemMessage` if `activeSessionId` no longer matches the session that produced the `validationResult`. The live `ValidationResult` type does not carry `session_id`, so the plan now uses the transient `inflightValidateSessionId` tracker path only. The guard is ordered before non-null fingerprint mutation, and tests use valid `ValidationResult` objects plus a same-content retry case to prove suppressed stale results do not consume `previousValidationFingerprint`.
 
 ### 2026-05-17 — Pre-execution reality-check addendum (tracker-name + executor-clarity)
 
-Final pre-execution sweep against the live `feat/composer-phase-2a-backend` worktree turned up three small things worth resolving before the executor picks up the plan; all doc-only, no behavioural change.
+Final pre-execution sweep against the then-current Phase 3 plan branch turned up three small things worth resolving before the executor picks up the plan; all doc-only, no behavioural change.
 
 **MINOR (Reality) — Fingerprint tracker name corrected.** Task 4 Step 1's reconciliation gate now names `previousValidationFingerprint` (the stringified content-guard actually exported by `subscriptions.ts:19`) rather than the earlier draft's `previousValidationResult`. Two downstream code-comment / reset-helper references in Step 4 updated to match. The gate's behavioral check ("two subscribe calls, three logical behaviors") is unchanged.
 
 **MINOR (Architecture) — Alt-key tabMap dead-dispatch documented as deliberate scope-deferral.** 15a2 Task 6 Step 6a's smoke-grep `grep 'detail:.*"spec"'` cannot catch `App.tsx:155-162`'s keyboard tabMap (which constructs `detail: tab` from a lookup table). A "known false-negative" note now flags this site as intentionally deferred to 15b per the §"Out of scope" list, with the rationale (Alt+2 / Alt+3 must keep working untouched until the keyboard handler is refactored). Cross-referenced from 15a2.
 
 **MINOR (Quality) — Redirect-toast mount-point made explicit in 15a2.** Tasks 5 Step 6 / 6a and Task 6 Step 8a now name the integration shape: `useHashRouter` returns a `redirectToast: { message; dismiss } | null` field; `App.tsx` mounts an `<div role="alert" className="alert-banner alert-banner--info">…</div>` immediately above the existing `App.tsx:235` alert-banner; the dismissal localStorage key works across both `runs` and `spec` paths because the toast field becomes `null` whenever the dismissal flag is set. This unblocks the `screen.getByRole("alert")` test assertions added by S4 / S2.
+
+### 2026-05-17 — Pre-dispatch NO-GO follow-up
+
+**BLOCKER (Execution target) — Phase 3 worktree/branch made concrete.** Shared header now names `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on `feat/composer-phase-3-ia-cleanup` from `RC5.2`; the old Phase 2A worktree/branch are explicitly forbidden.
+
+**BLOCKER (ValidationResult shape) — Cross-session guard test corrected.** Task 4 Step 4a now uses the live `ValidationResult` shape (`is_valid`, `checks`, `errors`, `warnings`) instead of `{ ok: true }`, orders the guard before fingerprint mutation, and adds a same-content current-session retry test.
+
+**MINOR (Quality) — AppHeader accessible-name assertion corrected.** The `Session:` prefix remains `aria-hidden`; the AppHeader test now queries the active/fallback title rather than expecting `Session:` in the accessible name.

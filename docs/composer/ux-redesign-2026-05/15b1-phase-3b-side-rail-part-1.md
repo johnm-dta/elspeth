@@ -8,9 +8,9 @@
 
 **Tech Stack:** React + Zustand + Vitest + testing-library. The new modal pattern mirrors `SecretsPanel.tsx` (focus-trap, escape-to-close, backdrop click) and `ConfirmDialog.tsx` (dialog role, aria-labelledby). No new dependencies.
 
-> **Phase 3 block notice (added 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on a shared worktree** (`.worktrees/phase-2a-backend`, branch `feat/composer-phase-2a-backend` — the same worktree that landed Phase 2A/2B/2C) and **merge as one PR**. Phrases below like "Phase 3A" / "15a" mean "earlier tasks in the same branch," not a prior cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
+> **Phase 3 block notice (added 2026-05-17; target corrected 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on the dedicated Phase 3 worktree/branch for this IA-cleanup block** and **merge as one PR**. The canonical target for this packet is worktree `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on branch `feat/composer-phase-3-ia-cleanup`, created from `RC5.2` with `git worktree add .worktrees/composer-phase-3-ia-cleanup -b feat/composer-phase-3-ia-cleanup RC5.2` if it does not already exist. Do **not** use the old Phase 2A/2B/2C worktree or branch (`.worktrees/phase-2a-backend`, `feat/composer-phase-2a-backend`); those references are stale. Phrases below like "Phase 3A" / "15a" mean "earlier tasks in the same Phase 3 branch," not a prior cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
 >
-> **Subagent dispatch discipline.** Any subagent run against this work MUST be given an explicit CWD-discipline preamble at the top of its prompt: first Bash call `cd /home/john/elspeth/.worktrees/phase-2a-backend && pwd && git rev-parse --abbrev-ref HEAD` (expect `feat/composer-phase-2a-backend`), then absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths will silently read the wrong branch (the main checkout is 87+ commits behind). See memory entry `feedback_subagents_cant_use_worktrees`.
+> **Subagent dispatch discipline.** Every subagent prompt for this packet MUST start with this CWD-discipline preamble as its first Bash call: `cd /home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup && pwd && git rev-parse --abbrev-ref HEAD`; expected branch: `feat/composer-phase-3-ia-cleanup`. If the operator explicitly chooses a different Phase 3 worktree/branch, update this notice in **all four** 15a1/15a2/15b1/15b2 files before dispatch and use the chosen concrete values in every subagent prompt. The prompt must also state that `.worktrees/phase-2a-backend` and `feat/composer-phase-2a-backend` are stale Phase 2 targets and forbidden for Phase 3 work. Use absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths can silently read the wrong branch.
 
 **Sibling plans:**
 - Predecessor (task order, same branch): [15a1-phase-3a-removals-part-1.md](15a1-phase-3a-removals-part-1.md) / [15a2-phase-3a-removals-part-2.md](15a2-phase-3a-removals-part-2.md) — Phase 3B tasks consume artifacts produced by 15a tasks (the `SideRail.tsx` scaffold, `HeaderSessionSwitcher`, `InlineRunResults`, the deletions of `SpecView` / `RunsView` / `SessionSidebar`, and the auto-validate effect). **Within the shared branch, complete 15a tasks before starting 15b tasks.** Since the whole block ships as one PR, "shipped" is not a meaningful gate between 15a and 15b — only task ordering is.
@@ -62,7 +62,7 @@
 
 - Real-time graph mini updates beyond the existing `compositionState` change subscription. The graph mini re-renders whenever `compositionState.version` increments — same trigger as the full graph. No new push channel.
 - Multi-run YAML export. The Export YAML modal exports the *current* composition only. Historical-version YAML is reachable via the Composition history selector (revert + export).
-- Side-rail width resize. The side rail width is fixed by CSS (matches the 15a scaffold dimensions). The legacy `inspector-width` localStorage key is *honoured* for one phase as the side-rail width, then deprecated in Phase 6.
+- Side-rail width resize/persistence. 15a keeps the legacy `elspeth_inspector_width` key only during the transitional Layout rename so existing users do not lose width preferences mid-branch. 15b2 Task 9 removes the resize path and all reads/writes of that key in Phase 3B, hardcoding the side rail to `SIDERAIL_WIDTH = 320`. There is no Phase 6 deprecation step for this key.
 
 ## Trust tier check
 
@@ -70,7 +70,7 @@ Phase 3B is **frontend chrome only**. Same posture as 15a:
 
 - No new external-data ingestion. `GraphMiniView` reads `useSessionStore.compositionState` (already Tier 2 after the backend boundary). `ExportYamlModal` hosts `YamlView`, which fetches `/api/sessions/{id}/state/yaml` — that endpoint already validates at the backend (Tier 3 → Tier 2) before returning the document. `HeaderVersionSelector` reads the existing `stateVersions` already loaded by `loadStateVersions`.
 - No new audit-recorder events. Opening / closing a modal is UI state, not auditable activity. The underlying actions (revert via `revertToVersion`, validate, execute) already record through their existing audit boundaries.
-- No new persistent state, except for one localStorage key (`elspeth_graph_mini_collapsed`, boolean) that mirrors the existing `elspeth_inspector_width` / `elspeth_sidebar_collapsed` patterns.
+- No new persistent state, except for one localStorage key (`elspeth_graph_mini_collapsed`, boolean) that mirrors the repo's existing localStorage-backed UI preference pattern. Do not introduce any new width-persistence key; Task 9 removes the transitional `elspeth_inspector_width` use.
 
 Per [CLAUDE.md](../../../CLAUDE.md) "Defensive Programming: Forbidden", store accesses go through typed selectors directly (`useSessionStore((s) => s.compositionState)`). No `try`/`catch` around store calls is introduced. The hash-router rewrite preserves the existing fail-closed behaviour: an unrecognized fragment is rewritten to the canonical no-fragment form via `replaceState`, exactly as 15a's pre-write code did for invalid `VALID_TABS` entries.
 
@@ -317,23 +317,39 @@ dual render is intentional and short-lived."
 - Create: `src/elspeth/web/frontend/src/components/sidebar/ExecuteButton.test.tsx`.
 - Modify: `src/elspeth/web/frontend/src/App.tsx` — pass `executeButtonSlot={<ExecuteButton />}` to `<SideRail />`.
 - Modify: `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx` — remove the Execute button from the inspector header (its parent flex row in the inspector top toolbar).
-- Modify: `src/elspeth/web/frontend/src/components/sidebar/SideRail.test.tsx` — existing slot-presence test for `siderail-slot-execute-button` (added in 15a) verifies the wiring; add content assertion.
+- Modify: `src/elspeth/web/frontend/src/components/sidebar/SideRail.test.tsx` — assert only that `executeButtonSlot` content is placed under `siderail-slot-execute-button`. Do not test Execute-button store behaviour through bare `<SideRail />`; `SideRail` must not import or mount `ExecuteButton`.
 
 This task carries forward the 15a §"Open scope questions resolved" 2: Execute lives at the side rail until Phase 6 wraps it in the completion bar.
 
-- [ ] **Step 1: Failing test in `SideRail.test.tsx`**
+- [ ] **Step 1: Failing slot-placement test in `SideRail.test.tsx`**
 
 Add this case to `src/elspeth/web/frontend/src/components/sidebar/SideRail.test.tsx`:
 
 ```typescript
+it("places executeButtonSlot content in the execute-button slot", () => {
+  render(<SideRail executeButtonSlot={<button type="button">Run pipeline</button>} />);
+  const slot = screen.getByTestId("siderail-slot-execute-button");
+  expect(
+    within(slot).getByRole("button", { name: /run pipeline/i }),
+  ).toBeInTheDocument();
+});
+```
+
+Import `within` from `@testing-library/react` if the file does not already import it. This is the only `SideRail.test.tsx` coverage for the execute button in this task: prop placement, not behaviour.
+
+- [ ] **Step 1a: Failing behaviour tests in `ExecuteButton.test.tsx`**
+
+Add these cases to `src/elspeth/web/frontend/src/components/sidebar/ExecuteButton.test.tsx`:
+
+```typescript
 it("renders a Run pipeline button when validation has passed", () => {
   useExecutionStore.setState({
-    validationResult: { is_valid: true, errors: [], warnings: [] } as never,
+    validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
     isExecuting: false,
     progress: null,
   } as never);
   useSessionStore.setState({ activeSessionId: "sess-1" } as never);
-  render(<SideRail />);
+  render(<ExecuteButton />);
   expect(
     screen.getByRole("button", { name: /run pipeline/i }),
   ).toBeInTheDocument();
@@ -341,25 +357,30 @@ it("renders a Run pipeline button when validation has passed", () => {
 
 it("disables the Run pipeline button when validation is failing", () => {
   useExecutionStore.setState({
-    validationResult: { is_valid: false, errors: [{ message: "x" } as never], warnings: [] } as never,
+    validationResult: {
+      is_valid: false,
+      checks: [],
+      errors: [{ component_type: "source", component_id: "csv_source", message: "x" } as never],
+      warnings: [],
+    } as never,
     isExecuting: false,
     progress: null,
   } as never);
   useSessionStore.setState({ activeSessionId: "sess-1" } as never);
-  render(<SideRail />);
+  render(<ExecuteButton />);
   expect(screen.getByRole("button", { name: /run pipeline/i })).toBeDisabled();
 });
 
 it("invokes execute with the active session id when clicked", () => {
   const execute = vi.fn();
   useExecutionStore.setState({
-    validationResult: { is_valid: true, errors: [], warnings: [] } as never,
+    validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
     isExecuting: false,
     progress: null,
     execute,
   } as never);
   useSessionStore.setState({ activeSessionId: "sess-1" } as never);
-  render(<SideRail />);
+  render(<ExecuteButton />);
   fireEvent.click(screen.getByRole("button", { name: /run pipeline/i }));
   expect(execute).toHaveBeenCalledWith("sess-1");
 });
@@ -368,10 +389,10 @@ it("invokes execute with the active session id when clicked", () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd src/elspeth/web/frontend && npx vitest run src/components/sidebar/SideRail.test.tsx
+cd src/elspeth/web/frontend && npx vitest run src/components/sidebar/SideRail.test.tsx src/components/sidebar/ExecuteButton.test.tsx
 ```
 
-Expected: FAIL — button not rendered yet.
+Expected: FAIL — the slot assertion fails until `SideRail` exposes the wrapper and the behaviour tests fail until `ExecuteButton` exists.
 
 - [ ] **Step 3: Create `ExecuteButton.tsx` and wire via App.tsx**
 
@@ -1181,3 +1202,11 @@ importers updated."
 **CRITICAL (Coherence #3, #6 — directory paths):** 15a placed `SideRail.tsx` under `src/components/common/`, but every 15b1/15b2 file path assumed `src/components/sidebar/` (new directory). Resolution: **Task 0 added** — moves `SideRail.tsx` + `SideRail.test.tsx` from `common/` to `sidebar/` in one commit (No Legacy Code Policy — no compat shim), updates the single `App.tsx` import, then all subsequent tasks use the consistent `sidebar/` path. Sequencing block and "Tasks in this file" wording updated. Directory convention adjudication added to the plan header.
 
 **IMPORTANT (Coherence #3 — new files under inspector/):** Original Task 3 placed `GraphModal.tsx` under `src/components/inspector/` "for now to minimise reflows; Task 10 moves it under `graph/`" — but Task 10 had no such move step, and the comment created a fresh stale-`inspector/` reference for a brand-new file. Same problem in Task 4 for `ExportYamlModal.tsx`. Resolution: both modal components are placed under `src/components/sidebar/` from the start. The modal mocks of `GraphView` / `YamlView` use absolute paths (`@/components/inspector/GraphView`) since those view files remain under `inspector/` (Task 9 only deletes `InspectorPanel.tsx` + `.test.tsx`, not the entire `inspector/` directory).
+
+### 2026-05-17 — Pre-dispatch NO-GO follow-up
+
+**BLOCKER (Execution target) — Phase 3 worktree/branch made concrete.** Shared header now names `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on `feat/composer-phase-3-ia-cleanup` from `RC5.2`; the old Phase 2A worktree/branch are explicitly forbidden.
+
+**BLOCKER (Slot contract) — ExecuteButton behaviour tests moved out of SideRail.** Task 2 now keeps `SideRail.test.tsx` to slot-placement assertions only. Run-button enable/disable/execute behaviour lives in `ExecuteButton.test.tsx`, preserving the contract that `SideRail` never imports or mounts slot content directly.
+
+**IMPORTANT (Layout consistency) — Width persistence decision aligned with 15b2.** The 15a transitional `elspeth_inspector_width` read survives only until Task 9; Phase 3B deletes width persistence and hardcodes `SIDERAIL_WIDTH = 320`. No Phase 6 deprecation step remains for that key.

@@ -2,9 +2,9 @@
 
 > **Continued from [15a1-phase-3a-removals-part-1.md](15a1-phase-3a-removals-part-1.md)**, which contains the plan header, scope boundaries, trust tier check, sequencing overview, open scope questions resolved, and Tasks 1–4 (all additive work).
 
-> **Phase 3 block notice (added 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on a shared worktree** (`.worktrees/phase-2a-backend`, branch `feat/composer-phase-2a-backend` — the same worktree that landed Phase 2A/2B/2C) and **merge as one PR**. Phrases below like "deferred to 15b" or "Phase 3B" mean "later tasks in the same branch," not a separate cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
+> **Phase 3 block notice (added 2026-05-17; target corrected 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on the dedicated Phase 3 worktree/branch for this IA-cleanup block** and **merge as one PR**. The canonical target for this packet is worktree `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on branch `feat/composer-phase-3-ia-cleanup`, created from `RC5.2` with `git worktree add .worktrees/composer-phase-3-ia-cleanup -b feat/composer-phase-3-ia-cleanup RC5.2` if it does not already exist. Do **not** use the old Phase 2A/2B/2C worktree or branch (`.worktrees/phase-2a-backend`, `feat/composer-phase-2a-backend`); those references are stale. Phrases below like "deferred to 15b" or "Phase 3B" mean "later tasks in the same Phase 3 branch," not a separate cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
 >
-> **Subagent dispatch discipline.** Any subagent run against this work MUST be given an explicit CWD-discipline preamble at the top of its prompt: first Bash call `cd /home/john/elspeth/.worktrees/phase-2a-backend && pwd && git rev-parse --abbrev-ref HEAD` (expect `feat/composer-phase-2a-backend`), then absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths will silently read the wrong branch (the main checkout is 87+ commits behind). See memory entry `feedback_subagents_cant_use_worktrees`.
+> **Subagent dispatch discipline.** Every subagent prompt for this packet MUST start with this CWD-discipline preamble as its first Bash call: `cd /home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup && pwd && git rev-parse --abbrev-ref HEAD`; expected branch: `feat/composer-phase-3-ia-cleanup`. If the operator explicitly chooses a different Phase 3 worktree/branch, update this notice in **all four** 15a1/15a2/15b1/15b2 files before dispatch and use the chosen concrete values in every subagent prompt. The prompt must also state that `.worktrees/phase-2a-backend` and `feat/composer-phase-2a-backend` are stale Phase 2 targets and forbidden for Phase 3 work. Use absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths can silently read the wrong branch.
 
 **Umbrella plan context:**
 - Predecessor: [13-phase-1b-frontend.md](13-phase-1b-frontend.md)
@@ -24,6 +24,11 @@
 - Delete: `src/elspeth/web/frontend/src/components/inspector/RunsView.tsx`.
 - Delete: `src/elspeth/web/frontend/src/components/inspector/RunsView.test.tsx` (if exists; check with `ls`).
 - Modify: `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.test.tsx` — drop Runs-tab assertions.
+- Modify: `src/elspeth/web/frontend/src/App.tsx` — remove the fanout-execute `"runs"` tab dispatch; consume `useHashRouter`'s widened return object via `const { redirectToast } = useHashRouter();`; render the redirect-toast banner.
+- Modify: `src/elspeth/web/frontend/src/components/common/CommandPalette.tsx` — remove the `tab-runs` command.
+- Modify: `src/elspeth/web/frontend/src/hooks/useHashRouter.ts` — remove `"runs"` from `VALID_TABS`, change the default to `"graph"`, add redirect-toast state, and widen the hook signature from `void` to `{ redirectToast: { message: string; dismiss: () => void } | null }`.
+- Modify: `src/elspeth/web/frontend/src/hooks/useHashRouter.test.ts` — add the `#/{id}/runs` hash-fallback and redirect-toast tests.
+- Modify: `src/elspeth/web/frontend/src/App.css` — add the info alert-banner modifier used by the redirect toast if no existing info style is present.
 
 The `handleExecute` callback in `InspectorPanel.tsx:378–385` (drift from pre-Phase-2C plan citation L426–433) currently does `setActiveTab("runs")` after a successful execute. With Runs gone, **remove that line**. The user lands on whichever tab they were on (Graph or YAML) — and the inline `InlineRunResults` (Task 1) renders the run in the chat column.
 
@@ -33,7 +38,7 @@ The `handleExecute` callback in `InspectorPanel.tsx:378–385` (drift from pre-P
 
 CommandPalette.tsx's `tab-runs` command needs removing. (15b removes the remaining `tab-spec/graph/yaml` commands; Task 5 removes `tab-runs` because Spec is still alive in this commit but Runs isn't.) Grep for `tab-runs` rather than relying on a line number — the pre-Phase-2C citation L174-179 is likely drifted.
 
-Hash-router `VALID_TABS` in useHashRouter.ts:29 still includes `"runs"`. **Leave it in 15a** — old `#/sess-1/runs` deep links resolve as "session sess-1, no valid tab, fall back to spec" via the `tab` parameter being `null` after `VALID_TABS` excludes it. Wait — `VALID_TABS` *includes* "runs" today; if we remove it from `VALID_TABS`, the regex in `parseHash` still matches but the `tab` value becomes `null` (because `VALID_TABS.has(match[2])` returns false). So **remove `"runs"` from `VALID_TABS`** in this task; the existing fallback handles the redirect. **Default-tab change folded into this task (Section A panel fix).** The `resolvedTab = tab ?? "graph"` default change — originally specified for Task 6 — moves up to Task 5 so the redirect toast text ("Showing Graph instead") is truthful for the entire Task 5 → Task 6 window. Task 6 leaves the default at `"graph"`.
+Hash-router `VALID_TABS` in useHashRouter.ts:29 still includes `"runs"` today. **Remove `"runs"` from `VALID_TABS` in this task.** The regex in `parseHash` still matches old `#/sess-1/runs` links, but the `tab` value becomes `null` because `VALID_TABS.has(match[2])` returns false. **Default-tab change folded into this task (Section A panel fix).** The `resolvedTab = tab ?? "graph"` default change — originally specified for Task 6 — moves up to Task 5 so old Runs links fall back to Graph and the redirect toast text ("Showing Graph instead") is truthful for the entire Task 5 → Task 6 window. Task 6 leaves the default at `"graph"`.
 
 > **Review finding (CRITICAL):** Silently redirecting old `#/{id}/runs` bookmarks during the 15a → 15b window produces a disorienting no-error experience. **Transient redirect toast:** when `useHashRouter` detects an old `runs` or `spec` hash fragment (before `VALID_TABS` strips it), show a one-time dismissible toast: _"The Runs tab was removed in this update. Showing Graph instead."_ (or _"The Spec tab was removed…"_). Track dismissal in `localStorage.elspeth_redirect_toast_dismissed`; the toast never reappears after dismissal. Add a test asserting the toast renders on first visit and does not render after dismissal.
 
@@ -144,7 +149,8 @@ Also add the redirect-toast logic: when `parseHash()` sees a fragment that is no
 **Toast mount point (IMPORTANT — pre-review-finding 2026-05-17 follow-up).** `useHashRouter` is a hook, not a UI mounter. The redirect message DOM has to render *somewhere*. Specification:
 
 - `useHashRouter` returns a new field on its return value, `redirectToast: { message: string; dismiss: () => void } | null`. The hook owns the localStorage read on first invocation and the message-text mapping (`"runs"` → _"The Runs tab was removed in this update. Showing Graph instead."_; `"spec"` → _"The Spec tab was removed in this update. Showing Graph instead."_). `dismiss` calls `localStorage.setItem("elspeth_redirect_toast_dismissed", "1")` and clears the in-state message.
-- `App.tsx` consumes the hook (it already does — search the file for `useHashRouter(` to find the call site). Render a banner immediately above the existing alert-banner region at `App.tsx:235`:
+- This widens the hook signature from `void` to `{ redirectToast: { message: string; dismiss: () => void } | null }`. Update `App.tsx`'s existing bare call (`useHashRouter();`) to destructure it: `const { redirectToast } = useHashRouter();`. Existing hook tests that call `renderHook(() => useHashRouter())` should still compile, but any typed caller must accept the new return object.
+- `App.tsx` consumes the hook (search the file for `useHashRouter(` to find the call site). Render a banner immediately above the existing alert-banner region at `App.tsx:235`:
 
   ```tsx
   {redirectToast && (
@@ -178,10 +184,10 @@ describe("useHashRouter — 15a hash fallback", () => {
     } as never);
   });
 
-  it("falls back to the spec tab when #/{id}/runs is visited", () => {
+  it("falls back to the graph tab when #/{id}/runs is visited", () => {
     window.location.hash = "#/sess-1/runs";
     const { result } = renderHook(() => useHashRouter());
-    // resolvedTab from the hook (or however it's exposed) should be "spec"
+    // resolvedTab from the hook (or however it's exposed) should be "graph"
     // The key contract: the app does not crash and presents a valid tab.
     expect(window.location.hash).toBe("#/sess-1/runs"); // URL not yet rewritten in 15a
   });
@@ -474,6 +480,7 @@ set."
 - Delete: `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.tsx`.
 - Delete: `src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx`.
 - Modify: `src/elspeth/web/frontend/src/components/common/UserMenu.tsx` — add a theme-toggle entry above "Settings" (the theme toggle was hosted in Layout's sidebar toolbar; moving it into UserMenu per design doc 03 §"Surface inventory" row "Theme toggle").
+- Create: `src/elspeth/web/frontend/tests/e2e/phase-3a-shell.spec.ts` — owns the Phase 3A shell Playwright pass named in the risks table (InlineRunResults real wiring, two-column layout, UserMenu keyboard nav).
 
 Before this task, the sidebar still renders (it's the entry point for sessions). After this task, sessions are reached via `HeaderSessionSwitcher` (Task 3) and CommandPalette (already-built). The collapse-toggle and theme-toggle that lived in the sidebar toolbar must find new homes:
 - **Theme toggle** → into `UserMenu` (per design doc 03).
@@ -481,7 +488,7 @@ Before this task, the sidebar still renders (it's the entry point for sessions).
 
 - [ ] **Step 1: Move theme-toggle into `UserMenu`**
 
-Read `Layout.tsx:248–263` (the theme-toggle in the sidebar toolbar). Read `UserMenu.tsx` (Phase 1B Task 6). Add a new menu item to `UserMenu`:
+Read `Layout.tsx:248–263` (the theme-toggle in the sidebar toolbar). Read `UserMenu.tsx` (Phase 1B Task 6). Preserve the existing disclosure/popover accessibility contract in `UserMenu`: it intentionally uses plain buttons inside list items, not `role="menu"` / `role="menuitem"`, because it does not implement the full ARIA menu keyboard contract. Add a new button-in-list item to `UserMenu`:
 
 ```tsx
 import { useTheme } from "@/hooks/useTheme";
@@ -490,25 +497,20 @@ import { useTheme } from "@/hooks/useTheme";
 const { resolvedTheme, toggleTheme } = useTheme();
 
 // ...in the menu <ul>, above Settings:
-<li
-  role="menuitem"
-  tabIndex={0}
-  onClick={() => {
-    toggleTheme();
-    setOpen(false);
-  }}
-  onKeyDown={(e) => {
-    if (e.key === "Enter") {
+<li>
+  <button
+    type="button"
+    onClick={() => {
       toggleTheme();
       setOpen(false);
-    }
-  }}
->
-  {resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+    }}
+  >
+    {resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+  </button>
 </li>
 ```
 
-Add three tests in `UserMenu.test.tsx` covering label-reflects-state, label-inversion, and click-fires-and-closes contracts. Presence-only assertions are too weak — a stub `useTheme` returning the wrong direction or a click handler that doesn't dismiss the menu would slip past.
+Match the existing `UserMenu` list-item/button styling and focus handling rather than introducing ARIA menu roles. Add three tests in `UserMenu.test.tsx` covering label-reflects-state, label-inversion, and click-fires-and-closes contracts. Presence-only assertions are too weak — a stub `useTheme` returning the wrong direction or a click handler that doesn't dismiss the menu would slip past.
 
 **Mocking discipline.** `useTheme` is a hook the component reads at render time; the tests need control over what it returns. Two pitfalls to avoid:
 
@@ -538,12 +540,12 @@ describe("UserMenu — theme toggle (Phase 3A Task 7)", () => {
     mockUseThemeState.toggleTheme = vi.fn();
   });
 
-  it("shows a theme toggle menu item with a label reflecting current theme", async () => {
+  it("shows a theme toggle button with a label reflecting current theme", async () => {
     // resolvedTheme = "light" from beforeEach
     render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /account/i }));
     expect(
-      screen.getByRole("menuitem", { name: /switch to dark theme/i }),
+      screen.getByRole("button", { name: /switch to dark theme/i }),
     ).toBeInTheDocument();
   });
 
@@ -552,18 +554,18 @@ describe("UserMenu — theme toggle (Phase 3A Task 7)", () => {
     render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /account/i }));
     expect(
-      screen.getByRole("menuitem", { name: /switch to light theme/i }),
+      screen.getByRole("button", { name: /switch to light theme/i }),
     ).toBeInTheDocument();
   });
 
   it("calls toggleTheme and closes the menu when the theme item is clicked", async () => {
     render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /account/i }));
-    await userEvent.click(screen.getByRole("menuitem", { name: /switch to dark theme/i }));
+    await userEvent.click(screen.getByRole("button", { name: /switch to dark theme/i }));
     expect(mockUseThemeState.toggleTheme).toHaveBeenCalledTimes(1);
     // Menu collapses after toggle.
     expect(
-      screen.queryByRole("menuitem", { name: /switch to dark theme/i }),
+      screen.queryByRole("button", { name: /switch to dark theme/i }),
     ).not.toBeInTheDocument();
   });
 });
@@ -689,6 +691,16 @@ git rm src/elspeth/web/frontend/src/components/sessions/SessionSidebar.tsx
 git rm src/elspeth/web/frontend/src/components/sessions/SessionSidebar.test.tsx
 ```
 
+- [ ] **Step 6a: Add the Phase 3A shell Playwright spec**
+
+Create `src/elspeth/web/frontend/tests/e2e/phase-3a-shell.spec.ts` in this Task 7 commit. It owns the three risks-table acceptance checks:
+
+1. **InlineRunResults real wiring** — start a pipeline run, assert a `[aria-label="Pipeline run results"]` region appears in the chat column and contains non-stub `ProgressView` content (live status + token counters).
+2. **Two-column layout** — assert the `.app-layout` element resolves to two grid-column tracks (chat + side rail), with no surviving session-sidebar region.
+3. **UserMenu keyboard nav** — open the user menu, ArrowDown to the theme-toggle button, Enter, assert the theme toggle fires and the menu closes.
+
+Run the spec with the repo's normal Playwright command (for example, `npm run test:e2e -- tests/e2e/phase-3a-shell.spec.ts` if that script is present). If Playwright cannot run locally, keep the spec in the commit and record the exact blocker in the handoff.
+
 - [ ] **Step 7: Run full test suite + smoke render + import-grep**
 
 ```bash
@@ -731,10 +743,11 @@ The validation dot indicator (currently at `InspectorPanel.tsx:452–494`, drift
 
 | Risk | Mitigation |
 |---|---|
-| App becomes un-launchable mid-phase between commits | Each task ends with `npx vitest run src` including `App.test.tsx`. **Note (Quality panel 2026-05-17): `App.test.tsx` stubs out Layout, SessionSidebar, ChatPanel, InspectorPanel, SecretsPanel, CommandPalette, ShortcutsHelp, and ConfirmDialog — so it asserts banner DOM, not the real component tree. Treat it as an "App-shell smoke" gate, not a component-integration gate.** Real component-integration risk for Tasks 5–7 (tab strip, layout grid, UserMenu) lands on the staging deploy. Phase 3 acceptance criteria add three named Playwright passes at the 15a→15b boundary: (1) **InlineRunResults real wiring** — start a pipeline run, assert a `[aria-label="Pipeline run results"]` region appears in the chat column and contains non-stub `ProgressView` content (live status + token counters); (2) **Two-column layout** — assert the `.app-layout` element resolves to two grid-column tracks (chat + side rail), with no surviving session-sidebar region; (3) **UserMenu keyboard nav** — open the user menu, ArrowDown to the theme-toggle item, Enter, assert the theme toggle fires and the menu closes. The Playwright spec lives at `src/elspeth/web/frontend/tests/e2e/phase-3a-shell.spec.ts` (new file in this PR). |
+| App becomes un-launchable mid-phase between commits | Each task ends with `npx vitest run src` including `App.test.tsx`. **Note (Quality panel 2026-05-17): `App.test.tsx` stubs out Layout, SessionSidebar, ChatPanel, InspectorPanel, SecretsPanel, CommandPalette, ShortcutsHelp, and ConfirmDialog — so it asserts banner DOM, not the real component tree. Treat it as an "App-shell smoke" gate, not a component-integration gate.** Real component-integration risk for Tasks 5–7 (tab strip, layout grid, UserMenu) lands on the staging deploy. Phase 3 acceptance criteria add three named Playwright passes at the 15a→15b boundary: (1) **InlineRunResults real wiring** — start a pipeline run, assert a `[aria-label="Pipeline run results"]` region appears in the chat column and contains non-stub `ProgressView` content (live status + token counters); (2) **Two-column layout** — assert the `.app-layout` element resolves to two grid-column tracks (chat + side rail), with no surviving session-sidebar region; (3) **UserMenu keyboard nav** — open the user menu, ArrowDown to the theme-toggle button, Enter, assert the theme toggle fires and the menu closes. The Playwright spec lives at `src/elspeth/web/frontend/tests/e2e/phase-3a-shell.spec.ts` (new file in this PR and owned by Task 7 Step 6a). |
 | Users hit a stale `#/{id}/spec` or `#/{id}/runs` bookmark and see a confusing default | 15a leaves `VALID_TABS` excluding the gone tabs; useHashRouter's fallback resolves them to a valid default (`spec` → `graph`, `runs` → `graph`). Tasks 5 and 6 add a one-time redirect toast (shared dismissal flag). 15b adds explicit hash rewrites. |
 | Spec-tab regulars confused by no "list view" | Phase 2C's audit-readiness "Explain" surface (already shipped) inherits the lineage view. Until 15b migrates the validation-banner click handler to use it, validation-banner clicks select a node (GraphView highlight) but don't navigate further. Acceptable transitional state. |
 | **Auto-validate stales validation badge during rapid composition flows (correctness, not load)** | Systems panel 2026-05-17 finding. A simple skip-if-in-flight guard discards intermediate `compositionState.version` increments during LLM tool-call bursts (N → N+1 → N+2). Resolution in Task 4: per-session `lastValidatedVersionBySession` map + `pendingValidateTarget` + `fireValidateLoop()` that re-fires `validate()` after the in-flight settles when a newer version arrived. The user never sees a "validated" badge for a stale snapshot. Debounce framing retired — correctness is the goal, not load shaping. |
+| Manual `Ctrl+Shift+V` validation races across sessions | Deliberate trade-off: the Path B guard in 15a1 only protects auto-validate results because manual validation does not flow through `fireValidateLoop`, so `inflightValidateSessionId === null` and the guard is a no-op. Manual validation is rare and user-initiated; fixing it fully requires adding session identity to `ValidationResult` or routing manual validation through the same tracker. Do not mistake the no-op for an accidental omission. |
 | Run-results inline rendering overlaps with the still-present Runs tab during Task 1–4 | `InlineRunResults` returns `null` when there are no runs *and* no historical runs. Even when it renders, the duplicate is brief — Task 5 removes the Runs tab. The dual-display is the cost of TDD discipline. |
 | Theme toggle loses discoverability after moving from sidebar to UserMenu | Both surfaces existed in the legacy UI; Phase 1B already created the UserMenu hosting. Task 7 makes it the sole home; design doc 03 ratifies this placement. |
 | The session-switcher's "New session" action collides with the `Ctrl+N` shortcut | Both call the same `createSession` action; no collision. The header dropdown adds discoverability; the shortcut is preserved in App.tsx. |
@@ -807,3 +820,13 @@ Final pre-execution sweep landed three small doc-only clarifications; this file 
 **MINOR (Quality) — Redirect-toast mount-point spec'd.** Task 5 Step 6 now defines the precise integration shape between `useHashRouter` (which owns the localStorage read and the message-text mapping) and `App.tsx` (which mounts a `role="alert"` banner immediately above the existing alert-banner region at `App.tsx:235`). The `useHashRouter` hook gains a `redirectToast: { message; dismiss } | null` return field. The shared dismissal-flag invariant (a single `elspeth_redirect_toast_dismissed` key silences both the runs- and spec-path toasts) is preserved structurally because the field becomes `null` whenever the flag is set, regardless of which fragment triggered the read. The `screen.getByRole("alert")` test assertions in Steps 6a and 8a now have a concrete mount point to verify.
 
 **MINOR (Architecture) — Alt-key tabMap dead-dispatch documented as deliberate scope-deferral.** Task 6 Step 6a's smoke-grep `grep 'detail:.*"spec"'` cannot catch `App.tsx:155-162`'s keyboard tabMap (which constructs `detail: tab` from a lookup table rather than dispatching a literal). A "known false-negative" note now flags this site as intentionally deferred to 15b per 15a1 §"Out of scope (deferred to 15b)" (`Alt+1/2/3/4 shortcut cleanup`). Rationale: removing the table entries for `"spec"` and `"runs"` in 15a would interleave a keyboard-handler refactor into an IA-cleanup pass; the dead dispatch is a silent no-op (no listener, no crash) so deferral is safe.
+
+### 2026-05-17 — Pre-dispatch NO-GO follow-up
+
+**BLOCKER (Execution target) — Phase 3 worktree/branch made concrete.** Shared header now names `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on `feat/composer-phase-3-ia-cleanup` from `RC5.2`; the old Phase 2A worktree/branch are explicitly forbidden.
+
+**BLOCKER (Accessibility) — UserMenu theme toggle preserves disclosure semantics.** Task 7 no longer adds `role="menuitem"` or tests with `getByRole("menuitem")`; it preserves the existing button-in-list disclosure/popover pattern.
+
+**IMPORTANT (Handoff) — Task 7 owns the Playwright shell spec.** `phase-3a-shell.spec.ts` is now in the Task 7 file list and Step 6a, matching the risks-table acceptance criteria.
+
+**IMPORTANT (Handoff) — `useHashRouter` return widening called out.** Task 5 Step 6 now tells implementers to change `App.tsx` from bare `useHashRouter();` to `const { redirectToast } = useHashRouter();`.

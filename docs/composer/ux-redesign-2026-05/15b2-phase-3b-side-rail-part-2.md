@@ -2,9 +2,9 @@
 
 > **Continued from [15b1-phase-3b-side-rail-part-1.md](15b1-phase-3b-side-rail-part-1.md)**, which contains the plan header, scope boundaries, trust tier check, sequencing overview, open scope questions resolved, and Tasks 1–5 (additive work and the Catalog button move).
 
-> **Phase 3 block notice (added 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on a shared worktree** (`.worktrees/phase-2a-backend`, branch `feat/composer-phase-2a-backend` — the same worktree that landed Phase 2A/2B/2C) and **merge as one PR**. Phrases below like "Phase 3A" / "15a" mean "earlier tasks in the same branch," not a prior cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
+> **Phase 3 block notice (added 2026-05-17; target corrected 2026-05-17):** This plan is one of four (15a1, 15a2, 15b1, 15b2) that together comprise the Phase 3 IA-cleanup work. **All four land as a single block on the dedicated Phase 3 worktree/branch for this IA-cleanup block** and **merge as one PR**. The canonical target for this packet is worktree `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on branch `feat/composer-phase-3-ia-cleanup`, created from `RC5.2` with `git worktree add .worktrees/composer-phase-3-ia-cleanup -b feat/composer-phase-3-ia-cleanup RC5.2` if it does not already exist. Do **not** use the old Phase 2A/2B/2C worktree or branch (`.worktrees/phase-2a-backend`, `feat/composer-phase-2a-backend`); those references are stale. Phrases below like "Phase 3A" / "15a" mean "earlier tasks in the same Phase 3 branch," not a prior cycle. The 15a1→15a2→15b1→15b2 split is task sequencing and document organisation, not delivery sequencing — sequencing within the block still matters per task ordering.
 >
-> **Subagent dispatch discipline.** Any subagent run against this work MUST be given an explicit CWD-discipline preamble at the top of its prompt: first Bash call `cd /home/john/elspeth/.worktrees/phase-2a-backend && pwd && git rev-parse --abbrev-ref HEAD` (expect `feat/composer-phase-2a-backend`), then absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths will silently read the wrong branch (the main checkout is 87+ commits behind). See memory entry `feedback_subagents_cant_use_worktrees`.
+> **Subagent dispatch discipline.** Every subagent prompt for this packet MUST start with this CWD-discipline preamble as its first Bash call: `cd /home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup && pwd && git rev-parse --abbrev-ref HEAD`; expected branch: `feat/composer-phase-3-ia-cleanup`. If the operator explicitly chooses a different Phase 3 worktree/branch, update this notice in **all four** 15a1/15a2/15b1/15b2 files before dispatch and use the chosen concrete values in every subagent prompt. The prompt must also state that `.worktrees/phase-2a-backend` and `feat/composer-phase-2a-backend` are stale Phase 2 targets and forbidden for Phase 3 work. Use absolute paths only thereafter for every Read/Bash/Grep. Bash `cd` does NOT persist between tool calls — relative paths can silently read the wrong branch.
 
 **Umbrella plan context:**
 - Predecessor: [15a1-phase-3a-removals-part-1.md](15a1-phase-3a-removals-part-1.md) / [15a2-phase-3a-removals-part-2.md](15a2-phase-3a-removals-part-2.md)
@@ -29,6 +29,8 @@ The new vocabulary:
 
 - [ ] **Step 1: Failing test**
 
+Before adding the tests, create the constants-only `src/lib/composer-events.ts` module described in Step 3a if it does not already exist. This prevents the red test from failing on a missing import instead of the router behaviour under test; the module itself is just shared string constants and adds no runtime behaviour.
+
 Create or extend `src/elspeth/web/frontend/src/hooks/useHashRouter.test.ts`:
 
 ```typescript
@@ -36,8 +38,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { useHashRouter } from "./useHashRouter";
 import { useSessionStore } from "@/stores/sessionStore";
-import { OPEN_GRAPH_MODAL_EVENT } from "@/components/sidebar/GraphMiniView";
-import { OPEN_YAML_MODAL_EVENT } from "@/components/sidebar/ExportYamlButton";
+import { OPEN_GRAPH_MODAL_EVENT, OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 
 describe("useHashRouter — Phase 3B fragment migration", () => {
   beforeEach(() => {
@@ -127,7 +128,7 @@ cd src/elspeth/web/frontend && npx vitest run src/hooks/useHashRouter.test.ts
 
 Expected: FAIL — current router has `VALID_TABS` and routes `spec`/`runs` to themselves.
 
-- [ ] **Step 3a: Create `src/lib/composer-events.ts`**
+- [ ] **Step 3a: Create or verify `src/lib/composer-events.ts`**
 
 > **Review finding (IMPORTANT):** `OPEN_GRAPH_MODAL_EVENT` and `OPEN_YAML_MODAL_EVENT` are currently exported from their respective component files (`GraphMiniView.tsx`, `ExportYamlButton.tsx`). `useHashRouter` importing from component files creates a circular dependency risk (hook → component → hook). Lift the constants into a shared events module. Update all importers.
 
@@ -183,6 +184,10 @@ interface HashState {
   verb: string | null;
 }
 
+interface HashRouterResult {
+  redirectToast: null;
+}
+
 const ACTION_VERBS: Record<string, string> = {
   graph: OPEN_GRAPH_MODAL_EVENT,
   yaml: OPEN_YAML_MODAL_EVENT,
@@ -199,7 +204,7 @@ function buildCanonicalHash(sessionId: string | null): string {
   return sessionId ? `#/${sessionId}` : "";
 }
 
-export function useHashRouter(): void {
+export function useHashRouter(): HashRouterResult {
   const lastWrittenHash = useRef<string>("");
   const applying = useRef(false);
 
@@ -300,6 +305,11 @@ export function useHashRouter(): void {
     });
     return unsub;
   }, []);
+
+  // Preserve the widened return shape introduced in 15a so App.tsx can keep
+  // destructuring `{ redirectToast }`.  Phase 3B rewrites stale fragments
+  // immediately, so there is no redirect toast to show.
+  return { redirectToast: null };
 }
 ```
 
@@ -307,6 +317,7 @@ Notes on the rewrite:
 - The previous `TAB_CHANGED_EVENT` listener is **deleted**. No surface dispatches it; 15a's auto-validate effect doesn't need it; nothing else listens. The export from this file is removed.
 - The default-tab `"spec"` is gone. The dispatch on `SWITCH_TAB_EVENT` is gone. The previous "dispatch the resolved tab on apply" is replaced by "dispatch the action verb if any."
 - The current-tab `useRef<string | null>` is gone — there is no tab state anymore.
+- The return type remains an object for compatibility with 15a's redirect-toast mount point. `redirectToast` is always `null` in 15b because stale fragments are canonicalized immediately.
 
 - [ ] **Step 4: Remove `TAB_CHANGED_EVENT` import in `InspectorPanel.tsx`**
 
@@ -557,7 +568,7 @@ run results pick up the new run from the store directly."
 - Delete: `src/elspeth/web/frontend/src/components/inspector/SpecView.test.tsx` (ditto).
 - Delete: `src/elspeth/web/frontend/src/components/inspector/RunsView.tsx` (ditto).
 - Delete: `src/elspeth/web/frontend/src/components/inspector/RunsView.test.tsx` (ditto).
-- Modify: `src/elspeth/web/frontend/src/components/common/Layout.tsx` — remove the `sidebar` slot prop entirely (already unused after 15a); rename the `inspector` slot prop to `siderail`; remove the `inspector-overlay` mode (the side rail is fixed-width and not collapsible in 15b — Phase 6's completion bar might re-introduce this, but Phase 3 deletes it).
+- Modify: `src/elspeth/web/frontend/src/components/common/Layout.tsx` — remove the `sidebar` slot prop entirely (already unused after 15a); rename the `inspector` slot prop to `siderail`; remove the `inspector-overlay` mode (the side rail is fixed-width and not collapsible in 15b — Phase 6's completion bar might re-introduce this, but Phase 3 deletes it); delete the transitional `elspeth_inspector_width` reader/writer from 15a and do not replace it with a new width-persistence key.
 - Modify: `src/elspeth/web/frontend/src/App.tsx` — replace `<InspectorPanel />` with `<SideRail />`; delete the `import { InspectorPanel }` line; delete the `<SessionSidebar />` mount that 15a left as a no-op-stripped pass-through (if any survived).
 - Modify: `src/elspeth/web/frontend/src/components/common/Layout.test.tsx` — drop tests of overlay mode, sidebar-collapse, and inspector-resize. Add a test that asserts the two-column grid: `chat`, `siderail`.
 
@@ -654,7 +665,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Rewrite `Layout.tsx`**
 
-Replace the existing Layout. Strip out: `sidebar` prop, `sidebarCollapsed` state, `INSPECTOR_WIDTH_KEY` persistence, the overlay-mode branch, the resize handle. Keep only:
+Replace the existing Layout. Strip out: `sidebar` prop, `sidebarCollapsed` state, `INSPECTOR_WIDTH_KEY` / `elspeth_inspector_width` persistence, the overlay-mode branch, the resize handle. Keep only:
 
 ```typescript
 import { type ReactNode } from "react";
@@ -665,7 +676,7 @@ interface LayoutProps {
   siderail: ReactNode;
 }
 
-const SIDERAIL_WIDTH = 320; // matches design doc 03's "Layout sketch" rail width
+const SIDERAIL_WIDTH = 320; // fixed Phase 3B width; no localStorage width persistence
 
 export function Layout({ chat, siderail }: LayoutProps): JSX.Element {
   return (
@@ -926,3 +937,11 @@ Not deferred to Phase 6."
 **CRITICAL (Architecture / Coherence #6):** Task 9 originally inlined the validation banner inside `SideRail`'s internal markup, violating the slot composition contract established in 15a1 ("caller passes content, SideRail places it"). Rewritten: `SideRail` gains a new `validationBannerSlot?: ReactNode | null` prop (this task is the first time the slot is reserved AND filled); a new `SideRailValidationBanner.tsx` under `components/sidebar/` owns the store subscriptions; `App.tsx` passes it as the slot prop. Slot-presence test added to `SideRail.test.tsx`; behaviour test moved to a new `SideRailValidationBanner.test.tsx`.
 
 **CRITICAL (Quality / Reality):** Task 6 Step 1's cold-load race test referenced an undefined `<AppWithModals />` fixture. Replaced with an inline `HarnessTree` component that calls `useHashRouter()` and renders `<GraphModal />` — minimal integration tree, no project-wide fixture assumed. Imports for `render`, `screen`, `act`, and `GraphModal` documented.
+
+### 2026-05-17 — Pre-dispatch NO-GO follow-up
+
+**BLOCKER (Execution target) — Phase 3 worktree/branch made concrete.** Shared header now names `/home/john/elspeth/.worktrees/composer-phase-3-ia-cleanup` on `feat/composer-phase-3-ia-cleanup` from `RC5.2`; the old Phase 2A worktree/branch are explicitly forbidden.
+
+**IMPORTANT (Layout consistency) — Width persistence decision aligned with 15b1.** Task 9 now explicitly deletes the transitional `elspeth_inspector_width` reader/writer and keeps `SIDERAIL_WIDTH = 320` as a fixed Phase 3B width with no replacement persistence key.
+
+**IMPORTANT (Hook compatibility) — 15b router preserves 15a return shape.** The 15b `useHashRouter` rewrite returns `{ redirectToast: null }` so `App.tsx` can keep the 15a destructuring while stale fragments are canonicalized immediately.

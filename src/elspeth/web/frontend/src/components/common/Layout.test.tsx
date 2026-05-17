@@ -21,12 +21,12 @@ describe("Layout", () => {
     vi.clearAllMocks();
   });
 
-  it("uses approximately 50% of remaining space for inspector by default", () => {
+  it("uses approximately 50% of remaining space for side rail by default", () => {
     const { container } = render(
       <Layout
         sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
-        inspector={<div>Inspector</div>}
+        siderail={<div>Side rail</div>}
         onOpenSettings={() => {}}
         onSignOut={() => {}}
       />,
@@ -35,13 +35,13 @@ describe("Layout", () => {
     const columns = layoutDiv.style.gridTemplateColumns;
     const match = columns.match(/(\d+)px$/);
     expect(match).not.toBeNull();
-    const inspectorWidth = Number(match![1]);
+    const sideRailWidth = Number(match![1]);
     // With 1600px viewport and 200px sidebar, half of remaining = 700px
-    expect(inspectorWidth).toBeGreaterThanOrEqual(600);
-    expect(inspectorWidth).toBeLessThanOrEqual(800);
+    expect(sideRailWidth).toBeGreaterThanOrEqual(600);
+    expect(sideRailWidth).toBeLessThanOrEqual(800);
   });
 
-  it("restores persisted inspector width from localStorage", () => {
+  it("restores persisted side-rail width from localStorage", () => {
     localStorageMock.getItem.mockImplementation((key: string) => {
       if (key === "elspeth_inspector_width") return "500";
       return null;
@@ -50,7 +50,7 @@ describe("Layout", () => {
       <Layout
         sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
-        inspector={<div>Inspector</div>}
+        siderail={<div>Side rail</div>}
         onOpenSettings={() => {}}
         onSignOut={() => {}}
       />,
@@ -70,7 +70,7 @@ describe("Layout", () => {
       <Layout
         sidebar={<div>Sidebar</div>}
         chat={<div>Chat</div>}
-        inspector={<div>Inspector</div>}
+        siderail={<div>Side rail</div>}
         onOpenSettings={() => {}}
         onSignOut={() => {}}
       />,
@@ -100,9 +100,9 @@ describe("Layout", () => {
         <Layout
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
-          inspector={<div>Inspector</div>}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
+          siderail={<div>Side rail</div>}
+          onOpenSettings={() => {}}
+          onSignOut={() => {}}
         />,
       );
 
@@ -112,7 +112,7 @@ describe("Layout", () => {
       const initialMatch = layoutDiv.style.gridTemplateColumns.match(/(\d+)px$/);
       const initialWidth = Number(initialMatch![1]);
 
-      const handle = screen.getByRole("separator", { name: /resize inspector/i });
+      const handle = screen.getByRole("separator", { name: /resize side rail/i });
       handle.focus();
 
       await user.keyboard("{ArrowRight}");
@@ -125,7 +125,7 @@ describe("Layout", () => {
       expect(lastPersistedWidth(setItem)).toBe(initialWidth - 10);
     });
 
-    it("clamps inspector width at 50% of viewport on repeated ArrowRight", async () => {
+    it("clamps side-rail width at 50% of viewport on repeated ArrowRight", async () => {
       // window.innerWidth is fixed at 1600 for these tests, so the upper
       // clamp is 800.  Start near the upper bound so the clamp is reachable
       // in a few keypresses.
@@ -141,13 +141,13 @@ describe("Layout", () => {
         <Layout
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
-          inspector={<div>Inspector</div>}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
+          siderail={<div>Side rail</div>}
+          onOpenSettings={() => {}}
+          onSignOut={() => {}}
         />,
       );
 
-      const handle = screen.getByRole("separator", { name: /resize inspector/i });
+      const handle = screen.getByRole("separator", { name: /resize side rail/i });
       handle.focus();
 
       // 780 → 790 → 800 → 800 (clamp).  Three keypresses; clamp at 800.
@@ -155,7 +155,7 @@ describe("Layout", () => {
       expect(lastPersistedWidth(setItem)).toBe(800);
     });
 
-    it("clamps inspector width at MIN_INSPECTOR_WIDTH (240px) on repeated ArrowLeft", async () => {
+    it("clamps side-rail width at 240px on repeated ArrowLeft", async () => {
       const user = userEvent.setup();
       const setItem = vi.spyOn(localStorageMock, "setItem");
 
@@ -169,13 +169,13 @@ describe("Layout", () => {
         <Layout
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
-          inspector={<div>Inspector</div>}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
+          siderail={<div>Side rail</div>}
+          onOpenSettings={() => {}}
+          onSignOut={() => {}}
         />,
       );
 
-      const handle = screen.getByRole("separator", { name: /resize inspector/i });
+      const handle = screen.getByRole("separator", { name: /resize side rail/i });
       handle.focus();
 
       // 260 → 250 → 240 → 240 (clamp).  Three keypresses; clamp at 240.
@@ -188,18 +188,38 @@ describe("Layout", () => {
         <Layout
           sidebar={<div>Sidebar</div>}
           chat={<div>Chat</div>}
-          inspector={<div>Inspector</div>}
-        onOpenSettings={() => {}}
-        onSignOut={() => {}}
+          siderail={<div>Side rail</div>}
+          onOpenSettings={() => {}}
+          onSignOut={() => {}}
         />,
       );
 
-      const handle = screen.getByRole("separator", { name: /resize inspector/i });
+      const handle = screen.getByRole("separator", { name: /resize side rail/i });
       expect(handle.getAttribute("aria-valuenow")).not.toBeNull();
       expect(Number(handle.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(240);
       expect(handle.getAttribute("aria-valuemin")).toBe("240");
       // valuemax = 50% of viewport (1600 / 2 = 800).
       expect(handle.getAttribute("aria-valuemax")).toBe("800");
     });
+  });
+
+  it("reads side-rail width from the pre-rename elspeth_inspector_width localStorage key", () => {
+    localStorageMock.getItem.mockImplementation((key: string) => {
+      if (key === "elspeth_inspector_width") return "420";
+      return null;
+    });
+
+    const { container } = render(
+      <Layout
+        sidebar={<div>Sidebar</div>}
+        chat={<div data-testid="chat" />}
+        siderail={<div data-testid="siderail" />}
+        onOpenSettings={() => {}}
+        onSignOut={() => {}}
+      />,
+    );
+
+    const layoutNode = container.querySelector(".app-layout") as HTMLElement;
+    expect(layoutNode.style.gridTemplateColumns).toContain("420px");
   });
 });

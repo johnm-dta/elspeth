@@ -10,28 +10,28 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { UserMenu } from "./UserMenu";
 import { DefaultModeChangedBanner } from "./DefaultModeChangedBanner";
 
-const INSPECTOR_WIDTH_KEY = "elspeth_inspector_width";
+const SIDERAIL_WIDTH_KEY = "elspeth_inspector_width";
 const SIDEBAR_COLLAPSED_KEY = "elspeth_sidebar_collapsed";
 
-const MIN_INSPECTOR_WIDTH = 240;
+const MIN_SIDERAIL_WIDTH = 240;
 const SIDEBAR_EXPANDED_WIDTH = 200;
 const SIDEBAR_COLLAPSED_WIDTH = 40;
 
 /** Breakpoint below which the sidebar auto-collapses. */
 const NARROW_BREAKPOINT = 1024;
 
-/** Breakpoint below which the inspector becomes an overlay sheet. */
+/** Breakpoint below which the side rail becomes an overlay sheet. */
 const OVERLAY_BREAKPOINT = 900;
 
 /**
- * Compute the default inspector width as ~50% of the space remaining
- * after the sidebar. This gives an even chat/inspector split (A4).
+ * Compute the default side-rail width as ~50% of the space remaining
+ * after the sidebar. This gives an even chat/side-rail split (A4).
  * Falls back to 50% of viewport if called before layout.
  */
-function defaultInspectorWidth(): number {
+function defaultSideRailWidth(): number {
   const available = window.innerWidth - SIDEBAR_EXPANDED_WIDTH;
   const half = Math.round(available / 2);
-  return Math.max(MIN_INSPECTOR_WIDTH, half);
+  return Math.max(MIN_SIDERAIL_WIDTH, half);
 }
 
 function loadPersistedNumber(key: string, fallback: number): number {
@@ -50,7 +50,7 @@ function loadPersistedBoolean(key: string, fallback: boolean): boolean {
 interface LayoutProps {
   sidebar: ReactNode;
   chat: ReactNode;
-  inspector: ReactNode;
+  siderail: ReactNode;
   /** Phase 1B — UserMenu callbacks. Threaded through Layout so the menu
    *  can mount in the existing sidebar toolbar without adding a new header
    *  row (which would change the calc(100vh - ...) height budget). */
@@ -64,29 +64,29 @@ interface LayoutProps {
  * Desktop (>1024px):
  *   - Sessions sidebar: 200px fixed, collapsible to 40px (persisted)
  *   - Chat panel: flex (1fr, takes remaining space)
- *   - Inspector panel: resizable via drag handle (persisted)
+ *   - Side-rail panel: resizable via drag handle (persisted)
  *
  * Narrow (<=1024px):
  *   - Sidebar auto-collapses (user can still expand manually)
  *
  * Overlay (<= 900px):
- *   - Inspector becomes a slide-over overlay sheet with backdrop
+ *   - Side rail becomes a slide-over overlay sheet with backdrop
  *   - Toggle button appears in the chat header area
  */
 export function Layout({
   sidebar,
   chat,
-  inspector,
+  siderail,
   onOpenSettings,
   onSignOut,
 }: LayoutProps) {
-  const [inspectorWidth, setInspectorWidth] = useState(() =>
-    loadPersistedNumber(INSPECTOR_WIDTH_KEY, defaultInspectorWidth())
+  const [sideRailWidth, setSideRailWidth] = useState(() =>
+    loadPersistedNumber(SIDERAIL_WIDTH_KEY, defaultSideRailWidth())
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     loadPersistedBoolean(SIDEBAR_COLLAPSED_KEY, false)
   );
-  const [inspectorVisible, setInspectorVisible] = useState(true);
+  const [sideRailVisible, setSideRailVisible] = useState(true);
   const [isOverlayMode, setIsOverlayMode] = useState(
     () => window.innerWidth <= OVERLAY_BREAKPOINT,
   );
@@ -112,11 +112,11 @@ export function Layout({
     function handleOverlay(e: MediaQueryListEvent) {
       setIsOverlayMode(e.matches);
       if (e.matches) {
-        // Hide inspector when entering overlay mode
-        setInspectorVisible(false);
+        // Hide side rail when entering overlay mode
+        setSideRailVisible(false);
       } else {
-        // Always show inspector when leaving overlay mode
-        setInspectorVisible(true);
+        // Always show side rail when leaving overlay mode
+        setSideRailVisible(true);
       }
     }
 
@@ -126,7 +126,7 @@ export function Layout({
     }
     if (overlayMq.matches) {
       setIsOverlayMode(true);
-      setInspectorVisible(false);
+      setSideRailVisible(false);
     }
 
     narrowMq.addEventListener("change", handleNarrow);
@@ -154,10 +154,11 @@ export function Layout({
     };
   }, []);
 
-  // Persist inspector width to localStorage when it changes.
+  // Persist side-rail width to localStorage when it changes. The storage key
+  // intentionally preserves its pre-rename value for existing preferences.
   useEffect(() => {
-    localStorage.setItem(INSPECTOR_WIDTH_KEY, String(inspectorWidth));
-  }, [inspectorWidth]);
+    localStorage.setItem(SIDERAIL_WIDTH_KEY, String(sideRailWidth));
+  }, [sideRailWidth]);
 
   // Persist sidebar collapsed state to localStorage when it changes.
   useEffect(() => {
@@ -168,12 +169,12 @@ export function Layout({
     setSidebarCollapsed((prev) => !prev);
   }, []);
 
-  const handleToggleInspector = useCallback(() => {
-    setInspectorVisible((prev) => !prev);
+  const handleToggleSideRail = useCallback(() => {
+    setSideRailVisible((prev) => !prev);
   }, []);
 
   const handleCloseOverlay = useCallback(() => {
-    setInspectorVisible(false);
+    setSideRailVisible(false);
   }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -184,7 +185,7 @@ export function Layout({
       if (!isResizing.current) return;
       const newWidth = window.innerWidth - ev.clientX;
       const maxWidth = window.innerWidth * 0.5;
-      setInspectorWidth(Math.max(MIN_INSPECTOR_WIDTH, Math.min(newWidth, maxWidth)));
+      setSideRailWidth(Math.max(MIN_SIDERAIL_WIDTH, Math.min(newWidth, maxWidth)));
     }
 
     function handleMouseUp() {
@@ -210,7 +211,7 @@ export function Layout({
       if (!touch) return;
       const newWidth = window.innerWidth - touch.clientX;
       const maxWidth = window.innerWidth * 0.5;
-      setInspectorWidth(Math.max(MIN_INSPECTOR_WIDTH, Math.min(newWidth, maxWidth)));
+      setSideRailWidth(Math.max(MIN_SIDERAIL_WIDTH, Math.min(newWidth, maxWidth)));
     }
 
     function handleTouchEnd() {
@@ -227,11 +228,11 @@ export function Layout({
     ? SIDEBAR_COLLAPSED_WIDTH
     : SIDEBAR_EXPANDED_WIDTH;
 
-  // In overlay mode, the grid only has sidebar + chat (inspector floats).
+  // In overlay mode, the grid only has sidebar + chat (side rail floats).
   const gridColumns = isOverlayMode
     ? `${sidebarWidth}px 1fr`
-    : inspectorVisible
-      ? `${sidebarWidth}px 1fr ${inspectorWidth}px`
+    : sideRailVisible
+      ? `${sidebarWidth}px 1fr ${sideRailWidth}px`
       : `${sidebarWidth}px 1fr`;
 
   return (
@@ -299,15 +300,15 @@ export function Layout({
             account for. Self-gates on visibility (returns null when not
             applicable). */}
         <DefaultModeChangedBanner />
-        {/* Inspector toggle button — visible when inspector is hidden or in overlay mode */}
-        {(!inspectorVisible || isOverlayMode) && (
+        {/* Side-rail toggle button — visible when hidden or in overlay mode */}
+        {(!sideRailVisible || isOverlayMode) && (
           <button
             className="inspector-toggle-btn"
-            onClick={handleToggleInspector}
-            aria-label={inspectorVisible ? "Hide inspector" : "Show inspector"}
-            title={inspectorVisible ? "Hide inspector" : "Show inspector"}
+            onClick={handleToggleSideRail}
+            aria-label={sideRailVisible ? "Hide side rail" : "Show side rail"}
+            title={sideRailVisible ? "Hide side rail" : "Show side rail"}
           >
-            {inspectorVisible ? "\u25B6" : "\u25C0"} Inspector
+            {sideRailVisible ? "\u25B6" : "\u25C0"} Side rail
           </button>
         )}
         <ErrorBoundary label="Chat panel">
@@ -315,23 +316,23 @@ export function Layout({
         </ErrorBoundary>
       </div>
 
-      {/* Inspector panel — inline in desktop, overlay sheet in narrow viewports.
-          Always mounted so InspectorPanel preserves state (active tab) across
+      {/* Side-rail panel — inline in desktop, overlay sheet in narrow viewports.
+          Always mounted so the transitional inspector preserves state across
           overlay toggles; hidden via display:none instead of unmounting. */}
-      {inspectorVisible && isOverlayMode && (
+      {sideRailVisible && isOverlayMode && (
         <div
-          className="inspector-overlay-backdrop"
+          className="siderail-overlay-backdrop"
           onClick={handleCloseOverlay}
           aria-hidden="true"
         />
       )}
       <div
-        className={`layout-inspector${isOverlayMode ? " layout-inspector--overlay" : ""}`}
+        className={`layout-siderail${isOverlayMode ? " layout-siderail--overlay" : ""}`}
         style={
-          !inspectorVisible
+          !sideRailVisible
             ? { display: "none" }
             : isOverlayMode
-              ? { width: Math.min(inspectorWidth, window.innerWidth - 48) }
+              ? { width: Math.min(sideRailWidth, window.innerWidth - 48) }
               : undefined
         }
       >
@@ -351,18 +352,18 @@ export function Layout({
             onTouchStart={handleTouchStart}
             role="separator"
             aria-orientation="vertical"
-            aria-label="Resize inspector panel"
-            aria-valuenow={inspectorWidth}
-            aria-valuemin={MIN_INSPECTOR_WIDTH}
+            aria-label="Resize side rail"
+            aria-valuenow={sideRailWidth}
+            aria-valuemin={MIN_SIDERAIL_WIDTH}
             aria-valuemax={Math.round(viewportWidth * 0.5)}
             tabIndex={0}
             onKeyDown={(e) => {
               if (e.key === "ArrowLeft") {
                 e.preventDefault();
-                setInspectorWidth((w) => Math.max(w - 10, MIN_INSPECTOR_WIDTH));
+                setSideRailWidth((w) => Math.max(w - 10, MIN_SIDERAIL_WIDTH));
               } else if (e.key === "ArrowRight") {
                 e.preventDefault();
-                setInspectorWidth((w) =>
+                setSideRailWidth((w) =>
                   Math.min(w + 10, window.innerWidth * 0.5)
                 );
               }
@@ -373,17 +374,17 @@ export function Layout({
         {/* Close button in overlay mode */}
         {isOverlayMode && (
           <button
-            className="inspector-overlay-close"
+            className="siderail-overlay-close"
             onClick={handleCloseOverlay}
-            aria-label="Close inspector"
-            title="Close inspector"
+            aria-label="Close side rail"
+            title="Close side rail"
           >
             &#x2715;
           </button>
         )}
 
-        <ErrorBoundary label="Inspector panel">
-          {inspector}
+        <ErrorBoundary label="Side rail">
+          {siderail}
         </ErrorBoundary>
       </div>
     </div>

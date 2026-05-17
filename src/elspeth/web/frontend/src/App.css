@@ -1163,7 +1163,7 @@ summary:focus-visible {
 .app-layout {
   display: grid;
   grid-template-rows: 100vh;
-  grid-template-areas: "sidebar chat inspector";
+  grid-template-areas: "sidebar chat siderail";
   height: 100vh;
   min-width: 640px;
   overflow: hidden;
@@ -1245,8 +1245,8 @@ summary:focus-visible {
   background-color: var(--color-surface);
 }
 
-.layout-inspector {
-  grid-area: inspector;
+.layout-siderail {
+  grid-area: siderail;
   position: relative;
   border-left: 1px solid var(--color-border);
   overflow: hidden;
@@ -1255,8 +1255,8 @@ summary:focus-visible {
   background-color: var(--color-surface-inspector);
 }
 
-/* Inspector overlay mode — slides over from the right */
-.layout-inspector--overlay {
+/* Side-rail overlay mode — slides over from the right */
+.layout-siderail--overlay {
   position: fixed;
   top: 0;
   right: 0;
@@ -1265,14 +1265,14 @@ summary:focus-visible {
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.3);
 }
 
-.inspector-overlay-backdrop {
+.siderail-overlay-backdrop {
   position: fixed;
   inset: 0;
   background-color: rgba(0, 0, 0, 0.35);
   z-index: var(--z-overlay-backdrop);
 }
 
-.inspector-overlay-close {
+.siderail-overlay-close {
   position: absolute;
   top: var(--space-sm);
   right: var(--space-sm);
@@ -1290,7 +1290,7 @@ summary:focus-visible {
   font-size: var(--font-size-lg);
 }
 
-.inspector-overlay-close:hover {
+.siderail-overlay-close:hover {
   background-color: var(--color-surface-hover);
   color: var(--color-text);
 }
@@ -1320,6 +1320,23 @@ summary:focus-visible {
   background-color: var(--color-surface-hover);
   color: var(--color-text);
   border-color: var(--color-border-strong);
+}
+
+.side-rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.side-rail-slot:empty {
+  display: none;
+}
+
+.side-rail-transitional {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* ---------------------------------------------------------------------------

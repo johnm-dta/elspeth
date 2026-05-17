@@ -3,6 +3,7 @@ import "./App.css";
 import * as api from "./api/client";
 import { AuthGuard } from "./components/common/AuthGuard";
 import { Layout } from "./components/common/Layout";
+import { SideRail } from "./components/common/SideRail";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
@@ -275,7 +276,18 @@ function App() {
                 onOpenComposerPreferences={openComposerSettings}
               />
             }
-            inspector={<InspectorPanel />}
+            siderail={
+              <SideRail
+                auditReadinessSlot={null}
+                graphMiniSlot={null}
+                catalogSlot={null}
+                exportYamlSlot={null}
+                executeButtonSlot={null}
+                completionBarSlot={null}
+              >
+                <InspectorPanel />
+              </SideRail>
+            }
             onOpenSettings={openComposerSettings}
             onSignOut={logout}
           />

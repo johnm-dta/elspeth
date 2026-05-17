@@ -20,16 +20,16 @@ vi.mock("./components/common/Layout", () => ({
   Layout: ({
     sidebar,
     chat,
-    inspector,
+    siderail,
   }: {
     sidebar: React.ReactNode;
     chat: React.ReactNode;
-    inspector: React.ReactNode;
+    siderail: React.ReactNode;
   }) => (
     <div data-testid="layout-stub">
       {sidebar}
       {chat}
-      {inspector}
+      {siderail}
     </div>
   ),
 }));

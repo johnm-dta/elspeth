@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 PluginKind = Literal["source", "transform", "sink"]
 
@@ -33,12 +33,36 @@ class ConfigFieldSummary(_StrictResponse):
 
 
 class PluginSummary(_StrictResponse):
-    """Lightweight plugin info for catalog browsing."""
+    """Lightweight plugin info for catalog browsing.
+
+    Phase 7A adds reference-content fields (when-to-use prose, capability
+    tags, audit-characteristic flags, data trust tier) so the catalog
+    drawer can render persona-facing reference cards instead of a bare
+    name+description. All new fields are optional and default to
+    None / empty for plugins that haven't been authored yet; the
+    frontend renders a fallback message rather than blocking display.
+
+    `audit_characteristics` is the catalog service's *derived* set:
+    declared characteristics from the plugin class composed with the
+    characteristic inferred from `determinism`, then sorted into a
+    deterministic tuple for stable wire-format ordering. Quarantine
+    behaviour is author-declared (the `_on_validation_failure` signal
+    is a per-instance attribute and cannot be inferred from the class
+    object). See `CatalogServiceImpl._derive_audit_characteristics`.
+    """
 
     name: str
     description: str
     plugin_type: PluginKind
     config_fields: list[ConfigFieldSummary]
+
+    # Phase 7A reference-content fields
+    usage_when_to_use: str | None = None
+    usage_when_not_to_use: str | None = None
+    example_use: str | None = None
+    capability_tags: tuple[str, ...] = ()
+    audit_characteristics: tuple[str, ...] = ()
+    data_trust_tier: int | None = Field(default=None, ge=1, le=3)
 
 
 class PluginSchemaInfo(_StrictResponse):

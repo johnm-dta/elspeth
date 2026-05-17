@@ -145,9 +145,15 @@ export function AuditReadinessPanel() {
         aria-label="Audit readiness"
         className="audit-readiness audit-readiness--loading"
       >
-        <span className="audit-readiness-loading">
-          Checking audit readiness…
-        </span>
+        <div
+          className="audit-readiness-live-region"
+          aria-live="polite"
+          aria-atomic="false"
+        >
+          <span className="audit-readiness-loading">
+            Checking audit readiness…
+          </span>
+        </div>
       </section>
     );
   }
@@ -175,6 +181,7 @@ export function AuditReadinessPanel() {
       <section
         aria-label="Audit readiness"
         className="audit-readiness audit-readiness--collapsed"
+        aria-busy={isLoading ? "true" : undefined}
       >
         <button
           type="button"
@@ -191,7 +198,11 @@ export function AuditReadinessPanel() {
 
   return (
     <>
-      <section aria-label="Audit readiness" className="audit-readiness">
+      <section
+        aria-label="Audit readiness"
+        className="audit-readiness"
+        aria-busy={isLoading ? "true" : undefined}
+      >
         <header className="audit-readiness-header">
           <h2 className="audit-readiness-title">Audit readiness</h2>
           <div className="audit-readiness-actions">
@@ -216,7 +227,12 @@ export function AuditReadinessPanel() {
           </div>
         </header>
 
-        <ul id="audit-readiness-rows" className="audit-readiness-rows">
+        <ul
+          id="audit-readiness-rows"
+          className="audit-readiness-rows"
+          aria-live="polite"
+          aria-atomic="false"
+        >
           {snapshot.rows.map((row: ReadinessRow) => {
             const { glyph, aria } = statusGlyph(row.status);
             const heading = row.label || rowHeading(row.id);

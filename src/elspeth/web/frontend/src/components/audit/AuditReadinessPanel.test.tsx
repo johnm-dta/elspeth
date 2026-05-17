@@ -151,6 +151,50 @@ describe("AuditReadinessPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("announces loading and row updates through a polite non-atomic live region", async () => {
+    let resolve!: (s: AuditReadinessSnapshot) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((r) => {
+        resolve = r;
+      }),
+    );
+
+    render(<AuditReadinessPanel />);
+    const loading = screen.getByText(/Checking audit readiness/i);
+    const loadingLiveRegion = loading.closest("[aria-live='polite']");
+    expect(loadingLiveRegion).toHaveAttribute("aria-atomic", "false");
+
+    resolve(snapshotWithProvenanceWarning(1));
+    const rows = await screen.findByRole("list");
+    expect(rows).toHaveAttribute("aria-live", "polite");
+    expect(rows).toHaveAttribute("aria-atomic", "false");
+  });
+
+  it("marks the panel busy during stale-cache refetch and clears busy after the new snapshot lands", async () => {
+    useAuditReadinessStore.setState({
+      snapshotsBySession: { [SESSION_ID]: snapshotWithProvenanceWarning(1) },
+    });
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(2),
+    });
+
+    let resolve!: (s: AuditReadinessSnapshot) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((r) => {
+        resolve = r;
+      }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    const panel = screen.getByRole("region", { name: /audit readiness/i });
+    await waitFor(() => expect(panel).toHaveAttribute("aria-busy", "true"));
+
+    resolve(snapshotWithProvenanceWarning(2));
+    await waitFor(() => expect(panel).not.toHaveAttribute("aria-busy"));
+  });
+
   it("renders all six rows when every row is warning or error (no collapse path)", async () => {
     const everyRowActionable: AuditReadinessSnapshot = {
       session_id: SESSION_ID,

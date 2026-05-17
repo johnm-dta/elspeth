@@ -72,6 +72,7 @@ interface ExecutionState {
 // The WebSocket connection handle is held outside Zustand state
 // because it's not serialisable and components don't need to read it.
 let wsConnection: WebSocketConnection | null = null;
+let validationRequestSeq = 0;
 
 /**
  * Derive the run status from a RunEvent.
@@ -256,11 +257,22 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   ...initialExecutionState,
 
   async validate(sessionId: string) {
+    const requestSeq = ++validationRequestSeq;
     set({ isValidating: true, validationResult: null, error: null });
     try {
       const result = await api.validatePipeline(sessionId);
+      if (requestSeq !== validationRequestSeq) return;
+      if (useSessionStore.getState().activeSessionId !== sessionId) {
+        set({ isValidating: false });
+        return;
+      }
       set({ validationResult: result, isValidating: false });
     } catch (err) {
+      if (requestSeq !== validationRequestSeq) return;
+      if (useSessionStore.getState().activeSessionId !== sessionId) {
+        set({ isValidating: false });
+        return;
+      }
       const apiErr = err as ApiError;
       const message =
         apiErr.status === 500
@@ -533,6 +545,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   },
 
   reset() {
+    validationRequestSeq += 1;
     wsConnection?.close();
     wsConnection = null;
     set(initialExecutionState);

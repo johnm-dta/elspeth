@@ -59,6 +59,9 @@ describe("UserMenu", () => {
 
     expect(localStorage.getItem("elspeth_theme")).toBe("light");
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(
+      screen.queryByRole("button", { name: /switch to dark theme/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("calls onSignOut when Sign out is clicked", async () => {

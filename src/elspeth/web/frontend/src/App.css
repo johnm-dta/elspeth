@@ -1161,12 +1161,21 @@ summary:focus-visible {
 }
 
 .header-session-switcher-item {
+  display: block;
+  width: 100%;
   padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
 
 .header-session-switcher-item:hover,
-.header-session-switcher-item:focus {
+.header-session-switcher-item:focus,
+.header-session-switcher-action:hover,
+.header-session-switcher-action:focus {
   background: var(--color-bg-hover, rgba(143, 200, 200, 0.08));
 }
 
@@ -1176,6 +1185,91 @@ summary:focus-visible {
 
 .header-session-switcher-item-new {
   border-bottom: 1px solid var(--color-border);
+}
+
+.header-session-switcher-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto auto;
+  align-items: center;
+}
+
+.header-session-switcher-action {
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.header-session-switcher-rename-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto auto;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.runs-history-item-summary {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.run-diagnostics-panel {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+  font-size: 12px;
+}
+
+.run-diagnostics-panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  color: var(--color-text-muted);
+}
+
+.run-diagnostics-actions,
+.run-diagnostics-operations {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.run-failure-detail {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-error-border);
+  border-left: 3px solid var(--color-error);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.run-failure-detail pre {
+  margin: 4px 0 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run-diagnostics-tokens {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.run-diagnostics-working-view,
+.run-diagnostics-explanation {
+  padding: 7px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
 }
 
 /* ---------------------------------------------------------------------------

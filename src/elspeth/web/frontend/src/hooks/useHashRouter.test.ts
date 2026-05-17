@@ -30,6 +30,7 @@ describe("useHashRouter removed tab redirects", () => {
       await waitFor(() => {
         expect(tabRequests).toEqual(["graph"]);
       });
+      expect(window.location.hash).toBe("#/session-1/graph");
       await waitFor(() => {
         expect(result.current.redirectToast?.message).toMatch(/Runs tab was removed/i);
       });
@@ -53,6 +54,7 @@ describe("useHashRouter removed tab redirects", () => {
       await waitFor(() => {
         expect(tabRequests).toEqual(["graph"]);
       });
+      expect(window.location.hash).toBe("#/session-1/graph");
       await waitFor(() => {
         expect(result.current.redirectToast?.message).toMatch(/Spec tab was removed/i);
       });
@@ -78,10 +80,10 @@ describe("useHashRouter removed tab redirects", () => {
     expect(result.current.redirectToast).toBeNull();
 
     unmount();
-    renderHook(() => useHashRouter());
+    const second = renderHook(() => useHashRouter());
 
     await waitFor(() => {
-      expect(result.current?.redirectToast).toBeNull();
+      expect(second.result.current.redirectToast).toBeNull();
     });
   });
 });

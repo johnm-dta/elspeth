@@ -5,9 +5,11 @@ import App from "./App";
 import * as api from "./api/client";
 import { resetStore } from "@/test/store-helpers";
 import { useSessionStore } from "./stores/sessionStore";
+import { useExecutionStore } from "./stores/executionStore";
 import type {
   ChatMessage,
   CompositionState,
+  Session,
   SystemStatus,
   UserProfile,
 } from "./types/index";
@@ -102,6 +104,8 @@ vi.mock("./api/client", () => ({
     composer_reason: null,
     composer_missing_keys: [],
   } satisfies SystemStatus),
+  fetchSessions: vi.fn().mockResolvedValue([]),
+  fetchRuns: vi.fn().mockResolvedValue([]),
   fetchComposerProgress: vi.fn().mockResolvedValue({ phase: "idle" }),
   fetchRecoveryTranscript: vi.fn().mockResolvedValue([]),
   sendMessage: vi.fn(),
@@ -126,6 +130,7 @@ describe("App banner roles", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(useSessionStore);
+    useExecutionStore.getState().reset();
     localStorage.clear();
     window.history.replaceState(null, "", "/");
     // Restore the default (backend up, composer available) after any
@@ -137,6 +142,8 @@ describe("App banner roles", () => {
       composer_reason: null,
       composer_missing_keys: [],
     } satisfies SystemStatus);
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
+    vi.spyOn(api, "fetchRuns").mockResolvedValue([]);
   });
 
   it("uses role=alert for the backend-unavailable banner (hard outage)", async () => {
@@ -187,6 +194,7 @@ describe("App banner roles", () => {
     expect(
       await screen.findByText(/Runs tab was removed/i),
     ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(/Runs tab was removed/i);
   });
 
   it("surfaces the stale Spec hash redirect toast", async () => {
@@ -218,6 +226,39 @@ describe("App banner roles", () => {
       expect(api.fetchSystemStatus).toHaveBeenCalled();
     });
     expect(localStorage.getItem("elspeth_sidebar_collapsed")).toBeNull();
+  });
+
+  it("loads sessions on startup after SessionSidebar removal", async () => {
+    const session: Session = {
+      id: "session-loaded",
+      title: "Loaded session",
+      created_at: "2026-05-17T00:00:00Z",
+      updated_at: "2026-05-17T00:00:00Z",
+    };
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([session]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSessions).toHaveBeenCalledTimes(1);
+    });
+    expect(useSessionStore.getState().sessions).toEqual([session]);
+  });
+
+  it("resets execution state and loads runs for the active session on startup", async () => {
+    useSessionStore.setState({ activeSessionId: "session-1" });
+    useExecutionStore.setState({
+      activeRunId: "stale-run",
+      runs: [{ id: "stale-run", status: "running" } as never],
+      progress: { status: "running" } as never,
+    } as never);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchRuns).toHaveBeenCalledWith("session-1");
+    });
+    expect(useExecutionStore.getState().activeRunId).toBeNull();
   });
 
   it("dispatches an open-catalog event on Ctrl+Shift+P", async () => {

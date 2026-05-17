@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { InlineRunResults } from "./InlineRunResults";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -102,6 +103,26 @@ describe("InlineRunResults", () => {
     ).toBeInTheDocument();
   });
 
+  it("opens and closes the Past runs drawer", async () => {
+    useExecutionStore.setState({
+      activeRunId: null,
+      runs: [
+        { id: "run-old-1", session_id: "sess-1", status: "completed" } as never,
+      ],
+    } as never);
+    const user = userEvent.setup();
+
+    render(<InlineRunResults />);
+    await user.click(screen.getByRole("button", { name: /past runs/i }));
+
+    expect(screen.getByRole("dialog", { name: /past pipeline runs/i })).toBeInTheDocument();
+    expect(screen.getByText("run-old-1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /close past runs/i }));
+    expect(
+      screen.queryByRole("dialog", { name: /past pipeline runs/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("hides the 'Past runs' button when no historical runs exist", () => {
     useExecutionStore.setState({
       activeRunId: null,
@@ -113,14 +134,26 @@ describe("InlineRunResults", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("handles a dangling activeRunId (race during reconnect / session switch)", () => {
+  it("shows live progress while the active run row is still loading", () => {
     useExecutionStore.setState({
       activeRunId: "run-ghost",
-      progress: null,
+      progress: {
+        status: "running",
+      } as never,
       runs: [],
     } as never);
-    const { container } = render(<InlineRunResults />);
-    expect(container.querySelector("[data-testid='progress-view-stub']")).toBeNull();
-    expect(container.querySelector("[data-testid='run-outputs-stub']")).toBeNull();
+    render(<InlineRunResults />);
+    expect(screen.getByTestId("progress-view-stub")).toBeInTheDocument();
+  });
+
+  it("loads the active session's runs when mounted", async () => {
+    const loadRuns = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ loadRuns } as never);
+
+    render(<InlineRunResults />);
+
+    await waitFor(() => {
+      expect(loadRuns).toHaveBeenCalledWith("sess-1");
+    });
   });
 });

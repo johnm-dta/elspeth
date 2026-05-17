@@ -70,7 +70,7 @@ Phase 3B is **frontend chrome only**. Same posture as 15a:
 
 - No new external-data ingestion. `GraphMiniView` reads `useSessionStore.compositionState` (already Tier 2 after the backend boundary). `ExportYamlModal` hosts `YamlView`, which fetches `/api/sessions/{id}/state/yaml` — that endpoint already validates at the backend (Tier 3 → Tier 2) before returning the document. `HeaderVersionSelector` reads the existing `stateVersions` already loaded by `loadStateVersions`.
 - No new audit-recorder events. Opening / closing a modal is UI state, not auditable activity. The underlying actions (revert via `revertToVersion`, validate, execute) already record through their existing audit boundaries.
-- No new persistent state, except for one localStorage key (`elspeth_graph_mini_collapsed`, boolean) that mirrors the repo's existing localStorage-backed UI preference pattern. Do not introduce any new width-persistence key; Task 9 removes the transitional `elspeth_inspector_width` use.
+- No new persistent state. The graph mini is not collapsible in Phase 3B; do not add an `elspeth_graph_mini_collapsed` key or any other side-rail preference key. Task 9 removes the transitional `elspeth_inspector_width` use and does not replace it.
 
 Per [CLAUDE.md](../../../CLAUDE.md) "Defensive Programming: Forbidden", store accesses go through typed selectors directly (`useSessionStore((s) => s.compositionState)`). No `try`/`catch` around store calls is introduced. The hash-router rewrite preserves the existing fail-closed behaviour: an unrecognized fragment is rewritten to the canonical no-fragment form via `replaceState`, exactly as 15a's pre-write code did for invalid `VALID_TABS` entries.
 
@@ -231,9 +231,9 @@ describe("HeaderVersionSelector", () => {
     const revertToVersion = vi.fn();
     useSessionStore.setState({
       stateVersions: [
-        { state_id: "st-1", version: 1, created_at: "2026-05-15T10:00:00Z" } as never,
-        { state_id: "st-2", version: 2, created_at: "2026-05-15T10:10:00Z" } as never,
-        { state_id: "st-3", version: 3, created_at: "2026-05-15T10:20:00Z" } as never,
+        { id: "st-1", version: 1, created_at: "2026-05-15T10:00:00Z", node_count: 1 } as never,
+        { id: "st-2", version: 2, created_at: "2026-05-15T10:10:00Z", node_count: 2 } as never,
+        { id: "st-3", version: 3, created_at: "2026-05-15T10:20:00Z", node_count: 3 } as never,
       ],
       revertToVersion,
     } as never);
@@ -242,7 +242,7 @@ describe("HeaderVersionSelector", () => {
     // Surface a revert affordance for v2 (the design-spec exact UI is decided
     // in the component; the contract here is "user can choose version 2").
     fireEvent.click(screen.getByRole("button", { name: /revert to version 2/i }));
-    expect(revertToVersion).toHaveBeenCalledWith("st-2", 2);
+    expect(revertToVersion).toHaveBeenCalledWith("st-2");
   });
 });
 ```
@@ -274,7 +274,7 @@ if (!activeSessionId || !compositionState) return null;
 
 2. The dropdown trigger's accessible name becomes "Composition history" (the design-spec rename). The visual label stays compact (e.g., `v{version} ▾`) but `aria-label="Composition history (currently v{version})"`.
 
-3. The revert-target state and `ConfirmDialog` are kept intact — the confirmation UX is the same.
+3. The revert-target state and `ConfirmDialog` are kept intact — the confirmation UX is the same. The store signature is `revertToVersion(stateId: string)`, so the confirmed action passes `revertTarget.id` only; the version number is display copy, not a second argument.
 
 The inner `VersionSelector` in `InspectorPanel.tsx` is **left in place** for now (Task 9 deletes the whole file). Both renders subscribe to the same store and mutate the same state; the dual-render is harmless.
 
@@ -475,17 +475,27 @@ Run pipeline →).  Ctrl+E is unchanged."
 - Create: `src/elspeth/web/frontend/src/components/sidebar/GraphMiniView.test.tsx`.
 - Create: `src/elspeth/web/frontend/src/components/sidebar/GraphModal.tsx` — placed under `sidebar/` from the start (its trigger and lifecycle belong to the side-rail surface). `GraphView.tsx` itself remains under `inspector/` because Task 9 keeps it (only `InspectorPanel.tsx` and its `.test.tsx` are deleted).
 - Create: `src/elspeth/web/frontend/src/components/sidebar/GraphModal.test.tsx`.
+- Create or verify: `src/elspeth/web/frontend/src/lib/composer-events.ts` — shared modal-open event constants. This module is the canonical event source for Graph/YAML modal open requests from Task 3 onward.
 - Modify: `src/elspeth/web/frontend/src/components/sidebar/SideRail.tsx` — populate the `graph-mini` slot.
-- Export `OPEN_GRAPH_MODAL_EVENT` from `GraphModal.tsx` for the hash router and command palette.
+- `GraphMiniView.tsx`, `GraphModal.tsx`, `useHashRouter.ts`, `CommandPalette.tsx`, `CompletionSummary.tsx`, and `ReadinessRowDetail.tsx` import modal-open constants from `@/lib/composer-events`; component files do not define their own event-name constants.
 
 - [ ] **Step 1: Failing test for `GraphMiniView`**
+
+Before creating the test, create or verify the constants-only module used by all modal openers:
+
+```typescript
+// src/elspeth/web/frontend/src/lib/composer-events.ts
+export const OPEN_GRAPH_MODAL_EVENT = "elspeth-open-graph-modal";
+export const OPEN_YAML_MODAL_EVENT = "elspeth-open-yaml-modal";
+```
 
 Create `src/elspeth/web/frontend/src/components/sidebar/GraphMiniView.test.tsx`:
 
 ```typescript
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { GraphMiniView, OPEN_GRAPH_MODAL_EVENT } from "./GraphMiniView";
+import { GraphMiniView } from "./GraphMiniView";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
 
 // GraphView is heavy (React Flow + dagre + canvas); the mini view does its
@@ -558,8 +568,7 @@ Expected: FAIL — module not found.
 // ============================================================================
 
 import { useSessionStore } from "@/stores/sessionStore";
-
-export const OPEN_GRAPH_MODAL_EVENT = "elspeth-open-graph-modal";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 
 export function GraphMiniView(): JSX.Element {
   const compositionState = useSessionStore((s) => s.compositionState);
@@ -666,7 +675,7 @@ Create `src/elspeth/web/frontend/src/components/sidebar/GraphModal.test.tsx`:
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { GraphModal } from "./GraphModal";
-import { OPEN_GRAPH_MODAL_EVENT } from "@/components/sidebar/GraphMiniView";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 
 vi.mock("@/components/inspector/GraphView", () => ({
   GraphView: () => <div data-testid="graph-view-stub" />,
@@ -721,7 +730,7 @@ describe("GraphModal", () => {
 
 import { useEffect, useRef, useState, useId } from "react";
 import { GraphView } from "@/components/inspector/GraphView";
-import { OPEN_GRAPH_MODAL_EVENT } from "@/components/sidebar/GraphMiniView";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 export function GraphModal(): JSX.Element | null {
@@ -845,8 +854,9 @@ panel."
 // src/elspeth/web/frontend/src/components/sidebar/ExportYamlButton.test.tsx
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { ExportYamlButton, OPEN_YAML_MODAL_EVENT } from "./ExportYamlButton";
+import { ExportYamlButton } from "./ExportYamlButton";
 import { useSessionStore } from "@/stores/sessionStore";
+import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 
 describe("ExportYamlButton", () => {
   it("renders nothing when no active session", () => {
@@ -877,8 +887,7 @@ describe("ExportYamlButton", () => {
 
 ```typescript
 import { useSessionStore } from "@/stores/sessionStore";
-
-export const OPEN_YAML_MODAL_EVENT = "elspeth-open-yaml-modal";
+import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 
 export function ExportYamlButton(): JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -903,7 +912,7 @@ export function ExportYamlButton(): JSX.Element | null {
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ExportYamlModal } from "./ExportYamlModal";
-import { OPEN_YAML_MODAL_EVENT } from "@/components/sidebar/ExportYamlButton";
+import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 
 vi.mock("@/components/inspector/YamlView", () => ({
   YamlView: () => <div data-testid="yaml-view-stub" />,
@@ -943,7 +952,7 @@ describe("ExportYamlModal", () => {
 ```typescript
 import { useEffect, useRef, useState, useId } from "react";
 import { YamlView } from "@/components/inspector/YamlView";
-import { OPEN_YAML_MODAL_EVENT } from "@/components/sidebar/ExportYamlButton";
+import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 export function ExportYamlModal(): JSX.Element | null {
@@ -1210,3 +1219,11 @@ importers updated."
 **BLOCKER (Slot contract) — ExecuteButton behaviour tests moved out of SideRail.** Task 2 now keeps `SideRail.test.tsx` to slot-placement assertions only. Run-button enable/disable/execute behaviour lives in `ExecuteButton.test.tsx`, preserving the contract that `SideRail` never imports or mounts slot content directly.
 
 **IMPORTANT (Layout consistency) — Width persistence decision aligned with 15b2.** The 15a transitional `elspeth_inspector_width` read survives only until Task 9; Phase 3B deletes width persistence and hardcodes `SIDERAIL_WIDTH = 320`. No Phase 6 deprecation step remains for that key.
+
+### 2026-05-17 — Authoritative-plan no-go blockers absorbed
+
+**BLOCKER (Version selector contract):** Task 1's `HeaderVersionSelector` test data now uses the live `CompositionStateVersion` shape (`id`, not `state_id`, plus `node_count`) and asserts the live store signature `revertToVersion(stateId)` rather than a nonexistent second `version` argument.
+
+**BLOCKER (Event constant ownership):** Task 3 now creates/verifies `src/lib/composer-events.ts` as the canonical owner of `OPEN_GRAPH_MODAL_EVENT` and `OPEN_YAML_MODAL_EVENT`. Graph/YAML side-rail components, modals, router, command palette, and legacy caller retargets all import from that shared module; component files do not define their own event names.
+
+**IMPORTANT (Persistent-state scope):** The trust-tier section now states that Phase 3B adds no new persistent state. The previously mentioned `elspeth_graph_mini_collapsed` key was removed because no task implements a collapsible graph mini.

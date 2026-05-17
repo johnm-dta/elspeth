@@ -47,6 +47,35 @@ describe("HeaderSessionSwitcher", () => {
     expect(createSession).toHaveBeenCalled();
   });
 
+  it("renames a session from the header menu", async () => {
+    const renameSession = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ renameSession } as never);
+    const user = userEvent.setup();
+
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /first/i }));
+    await user.click(screen.getAllByRole("menuitem", { name: /^rename$/i })[0]);
+    const input = screen.getByRole("textbox", { name: /^rename session$/i });
+    await user.clear(input);
+    await user.type(input, "Updated title");
+    await user.click(screen.getByRole("button", { name: /save session name/i }));
+
+    expect(renameSession).toHaveBeenCalledWith("s1", "Updated title");
+  });
+
+  it("archives a session from the header menu after confirmation", async () => {
+    const archiveSession = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ archiveSession } as never);
+    const user = userEvent.setup();
+
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /first/i }));
+    await user.click(screen.getAllByRole("menuitem", { name: /^archive$/i })[1]);
+    await user.click(screen.getByRole("button", { name: /^archive$/i }));
+
+    expect(archiveSession).toHaveBeenCalledWith("s2");
+  });
+
   it("closes on Escape", async () => {
     render(<HeaderSessionSwitcher />);
     await userEvent.click(screen.getByRole("button", { name: /first/i }));

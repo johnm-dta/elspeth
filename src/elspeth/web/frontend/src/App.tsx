@@ -20,6 +20,7 @@ import { useExecutionStore } from "./stores/executionStore";
 import { usePreferencesStore } from "./stores/preferencesStore";
 import { useHashRouter } from "./hooks/useHashRouter";
 import { useAuth } from "./hooks/useAuth";
+import { useSessionLifecycle } from "./hooks/useSession";
 import { SWITCH_TAB_EVENT } from "./components/common/CommandPalette";
 import type { SystemStatus } from "./types/index";
 
@@ -74,6 +75,7 @@ function App() {
 
   // Sync URL hash ↔ session/tab state for deep linking & back/forward
   const { redirectToast } = useHashRouter();
+  useSessionLifecycle();
 
   const createSession = useSessionStore((s) => s.createSession);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -240,7 +242,7 @@ function App() {
         <h1 className="sr-only">ELSPETH Pipeline Composer</h1>
 
         {redirectToast && (
-          <div role="status" className="alert-banner alert-banner--info">
+          <div role="alert" className="alert-banner alert-banner--info">
             <span>{redirectToast.message}</span>
             <button
               onClick={redirectToast.dismiss}

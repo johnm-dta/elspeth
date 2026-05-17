@@ -76,6 +76,11 @@ export function UserMenu({
     onSignOut();
   }, [onSignOut]);
 
+  const onThemeToggle = useCallback(() => {
+    toggleTheme();
+    setOpen(false);
+  }, [toggleTheme]);
+
   return (
     <div ref={wrapperRef} className="user-menu" style={{ position: "relative" }}>
       <button
@@ -108,7 +113,7 @@ export function UserMenu({
           <li style={{ margin: 0 }}>
             <button
               type="button"
-              onClick={toggleTheme}
+              onClick={onThemeToggle}
               aria-label={themeLabel}
               title={themeLabel}
               style={{

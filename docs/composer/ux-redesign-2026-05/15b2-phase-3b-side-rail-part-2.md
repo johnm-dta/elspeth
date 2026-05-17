@@ -63,21 +63,23 @@ describe("useHashRouter — Phase 3B fragment migration", () => {
     expect(window.location.hash).toBe("#/sess-1");
   });
 
-  it("opens the graph modal and rewrites for #/{id}/graph", () => {
+  it("opens the graph modal and rewrites for #/{id}/graph", async () => {
     const handler = vi.fn();
     window.addEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
     window.location.hash = "#/sess-1/graph";
     renderHook(() => useHashRouter());
+    await act(async () => {});
     expect(handler).toHaveBeenCalled();
     expect(window.location.hash).toBe("#/sess-1");
     window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
   });
 
-  it("opens the yaml modal and rewrites for #/{id}/yaml", () => {
+  it("opens the yaml modal and rewrites for #/{id}/yaml", async () => {
     const handler = vi.fn();
     window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
     window.location.hash = "#/sess-1/yaml";
     renderHook(() => useHashRouter());
+    await act(async () => {});
     expect(handler).toHaveBeenCalled();
     expect(window.location.hash).toBe("#/sess-1");
     window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
@@ -130,7 +132,7 @@ Expected: FAIL — current router has `VALID_TABS` and routes `spec`/`runs` to t
 
 - [ ] **Step 3a: Create or verify `src/lib/composer-events.ts`**
 
-> **Review finding (IMPORTANT):** `OPEN_GRAPH_MODAL_EVENT` and `OPEN_YAML_MODAL_EVENT` are currently exported from their respective component files (`GraphMiniView.tsx`, `ExportYamlButton.tsx`). `useHashRouter` importing from component files creates a circular dependency risk (hook → component → hook). Lift the constants into a shared events module. Update all importers.
+> **Review finding (IMPORTANT):** `OPEN_GRAPH_MODAL_EVENT` and `OPEN_YAML_MODAL_EVENT` must live in a shared constants module. `useHashRouter` importing from component files creates a circular dependency risk (hook → component → hook). Task 3 creates this module before GraphMiniView's first test; this step verifies it still exists and updates any missed importers.
 
 Create `src/elspeth/web/frontend/src/lib/composer-events.ts`:
 
@@ -139,9 +141,8 @@ Create `src/elspeth/web/frontend/src/lib/composer-events.ts`:
 // Composer event constants — shared across useHashRouter, modal components,
 // and any consumer that needs to open a modal programmatically.
 //
-// All parties import from this module; component files re-export for
-// backward-compatibility during the transition commit only, then the
-// re-exports are removed in Task 10.
+// All parties import from this module. Component files must not define their
+// own event-name constants.
 // ============================================================================
 
 export const OPEN_GRAPH_MODAL_EVENT = "elspeth-open-graph-modal";
@@ -149,12 +150,12 @@ export const OPEN_YAML_MODAL_EVENT = "elspeth-open-yaml-modal";
 ```
 
 Update importers:
-- `GraphMiniView.tsx` — remove its `export const OPEN_GRAPH_MODAL_EVENT` declaration; import from `@/lib/composer-events`.
-- `ExportYamlButton.tsx` — remove its `export const OPEN_YAML_MODAL_EVENT` declaration; import from `@/lib/composer-events`.
+- `GraphMiniView.tsx` — import `OPEN_GRAPH_MODAL_EVENT` from `@/lib/composer-events`; if a local export slipped in during Task 3, delete it.
+- `ExportYamlButton.tsx` — import `OPEN_YAML_MODAL_EVENT` from `@/lib/composer-events`; if a local export slipped in during Task 4, delete it.
 - `GraphModal.tsx` — update import.
 - `ExportYamlModal.tsx` — update import.
 - `useHashRouter.ts` — update import (see Step 3b below).
-- `CommandPalette.tsx` — update any hard-coded string literals to import the named constants (or keep them as literals per the existing comment; either is acceptable, but one canonical source is preferred).
+- `CommandPalette.tsx`, `CompletionSummary.tsx`, and `ReadinessRowDetail.tsx` — update modal-open dispatches to import the named constants from this module. Do not keep hard-coded modal event strings in these files.
 
 - [ ] **Step 3b: Rewrite `useHashRouter.ts`**
 
@@ -360,33 +361,35 @@ Changes:
 - Rename `tab-graph` → `open-graph-modal`, retarget to dispatch `OPEN_GRAPH_MODAL_EVENT`. Title: "Open graph view". Shortcut: `Ctrl+Shift+G`.
 - Rename `tab-yaml` → `open-yaml-export`, retarget to dispatch `OPEN_YAML_MODAL_EVENT`. Title: "Export YAML". Shortcut: `Ctrl+Shift+Y`.
 - The internal `switchTab` helper is gone; commands call `window.dispatchEvent` directly.
-- The import of `SWITCH_TAB_EVENT` is removed; the constant export *survives* in the file (per §"Open scope questions resolved" 6) but is no longer used by the palette's own commands.
+- The import/use of `SWITCH_TAB_EVENT` is removed from the palette commands. The constant export may survive only until Task 10, while `CompletionSummary.tsx` and `ReadinessRowDetail.tsx` are retargeted; after Task 10 it must be gone.
 
 - [ ] **Step 1: Failing test**
 
 Add to `CommandPalette.test.tsx`:
 
 ```typescript
+import { OPEN_GRAPH_MODAL_EVENT, OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
+
 it("opens the graph modal via the command 'Open graph view'", async () => {
   const handler = vi.fn();
-  window.addEventListener("elspeth-open-graph-modal", handler);
+  window.addEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
   const { getByRole, getByText } = render(
     <CommandPalette isOpen onClose={() => {}} />,
   );
   fireEvent.click(getByText(/open graph view/i));
   expect(handler).toHaveBeenCalled();
-  window.removeEventListener("elspeth-open-graph-modal", handler);
+  window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
 });
 
 it("opens the yaml export modal via the command 'Export YAML'", () => {
   const handler = vi.fn();
-  window.addEventListener("elspeth-open-yaml-modal", handler);
+  window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
   const { getByText } = render(
     <CommandPalette isOpen onClose={() => {}} />,
   );
   fireEvent.click(getByText(/export yaml/i));
   expect(handler).toHaveBeenCalled();
-  window.removeEventListener("elspeth-open-yaml-modal", handler);
+  window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
 });
 
 it("does not list Spec or Runs as navigation commands", () => {
@@ -400,7 +403,13 @@ it("does not list Spec or Runs as navigation commands", () => {
 
 - [ ] **Step 2: Apply the changes in `CommandPalette.tsx`**
 
-Replace lines 140–180 (the `switchTab` helper and the four `tab-*` command pushes) with two direct commands:
+At the top of `CommandPalette.tsx`, import the shared event constants:
+
+```typescript
+import { OPEN_GRAPH_MODAL_EVENT, OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
+```
+
+Then replace lines 140–180 (the `switchTab` helper and the four `tab-*` command pushes) with two direct commands:
 
 ```typescript
 cmds.push({
@@ -409,7 +418,7 @@ cmds.push({
   category: "navigation",
   shortcut: "Ctrl+Shift+G",
   action: () => {
-    window.dispatchEvent(new CustomEvent("elspeth-open-graph-modal"));
+    window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
     onClose();
   },
 });
@@ -420,13 +429,13 @@ cmds.push({
   category: "navigation",
   shortcut: "Ctrl+Shift+Y",
   action: () => {
-    window.dispatchEvent(new CustomEvent("elspeth-open-yaml-modal"));
+    window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
     onClose();
   },
 });
 ```
 
-Note: the event names are inlined as string literals here (not imported from `GraphMiniView` / `ExportYamlButton`) to avoid a circular import (CommandPalette is imported widely). The constants are also exported from those files for typed importers; the palette uses literals deliberately.
+Note: import event constants from `@/lib/composer-events`, not from `GraphMiniView` / `ExportYamlButton`. The shared module exists specifically to avoid a component import cycle while keeping one canonical source for event names.
 
 - [ ] **Step 3: Run all tests + smoke render**
 
@@ -485,7 +494,13 @@ it("no longer documents Alt+1/2/3/4 tab shortcuts", () => {
 
 - [ ] **Step 2: Update `App.tsx`**
 
-Replace the `Alt+1/2/3/4` block in `App.tsx:123–139` with handlers for the two new shortcuts:
+At the top of `App.tsx`, import the shared event constants:
+
+```typescript
+import { OPEN_GRAPH_MODAL_EVENT, OPEN_YAML_MODAL_EVENT } from "./lib/composer-events";
+```
+
+Then replace the `Alt+1/2/3/4` block in `App.tsx:123–139` with handlers for the two new shortcuts:
 
 ```typescript
 // Ctrl+Shift+G / Cmd+Shift+G: Open graph view modal
@@ -495,7 +510,7 @@ if (
   (e.ctrlKey || e.metaKey)
 ) {
   e.preventDefault();
-  window.dispatchEvent(new CustomEvent("elspeth-open-graph-modal"));
+  window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
   return;
 }
 
@@ -506,12 +521,12 @@ if (
   (e.ctrlKey || e.metaKey)
 ) {
   e.preventDefault();
-  window.dispatchEvent(new CustomEvent("elspeth-open-yaml-modal"));
+  window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
   return;
 }
 ```
 
-Also: the existing dispatch in `confirmFanoutExecution` at `App.tsx:61` (`new CustomEvent(SWITCH_TAB_EVENT, { detail: "runs" })`) is **removed** — there is no Runs tab. The post-fan-out behaviour is to do nothing special; `InlineRunResults` will pick up the activeRunId via its store subscription as the run starts.
+Also: if any stale dispatch remains in `confirmFanoutExecution` (`new CustomEvent(SWITCH_TAB_EVENT, { detail: "runs" })`), remove it — there is no Runs tab. In the current Phase 3A worktree this should already be absent. The post-fan-out behaviour is to do nothing special; `InlineRunResults` will pick up the activeRunId via its store subscription as the run starts.
 
 ```typescript
 const confirmFanoutExecution = useCallback(async () => {
@@ -568,7 +583,7 @@ run results pick up the new run from the store directly."
 - Delete: `src/elspeth/web/frontend/src/components/inspector/SpecView.test.tsx` (ditto).
 - Delete: `src/elspeth/web/frontend/src/components/inspector/RunsView.tsx` (ditto).
 - Delete: `src/elspeth/web/frontend/src/components/inspector/RunsView.test.tsx` (ditto).
-- Modify: `src/elspeth/web/frontend/src/components/common/Layout.tsx` — remove the `sidebar` slot prop entirely (already unused after 15a); rename the `inspector` slot prop to `siderail`; remove the `inspector-overlay` mode (the side rail is fixed-width and not collapsible in 15b — Phase 6's completion bar might re-introduce this, but Phase 3 deletes it); delete the transitional `elspeth_inspector_width` reader/writer from 15a and do not replace it with a new width-persistence key.
+- Modify: `src/elspeth/web/frontend/src/components/common/Layout.tsx` — remove the `sidebar` slot prop entirely (already unused after 15a); rename the `inspector` slot prop to `siderail`; remove the `inspector-overlay` mode (the side rail is fixed-width and not collapsible in 15b — Phase 6's completion bar might re-introduce this, but Phase 3 deletes it); delete the transitional `elspeth_inspector_width` reader/writer from 15a and do not replace it with a new width-persistence key; preserve the existing `<DefaultModeChangedBanner />` mount inside the chat column.
 - Modify: `src/elspeth/web/frontend/src/App.tsx` — replace `<InspectorPanel />` with `<SideRail />`; delete the `import { InspectorPanel }` line; delete the `<SessionSidebar />` mount that 15a left as a no-op-stripped pass-through (if any survived).
 - Modify: `src/elspeth/web/frontend/src/components/common/Layout.test.tsx` — drop tests of overlay mode, sidebar-collapse, and inspector-resize. Add a test that asserts the two-column grid: `chat`, `siderail`.
 
@@ -655,6 +670,22 @@ it("renders the validation banner when validationResult is present", () => {
 
 The slot-presence assertion (that `<SideRail validationBannerSlot={…} />` places the prop content under `data-testid="siderail-slot-validation-banner"`) lives in `SideRail.test.tsx` — see Step 6 below.
 
+Also preserve Phase 1B's default-mode banner host in `Layout.test.tsx`. Mock the component at the top of the test file if necessary:
+
+```typescript
+vi.mock("./DefaultModeChangedBanner", () => ({
+  DefaultModeChangedBanner: () => <div data-testid="default-mode-changed-banner" />,
+}));
+
+it("keeps the default-mode changed banner in the chat column", () => {
+  render(<Layout chat={<div data-testid="chat" />} siderail={<div data-testid="rail" />} />);
+  const chatColumn = screen.getByTestId("chat").closest(".layout-chat");
+  expect(chatColumn).toContainElement(
+    screen.getByTestId("default-mode-changed-banner"),
+  );
+});
+```
+
 - [ ] **Step 2: Run test to verify failure**
 
 ```bash
@@ -665,11 +696,12 @@ Expected: FAIL.
 
 - [ ] **Step 3: Rewrite `Layout.tsx`**
 
-Replace the existing Layout. Strip out: `sidebar` prop, `sidebarCollapsed` state, `INSPECTOR_WIDTH_KEY` / `elspeth_inspector_width` persistence, the overlay-mode branch, the resize handle. Keep only:
+Replace the existing Layout. Strip out: `sidebar` prop, `sidebarCollapsed` state, `INSPECTOR_WIDTH_KEY` / `elspeth_inspector_width` persistence, the overlay-mode branch, the resize handle. Preserve the Phase 1B `<DefaultModeChangedBanner />` mount in the chat column. Keep only:
 
 ```typescript
 import { type ReactNode } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { DefaultModeChangedBanner } from "./DefaultModeChangedBanner";
 
 interface LayoutProps {
   chat: ReactNode;
@@ -685,6 +717,7 @@ export function Layout({ chat, siderail }: LayoutProps): JSX.Element {
       style={{ gridTemplateColumns: `1fr ${SIDERAIL_WIDTH}px` }}
     >
       <div className="layout-chat">
+        <DefaultModeChangedBanner />
         <ErrorBoundary label="Chat panel">{chat}</ErrorBoundary>
       </div>
       <div className="layout-siderail">
@@ -701,7 +734,12 @@ Find the `<Layout>` mount and replace:
 
 ```tsx
 <Layout
-  chat={<ChatPanel />}
+  chat={
+    <ChatPanel
+      onOpenSecrets={openSecrets}
+      onOpenComposerPreferences={openComposerSettings}
+    />
+  }
   siderail={<SideRail />}
 />
 ```
@@ -838,18 +876,24 @@ Every match is either:
 
 - [ ] **Step 2: Delete `SWITCH_TAB_EVENT` and all dispatch/listener sites (IMPORTANT)**
 
-> **Review finding (IMPORTANT):** `SWITCH_TAB_EVENT` is dead code after Phase 3B. Delete it now — do not defer to Phase 6. Per §"Open scope questions resolved" 6 (updated in 15b1): deletion in-phase, not deferred.
+> **Review finding (IMPORTANT):** `SWITCH_TAB_EVENT` is dead code after Phase 3B. Delete it now — do not defer to Phase 6. Per §"Open scope questions resolved" 6 (updated in 15b1): deletion in-phase, not deferred. This cleanup must retarget the two non-inspector user-facing callers that survived Phase 3A: `CompletionSummary.tsx` and `ReadinessRowDetail.tsx`.
 
 Actions:
 1. Find all references:
    ```bash
    grep -RIn "SWITCH_TAB_EVENT" src/elspeth/web/frontend/src
    ```
-2. Delete the export from `CommandPalette.tsx`.
-3. Delete any remaining `dispatchEvent(SWITCH_TAB_EVENT, ...)` calls.
-4. Delete any remaining `addEventListener(SWITCH_TAB_EVENT, ...)` listeners (should all be gone after Task 9 deleted `InspectorPanel.tsx`; verify).
-5. Update `CommandPalette.tsx` to dispatch `OPEN_GRAPH_MODAL_EVENT` / `OPEN_YAML_MODAL_EVENT` directly for the graph and YAML commands (already done in Task 7; verify no stale `SWITCH_TAB_EVENT` use remains).
-6. Re-run the grep — expect zero matches.
+2. Retarget `src/elspeth/web/frontend/src/components/chat/guided/CompletionSummary.tsx`: import `OPEN_YAML_MODAL_EVENT` from `@/lib/composer-events`; the "Review YAML" button dispatches `new CustomEvent(OPEN_YAML_MODAL_EVENT)`. Update `CompletionSummary.test.tsx` so the button test listens for `OPEN_YAML_MODAL_EVENT` and says "opens the YAML export modal" rather than "dispatches a YAML inspector-tab switch".
+3. Retarget `src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx`: import `OPEN_GRAPH_MODAL_EVENT` from `@/lib/composer-events`; `handleJump` still calls `selectNode(componentId)`, then dispatches `new CustomEvent(OPEN_GRAPH_MODAL_EVENT)`, then closes the detail. Update `ReadinessRowDetail.test.tsx` to listen for `OPEN_GRAPH_MODAL_EVENT` and assert the graph modal request fired. Do not reintroduce tab state.
+4. Verify `CommandPalette.tsx` already dispatches `OPEN_GRAPH_MODAL_EVENT` / `OPEN_YAML_MODAL_EVENT` directly from Task 7; fix it if a stale `SWITCH_TAB_EVENT` use remains.
+5. Delete the `SWITCH_TAB_EVENT` export from `CommandPalette.tsx`.
+6. Delete any remaining `dispatchEvent(SWITCH_TAB_EVENT, ...)` calls.
+7. Delete any remaining `addEventListener(SWITCH_TAB_EVENT, ...)` listeners.
+8. Re-run the grep across both source and tests:
+   ```bash
+   grep -RIn "SWITCH_TAB_EVENT" src/elspeth/web/frontend/src src/elspeth/web/frontend/tests
+   ```
+   Expected: zero matches.
 
 > **No filigree observation is filed.** The work is done here.
 
@@ -899,7 +943,7 @@ Not deferred to Phase 6."
 | Validation banner becomes invisible after the inspector is deleted | Task 9 explicitly mounts the banner in `SideRail`'s `validation-banner` slot. The banner subscribes to the same `executionStore.validationResult` it always did. Phase 2 (audit-readiness panel) absorbs this slot later; until then the banner is the indicator. |
 | Catalog drawer hosts in two places mid-phase (inspector mounts its own, side rail mounts another) | Task 5 cuts the inspector's `<CatalogDrawer>` mount in the same commit that mounts the side-rail one. There is never a state where both render. |
 | `OPEN_CATALOG_EVENT` import path break | Task 5 moves the constant declaration to `CatalogButton.tsx` and uses `grep` to find every importer (`App.tsx`). Build will fail loudly if any importer is missed; mitigation is to run `npm run build` after Task 5. |
-| Hash-router race: a graph/yaml fragment dispatches the modal event before `<GraphModal>` is mounted | The router's `useEffect` runs at app mount; modals mount at the same point in the render tree (also via `useEffect`). React batches mount-effects within a single commit; both run before any DOM event handler fires. If profiling shows a race, wrap the dispatch in `requestAnimationFrame` — the modal will be mounted by the next frame. |
+| Hash-router race: a graph/yaml fragment dispatches the modal event before `<GraphModal>` is mounted | Task 6 uses `queueMicrotask(() => dispatchEvent(...))` and includes a cold-load integration test that mounts `useHashRouter()` and `<GraphModal />` in the same tree. Do not use synchronous dispatch; if the cold-load test fails in implementation, fix the scheduling and test together. |
 | Users hit Ctrl+Shift+G or Ctrl+Shift+Y in a browser that already binds them (e.g., Ctrl+Shift+Y is "history" in some Firefox versions) | The handlers call `e.preventDefault()` first; that's sufficient for app-focused key events. If a user reports a clash, the shortcut can be remapped without an architectural change. Documented in `ShortcutsHelp` and the design-doc-aligned vocabulary leaves room for rebinding. |
 | Stale `#/{id}/spec` bookmarks open the page in a strange-looking state (no modal, no error) | The router's silent rewrite produces a canonical URL and the standard composition surface. There is no error. This is the design-intended behaviour — bookmark continues to work, just lands on the canonical home rather than the (now-deleted) spec listing. |
 | The graph mini doesn't render anything useful for very large pipelines (>20 transforms) | The mini collapses to bucket counts ("src • 17 tx • sink"), not per-node rendering. The full graph modal is the right tool for large pipelines. Phase 8 polish may revisit if Marcus or Linda find the bucket compression unhelpful. |
@@ -924,7 +968,7 @@ Not deferred to Phase 6."
 
 **CRITICAL (Systems):** `useHashRouter` now uses `queueMicrotask(() => dispatchEvent(...))` for modal-open dispatches, preventing the cold-load race where events fire before modal listeners have registered. A cold-load integration test added to Task 6 Step 1.
 
-**IMPORTANT (Architecture):** `OPEN_GRAPH_MODAL_EVENT` and `OPEN_YAML_MODAL_EVENT` lifted from their respective component files into a shared `src/lib/composer-events.ts` module. `useHashRouter`, modal components, and all consumers import from there. Eliminates the hook → component circular dependency risk. Task 6 Step 3 split into Step 3a (create the events module) and Step 3b (rewrite the hook).
+**IMPORTANT (Architecture):** `OPEN_GRAPH_MODAL_EVENT` and `OPEN_YAML_MODAL_EVENT` are standardized in the shared `src/lib/composer-events.ts` module. `useHashRouter`, modal components, and all consumers import from there; if earlier task execution introduced component-local exports, delete them during Task 6 Step 3a. Eliminates the hook -> component circular dependency risk.
 
 **CRITICAL (Systems):** Task 9 has a new explicit sub-step 4a: BEFORE deleting `InspectorPanel.tsx`, relocate `<AuditReadinessPanel />` from inside the inspector into `SideRail.auditReadinessSlot` via `App.tsx`. Failing test added for the post-Task-9 state. Prevents silent removal of the panel from the UI.
 
@@ -945,3 +989,13 @@ Not deferred to Phase 6."
 **IMPORTANT (Layout consistency) — Width persistence decision aligned with 15b1.** Task 9 now explicitly deletes the transitional `elspeth_inspector_width` reader/writer and keeps `SIDERAIL_WIDTH = 320` as a fixed Phase 3B width with no replacement persistence key.
 
 **IMPORTANT (Hook compatibility) — 15b router preserves 15a return shape.** The 15b `useHashRouter` rewrite returns `{ redirectToast: null }` so `App.tsx` can keep the 15a destructuring while stale fragments are canonicalized immediately.
+
+### 2026-05-17 — Authoritative-plan no-go blockers absorbed
+
+**BLOCKER (Layout behaviour preservation):** Task 9 now preserves `DefaultModeChangedBanner` inside the chat column when simplifying `Layout.tsx`; the replacement code and tests were updated so Phase 1B's default-mode banner host is not silently dropped.
+
+**BLOCKER (App wiring preservation):** Task 9's `App.tsx` snippet now keeps the existing `ChatPanel` callbacks (`onOpenSecrets`, `onOpenComposerPreferences`) instead of replacing the mount with bare `<ChatPanel />`.
+
+**BLOCKER (Router test timing):** Task 6's graph/yaml fragment tests now await a microtask after `renderHook()` because the planned implementation deliberately dispatches modal-open events via `queueMicrotask`.
+
+**BLOCKER (SWITCH_TAB_EVENT callers):** Task 10 now explicitly retargets `CompletionSummary.tsx` and `ReadinessRowDetail.tsx` to `OPEN_YAML_MODAL_EVENT` / `OPEN_GRAPH_MODAL_EVENT` before deleting `SWITCH_TAB_EVENT`.

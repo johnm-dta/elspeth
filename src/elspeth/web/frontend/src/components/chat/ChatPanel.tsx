@@ -250,6 +250,7 @@ export function ChatPanel({
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
         <CompletionSummary terminal={guidedSession.terminal} />
+        <InlineRunResults />
       </div>
     );
   }
@@ -367,6 +368,7 @@ export function ChatPanel({
             placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
           />
         </section>
+        <InlineRunResults />
       </div>
     );
   }

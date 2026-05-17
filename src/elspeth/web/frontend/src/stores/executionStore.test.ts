@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useExecutionStore } from "./executionStore";
+import { useSessionStore } from "./sessionStore";
 import { connectToRun } from "@/api/websocket";
 import type { Run, RunAccounting, RunDiagnostics, RunEvent, ValidationResult } from "@/types/index";
 
@@ -21,6 +22,7 @@ describe("executionStore.validate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
   });
 
   it("stores validation result on success", async () => {
@@ -84,6 +86,31 @@ describe("executionStore.validate", () => {
     expect(state.validationResult).toBeNull();
     expect(state.isValidating).toBe(false);
     expect(state.error).toContain("internal error");
+  });
+
+  it("does not store a validation result that resolves after the user switches sessions", async () => {
+    const staleResult: ValidationResult = {
+      is_valid: true,
+      summary: "Stale session result",
+      checks: [],
+      errors: [],
+      warnings: [],
+    };
+    let resolveValidation: (result: ValidationResult) => void = () => {};
+    const pendingValidation = new Promise<ValidationResult>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const { validatePipeline } = await import("@/api/client");
+    (validatePipeline as ReturnType<typeof vi.fn>).mockReturnValue(pendingValidation);
+
+    const validatePromise = useExecutionStore.getState().validate("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    resolveValidation(staleResult);
+    await validatePromise;
+
+    const state = useExecutionStore.getState();
+    expect(state.validationResult).toBeNull();
+    expect(state.isValidating).toBe(false);
   });
 });
 

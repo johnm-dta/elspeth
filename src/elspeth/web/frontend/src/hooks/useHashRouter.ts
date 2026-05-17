@@ -97,6 +97,11 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
     maybeShowRedirectToast(staleTab);
 
     const resolvedTab = tab ?? DEFAULT_TAB;
+    if (sessionId && staleTab) {
+      const redirectedHash = buildHash(sessionId, resolvedTab);
+      lastWrittenHash.current = redirectedHash;
+      window.history.replaceState(null, "", redirectedHash);
+    }
     currentTab.current = resolvedTab;
     window.dispatchEvent(
       new CustomEvent(SWITCH_TAB_EVENT, { detail: resolvedTab }),

@@ -84,6 +84,10 @@ vi.mock("@/components/blobs/BlobManager", () => ({
   BlobManager: () => <div data-testid="blob-manager" />,
 }));
 
+vi.mock("@/components/execution/InlineRunResults", () => ({
+  InlineRunResults: () => <div data-testid="inline-run-results" />,
+}));
+
 describe("ChatPanel", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -288,6 +292,7 @@ describe("ChatPanel mode discriminator", () => {
     // Per-step placeholder + onSend wiring are exercised in the two
     // dedicated tests below.
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
   });
 
   it("renders a persistent guided workflow stepper with the active step marked", () => {
@@ -551,6 +556,7 @@ describe("ChatPanel mode discriminator", () => {
 
     // Freeform surface suppressed.
     expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
+    expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
   });
 
   it("does not render ExitToFreeformButton on the completed surface (regression pin for elspeth-obs-0a1002de6d)", () => {

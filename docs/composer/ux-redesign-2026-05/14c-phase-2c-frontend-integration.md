@@ -134,8 +134,6 @@ If all four return non-empty: Task 4B is already complete. Mark this checkbox an
 
 ## Task 4C: Migrate AuditReadinessPanel `userExpanded` to per-session store state
 
-> **Issue:** No filigree issue filed yet. The next session should `mcp__filigree__create_issue` to create a tracking issue for this task before starting work.
-
 **Why this task exists.** Task 4B introduced `const [userExpanded, setUserExpanded] = useState(false)` in `AuditReadinessPanel.tsx` — component-local state that controls whether the user has explicitly chosen to keep the panel expanded. This is correct for Phase 2C's mount location (inside `InspectorPanel.tsx`). However, Phase 3B Task 9 Step 4a (`15b2-phase-3b-side-rail-part-2.md`) relocates `<AuditReadinessPanel />` from `InspectorPanel.tsx` to `App.tsx → SideRail.auditReadinessSlot`. This relocation is a full component remount: the old component unmounts, the new one mounts, and React resets all component-local state to initial values. The result is that `userExpanded` resets to `false` at Phase 3B's deploy boundary. A user who had explicitly expanded the panel — to keep it persistently visible while iterating on a pipeline that cycles between warning and all-green states — will find it collapsed without warning. The store-keyed snapshot data survives (zustand, keyed by sessionId), but the user's preference is silently discarded. In an auditability-first UI, visible state loss at a deploy boundary the user cannot predict undermines trust in the panel's reliability as an indicator.
 
 The fix is to migrate `userExpanded` from component-local `useState` into `auditReadinessStore` as a per-session keyed map. This mirrors the pattern already established for six other per-session values (`snapshotsBySession`, `explainsBySession`, `isLoadingBySession`, `errorBySession`, `isLoadingExplainBySession`, `explainErrorBySession`). The component reads `userExpanded` from the store (keyed by `activeSessionId`) and writes via the store action. After the migration, a Phase 3B remount reads the stored preference and renders correctly.
@@ -145,7 +143,7 @@ The fix is to migrate `userExpanded` from component-local `useState` into `audit
 - Modify: `frontend/src/components/audit/AuditReadinessPanel.tsx` — replace component-local `useState` with store selectors.
 - Modify: `frontend/src/components/audit/AuditReadinessPanel.test.tsx` — add one remount-safety regression test.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append ONE new test to the `describe("AuditReadinessPanel", ...)` block in `frontend/src/components/audit/AuditReadinessPanel.test.tsx`:
 
@@ -183,7 +181,7 @@ Append ONE new test to the `describe("AuditReadinessPanel", ...)` block in `fron
 
 This test **FAILS** with the current implementation because the second `render(<AuditReadinessPanel />)` starts a fresh component with `useState(false)`, so `userExpanded` is `false`, `anyActionable` is `false`, and `showExpanded = false` — the panel collapses.
 
-- [ ] **Step 2: Run the test — expect FAIL**
+- [x] **Step 2: Run the test — expect FAIL**
 
 ```bash
 cd /home/john/elspeth/.worktrees/phase-2a-backend
@@ -195,7 +193,7 @@ npx --prefix src/elspeth/web/frontend vitest run \
 
 Expected: the new "preserves the user's expand preference" test fails; all prior tests in the file pass.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Two changes in parallel:
 
@@ -272,7 +270,7 @@ Update the two call sites that call `setUserExpanded(bool)` to call `setUserExpa
 
 Remove `useState` from the `react` import if `userExpanded` was its only use. (`selectedRowId` and `explainOpen` still use `useState`, so the import is not removed in full — verify before removing.)
 
-- [ ] **Step 4: Run tests — expect PASS**
+- [x] **Step 4: Run tests — expect PASS**
 
 ```bash
 cd /home/john/elspeth/.worktrees/phase-2a-backend
@@ -289,7 +287,7 @@ Run the full frontend suite to confirm no regression:
 npx --prefix src/elspeth/web/frontend vitest run 2>&1 | tail -10
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/john/elspeth/.worktrees/phase-2a-backend
@@ -317,7 +315,7 @@ A small drawer/popover. Contents:
 
 > **Phase 8 deferral marker.** No telemetry. When telemetry lands, this is the click-handler that fires the audit-row-click event.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `frontend/src/components/audit/ReadinessRowDetail.test.tsx`:
 
@@ -478,9 +476,9 @@ describe("ReadinessRowDetail", () => {
 });
 ```
 
-- [ ] **Step 2: Run test — expect FAIL**
+- [x] **Step 2: Run test — expect FAIL**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `frontend/src/components/audit/ReadinessRowDetail.tsx`:
 
@@ -587,9 +585,9 @@ export function ReadinessRowDetail({ row, onClose }: ReadinessRowDetailProps) {
 }
 ```
 
-- [ ] **Step 4: Run tests — expect PASS**
+- [x] **Step 4: Run tests — expect PASS**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.tsx src/elspeth/web/frontend/src/components/audit/ReadinessRowDetail.test.tsx
@@ -606,7 +604,7 @@ git commit -m "feat(web/frontend): add ReadinessRowDetail with jump-to-component
 
 The Explain dialog fetches the narrative on first open (via `useAuditReadinessStore.loadExplain`), caches by composition version, and renders the result with preserved whitespace.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `frontend/src/components/audit/ExplainDialog.test.tsx`:
 
@@ -927,9 +925,9 @@ describe("ExplainDialog", () => {
 });
 ```
 
-- [ ] **Step 2: Run test — expect FAIL**
+- [x] **Step 2: Run test — expect FAIL**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Implements the project's standard modal-dialog focus contract via `useFocusTrap` — see CommandPalette/RecoveryPanel for the canonical example.
 
@@ -1038,9 +1036,9 @@ export function ExplainDialog({
 }
 ```
 
-- [ ] **Step 4: Run tests — expect PASS**
+- [x] **Step 4: Run tests — expect PASS**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/audit/ExplainDialog.tsx src/elspeth/web/frontend/src/components/audit/ExplainDialog.test.tsx
@@ -1057,13 +1055,13 @@ git commit -m "feat(web/frontend): add ExplainDialog with version-keyed narrativ
 
 The panel mounts **between the inspector header and the tab strip**, so it is visible under every tab. Phase 3's IA cleanup will likely move this mount point, but until then this placement is the cheapest "always visible during composition" location.
 
-- [ ] **Step 1: Confirm the mount site**
+- [x] **Step 1: Confirm the mount site**
 
 Read `InspectorPanel.tsx` around line 595 (the closing `</div>` of "Row 1" — the inspector header — and the opening of "Row 2" — the tab strip; per the reconnaissance notes the regions are clearly commented `Row 1: Version selector + validation dot | Validate + Execute` and `Row 2: Tab strip`).
 
 The mount is **after** the Row 1 closing `</div>` and **before** the `role="tablist"` opening. This is also the natural insertion point for the standalone Validate button removal in Task 8 — both edits land in adjacent lines.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Add this test to `frontend/src/components/inspector/InspectorPanel.test.tsx` (a new `describe` block; do not rewrite the existing tests). At the top of `InspectorPanel.test.tsx`, ensure these are present (add if missing):
 
@@ -1154,9 +1152,9 @@ describe("AuditReadinessPanel mount in InspectorPanel", () => {
 });
 ```
 
-- [ ] **Step 3: Run test — expect FAIL** (panel isn't mounted)
+- [x] **Step 3: Run test — expect FAIL** (panel isn't mounted)
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 In `InspectorPanel.tsx`, add at the top of the imports:
 
@@ -1173,7 +1171,7 @@ Then, after the closing `</div>` of the inspector header (the `<div>` that conta
         <AuditReadinessPanel />
 ```
 
-- [ ] **Step 5: Run tests — expect PASS**
+- [x] **Step 5: Run tests — expect PASS**
 
 ```bash
 cd src/elspeth/web/frontend && npx vitest run src/components/inspector/InspectorPanel.test.tsx
@@ -1181,7 +1179,7 @@ cd src/elspeth/web/frontend && npx vitest run src/components/inspector/Inspector
 
 Expected: existing tests still pass; the two new tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx src/elspeth/web/frontend/src/components/inspector/InspectorPanel.test.tsx
@@ -1203,7 +1201,7 @@ This task does the full relocation in Phase 2C: it deletes the button, deletes `
 
 **Why full relocation now (not deferral to Phase 3A):** The previous plan deferred to Phase 3A under the assumption that keyboard shortcuts or other callers of `handleValidate` would keep the handler live. Verification against the actual source disproves this: `App.tsx:168-179` (`Ctrl+Shift+V`) calls `useExecutionStore.getState().validate(activeSessionId)` directly, not `handleValidate`; `CommandPalette.tsx:88-93` likewise calls `validate(activeSessionId)` directly. The InspectorPanel Validate button was the **only** caller of InspectorPanel's `handleValidate`. Deferring would silently orphan the side effects.
 
-- [ ] **Step 1: Write the failing test (negative + smoke)**
+- [x] **Step 1: Write the failing test (negative + smoke)**
 
 In `frontend/src/components/inspector/InspectorPanel.test.tsx`, add:
 
@@ -1256,9 +1254,9 @@ Also locate any existing tests that assert the Validate button exists or click i
 2. Tests under `describe("Version selector and catalog", ...)` — none reference Validate. No change.
 3. Tests under `describe("InspectorPanel execution feedback", ...)` — any test that asserted the `handleValidate`-driven system-message injection should be **deleted**. The new behaviour (injection on validation failure) is covered by the `subscriptions.test.ts` new describe block added in Task 8.5. Do not attempt to invoke `handleValidate` directly in the test — the handler is being deleted.
 
-- [ ] **Step 2: Run tests — expect FAIL on the new negative assertions**
+- [x] **Step 2: Run tests — expect FAIL on the new negative assertions**
 
-- [ ] **Step 3: Implement — remove the Validate button and delete the handlers**
+- [x] **Step 3: Implement — remove the Validate button and delete the handlers**
 
 **3a. In `InspectorPanel.tsx`, delete the Validate button block:**
 
@@ -1378,7 +1376,7 @@ export function _resetSubscriptionsForTesting(): void {
 
 > **Wire shape note.** The outer subscription glue here differs from `15a2` Task 8 Step 2: Phase 3A subscribed to `compositionState.version` change and drove `validate()` inside the subscription (auto-validate on change). Phase 2C subscribes to `useExecutionStore.validationResult` directly — we observe results and fire side effects, but we do not drive validation. `validate()` continues to be called by `App.tsx:177` (`Ctrl+Shift+V`) and `CommandPalette.tsx:88-93`. The inner side-effect body (the two-branch message-building and `sendValidationFeedback` call) is lifted verbatim from `15a2` Task 8 Step 2:566-600.
 
-- [ ] **Step 4: Run tests — expect PASS**
+- [x] **Step 4: Run tests — expect PASS**
 
 ```bash
 cd src/elspeth/web/frontend && npx vitest run src/components/inspector/InspectorPanel.test.tsx
@@ -1386,7 +1384,7 @@ cd src/elspeth/web/frontend && npx vitest run src/components/inspector/Inspector
 
 Expected: all assertions pass, including the new negative tests.
 
-- [ ] **Step 5: Toolchain check (tsc + eslint)**
+- [x] **Step 5: Toolchain check (tsc + eslint)**
 
 All four tsconfig files in this project enable `noUnusedLocals: true` and `noUnusedParameters: true` (`tsconfig.json`, `tsconfig.app.json`, `tsconfig.test.json`, `tsconfig.e2e.json` — verified 2026-05-16). `handleValidate`, `canValidate`, `isValidating`, `injectSystemMessage`, and `sendValidationFeedback` are deleted outright in Step 3b — no underscore-prefix or `@ts-expect-error` workarounds are needed. If any reference to these symbols remains after the deletion (confirmed by the grep in Step 3b), fix the remaining reference rather than suppressing the error.
 
@@ -1396,7 +1394,7 @@ cd src/elspeth/web/frontend && npx tsc --noEmit && npx eslint src/components/ins
 
 Both must pass before committing. Do **not** use `eslint-disable` for symbols that should have been deleted.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx \
@@ -1428,7 +1426,7 @@ to also unsubscribe the new execution subscriber."
 
 > **Note (B4 resolved).** The prior plan drafted a standalone `subscriptions.handoff.test.ts` without `_resetSubscriptionsForTesting()` in `beforeEach`, which would have left `initialized = true` leaking between tests (Zustand module-level state is shared). Co-locating the new `describe` block inside `subscriptions.test.ts` inherits the file's existing `beforeEach` discipline and eliminates the singleton-bleed entirely.
 
-- [ ] **Step 1: Add the new describe block**
+- [x] **Step 1: Add the new describe block**
 
 Add to `src/elspeth/web/frontend/src/stores/subscriptions.test.ts` (after the existing `describe` block):
 
@@ -1542,7 +1540,7 @@ At the top of the file, add `useExecutionStore` to the imports (the existing fil
 import { useExecutionStore } from "./executionStore";
 ```
 
-- [ ] **Step 2: Run the new tests — expect PASS**
+- [x] **Step 2: Run the new tests — expect PASS**
 
 ```bash
 cd src/elspeth/web/frontend && npx vitest run src/stores/subscriptions.test.ts
@@ -1550,7 +1548,7 @@ cd src/elspeth/web/frontend && npx vitest run src/stores/subscriptions.test.ts
 
 Expected: all tests pass, including the three new ones.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add src/elspeth/web/frontend/src/stores/subscriptions.test.ts
@@ -1730,7 +1728,7 @@ Note: `active` flag is `true` (not tied to an `isOpen` prop — ExplainDialog re
 
 Systems reviewer finding W3: `AuditReadinessPanel` stores `userExpanded` as component-local `useState(false)`. Phase 3B Task 9 Step 4a relocates `<AuditReadinessPanel />` from `InspectorPanel.tsx` to `App.tsx → SideRail.auditReadinessSlot` — a full component remount — which resets `userExpanded` to `false`. A user who had explicitly expanded the panel to keep it persistently visible would find it collapsed after Phase 3B's deploy. The store-keyed snapshot data survives (zustand, keyed by sessionId), but the UI preference is silently discarded.
 
-Fix: Task 4C inserted between Task 4B and Task 5. Task 4C migrates `userExpanded` from component-local `useState` into `auditReadinessStore` as a per-session keyed map (`userExpandedBySession: Record<string, boolean>`) with a matching `setUserExpanded(sessionId, value)` action. The new test (remount-safety regression) unmounts and re-renders the panel and asserts `userExpanded` survives via the store. No filigree issue filed yet — the next session should `mcp__filigree__create_issue` to create the tracking issue.
+Fix: Task 4C inserted between Task 4B and Task 5. Task 4C migrates `userExpanded` from component-local `useState` into `auditReadinessStore` as a per-session keyed map (`userExpandedBySession: Record<string, boolean>`) with a matching `setUserExpanded(sessionId, value)` action. The new test (remount-safety regression) unmounts and re-renders the panel and asserts `userExpanded` survives via the store.
 
 ### 2026-05-17 — Tasks 4A and 4B collapsed to verification stubs (already committed on branch)
 

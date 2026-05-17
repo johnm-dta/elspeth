@@ -161,7 +161,7 @@ No new trust boundary is introduced.
 | Removing the Validate button strands users mid-keystroke | Phase 2B Task 4 wires auto-validate to `compositionState.version`; the Validation row reflects status without an explicit click. Phase 2C Task 8 verifies the keyboard navigation across the inspector tabs still works after the button is gone. |
 | Phase 3 layout change breaks the panel | Phase 2C mounts the component inside `InspectorPanel.tsx` as a fixed section above the tab strip — pure presentation. Phase 3 relocates the mount point only. |
 | Recomputing on every composition change is expensive | Phase 2B caches by `(session_id, composition_version)` in the Zustand store; only fires when the version changes. The aggregator calls existing routes — same order as the standalone Validate button it replaces. |
-| Per-row "jump to component" requires `component_ids` to be accurate | Phase 2A populates `component_ids` from `ValidationResult.errors[*].component_id` and the identity-advisory check string. Phase 2C's click handler resolves these via `compositionState.nodes` and calls `selectNode` + `setActiveTab("spec")` — the same pattern `ValidationResult.tsx` already uses. |
+| Per-row "jump to component" requires `component_ids` to be accurate | Phase 2A populates `component_ids` from `ValidationResult.errors[*].component_id` and the identity-advisory check string. Phase 2C's click handler resolves these via `compositionState.nodes`, calls `selectNode`, and dispatches `SWITCH_TAB_EVENT` for `"spec"` — the same tab-switch pattern `InspectorPanel.tsx` already listens for. |
 
 ## Rollout coordination
 
@@ -216,9 +216,8 @@ deletes the old sessions/audit DB"):
    Task 1 Step 3 — coverage must include `execution/service.py`,
    `composer/service.py`, `guided/audit.py`, and the affected test files).
 3. Confirm at least one `curl` against
-   `/api/v1/composer/sessions/{id}/audit-readiness/snapshot` returns
-   a payload containing `error_code` and `affected_nodes` in the
-   `validation` row.
+   `/api/sessions/{id}/audit-readiness` returns a payload containing
+   `composition_version`, `checked_at`, and the six canonical readiness rows.
 
 ### Cross-references
 

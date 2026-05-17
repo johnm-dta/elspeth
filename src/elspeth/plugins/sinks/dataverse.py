@@ -223,11 +223,16 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7c4a3db0ccb11e7a"
+    source_file_hash: str | None = "sha256:f2ad1060d3bd44d5"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
     supports_resume = False  # Dataverse writes are not locally staged
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary (Dataverse REST write).
+    # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
+    # required for trust.py deletion per Phase 7A No-Legacy commitment
+    # (trust.py:31-35).
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

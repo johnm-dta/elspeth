@@ -71,8 +71,12 @@ class TextSource(BaseSource):
 
     name = "text"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:13330414d4bf9b53"
+    source_file_hash: str | None = "sha256:d9b471c7467ba5a9"
     config_model = TextSourceConfig
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
+    # for tier definitions. Declaration required for trust.py deletion
+    # per Phase 7A No-Legacy commitment (trust.py:31-35).
     _on_validation_failure: str
 
     def __init__(self, config: dict[str, Any]) -> None:

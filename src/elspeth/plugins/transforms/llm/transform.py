@@ -1039,10 +1039,14 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6b6bb595f475a9b6"
+    source_file_hash: str | None = "sha256:9fd90f5fafa2aaf5"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary (LLM API). See CLAUDE.md
+    # "Data Manifesto" for tier definitions. Declaration required for
+    # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).
     _provider: LLMProvider | None
 
     @classmethod

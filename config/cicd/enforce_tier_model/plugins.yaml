@@ -189,7 +189,7 @@ allow_hits:
   reason: HTTP redirect Location header — external system boundary, header may be
     absent
   safety: Missing Location header breaks redirect loop naturally
-- key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=61d3dae5f7961222
+- key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=24ca60e7811626e8
   owner: architecture
   reason: os.environ.get() for optional env var at trust boundary — ELSPETH_ALLOW_RAW_SECRETS
     is genuinely optional with empty-string default
@@ -427,7 +427,7 @@ allow_hits:
   safety: Raises TypeError (crash), does not suppress or coerce; message identifies
     the upstream plugin bug
   expires: null
-- key: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform:_configured_collection_name:fp=4b72e60f7eac27db
+- key: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform:_configured_collection_name:fp=59b00c518c9f96fc
   owner: architecture
   reason: Provider config comes from a validated provider-specific model union; getattr
     is limited to the two mutually exclusive naming conventions (collection vs index)
@@ -435,7 +435,7 @@ allow_hits:
   safety: Missing both attributes raises FrameworkBugError immediately; no fallback
     value is fabricated
   expires: null
-- key: plugins/transforms/rag/transform.py:R5:RAGRetrievalTransform:_configured_collection_name:fp=727fc5a4cc1ad144
+- key: plugins/transforms/rag/transform.py:R5:RAGRetrievalTransform:_configured_collection_name:fp=a0eb58d9abbad667
   owner: architecture
   reason: Provider config comes from a validated provider-specific model union; isinstance(value,
     str) confirms the selected readiness-audit identifier is a non-empty string before
@@ -581,35 +581,35 @@ allow_hits:
     from R1 rule matching .get( syntax
   safety: This is the actual HTTP call, not a defensive dict access
   expires: null
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=fcef4e9899cc8149
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=985168651b8953d2
   owner: feature
   reason: Per-row KeyError catch at Tier 2→external boundary — missing id/document
     field diverts the row via _divert_row() instead of aborting the batch
   safety: Row diverted to failsink with descriptive reason; remaining valid rows written
     normally; no silent data loss
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=7cf4a40e96d811cf
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=7eeb91d3fccaa11e
   owner: feature
   reason: Tier 2→external trust boundary — ChromaDB requires string IDs; isinstance(str)
     validates before write to avoid batch-aborting TypeError from SDK
   safety: Non-string ID diverts the row via _divert_row() with descriptive reason;
     not silent suppression
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=8e37ec696bc77c40
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=f59efd266777de47
   owner: feature
   reason: Tier 2→external trust boundary — ChromaDB requires string documents; isinstance(str)
     validates before write
   safety: Non-string document diverts the row via _divert_row() with descriptive reason;
     not silent suppression
   expires: null
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=bd736d2a9c36462a
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=e8b0fe5e420e7858
   owner: feature
   reason: Per-row KeyError catch for optional metadata fields — missing metadata field
     skipped (metadata is optional per-field)
   safety: Missing metadata fields silently omitted from the per-row metadata dict;
     no data fabrication
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=cc01516a1d93bec0
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=5ba52bc6c1b69cd4
   owner: feature
   reason: Tier 2→external trust boundary — validates metadata value types before sending
     to ChromaDB; isinstance check filters rows with non-scalar metadata (dict, list,
@@ -617,7 +617,7 @@ allow_hits:
   safety: Invalid rows diverted via _divert_row() with per-field detail; valid rows
     written normally; no silent data loss
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=e2de75ee6893aab5
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=950c1fddb3af5198
   owner: bugfix
   reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
     values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected

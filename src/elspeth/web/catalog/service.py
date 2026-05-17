@@ -59,7 +59,7 @@ _DETERMINISM_TO_AUDIT_FLAG: dict[Determinism, str] = {
 }
 
 # Closed vocabulary of valid audit-characteristic strings. Every token
-# a plugin author places in `audit_characteristics: ClassVar[frozenset[str]]`
+# a plugin author places in `audit_characteristics: frozenset[str]`
 # must appear in this set. Typos (e.g. "io-read", "quarentine") fail CI
 # via test_all_plugin_audit_characteristics_are_valid rather than
 # silently disappearing from the rendered card. Extend this set together

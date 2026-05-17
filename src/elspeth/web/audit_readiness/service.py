@@ -6,21 +6,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any, Protocol
 from uuid import UUID
 
+from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.audit_readiness.models import (
     AuditReadinessSnapshot,
     ReadinessRow,
 )
-from elspeth.web.audit_readiness.trust import (
-    PluginKind,
-    PluginTrust,
-    classify_plugin,
-    is_registered_plugin,
-)
+from elspeth.web.catalog.schemas import PluginKind
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import (
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
@@ -38,6 +35,61 @@ from elspeth.web.sessions.converters import (
 # dependency unidirectional (audit_readiness depends on the result shape,
 # not on validation's internal naming).
 _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+
+
+@lru_cache(maxsize=1)
+def _registered_plugin_names() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Return source/transform/sink plugin names from the live builtin catalog.
+
+    Inlined from the now-deleted ``elspeth.web.audit_readiness.trust`` module
+    (Phase 7A No-Legacy commitment). Layer: L3.
+    """
+    from elspeth.plugins.infrastructure.manager import PluginManager
+
+    manager = PluginManager()
+    manager.register_builtin_plugins()
+    return (
+        frozenset(cls.name for cls in manager.get_sources()),
+        frozenset(cls.name for cls in manager.get_transforms()),
+        frozenset(cls.name for cls in manager.get_sinks()),
+    )
+
+
+def _is_registered_plugin(kind: PluginKind, name: str) -> bool:
+    """Return True when ``name`` exists in the live catalog for ``kind``.
+
+    Inlined from the now-deleted ``elspeth.web.audit_readiness.trust`` module
+    (Phase 7A No-Legacy commitment). Layer: L3.
+    """
+    sources, transforms, sinks = _registered_plugin_names()
+    if kind == "source":
+        return name in sources
+    if kind == "transform":
+        return name in transforms
+    if kind == "sink":
+        return name in sinks
+    raise ValueError(f"unknown plugin kind: {kind!r}")
+
+
+def _get_plugin_class_for_kind(kind: PluginKind, name: str) -> type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol]:
+    """Return the registered plugin class for (kind, name).
+
+    Raises StopIteration when the name is not in the catalog — caller
+    must guard with _is_registered_plugin() first (as _record() does).
+    Layer: L3. Called only after _is_registered_plugin() confirms the
+    name is present.
+    """
+    from elspeth.plugins.infrastructure.manager import PluginManager
+
+    manager = PluginManager()
+    manager.register_builtin_plugins()
+    if kind == "source":
+        return next(cls for cls in manager.get_sources() if cls.name == name)
+    if kind == "transform":
+        return next(cls for cls in manager.get_transforms() if cls.name == name)
+    if kind == "sink":
+        return next(cls for cls in manager.get_sinks() if cls.name == name)
+    raise ValueError(f"unknown plugin kind: {kind!r}")
 
 
 class CompositionStateNotFoundError(LookupError):
@@ -165,12 +217,11 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
     unknown: list[tuple[str, str]] = []
 
     def _record(kind: PluginKind, component_id: str, name: str | None) -> None:
-        if name is None or not is_registered_plugin(kind, name):
+        if name is None or not _is_registered_plugin(kind, name):
             unknown.append((kind, component_id))
             return
-        # TODO(phase-7): delete trust.py and replace classify_plugin() callers per Phase 7 plan
-        trust = classify_plugin(kind, name)
-        if trust is PluginTrust.BOUNDARY:
+        plugin_cls = _get_plugin_class_for_kind(kind, name)
+        if plugin_cls.data_trust_tier == 3:
             boundary.append((kind, component_id, name))
 
     if state.source is not None:

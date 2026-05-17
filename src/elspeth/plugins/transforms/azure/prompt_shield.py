@@ -95,9 +95,14 @@ class AzurePromptShield(BaseAzureSafetyTransform):
 
     name = "azure_prompt_shield"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:19f08887d6f0065d"
+    source_file_hash: str | None = "sha256:411bb2a694829456"
     config_model = AzurePromptShieldConfig
     passes_through_input = True
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary (Azure Prompt Shield API).
+    # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
+    # required for trust.py deletion per Phase 7A No-Legacy commitment
+    # (trust.py:31-35).
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

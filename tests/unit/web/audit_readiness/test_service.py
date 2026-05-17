@@ -263,9 +263,9 @@ def test_validation_row_error_lists_component_ids():
 
 
 def test_plugin_trust_row_ok_summary_when_boundary_plugins_present():
-    # Default source_plugin="csv" → classify_plugin("source", "csv") is BOUNDARY
-    # (sources are uniformly BOUNDARY per trust.py:87-88). Exercises the
-    # boundary branch of _build_plugin_trust_row (service.py:174-185).
+    # Default source_plugin="csv" → CSVSource.data_trust_tier == 3 (the
+    # post-Phase-7A successor to classify_plugin("source", "csv") is BOUNDARY).
+    # Exercises the boundary branch of _build_plugin_trust_row.
     svc = _make_service(
         _state(transforms=(("t", "passthrough"),), sinks=(("out", "csv"),)),
         _OK,

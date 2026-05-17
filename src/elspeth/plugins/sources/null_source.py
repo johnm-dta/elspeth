@@ -47,10 +47,14 @@ class NullSource(BaseSource):
 
     name = "null"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d958973b7ed25332"
+    source_file_hash: str | None = "sha256:bee342129ba1263d"
     config_model = None  # NullSource requires no config (resume-only)
     determinism = Determinism.DETERMINISTIC
     output_schema: type[PluginSchema] = NullSourceSchema
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
+    # for tier definitions. Declaration required for trust.py deletion
+    # per Phase 7A No-Legacy commitment (trust.py:31-35).
     # NullSource yields no rows, so it never quarantines - but set to satisfy protocol
     _on_validation_failure: str = "discard"
 

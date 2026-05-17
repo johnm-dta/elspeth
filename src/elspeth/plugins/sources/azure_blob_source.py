@@ -321,8 +321,12 @@ class AzureBlobSource(BaseSource):
 
     name = "azure_blob"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:525397539f159571"
+    source_file_hash: str | None = "sha256:283e7cfd7e9f4726"
     config_model = AzureBlobSourceConfig
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
+    # for tier definitions. Declaration required for trust.py deletion
+    # per Phase 7A No-Legacy commitment (trust.py:31-35).
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

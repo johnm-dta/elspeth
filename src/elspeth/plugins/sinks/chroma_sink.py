@@ -172,9 +172,13 @@ class ChromaSink(BaseSink):
 
     name = "chroma_sink"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6c2e9ee70616c942"
+    source_file_hash: str | None = "sha256:519aef9054f82218"
     config_model = ChromaSinkConfig
     supports_resume = False
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary (ChromaDB write). See CLAUDE.md
+    # "Data Manifesto" for tier definitions. Declaration required for
+    # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

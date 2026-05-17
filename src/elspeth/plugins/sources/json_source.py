@@ -145,8 +145,12 @@ class JSONSource(BaseSource):
 
     name = "json"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b6ec4f1922589c69"
+    source_file_hash: str | None = "sha256:ee41ea5b853ed3e1"
     config_model = JSONSourceConfig
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary. See CLAUDE.md "Data Manifesto"
+    # for tier definitions. Declaration required for trust.py deletion
+    # per Phase 7A No-Legacy commitment (trust.py:31-35).
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
 

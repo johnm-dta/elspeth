@@ -101,11 +101,12 @@ def test_closes_with_evidence_promise():
 
 
 def test_calls_out_dataverse_sink_as_boundary():
-    """Dataverse is the only BOUNDARY sink in the registered catalog
-    (EXTERNAL_BOUNDARY_SINKS = {"dataverse"} in trust.py). The Explain
-    narrative MUST name the boundary crossing — falling back to the
-    generic per-row hash sentence silently omits that the write leaves
-    ELSPETH for an external Microsoft system.
+    """Dataverse is a BOUNDARY sink in the registered catalog
+    (DataverseSink.data_trust_tier == 3, post-Phase-7A successor to the
+    EXTERNAL_BOUNDARY_SINKS allowlist in the now-deleted trust.py). The
+    Explain narrative MUST name the boundary crossing — falling back to
+    the generic per-row hash sentence silently omits that the write
+    leaves ELSPETH for an external Microsoft system.
     """
     text = build_narrative(_state(sinks=(("primary", "dataverse"),)), retention_days=90)
     assert "Dataverse" in text

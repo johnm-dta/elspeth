@@ -100,9 +100,14 @@ class DatabaseSink(BaseSink):
 
     name = "database"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bc72839481df1d5c"
+    source_file_hash: str | None = "sha256:faf499dcd694f715"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary (database write via SQLAlchemy).
+    # See CLAUDE.md "Data Manifesto" for tier definitions. Declaration
+    # required for trust.py deletion per Phase 7A No-Legacy commitment
+    # (trust.py:31-35).
 
     # Resume capability: Database can append to existing tables
     supports_resume: bool = True

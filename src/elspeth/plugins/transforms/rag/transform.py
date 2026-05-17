@@ -54,10 +54,14 @@ class RAGRetrievalTransform(BaseTransform):
 
     name = "rag_retrieval"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:633a7b332887749c"
+    source_file_hash: str | None = "sha256:e0ca4b6f0b30a6a2"
     determinism: Determinism = Determinism.EXTERNAL_CALL
     config_model = RAGRetrievalConfig
     passes_through_input = True
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary (retrieval API). See CLAUDE.md
+    # "Data Manifesto" for tier definitions. Declaration required for
+    # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).
     _provider: RetrievalProvider | None
 
     @classmethod

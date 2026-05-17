@@ -339,9 +339,13 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4b5cf12339422ebe"
+    source_file_hash: str | None = "sha256:429936fd369b9f77"
     config_model = WebScrapeConfig
     passes_through_input = True
+    data_trust_tier: int | None = 3
+    # Crosses a Tier-3 external boundary (HTTP fetch). See CLAUDE.md
+    # "Data Manifesto" for tier definitions. Declaration required for
+    # trust.py deletion per Phase 7A No-Legacy commitment (trust.py:31-35).
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

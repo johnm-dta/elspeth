@@ -831,31 +831,31 @@ Final pre-execution sweep landed three small doc-only clarifications; this file 
 
 **IMPORTANT (Handoff) — `useHashRouter` return widening called out.** Task 5 Step 6 now tells implementers to change `App.tsx` from bare `useHashRouter();` to `const { redirectToast } = useHashRouter();`.
 
-### 2026-05-17 — P3A-008 — Retired RunsView capabilities (decision: not returning in 15b/3B)
+### 2026-05-17 — P3A-008 — Retired RunsView capabilities (decision: most preserved in successors; two genuinely retired)
 
-The deletion of `RunsView.test.tsx` (579 lines, commit `66748edb9`) removed test coverage for a set of behaviours that have no successor tests anywhere in the current suite. This entry records the operator-gate decision on their disposition.
+The deletion of `RunsView.test.tsx` (579 lines, commit `66748edb9`) removed test coverage for a set of behaviours. A subsequent post-merge audit found that most of the capabilities Agent D Finding 5 listed as "deleted" were in fact preserved by the successor surfaces (`RunsHistoryDrawer` + `RunDiagnosticsPanel` + `RunOutputsPanel`); the original entry mislabelled them. This entry records the corrected disposition.
 
-**Deleted capabilities (Agent D Finding 5 inventory):**
+**Capability inventory, corrected (Agent D Finding 5 list, re-audited 2026-05-17 against `RunsHistoryDrawer.tsx`):**
 
-- Diagnostics accordion (expanded / collapsed state, content rendering)
-- Polling while active (interval-driven refresh, stop-on-unmount)
-- Token states + artifacts on inspect (per-token status badges, artifact download links)
-- LLM explanation rendering (streamed explanation text, loading state)
-- `failure_detail` rendering (error message surface, stack-trace display)
-- Fan-out accounting (multi-path token count display)
-- Inspect-button `aria-expanded` / `aria-controls` (disclosure semantics for the detail panel)
-- Suggestion-banner from SpecView (cross-tab nudge injected into the Runs surface)
-- Active-run indicator + inline-rename from SessionSidebar (sidebar badge + rename-in-place affordance)
+- Diagnostics accordion — **PRESERVED** in `RunsHistoryDrawer.tsx:170-175` (expandedRunId / hidden + conditional render).
+- Polling while active — **RETIRED.** No interval-driven refresh; user clicks Refresh.
+- Token states + artifacts on inspect — **PRESERVED** in `RunsHistoryDrawer.tsx:273-291` (per-token state rendering) + `RunOutputsPanel` mounted at `RunsHistoryDrawer.tsx:187` (artifacts).
+- LLM explanation rendering — **PRESERVED** in `RunDiagnosticsPanel` via the `explanation` prop and Explain button (`RunsHistoryDrawer.tsx:180,244-246`).
+- `failure_detail` rendering — **PRESERVED** in `RunDiagnosticsPanel` (`RunsHistoryDrawer.tsx:252-259`: operation_type, node_id, error_message).
+- Fan-out accounting — **RETIRED.** No multi-path token count display.
+- Inspect-button `aria-expanded` / `aria-controls` — **PRESERVED** at `RunsHistoryDrawer.tsx:151-152` (disclosure semantics maintained).
+- Suggestion-banner from SpecView — **RESTORED** in `SideRailValidationBanner.tsx` (commit `a58479c19`, Phase 3A/3B Batch 5). The data source (`compositionState.validation_suggestions`) is now consumed by the new SuggestionList sub-component; the prior Runs-surface placement is gone but the field is no longer dropped on the floor.
+- Active-run indicator + inline-rename from SessionSidebar — **RETIRED.** SessionSidebar is gone; HeaderSessionSwitcher does not replicate the active-run badge or rename-in-place affordance.
 
-**Decision: retired.** These capabilities belonged to `RunsView`, the component that was intentionally deleted as part of the Phase 3A IA cleanup. The successor surface is `RunsHistoryDrawer` (launched via `InlineRunResults`), whose scope is deliberately lighter — it does not include diagnostics accordions, LLM explanations, or polling. The 15a2 plan treats that lighter scope as the correct post-cleanup steady state.
+**Decision: keep retired what is retired; do not re-add the two genuine drops.** Polling and fan-out accounting are deliberately out of scope for the post-cleanup steady state — operators refresh on demand, and DAG-level token accounting is owned by the audit Landscape, not by the Runs surface. The active-run indicator and inline-rename can be re-added if the header session switcher acquires a richer affordance, but neither is required for the demo merge bar.
 
 **Rationale:**
 
-- Phase 3A's stated direction is IA cleanup, not feature migration. `RunsView` was the unit being deleted; the test file deletion was a consequence, not an omission.
-- `RunsHistoryDrawer` / `InlineRunResults` intentionally carry a narrower capability surface. Adding the deleted behaviours to 15b/3B would re-inflate the surface the IA cleanup was designed to shrink.
-- The default for "deleted on purpose" is that it stays deleted unless an explicit product need re-emerges.
+- Phase 3A's stated direction is IA cleanup, not feature deletion. `RunsView` was the unit being deleted; its **container** went away but most of its rendering responsibilities migrated to `RunsHistoryDrawer` / `RunDiagnosticsPanel` / `RunOutputsPanel` rather than vanishing. The original entry conflated "test file deleted" with "capability deleted"; only two of the nine items were genuinely retired.
+- Test rehoming for the preserved capabilities is owed: the deleted `RunsView.test.tsx` covered behaviour that the new surfaces implement but do not yet test at the same granularity. Filing as a follow-up rather than amending 3A retroactively.
+- The default for "deleted on purpose" is that it stays deleted unless an explicit product need re-emerges. The two genuine retirements (polling, fan-out accounting) follow this rule.
 
-**Override path:** If any of the listed capabilities is intended to return in 15b/3B, the plan for that phase must (1) include the capability explicitly in scope and (2) add a tests-rehoming sub-task that recreates the corresponding coverage. The synthesis file at `.review/synthesis.md` (Agent D Finding 5) preserves the full missing-test inventory as the rehoming checklist.
+**Override path:** If polling-while-active or fan-out accounting is intended to return, the plan for that phase must (1) include the capability explicitly in scope and (2) add the corresponding tests. The six preserved capabilities are already live; their test coverage is the rehoming target, tracked separately. The synthesis file at `.review/synthesis.md` (Agent D Finding 5) is retained as the historical inventory.
 
 ### 2026-05-17 — P3A-003 — Migration shim policy decision (operator override)
 

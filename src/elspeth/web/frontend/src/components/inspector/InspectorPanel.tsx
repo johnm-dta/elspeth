@@ -353,15 +353,7 @@ export function InspectorPanel() {
   const selectNode = useSessionStore((s) => s.selectNode);
 
   const validationResult = useExecutionStore((s) => s.validationResult);
-  const isExecuting = useExecutionStore((s) => s.isExecuting);
-  const execute = useExecutionStore((s) => s.execute);
-  const progress = useExecutionStore((s) => s.progress);
   const error = useExecutionStore((s) => s.error);
-
-  const canExecute =
-    validationResult?.is_valid === true &&
-    !isExecuting &&
-    progress?.status !== "running";
 
   // A composition "has content" when it has a source, nodes, or outputs.
   // Source→sink pipelines have zero nodes but are still valid compositions.
@@ -370,12 +362,6 @@ export function InspectorPanel() {
     (compositionState.source !== null ||
       compositionState.nodes.length > 0 ||
       compositionState.outputs.length > 0);
-
-  const handleExecute = useCallback(async () => {
-    if (activeSessionId && canExecute) {
-      await execute(activeSessionId);
-    }
-  }, [activeSessionId, canExecute, execute]);
 
   const handleVersionDropdownOpen = useCallback(() => {
     loadStateVersions();
@@ -487,7 +473,7 @@ export function InspectorPanel() {
             })()}
           </div>
 
-          {/* Right: Catalog + Execute */}
+          {/* Right: Catalog */}
           <div className="inspector-header-right">
             {/* Catalog toggle */}
             <button
@@ -496,27 +482,6 @@ export function InspectorPanel() {
             >
               <span aria-hidden="true">▦</span>{" "}
               Catalog
-            </button>
-
-            {/* Execute button with spinner */}
-            <button
-              onClick={handleExecute}
-              disabled={isExecuting || !canExecute}
-              aria-label={isExecuting ? "Starting pipeline" : "Execute pipeline"}
-              className={`btn inspector-action-btn ${canExecute && !isExecuting ? "btn-primary" : ""}`}
-            >
-              {isExecuting ? (
-                <>
-                  <span
-                    className="spinner"
-                    role="status"
-                    aria-label="Starting pipeline"
-                  />
-                  Starting...
-                </>
-              ) : (
-                "Execute"
-              )}
             </button>
           </div>
         </div>

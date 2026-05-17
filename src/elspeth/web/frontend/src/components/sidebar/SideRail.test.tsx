@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { SideRail } from "./SideRail";
 
 describe("SideRail", () => {
@@ -44,6 +44,18 @@ describe("SideRail", () => {
   it("renders content passed via the executeButton slot prop", () => {
     render(<SideRail executeButtonSlot={<button>Run</button>} />);
     expect(screen.getByRole("button", { name: /run/i })).toBeInTheDocument();
+  });
+
+  it("places executeButtonSlot content in the execute-button slot", () => {
+    render(
+      <SideRail
+        executeButtonSlot={<button type="button">Run pipeline</button>}
+      />,
+    );
+    const slot = screen.getByTestId("siderail-slot-execute-button");
+    expect(
+      within(slot).getByRole("button", { name: /run pipeline/i }),
+    ).toBeInTheDocument();
   });
 
   it("renders children passed through (the transitional inspector mount)", () => {

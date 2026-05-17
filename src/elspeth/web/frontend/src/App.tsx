@@ -5,6 +5,7 @@ import { AuthGuard } from "./components/common/AuthGuard";
 import { AppHeader } from "./components/common/AppHeader";
 import { Layout } from "./components/common/Layout";
 import { SideRail } from "./components/sidebar/SideRail";
+import { ExecuteButton } from "./components/sidebar/ExecuteButton";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
@@ -312,7 +313,7 @@ function App() {
                 graphMiniSlot={null}
                 catalogSlot={null}
                 exportYamlSlot={null}
-                executeButtonSlot={null}
+                executeButtonSlot={<ExecuteButton />}
                 completionBarSlot={null}
               >
                 <InspectorPanel />

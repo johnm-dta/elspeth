@@ -1391,6 +1391,12 @@ summary:focus-visible {
   display: none;
 }
 
+.side-rail-execute-btn {
+  width: calc(100% - (2 * var(--space-sm)));
+  margin: var(--space-sm);
+  justify-content: center;
+}
+
 .side-rail-transitional {
   flex: 1 1 auto;
   min-height: 0;

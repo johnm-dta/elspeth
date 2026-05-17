@@ -473,12 +473,7 @@ describe("InspectorPanel execution feedback", () => {
     });
   });
 
-  it("keeps the current tab after Execute starts a run", async () => {
-    const { executePipeline } = await import("@/api/client");
-    (executePipeline as ReturnType<typeof vi.fn>).mockResolvedValue({
-      run_id: "run-1",
-    });
-
+  it("does not host Execute after the button moves to the side rail", async () => {
     render(<InspectorPanel />);
     const user = userEvent.setup();
 
@@ -487,12 +482,9 @@ describe("InspectorPanel execution feedback", () => {
       "aria-selected",
       "true",
     );
-
-    await user.click(screen.getByRole("button", { name: "Execute pipeline" }));
-
-    await waitFor(() =>
-      expect(executePipeline).toHaveBeenCalledWith("session-1"),
-    );
+    expect(
+      screen.queryByRole("button", { name: "Execute pipeline" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Runs" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "YAML" })).toHaveAttribute(
       "aria-selected",
@@ -545,21 +537,15 @@ describe("InspectorPanel Runs tab removal", () => {
     );
   });
 
-  it("does not switch to a removed Runs tab after Execute starts a run", async () => {
-    const { executePipeline } = await import("@/api/client");
-    (executePipeline as ReturnType<typeof vi.fn>).mockResolvedValue({
-      run_id: "run-1",
-    });
-
+  it("keeps the current tab after Execute is removed from the inspector", async () => {
     render(<InspectorPanel />);
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("tab", { name: "YAML" }));
-    await user.click(screen.getByRole("button", { name: "Execute pipeline" }));
 
-    await waitFor(() =>
-      expect(executePipeline).toHaveBeenCalledWith("session-1"),
-    );
+    expect(
+      screen.queryByRole("button", { name: "Execute pipeline" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Runs" })).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "YAML" })).toHaveAttribute(
       "aria-selected",
@@ -739,9 +725,11 @@ describe("Validate button removal (Phase 2C)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("still renders Execute and Catalog buttons", () => {
+  it("renders Catalog while Execute is owned by the side rail", () => {
     render(<InspectorPanel />);
-    expect(screen.getByRole("button", { name: /^Execute pipeline$/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^Execute pipeline$/ }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Catalog/ })).toBeInTheDocument();
   });
 

@@ -1,4 +1,4 @@
-export const OPEN_CATALOG_EVENT = "open-catalog";
+import { OPEN_CATALOG_EVENT } from "@/lib/composer-events";
 
 export function CatalogButton(): JSX.Element {
   return (

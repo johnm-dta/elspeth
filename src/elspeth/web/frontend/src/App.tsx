@@ -10,10 +10,7 @@ import { GraphMiniView } from "./components/sidebar/GraphMiniView";
 import { GraphModal } from "./components/sidebar/GraphModal";
 import { ExportYamlButton } from "./components/sidebar/ExportYamlButton";
 import { ExportYamlModal } from "./components/sidebar/ExportYamlModal";
-import {
-  CatalogButton,
-  OPEN_CATALOG_EVENT,
-} from "./components/sidebar/CatalogButton";
+import { CatalogButton } from "./components/sidebar/CatalogButton";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
 import { ShortcutsHelp } from "./components/common/ShortcutsHelp";
@@ -35,6 +32,7 @@ import { useSessionLifecycle } from "./hooks/useSession";
 import {
   OPEN_GRAPH_MODAL_EVENT,
   OPEN_YAML_MODAL_EVENT,
+  OPEN_CATALOG_EVENT,
 } from "./lib/composer-events";
 import type { SystemStatus } from "./types/index";
 

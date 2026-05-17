@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { CatalogButton, OPEN_CATALOG_EVENT } from "./CatalogButton";
+import { CatalogButton } from "./CatalogButton";
+import { OPEN_CATALOG_EVENT } from "@/lib/composer-events";
 
 describe("CatalogButton", () => {
   it("renders a catalog-reference button", () => {

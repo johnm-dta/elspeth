@@ -79,7 +79,7 @@ function App() {
   const healthCheckRef = useRef<number | null>(null);
 
   // Sync URL hash ↔ session/tab state for deep linking & back/forward
-  const { redirectToast } = useHashRouter();
+  useHashRouter();
   useSessionLifecycle();
 
   const createSession = useSessionStore((s) => s.createSession);
@@ -264,20 +264,6 @@ function App() {
           Skip to main content
         </a>
         <h1 className="sr-only">ELSPETH Pipeline Composer</h1>
-
-        {redirectToast && (
-          <div role="alert" className="alert-banner alert-banner--info">
-            <span>{redirectToast.message}</span>
-            <button
-              onClick={redirectToast.dismiss}
-              aria-label="Dismiss redirect notice"
-              title="Dismiss"
-              className="alert-banner-action"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
 
         {/* Backend unavailable banner.
             role=alert (assertive) because backend-down is a hard outage that

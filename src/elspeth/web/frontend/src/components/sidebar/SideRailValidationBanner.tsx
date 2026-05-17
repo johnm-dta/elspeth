@@ -24,7 +24,7 @@ export function SideRailValidationBanner(): JSX.Element | null {
       {error && (
         <div
           role="alert"
-          className="validation-banner validation-banner-fail inspector-error-banner"
+          className="validation-banner validation-banner-fail side-rail-error-banner"
         >
           {error}
         </div>

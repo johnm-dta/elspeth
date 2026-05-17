@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ReadinessRowDetail } from "./ReadinessRowDetail";
-import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "../../stores/sessionStore";
 import { makeComposition } from "@/test/composerFixtures";
 import type { ReadinessRow } from "../../types/api";
@@ -70,19 +70,16 @@ describe("ReadinessRowDetail", () => {
     expect(selectNode).toHaveBeenCalledWith("select_columns");
   });
 
-  it("requests the Graph tab when jumping to a component", async () => {
+  it("opens the Graph modal when jumping to a component", async () => {
     const user = userEvent.setup();
-    const tabRequests: string[] = [];
-    function recordTabRequest(event: Event) {
-      tabRequests.push((event as CustomEvent<string>).detail);
-    }
-    window.addEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+    const handler = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
     try {
       render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />);
       await user.click(screen.getByRole("button", { name: /Jump to select_columns/ }));
-      expect(tabRequests).toEqual(["graph"]);
+      expect(handler).toHaveBeenCalledTimes(1);
     } finally {
-      window.removeEventListener(SWITCH_TAB_EVENT, recordTabRequest);
+      window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
     }
   });
 

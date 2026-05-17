@@ -66,7 +66,7 @@ describe("executionStore.validate", () => {
     await useExecutionStore.getState().validate("session-1");
 
     // validate() should only store the result — no cross-store side effects.
-    // Orchestration (system messages, LLM feedback) is handled by InspectorPanel.
+    // Orchestration (system messages, LLM feedback) is handled by subscriptions.
     const state = useExecutionStore.getState();
     expect(state.validationResult).toEqual(failedResult);
     expect(state.isValidating).toBe(false);

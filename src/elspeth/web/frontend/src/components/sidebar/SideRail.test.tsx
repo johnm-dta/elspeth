@@ -77,7 +77,7 @@ describe("SideRail", () => {
   });
 
   it("does not render the retired transitional inspector mount", () => {
-    render(<SideRail />);
-    expect(document.querySelector(".side-rail-transitional")).toBeNull();
+    const { container } = render(<SideRail />);
+    expect(container.querySelector("[class*='transitional']")).toBeNull();
   });
 });

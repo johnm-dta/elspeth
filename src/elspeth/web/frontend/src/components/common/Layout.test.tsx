@@ -50,6 +50,5 @@ describe("Layout", () => {
     expect(
       screen.queryByRole("button", { name: /close side rail/i }),
     ).not.toBeInTheDocument();
-    expect(document.querySelector(".siderail-overlay-backdrop")).toBeNull();
   });
 });

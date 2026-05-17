@@ -6,7 +6,7 @@
  *         #/{sessionId}/yaml            -> open YAML modal, then rewrite
  *         #/{sessionId}/{anything-else} -> silently strip the verb
  *
- * Phase 3B replaced the old inspector-tab vocabulary with action fragments.
+ * Phase 3B uses action fragments rather than steady-state view fragments.
  * The fragment is an arrival action, not steady-state URL state.
  */
 
@@ -20,15 +20,6 @@ import { useSessionStore } from "@/stores/sessionStore";
 interface HashState {
   sessionId: string | null;
   verb: string | null;
-}
-
-interface HashRouterResult {
-  redirectToast: RedirectToast | null;
-}
-
-interface RedirectToast {
-  message: string;
-  dismiss: () => void;
 }
 
 const ACTION_VERBS: Record<string, string> = {
@@ -47,7 +38,7 @@ function buildCanonicalHash(sessionId: string | null): string {
   return sessionId ? `#/${sessionId}` : "";
 }
 
-export function useHashRouter(): HashRouterResult {
+export function useHashRouter(): void {
   const lastWrittenHash = useRef<string>("");
   const applying = useRef(false);
 
@@ -148,5 +139,4 @@ export function useHashRouter(): HashRouterResult {
     return unsub;
   }, []);
 
-  return { redirectToast: null };
 }

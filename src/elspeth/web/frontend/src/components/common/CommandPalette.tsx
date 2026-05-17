@@ -33,9 +33,6 @@ interface Command {
   enabled?: boolean;
 }
 
-/** Custom event name used to request an inspector tab switch. */
-export const SWITCH_TAB_EVENT = "elspeth-switch-tab";
-
 interface CommandPaletteProps {
   isOpen: boolean;
   onClose: () => void;

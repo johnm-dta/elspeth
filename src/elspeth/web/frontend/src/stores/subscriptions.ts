@@ -56,10 +56,8 @@ function validationFingerprint(result: ValidationResult | null): string | null {
  *   uniformly — no need to instrument each removal call site.
  * - Fire injectSystemMessage + sendValidationFeedback when
  *   useExecutionStore.validationResult transitions to a failing or
- *   warnings-only result. Phase 2C subsumes the side-effect orchestration
- *   that previously lived in InspectorPanel.handleValidate; the
- *   InspectorPanel Validate button was removed in the same phase and the
- *   keyboard/CommandPalette callers of validate() are now the only triggers.
+ *   warnings-only result. Phase 2C centralized the side-effect orchestration
+ *   so keyboard and CommandPalette callers of validate() share the same path.
  * - Auto-validate when compositionState.version increments, with a correctness
  *   loop that re-fires after in-flight validation settles if a newer version
  *   arrived in the meantime.

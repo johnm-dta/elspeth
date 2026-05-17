@@ -12,7 +12,7 @@
  */
 import { useId } from "react";
 
-import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "../../stores/sessionStore";
 import type { ReadinessRow } from "../../types/api";
 
@@ -30,7 +30,7 @@ export function ReadinessRowDetail({ row, onClose }: ReadinessRowDetailProps) {
 
   function handleJump(componentId: string) {
     selectNode(componentId);
-    window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "graph" }));
+    window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
     // Phase 8 deferral: emit telemetry here.
     onClose();
   }

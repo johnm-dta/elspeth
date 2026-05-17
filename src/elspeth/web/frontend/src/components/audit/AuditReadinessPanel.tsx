@@ -163,10 +163,8 @@ export function AuditReadinessPanel() {
   // panel auto-collapse when a later snapshot returns all-green (unless the
   // user explicitly clicked Expand).
   //
-  // Stored per-session in auditReadinessStore so the preference survives the
-  // Phase 3B remount of <AuditReadinessPanel /> from InspectorPanel to
-  // SideRail.auditReadinessSlot. Component-local useState would reset on
-  // remount.
+  // Stored per-session in auditReadinessStore so the preference survives
+  // right-rail remounts. Component-local useState would reset on remount.
   const userExpanded = useAuditReadinessStore((s) =>
     activeSessionId ? (s.userExpandedBySession[activeSessionId] ?? false) : false,
   );

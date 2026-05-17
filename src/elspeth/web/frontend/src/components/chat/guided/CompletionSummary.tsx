@@ -22,7 +22,7 @@ import { Highlight, themes } from "prism-react-renderer";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useTheme } from "@/hooks/useTheme";
-import { SWITCH_TAB_EVENT } from "@/components/common/CommandPalette";
+import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import type { TerminalState } from "@/types/guided";
 
 // ── Props ─────────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
   }
 
   function handleReviewYaml(): void {
-    window.dispatchEvent(new CustomEvent(SWITCH_TAB_EVENT, { detail: "yaml" }));
+    window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
   }
 
   function handleValidate(): void {

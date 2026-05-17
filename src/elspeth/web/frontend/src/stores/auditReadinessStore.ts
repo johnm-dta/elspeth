@@ -49,10 +49,8 @@ export interface AuditReadinessState {
   isLoadingExplainBySession: Record<string, boolean>;
   errorBySession: Record<string, string | null>;
   explainErrorBySession: Record<string, string | null>;
-  /** Per-session user-expand preference. Migrated from AuditReadinessPanel's
-   *  component-local useState so that the preference survives the Phase 3B
-   *  remount when <AuditReadinessPanel /> relocates from InspectorPanel to
-   *  SideRail.auditReadinessSlot. Keyed-by-sessionId mirrors the other six
+  /** Per-session user-expand preference. Kept in the store so the preference
+   *  survives right-rail remounts. Keyed-by-sessionId mirrors the other six
    *  per-session maps; clearSession drops the entry alongside them. */
   userExpandedBySession: Record<string, boolean>;
 

@@ -35,6 +35,7 @@ import { CompletionSummary } from "./CompletionSummary";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { resetStore } from "@/test/store-helpers";
+import { OPEN_YAML_MODAL_EVENT } from "@/lib/composer-events";
 import type { TerminalState } from "@/types/guided";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -120,16 +121,16 @@ describe("CompletionSummary -- exit action", () => {
     expect(mockExit).toHaveBeenCalledWith();
   });
 
-  it("clicking 'Review YAML' dispatches a YAML inspector-tab switch", async () => {
+  it("clicking 'Review YAML' opens the YAML export modal", async () => {
     const user = userEvent.setup();
-    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const handler = vi.fn();
+    window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
 
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     await user.click(screen.getByRole("button", { name: /review yaml/i }));
 
-    const event = dispatchSpy.mock.calls[0][0] as CustomEvent<string>;
-    expect(event.type).toBe("elspeth-switch-tab");
-    expect(event.detail).toBe("yaml");
+    expect(handler).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
   });
 
   it("clicking 'Validate pipeline' validates the active session", async () => {

@@ -205,7 +205,6 @@ describe("App banner roles", () => {
     await waitFor(() => {
       expect(window.location.hash).toBe("#/session-1");
     });
-    expect(screen.queryByText(/Runs tab was removed/i)).toBeNull();
   });
 
   it("silently canonicalizes stale Spec hashes", async () => {
@@ -217,7 +216,6 @@ describe("App banner roles", () => {
     await waitFor(() => {
       expect(window.location.hash).toBe("#/session-1");
     });
-    expect(screen.queryByText(/Spec tab was removed/i)).toBeNull();
   });
 
   it("does not mount the retired sessions sidebar", async () => {

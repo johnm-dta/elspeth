@@ -24,6 +24,7 @@ import { YamlView } from "./YamlView";
 import { RunsView } from "./RunsView";
 import { ValidationResultBanner } from "@/components/execution/ValidationResult";
 import { CatalogDrawer } from "@/components/catalog/CatalogDrawer";
+import { AuditReadinessPanel } from "@/components/audit/AuditReadinessPanel";
 import type { CompositionStateVersion } from "@/types/index";
 import { relativeTime } from "@/utils/time";
 
@@ -593,6 +594,11 @@ export function InspectorPanel() {
             </button>
           </div>
         </div>
+
+        {/* Audit-readiness panel — Phase 2.
+            Persistent across tabs. The Validation row inside this panel
+            replaces the standalone Validate button (Task 8). */}
+        <AuditReadinessPanel />
 
         {/* Row 2: Tab strip */}
         <div

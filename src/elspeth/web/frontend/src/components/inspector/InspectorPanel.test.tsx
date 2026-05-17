@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { InspectorPanel } from "./InspectorPanel";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
+import { fetchAuditReadiness } from "@/api/auditReadiness";
+import { makeComposition } from "@/test/composerFixtures";
 import type { CompositionState, CompositionStateVersion } from "@/types/index";
 
 // Mock API client and websocket to prevent real calls
@@ -29,6 +31,11 @@ vi.mock("@/api/client", () => ({
 
 vi.mock("@/api/websocket", () => ({
   connectToRun: vi.fn().mockReturnValue({ close: vi.fn() }),
+}));
+
+vi.mock("@/api/auditReadiness", () => ({
+  fetchAuditReadiness: vi.fn(),
+  fetchAuditReadinessExplain: vi.fn(),
 }));
 
 function makeState(
@@ -517,5 +524,89 @@ describe("InspectorPanel aria-live scope", () => {
 
     const tabPanel = screen.getByRole("tabpanel");
     expect(tabPanel.getAttribute("aria-live")).toBeNull();
+  });
+});
+
+describe("AuditReadinessPanel mount in InspectorPanel", () => {
+  beforeEach(() => {
+    // Use the canonical fixture; pass an overrides map to clear nodes when
+    // the test wants an empty pipeline. SourceSpec is { plugin, options }
+    // (NOT kind/config — that shape never existed; the previous draft of
+    // this plan inherited the drift from a stale memo).
+    useSessionStore.setState({
+      activeSessionId: "s-1",
+      compositionState: makeComposition(1, { nodes: [] }),
+    } as never);
+    useExecutionStore.setState({
+      validationResult: null,
+      isValidating: false,
+      isExecuting: false,
+      progress: null,
+      error: null,
+    });
+    vi.mocked(fetchAuditReadiness).mockResolvedValue({
+      session_id: "s-1",
+      composition_version: 1,
+      rows: [
+        { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
+        { id: "plugin_trust", label: "Plugin trust", status: "ok", summary: "All Tier 1/2", detail: null, component_ids: [] },
+        { id: "provenance", label: "Provenance", status: "ok", summary: "Complete lineage", detail: null, component_ids: [] },
+        { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
+        { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
+        { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secrets", detail: null, component_ids: [] },
+      ],
+    });
+  });
+
+  it("renders the audit readiness panel inside the inspector", async () => {
+    render(<InspectorPanel />);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Audit readiness")).toBeInTheDocument();
+    });
+  });
+
+  it("renders the audit readiness panel above the tab strip", async () => {
+    render(<InspectorPanel />);
+    const panel = await screen.findByLabelText("Audit readiness");
+    const tablist = screen.getByRole("tablist", { name: /Inspector tabs/ });
+    // compareDocumentPosition returns 4 (DOCUMENT_POSITION_FOLLOWING) when
+    // the argument follows the receiver — the panel must come first.
+    expect(panel.compareDocumentPosition(tablist)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  // W6 — added 2026-05-17
+
+  it("panel remains present when every tab is activated in turn", async () => {
+    // The panel mounts above the tab strip (not inside any tab panel), so it
+    // must survive tab switching. InspectorPanel has 4 tabs: Spec, Graph, YAML,
+    // Runs. We iterate dynamically over whatever tabs are rendered, so this
+    // test is resilient to future tab-list changes.
+    const user = userEvent.setup();
+    render(<InspectorPanel />);
+    // Wait for initial mount and panel to appear.
+    await screen.findByLabelText("Audit readiness");
+    const tabs = screen.getAllByRole("tab");
+    for (const tab of tabs) {
+      await user.click(tab);
+      // Panel must still be present after each tab switch.
+      expect(screen.getByLabelText("Audit readiness")).toBeInTheDocument();
+    }
+  });
+
+  it("renders without crashing when activeSessionId and compositionState are null", () => {
+    // Protects against the null-compositionState path omitted from the initial
+    // test set. The panel must not throw on a store that has not yet populated.
+    useSessionStore.setState({
+      activeSessionId: null,
+      compositionState: null,
+    } as never);
+    // Should not throw.
+    render(<InspectorPanel />);
+    // The panel is either absent or renders an empty/placeholder state — either
+    // is correct. The assertion is that no runtime error is thrown and the
+    // tablist still renders (InspectorPanel skeleton remains usable).
+    expect(screen.getByRole("tablist", { name: /Inspector tabs/ })).toBeInTheDocument();
   });
 });

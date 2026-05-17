@@ -90,7 +90,7 @@ def _request_id(request: Request) -> str | None:
 def _optional_header(request: Request, name: str) -> str | None:
     if name not in request.headers:
         return None
-    return cast(str, request.headers[name])
+    return request.headers[name]
 
 
 def _request_metadata(request: Request) -> dict[str, object]:

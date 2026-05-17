@@ -172,7 +172,7 @@ class ChromaSink(BaseSink):
 
     name = "chroma_sink"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0953bd68bf7dd259"
+    source_file_hash: str | None = "sha256:6c2e9ee70616c942"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -416,7 +416,7 @@ class ChromaSink(BaseSink):
                         collection.upsert(
                             ids=batch_ids,
                             documents=batch_docs,
-                            metadatas=batch_metadatas,
+                            metadatas=batch_metadatas,  # type: ignore[arg-type]  # chromadb stub Metadata vs dict[str, Any]
                         )
                     except ValueError as ve:
                         raise _ChromaPayloadRejection(str(ve)) from ve
@@ -438,7 +438,7 @@ class ChromaSink(BaseSink):
                             collection.add(
                                 ids=write_ids,
                                 documents=write_documents,
-                                metadatas=write_metadatas,
+                                metadatas=write_metadatas,  # type: ignore[arg-type]  # chromadb stub Metadata vs dict[str, Any]
                             )
                         except ValueError as ve:
                             raise _ChromaPayloadRejection(str(ve)) from ve
@@ -460,7 +460,7 @@ class ChromaSink(BaseSink):
                         collection.add(
                             ids=batch_ids,
                             documents=batch_docs,
-                            metadatas=batch_metadatas,
+                            metadatas=batch_metadatas,  # type: ignore[arg-type]  # chromadb stub Metadata vs dict[str, Any]
                         )
                     except ValueError as ve:
                         raise _ChromaPayloadRejection(str(ve)) from ve

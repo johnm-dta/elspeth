@@ -292,6 +292,10 @@ plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
+# Third-party modules without type stubs (or not installed in the dev extra).
+# `dev` install is deliberately lean; webui/llm/rag/web extras are only present
+# under `.[all]`. mypy needs explicit permission to treat absent libraries as
+# Any rather than failing on the import.
 module = [
     "pluggy.*",
     "rfc8785.*",
@@ -306,6 +310,12 @@ module = [
     "sqlcipher3.*",
     "langfuse.*",
     "chromadb.*",
+    "fastapi.*",
+    "litellm.*",
+    "openai.*",
+    "bcrypt",
+    "html2text",
+    "bs4",
 ]
 ignore_missing_imports = true
 
@@ -331,6 +341,18 @@ module = "elspeth.tui.*"
 # TUI uses textual which has incomplete type stubs
 # App[None] inheritance triggers "Class cannot subclass value of type Any"
 disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+module = "elspeth.web.*"
+# FastAPI's route decorators (@app.get, @router.post, @app.exception_handler,
+# etc.) are typed `Callable[..., Any]` in the upstream library, which strips
+# the signature of every decorated function. Our route handlers ARE properly
+# annotated — see web/app.py:708 (handle_validation_error -> JSONResponse),
+# web/auth/routes.py, etc. — but `disallow_untyped_decorators` flags them
+# regardless because the outer decorator returns Any. Same root cause as the
+# tests/* (hypothesis) and tui/* (textual) exemptions above: library-side
+# decorator typing the framework can't fix.
+disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
 module = "scripts.*"

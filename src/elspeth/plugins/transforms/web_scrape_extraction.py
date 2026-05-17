@@ -4,6 +4,8 @@ Converts HTML to markdown, text, or raw format with configurable
 element stripping.
 """
 
+from typing import cast
+
 import html2text
 from bs4 import BeautifulSoup
 
@@ -59,10 +61,10 @@ def extract_content(
             h.ignore_tables = False
             h.ignore_emphasis = False
 
-            return h.handle(cleaned_html)
+            return cast(str, h.handle(cleaned_html))
 
         elif format == "text":
-            return soup.get_text(separator=text_separator, strip=True)
+            return cast(str, soup.get_text(separator=text_separator, strip=True))
 
         else:
             raise ValueError(f"Unknown format: {format}")

@@ -130,6 +130,45 @@ describe("subscriptions — validation result side effects", () => {
     expect(stableId).toBe("system-validation-current");
   });
 
+  it("does NOT inject system message or send validation feedback for the structured empty_pipeline outcome", () => {
+    // Regression: after exit_to_freeform the backend used to surface its
+    // pydantic "ElspethSettings: source/sinks Field required" stack trace
+    // here, which the subscription would (a) inject into chat and (b) POST
+    // to /messages via sendValidationFeedback — provoking the LLM to
+    // confabulate a placeholder set_pipeline. Backend now returns a
+    // structured ``empty_pipeline`` error_code; this guard suppresses the
+    // broadcast so a user with no pipeline content gets no spurious chat
+    // noise and no LLM auto-fix.
+    const injectSystemMessage = vi.fn();
+    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendValidationFeedback,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        errors: [
+          {
+            component_type: null,
+            component_id: null,
+            message: "Pipeline is empty. Add a source and at least one output to begin building.",
+            suggestion: "Pick a source plugin and an output destination, then validate again.",
+            error_code: "empty_pipeline",
+          },
+        ],
+        warnings: [],
+      } as never,
+    } as never);
+
+    expect(injectSystemMessage).not.toHaveBeenCalled();
+    expect(sendValidationFeedback).not.toHaveBeenCalled();
+  });
+
   it("calls injectSystemMessage but NOT sendValidationFeedback when validation passes with warnings", () => {
     const injectSystemMessage = vi.fn();
     const sendValidationFeedback = vi.fn();
@@ -723,7 +762,10 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     useAuthStore.setState({ token: "tok", user: { user_id: "user-a" } as never });
     useSessionStore.setState({
       activeSessionId: "sess-1",
-      compositionState: null,
+      // Default to a non-empty state so the hasCompositionContent guard
+      // inside requestValidate does not short-circuit every test below.
+      // The empty-state case has its own dedicated test further down.
+      compositionState: compositionWithSource(0) as never,
       sessions: [{ id: "sess-1", title: "x" } as never],
     } as never);
     useExecutionStore.setState({
@@ -732,6 +774,31 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
       validationResult: null,
     } as never);
     initStoreSubscriptions();
+  });
+
+  it("skips validate when active compositionState has no content (post-exit_to_freeform metadata-only state)", async () => {
+    // After exit_to_freeform the backend returns a state with version=N
+    // but source=null nodes=[] outputs=[]. Without the guard, requestValidate
+    // would queue validate and land the structured ``empty_pipeline``
+    // failure — which the executionStore subscription used to broadcast
+    // via injectSystemMessage AND sendValidationFeedback (POST /messages
+    // as role=user). The LLM then "fixed" it with a confabulated placeholder
+    // source/sink, polluting the audit trail.
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+    } as never);
+
+    // Manually invoke as if from CommandPalette / Ctrl+Shift+V / CompletionSummary.
+    requestValidate("sess-1", 1);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(validate).not.toHaveBeenCalled();
   });
 
   it("is a no-op at an already-validated version (cache hit)", async () => {

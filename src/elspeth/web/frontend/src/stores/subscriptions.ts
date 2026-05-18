@@ -28,6 +28,24 @@ let unsubscribeAutoValidate: (() => void) | null = null;
 let inflightValidateTarget: { sessionId: string; version: number } | null = null;
 let unsubscribeAuth: (() => void) | null = null;
 
+/**
+ * Detects the backend's structured ``empty_pipeline`` validation outcome.
+ *
+ * Returned by ``web/execution/validation.py::validate_pipeline`` when the
+ * composition has no source, no transforms, and no outputs. The frontend
+ * uses this to suppress chat-injected error banners and to prevent
+ * ``sendValidationFeedback`` from POSTing the failure to ``/messages`` —
+ * doing so would push the LLM to confabulate a placeholder ``set_pipeline``
+ * fix that the user did not ask for.
+ */
+function isEmptyPipelineResult(result: ValidationResult): boolean {
+  return (
+    !result.is_valid &&
+    result.errors.length === 1 &&
+    result.errors[0].error_code === "empty_pipeline"
+  );
+}
+
 function validationFingerprint(result: ValidationResult | null): string | null {
   if (!result) return null;
   return JSON.stringify({
@@ -157,6 +175,16 @@ export function initStoreSubscriptions(): void {
     if (fingerprint === previousValidationFingerprint) return;
     previousValidationFingerprint = fingerprint;
 
+    // Empty-pipeline guard: never inject the system message or send
+    // validation feedback to the LLM when the backend reports the
+    // structured ``empty_pipeline`` outcome. The user has not built
+    // anything yet (e.g. immediately after exit_to_freeform) — feeding a
+    // "fix these errors" message to the LLM produces a confabulated
+    // placeholder source/sink (set_pipeline auto-fix), which is worse
+    // than no feedback. The fingerprint update above stays so a later
+    // non-empty failure with a different fingerprint still surfaces.
+    if (isEmptyPipelineResult(result)) return;
+
     const sessionStore = useSessionStore.getState();
 
     if (!result.is_valid && result.errors.length > 0) {
@@ -258,9 +286,19 @@ async function fireValidateLoop(): Promise<void> {
  * subscriber's enqueue logic so a manual trigger at an already-validated
  * version is a no-op. Use this from keyboard shortcuts and command-palette
  * actions instead of calling useExecutionStore.validate() directly.
+ *
+ * Skips validate when the active composition has no source, transforms,
+ * or outputs. This mirrors the auto-validate subscription guard so that
+ * keyboard / command-palette triggers cannot land the structured
+ * ``empty_pipeline`` failure on a session immediately after
+ * ``exit_to_freeform`` (where the composition_state version increments
+ * but content is empty).
  */
 export function requestValidate(sessionId: string, version: number): void {
   if (lastValidatedVersionBySession.get(sessionId) === version) return;
+  if (!hasCompositionContent(useSessionStore.getState().compositionState)) {
+    return;
+  }
   const exec = useExecutionStore.getState();
   if (exec.isExecuting || exec.progress?.status === "running") return;
   pendingValidateTarget = { sessionId, version };

@@ -2461,32 +2461,32 @@ allow_hits:
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R1:validate_pipeline:fp=1619613e93417508"
+- key: "web/execution/validation.py:R1:validate_pipeline:fp=c93632f0adce9f79"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R1:validate_pipeline:fp=c3ac6e6f07b0e3b0"
+- key: "web/execution/validation.py:R1:validate_pipeline:fp=07d974974c542300"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=8aaa2e045fb617fe"
+- key: "web/execution/validation.py:R5:validate_pipeline:fp=90c558e74f892a90"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=f18dbb6dcccabb64"
+- key: "web/execution/validation.py:R5:validate_pipeline:fp=cec6a8eb11f61aec"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=770ad21b8f11dbc6"
+- key: "web/execution/validation.py:R5:validate_pipeline:fp=6efb906118290962"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=8b9ecec696634113"
+- key: "web/execution/validation.py:R5:validate_pipeline:fp=2f6e06035124c57a"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."

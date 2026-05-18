@@ -615,6 +615,44 @@ def validate_pipeline(
     checks: list[ValidationCheck] = []
     errors: list[ValidationError] = []
 
+    # Step 0: Empty-composition short-circuit.
+    #
+    # A CompositionState with no source, no transforms, and no outputs cannot
+    # be assembled into ElspethSettings — pydantic would raise
+    # ``2 validation errors for ElspethSettings: source/sinks Field required``,
+    # which is a Tier-3 boundary violation (internal pydantic model names
+    # leaking to a user-facing UI). It also auto-populates the post-
+    # ``exit_to_freeform`` view of any guided session, so the surface is
+    # exercised on a normal workflow, not just on hand-crafted empty configs.
+    #
+    # Return a clean ``empty_pipeline`` ValidationResult instead. The frontend
+    # subscription guard treats ``empty_pipeline`` as non-broadcast (no chat
+    # injection, no validation feedback sent to the LLM) — see
+    # ``stores/subscriptions.ts``.
+    if state.source is None and not state.nodes and not state.outputs:
+        return ValidationResult(
+            is_valid=False,
+            checks=[
+                ValidationCheck(
+                    name=_CHECK_SETTINGS,
+                    passed=False,
+                    detail="Pipeline has no source, transforms, or outputs.",
+                    affected_nodes=(),
+                    outcome_code=None,
+                ),
+                *_skipped_checks(_CHECK_SETTINGS),
+            ],
+            errors=[
+                ValidationError(
+                    component_id=None,
+                    component_type=None,
+                    message=("Pipeline is empty. Add a source and at least one output to begin building."),
+                    suggestion=("Pick a source plugin (e.g. text, csv) and an output destination, then validate again."),
+                    error_code="empty_pipeline",
+                ),
+            ],
+        )
+
     # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
     # Any `path` or `file` key in source/sink options must resolve under
     # an allowed directory. Uses the shared helpers from AD-4.

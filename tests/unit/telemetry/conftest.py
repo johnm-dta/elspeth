@@ -34,19 +34,18 @@ def _auto_close_telemetry_managers() -> Iterator[None]:
 
 @pytest.fixture
 def in_memory_metric_reader() -> Iterator[InMemoryMetricReader]:
-    """Provide an InMemoryMetricReader bound to a freshly-constructed MeterProvider.
-
-    Yields both the reader and the provider so tests can create instruments via
-    ``provider.get_meter()`` and assert on counter increments via
-    ``reader.get_metrics_data()``.
+    """Yield an InMemoryMetricReader bound to a local, freshly-constructed MeterProvider.
 
     IMPORTANT: after B1-r3 this fixture does NOT set the global OTel provider
     (the old save/restore pattern no longer works because OTel 1.41+ enforces
-    do_once semantics).  Tests that need to intercept module-level counters
-    (e.g. pass_through._VIOLATIONS_COUNTER) must monkeypatch those module
-    globals with a counter created from the local provider returned here.
-    See tests/unit/engine/test_executors.py::test_cross_check_increments_telemetry_counter_on_violation
-    for the canonical pattern.
+    do_once semantics).  The yielded reader is bound to a local provider that
+    is held alive for the duration of the test.  Tests that need to intercept
+    module-level counters (e.g. ``pass_through._VIOLATIONS_COUNTER``) must
+    construct a local ``MeterProvider`` themselves and monkeypatch those
+    module globals with a counter created from it — see
+    ``tests/unit/engine/test_executors.py::test_cross_check_increments_telemetry_counter_on_violation``
+    for the canonical pattern.  Assert counter increments via
+    ``reader.get_metrics_data()``.
     """
     reader = InMemoryMetricReader()
     _provider = MeterProvider(metric_readers=[reader])  # keeps reader registered

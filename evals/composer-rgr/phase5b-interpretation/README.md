@@ -161,7 +161,9 @@ After running the suite, the operator commits `results-<utc-date>.json` to this 
 
 ## Opt-out scenarios
 
-The `hero-opt-out` scenario requires a pre-step the standard harness does not handle: after `POST /api/sessions` creates the session but before the first `POST /messages`, the harness must set `interpretation_review_disabled=true` on that session.
+The `hero-opt-out` scenario requires a pre-step the standard harness does not handle: after `POST /api/sessions` creates the session but before the first `POST /messages`, the harness must opt the session out of interpretation review by calling the dedicated opt-out endpoint shipped in Phase 5b Task 7.
+
+Endpoint: `POST /api/sessions/{session_id}/interpretations/opt_out`. Request body is empty. Response is the `InterpretationOptOutResponse` envelope (`session_id`, `interpretation_review_disabled: true`, `opted_out_at`). The route is idempotent per F-29: repeated POSTs return the original `opted_out_at` from the first call rather than re-stamping.
 
 Until a `--opt-out` flag is added to `run_scenario.sh`, do this manually:
 
@@ -170,13 +172,11 @@ Until a `--opt-out` flag is added to `run_scenario.sh`, do this manually:
 # 'send opening prompt' step — OR, run the harness once, retrieve the
 # session_id, kill before the message send. Cleaner: extend run_scenario.sh.
 SID=$(cat runs/<run-dir>/session_id.txt)
-curl -sS -X PATCH "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID" \
-  -H "Authorization: Bearer $JWT" \
-  -H "Content-Type: application/json" \
-  -d '{"interpretation_review_disabled": true}'
+curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/interpretations/opt_out" \
+  -H "Authorization: Bearer $JWT"
 ```
 
-If the opt-out PATCH endpoint is not yet wired (Task 7 ships the session-end review route; the in-session opt-out toggle may land separately), the `hero-opt-out` scenario is BLOCKED. Surface to the operator rather than skip-pass.
+If the opt-out endpoint is unreachable for any reason, the `hero-opt-out` scenario is BLOCKED. Surface to the operator rather than skip-pass.
 
 ## What this suite deliberately does not test
 

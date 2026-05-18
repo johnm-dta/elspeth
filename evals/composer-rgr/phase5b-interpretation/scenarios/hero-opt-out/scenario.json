@@ -5,7 +5,7 @@
   "opening_prompt": "create a list of 5 government web pages and use an LLM to rate how cool they are",
   "session_setup": {
     "interpretation_review_disabled": true,
-    "session_setup_note": "Before sending the opening prompt, PATCH /api/sessions/{id} (or use the dedicated opt-out endpoint per Task 7 session-end review route spec) to set interpretation_review_disabled=true on the session. The composer skill MUST consult this flag and skip the request_interpretation_review tool path entirely. The harness must apply this before the first POST /messages. Default run_scenario.sh does NOT do this — see ../README.md §Opt-out-scenarios for the operator's pre-step."
+    "session_setup_note": "Before sending the opening prompt, call POST /api/sessions/{id}/interpretations/opt_out (empty body; idempotent per F-29) to set interpretation_review_disabled=true on the session. The composer skill MUST consult this flag and skip the request_interpretation_review tool path entirely. The harness must apply this before the first POST /messages. Default run_scenario.sh does NOT do this — see ../README.md §Opt-out-scenarios for the operator's pre-step."
   },
   "phase5b_assertions": {
     "must_not_call_request_interpretation_review": true,

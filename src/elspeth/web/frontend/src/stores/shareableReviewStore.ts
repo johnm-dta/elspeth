@@ -38,17 +38,39 @@ export interface ShareableReviewState {
 
   /** Open the dialog and POST mark-ready-for-review.  Resolves the
    *  in-flight promise on success/failure; state reflects the outcome
-   *  via ``latestResponse`` or ``error``. */
+   *  via ``latestResponse`` or ``error``.
+   *
+   *  Re-entrancy: if a POST is already in flight, the call is a no-op
+   *  (returns immediately without minting a second audit row). The
+   *  CompletionBar button's ``inFlight`` disable handles UI; this guard
+   *  closes the programmatic-re-entry hole (Enter spam, double-click
+   *  before re-render).
+   *
+   *  Session safety: the sessionId is captured at call entry. If the
+   *  store's tracking sessionId changes before the POST resolves (the
+   *  user switched sessions, or another openAndMark for a different
+   *  session completed first), the late response is dropped on the
+   *  floor — the audit row is still minted server-side, but we never
+   *  surface session A's token while session B is composing. */
   openAndMark: (sessionId: string) => Promise<void>;
   /** Close the dialog. Does NOT clear ``latestResponse`` — the user can
    *  reopen the dialog to see the same response. ``reset()`` is the
    *  explicit clear path. */
   close: () => void;
+  /** Clear all dialog/response state if ``sessionId`` matches the
+   *  session that owns the current response. No-op if the id doesn't
+   *  match (we don't own that session's state). Use from
+   *  session-switch handlers — the documented "switching sessions
+   *  clears the store" contract. */
+  clearForSession: (sessionId: string) => void;
   /** Reset the store entirely (clears response + error + dialog state). */
   reset: () => void;
 }
 
-const _initial: Omit<ShareableReviewState, "openAndMark" | "close" | "reset"> = {
+const _initial: Omit<
+  ShareableReviewState,
+  "openAndMark" | "close" | "clearForSession" | "reset"
+> = {
   dialogOpen: false,
   latestResponse: null,
   inFlight: false,
@@ -64,19 +86,73 @@ function _isApiError(value: unknown): value is ApiError {
   );
 }
 
+/**
+ * Module-scoped state for ``openAndMark`` race control.
+ *
+ * - ``_openAndMarkEpoch`` is a monotonic counter; each invocation captures
+ *   its epoch at start, then re-checks after the network await. Mismatch
+ *   means a later call superseded us and our response must be dropped
+ *   (gap 1 — stale-response race).
+ * - ``_inFlightSessionId`` records which session currently has a POST in
+ *   flight, used by the double-click guard (gap 2). Tracking this in
+ *   module scope rather than store state keeps it out of the public
+ *   ``ShareableReviewState`` type (consumers shouldn't care) and avoids
+ *   needing a separate field next to the user-visible ``inFlight`` /
+ *   ``sessionIdForResponse`` pair.
+ */
+let _openAndMarkEpoch = 0;
+let _inFlightSessionId: string | null = null;
+
 export const useShareableReviewStore = create<ShareableReviewState>((set, get) => ({
   ..._initial,
 
   async openAndMark(sessionId: string) {
-    // Clear any stale response from a previous session before opening.
-    // Without this the dialog could flash the previous session's URL.
-    const current = get();
-    if (current.sessionIdForResponse !== null && current.sessionIdForResponse !== sessionId) {
-      set({ latestResponse: null, sessionIdForResponse: null, error: null });
+    // DC-7 gap 2: double-click race. If a POST is already in-flight for
+    // the SAME session, drop the re-entrant call — minting a second token
+    // would create a duplicate audit row (append-only, can't undo). A
+    // different session is allowed to proceed; the in-flight call's
+    // post-await check will discard its stale response (gap 1).
+    //
+    // The button's UI inFlight-disable handles single-session double-click
+    // at the view layer; this guard closes the programmatic-re-entry hole
+    // (rapid Enter, keyboard repeat, click-before-render).
+    if (_inFlightSessionId === sessionId) {
+      return;
     }
-    set({ dialogOpen: true, inFlight: true, error: null });
+    // DC-7 gap 1 prep: capture this call's epoch. After the await we
+    // re-check against the live counter; mismatch means a later call
+    // superseded us and our response must be dropped.
+    _openAndMarkEpoch += 1;
+    const myEpoch = _openAndMarkEpoch;
+    _inFlightSessionId = sessionId;
+
+    // Clear any stale response from a previous session before opening,
+    // so the dialog never flashes the previous session's URL while the
+    // new POST is in flight.
+    const current = get();
+    const staleSessionResponse =
+      current.sessionIdForResponse !== null && current.sessionIdForResponse !== sessionId;
+    set({
+      dialogOpen: true,
+      inFlight: true,
+      error: null,
+      latestResponse: staleSessionResponse ? null : current.latestResponse,
+      sessionIdForResponse: staleSessionResponse ? sessionId : current.sessionIdForResponse,
+    });
+
     try {
       const response = await markReadyForReview(sessionId);
+      // DC-7 gap 1: post-await captured-epoch check. If another
+      // openAndMark started after us (different session, or our own
+      // entry was overtaken), our epoch is stale — drop the response.
+      // Audit row was minted server-side regardless; we just don't
+      // surface session A's token while session B is composing.
+      // Note: do NOT touch _inFlightSessionId here — the superseding
+      // call already owns it.
+      if (_openAndMarkEpoch !== myEpoch) {
+        return;
+      }
+      _inFlightSessionId = null;
       set({
         latestResponse: response,
         sessionIdForResponse: sessionId,
@@ -84,6 +160,13 @@ export const useShareableReviewStore = create<ShareableReviewState>((set, get) =
         error: null,
       });
     } catch (exc) {
+      // Same epoch check on the error path: a stale failure must not
+      // overwrite the current session's successful response with an
+      // error banner from a prior session.
+      if (_openAndMarkEpoch !== myEpoch) {
+        return;
+      }
+      _inFlightSessionId = null;
       let message = "Could not mint a shareable link";
       if (_isApiError(exc)) {
         if (exc.status === 409) {
@@ -108,7 +191,31 @@ export const useShareableReviewStore = create<ShareableReviewState>((set, get) =
     set({ dialogOpen: false });
   },
 
+  clearForSession(sessionId: string) {
+    // No-op unless the current response belongs to this session. We
+    // don't blow away state that came from a different session — the
+    // caller has only authority to clear what they own.
+    const current = get();
+    if (current.sessionIdForResponse !== sessionId) {
+      return;
+    }
+    // Bump the epoch so any pending openAndMark for this session sees a
+    // stale epoch on resume and drops its response. Also clear the
+    // in-flight tracker so a subsequent openAndMark for the same id
+    // isn't accidentally suppressed by the double-click guard.
+    _openAndMarkEpoch += 1;
+    if (_inFlightSessionId === sessionId) {
+      _inFlightSessionId = null;
+    }
+    set(_initial);
+  },
+
   reset() {
+    // Bump epoch + clear in-flight tracker for the same reason as
+    // clearForSession: any pending await that resumes after reset
+    // must see a stale epoch and drop its response.
+    _openAndMarkEpoch += 1;
+    _inFlightSessionId = null;
     set(_initial);
   },
 }));

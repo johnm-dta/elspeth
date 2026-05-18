@@ -92,3 +92,44 @@ export interface UpdateUserComposerPreferencesPayload {
   default_mode?: ComposerMode;
   banner_dismissed_at?: string | null;
 }
+
+// ── Shareable reviews (Phase 6A) ───────────────────────────────────────────
+//
+// Wire shapes mirroring the strict Pydantic models at
+// src/elspeth/web/shareable_reviews/models.py. The frontend treats these as
+// Tier-1 inbound (typed parse; shape drift crashes). The audit_readiness
+// field on SharedInspectResponse is the Phase 2 AuditReadinessSnapshot
+// reused verbatim — the shared inspect view shows the same six-row panel
+// the owner saw at mark-time.
+
+import type { AuditReadinessSnapshot as _AuditReadinessSnapshot } from "./index";
+
+/** Response from POST /api/sessions/{session_id}/mark-ready-for-review. */
+export interface MarkReadyForReviewResponse {
+  token: string;
+  share_url: string;
+  expires_at: string;
+  payload_digest: string;
+}
+
+/** Response from GET /api/sessions/{session_id}/shareable-link. */
+export interface ShareableLinkResponse {
+  token: string;
+  share_url: string;
+  expires_at: string;
+  state_id: string;
+  payload_digest: string;
+}
+
+/** Response from GET /api/sessions/shared/{token}. */
+export interface SharedInspectResponse {
+  session_id: string;
+  state_id: string;
+  pipeline_metadata: Record<string, unknown>;
+  composition_snapshot: Record<string, unknown>;
+  yaml: string;
+  audit_readiness: _AuditReadinessSnapshot;
+  created_by_user_id: string;
+  created_at: string;
+  expires_at: string;
+}

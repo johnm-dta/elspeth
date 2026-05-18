@@ -4,11 +4,19 @@ defaults:
   fail_on_expired: true
   allowlist_budget:
     max_allow_hits: 392
-    max_per_file_rules: 92
-    max_total_entries: 484
+    # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
+    # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
+    # — W5 load-bearing telemetry-only exemption per
+    # docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md).
+    # The single per_file_rules entry covers all 11 ``record_*`` helpers
+    # via max_hits=12 instead of 11 individual fingerprinted entries —
+    # avoids AST-shift fingerprint rotation and concentrates the W5
+    # rationale at one site.
+    max_per_file_rules: 93
+    max_total_entries: 485
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.
     max_permanent_allow_hits: 324
-    max_permanent_per_file_rules: 92
-    max_permanent_total_entries: 416
+    max_permanent_per_file_rules: 93
+    max_permanent_total_entries: 417

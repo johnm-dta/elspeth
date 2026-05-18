@@ -728,3 +728,118 @@ def test_snapshot_raises_when_no_state():
                 user_id="alice",
             )
         )
+
+
+# ── Module-private catalog helpers ────────────────────────────────────────────
+#
+# _plugin_catalog_snapshot / _is_registered_plugin / _get_plugin_class_for_kind
+# are private but load-bearing: _record() (the entrypoint that classifies a
+# composition's plugins as boundary-crossing) guards with _is_registered_plugin
+# then resolves with _get_plugin_class_for_kind. The two helpers MUST share a
+# single snapshot — otherwise a class registered between guard and resolve
+# would slip past _record's safety net.
+
+
+from typing import Any, cast  # noqa: E402  — co-located with the helper-tests block.
+
+from elspeth.web.audit_readiness import service as _service_mod  # noqa: E402
+
+
+class TestPluginCatalogHelpers:
+    """Covers the offensive-programming guards and the shared-snapshot
+    invariant on the three private catalog helpers.
+    """
+
+    def test_is_registered_plugin_raises_on_unknown_kind(self) -> None:
+        """The PluginKind Literal forbids "bogus" at type-check time, but the
+        runtime guard exists for non-typed callers (test/REPL/JSON-dispatch).
+        """
+        with pytest.raises(ValueError, match="unknown plugin kind"):
+            _service_mod._is_registered_plugin(cast(Any, "bogus"), "anything")
+
+    def test_get_plugin_class_for_kind_raises_on_unknown_kind(self) -> None:
+        """Mirrors _is_registered_plugin's offensive guard so both helpers
+        fail loudly on the same bad input rather than diverging.
+        """
+        with pytest.raises(ValueError, match="unknown plugin kind"):
+            _service_mod._get_plugin_class_for_kind(cast(Any, "bogus"), "anything")
+
+    def test_get_plugin_class_for_kind_raises_descriptive_runtime_error_when_guard_skipped(
+        self,
+    ) -> None:
+        """The previous implementation used ``next(...)`` which raised an
+        opaque ``StopIteration``. The contract is: when ``_is_registered_plugin``
+        returns False (or the caller skipped that guard), resolution must
+        raise ``RuntimeError`` with enough context to identify the bug.
+        """
+        ghost = "definitely_not_a_real_plugin_zzzzz"
+        assert _service_mod._is_registered_plugin("source", ghost) is False
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _service_mod._get_plugin_class_for_kind("source", ghost)
+
+        msg = str(exc_info.value)
+        assert ghost in msg, "RuntimeError must name the missing plugin"
+        assert "source" in msg, "RuntimeError must name the plugin kind"
+        assert "_is_registered_plugin" in msg, (
+            "RuntimeError must point to the guard the caller skipped — the "
+            "diagnostic is useless if it doesn't tell the reader what was missed."
+        )
+
+    def test_is_registered_and_get_class_share_single_snapshot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Structurally enforce the 'shared snapshot' contract: both helpers
+        delegate to ``_plugin_catalog_snapshot()`` so monkeypatching that
+        single function reroutes BOTH lookups together.
+        """
+
+        class _StubSource:
+            name = "stub_src_for_shared_snapshot_test"
+
+        fake_snapshot: dict[str, dict[str, type]] = {
+            "source": {"stub_src_for_shared_snapshot_test": _StubSource},
+            "transform": {},
+            "sink": {},
+        }
+        monkeypatch.setattr(_service_mod, "_plugin_catalog_snapshot", lambda: fake_snapshot)
+
+        # Membership query and class resolution both reroute through the
+        # patched snapshot — they cannot disagree.
+        assert _service_mod._is_registered_plugin("source", "stub_src_for_shared_snapshot_test") is True
+        assert _service_mod._get_plugin_class_for_kind("source", "stub_src_for_shared_snapshot_test") is _StubSource
+
+        # A name absent from the fake snapshot is rejected by BOTH paths.
+        assert _service_mod._is_registered_plugin("source", "absent_from_fake") is False
+        with pytest.raises(RuntimeError, match="not in catalog snapshot"):
+            _service_mod._get_plugin_class_for_kind("source", "absent_from_fake")
+
+    def test_plugin_manager_built_exactly_once_for_both_helpers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The previous implementation instantiated ``PluginManager`` twice —
+        once per helper — and relied on import-time stability to keep the
+        two snapshots in sync. After the refactor, both helpers must share
+        a single ``_plugin_catalog_snapshot()`` so ``PluginManager`` is built
+        once per cache lifetime.
+        """
+        _service_mod._plugin_catalog_snapshot.cache_clear()
+
+        import elspeth.plugins.infrastructure.manager as _manager_mod
+
+        original = _manager_mod.PluginManager
+        call_count = 0
+
+        def _counting_manager(*args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(_manager_mod, "PluginManager", _counting_manager)
+
+        # Two distinct entrypoints into the catalog. With separate
+        # PluginManager instances per helper this would tick the counter
+        # twice; with a shared snapshot the counter ticks once.
+        _service_mod._is_registered_plugin("source", "no_such_plugin_zzz")
+        with pytest.raises(RuntimeError):
+            _service_mod._get_plugin_class_for_kind("source", "no_such_plugin_zzz")
+
+        assert call_count == 1, (
+            f"PluginManager instantiated {call_count} times; the shared-snapshot contract requires exactly 1 per cache lifetime."
+        )

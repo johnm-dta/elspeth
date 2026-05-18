@@ -154,7 +154,13 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
         setTransforms(xfm);
         setSinks(snk);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // The user-visible chip ("Failed to load.") collapses every failure
+        // mode (5xx, network drop, auth, schema drift) into one opaque
+        // string. Surface the rejection through console.error so an
+        // operator inspecting DevTools can distinguish causes without
+        // having to reproduce the failure server-side.
+        console.error("[CatalogDrawer] failed to load plugin catalog:", err);
         setFetchError(true);
       })
       .finally(() => {

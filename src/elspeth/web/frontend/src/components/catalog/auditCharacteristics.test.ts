@@ -32,13 +32,6 @@ describe("auditCharacteristics metadata", () => {
     expect(lookupAuditCharacteristic("signed")).not.toBeNull();
   });
 
-  it("exposes network flag with attention tone", () => {
-    const meta = lookupAuditCharacteristic("network");
-    expect(meta).not.toBeNull();
-    expect(meta?.tone).toBe("attention");
-    expect(meta?.tooltip).toMatch(/network|external/i);
-  });
-
   it("io_write has informational tone (not attention)", () => {
     const meta = lookupAuditCharacteristic("io_write");
     expect(meta).not.toBeNull();

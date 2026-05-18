@@ -43,6 +43,14 @@ import type {
   GuidedRespondRequest,
   GuidedRespondResponse,
 } from "@/types/guided";
+import type {
+  InterpretationEvent,
+  InterpretationOptOutResponse,
+  InterpretationResolveRequest,
+  InterpretationResolveResponse,
+  ListInterpretationEventsResponse,
+  OptOutSummaryResponse,
+} from "@/types/interpretation";
 import type { RecoveryTranscriptRow } from "@/types/recovery";
 import type {
   UserComposerPreferencesPayload,
@@ -1052,6 +1060,145 @@ export async function deleteSecret(name: string): Promise<void> {
   if (!response.ok) {
     await parseResponse<never>(response);
   }
+}
+
+// ── Interpretation events (Phase 5b) ───────────────────────────────────────
+//
+// HTTP surface mirroring the four routes in
+// src/elspeth/web/sessions/routes.py (Phase 5b Tasks 6 + 7):
+//
+//   GET  /api/sessions/{id}/interpretations[?status=pending|all]
+//   POST /api/sessions/{id}/interpretations/{event_id}/resolve
+//   POST /api/sessions/{id}/interpretations/opt_out
+//   GET  /api/sessions/{id}/interpretations/opt_out_summary
+//
+// Error envelopes:
+// - 422 (validation, e.g. amended_value missing when choice="amended") flows
+//   through parseResponse and surfaces as an ApiError with status: 422.
+// - 404 (session or event not found, or 404 on IDOR-deflected access) flows
+//   through parseResponse and surfaces as an ApiError with status: 404.
+// - 409 (already-resolved event, or conflict between concurrent resolves)
+//   flows through parseResponse and surfaces as an ApiError with status: 409.
+//
+// Per the existing client convention, all four functions throw the typed
+// ApiError envelope; callers branch on error_type / status code, not on
+// detail text.
+
+/**
+ * List interpretation events for a session.
+ *
+ * `status` selects the row subset:
+ *   - "pending" — only choice="pending" rows (active review affordances).
+ *   - "all"     — every row regardless of choice (for audit-readiness
+ *                 counts and the post-resolve event list).
+ *
+ * The backend default is "all"; this client mirrors that default so the
+ * common case (fetch everything on session load for the readiness panel)
+ * needs no explicit argument.
+ */
+export async function listInterpretationEvents(
+  sessionId: string,
+  status: "pending" | "all" = "all",
+  signal?: AbortSignal,
+): Promise<InterpretationEvent[]> {
+  // Use URLSearchParams to handle the query-string boundary cleanly: it
+  // does percent-encoding correctly for any future status-value extension
+  // and keeps the call site free of manual string concatenation.
+  const qs = new URLSearchParams({ status });
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations?${qs.toString()}`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  const body = await parseResponse<ListInterpretationEventsResponse>(response);
+  return body.events;
+}
+
+/**
+ * Resolve a single interpretation event.
+ *
+ * `body.choice` is narrowed to the two user-driven values
+ * (accepted_as_drafted, amended) — opt-out goes through a separate route,
+ * and pending/abandoned are not user resolve actions.
+ *
+ * The response returns the resolved event row PLUS the new composition
+ * state produced by patching the affected LLM transform.  Single-envelope
+ * shape so the caller can update its event-list view and
+ * composition-state view atomically.
+ */
+export async function resolveInterpretation(
+  sessionId: string,
+  eventId: string,
+  body: InterpretationResolveRequest,
+  signal?: AbortSignal,
+): Promise<InterpretationResolveResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations/${eventId}/resolve`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse<InterpretationResolveResponse>(response);
+}
+
+/**
+ * Record the per-session "stop asking about interpretations" decision.
+ *
+ * No request body: the route is a discrete user decision, parameterised
+ * only by the session ID and the authenticated actor (carried by the
+ * auth middleware).  On success the backend (a) sets the session's
+ * interpretation_review_disabled flag and (b) writes an opt-out row to
+ * interpretation_events_table with choice='opted_out' and
+ * interpretation_source='auto_interpreted_opt_out'.
+ */
+export async function optOutOfInterpretations(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<InterpretationOptOutResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations/opt_out`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+      // The route accepts an empty body; sending "{}" rather than omitting
+      // body entirely so the Content-Type: application/json header has a
+      // matching payload (some HTTP intermediaries reject the inverse).
+      body: "{}",
+      signal,
+    },
+  );
+  return parseResponse<InterpretationOptOutResponse>(response);
+}
+
+/**
+ * Retroactive audit of auto-baked interpretations (F-22).
+ *
+ * After a session has opted out, the composer-LLM continues to auto-bake
+ * interpretations.  This route lets the user retroactively review every
+ * auto-baked event whose interpretation_source is auto_interpreted_opt_out
+ * or auto_interpreted_no_surfaces.  user_approved rows are excluded; the
+ * standard list route is the right surface for those.
+ */
+export async function getInterpretationOptOutSummary(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<InterpretationEvent[]> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations/opt_out_summary`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  const body = await parseResponse<OptOutSummaryResponse>(response);
+  return body.events;
 }
 
 export {

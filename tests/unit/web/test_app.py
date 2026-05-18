@@ -150,6 +150,43 @@ class TestCORSMiddleware:
         assert "access-control-allow-origin" not in response.headers
 
 
+class TestBodySizeLimitMiddleware:
+    """Tests that the 10 MB body-size guard rejects oversized requests.
+
+    Phase 5b.0.5 (F-3): the ASGI body-size middleware is defense-in-depth
+    against unbounded payload allocation.  The Pydantic per-field caps
+    (``SendMessageRequest.content``, ``_InlineBlobModel.content``) are
+    the actual guarantees; the middleware short-circuits Content-Length
+    declarations that would otherwise reach the parser at all.
+    """
+
+    def test_rejects_oversized_content_length(self, tmp_path) -> None:
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        # 11 MB declared > 10 MB cap.  Body content itself doesn't matter
+        # because the middleware checks the header and short-circuits
+        # before reading the body.
+        response = client.post(
+            "/api/health",
+            headers={"Content-Length": "11000000", "Content-Type": "application/json"},
+            content=b"{}",
+        )
+        assert response.status_code == 413
+
+    def test_allows_under_limit_content_length(self, tmp_path) -> None:
+        # Sanity check that the middleware does not over-reject — a
+        # tiny body must still reach the (404) handler for the missing
+        # POST /api/health route, not be 413'd by the size guard.
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        response = client.post(
+            "/api/health",
+            headers={"Content-Type": "application/json"},
+            content=b"{}",
+        )
+        assert response.status_code != 413
+
+
 class TestGetSettingsDependency:
     """Tests for get_settings() dependency provider."""
 

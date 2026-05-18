@@ -96,7 +96,13 @@ class SessionResponse(_StrictResponse):
 class SendMessageRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/messages."""
 
-    content: str = pydantic.Field(min_length=1)
+    # max_length=65536 (64 KiB) caps message content at the schema boundary.
+    # Phase 5b.0.5 (F-3): defense against unbounded payload allocation
+    # before interpretation-event code paths can be exercised.  64 KiB
+    # accommodates multi-paragraph user messages and long paste content
+    # while preventing trivial-cost large-string attacks.  Mirrors the
+    # _InlineBlobModel.content 256 KiB cap (web/composer/redaction.py).
+    content: str = pydantic.Field(min_length=1, max_length=65536)
     state_id: UUID | None = None
 
     @field_validator("content")

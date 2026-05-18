@@ -1,0 +1,187 @@
+# Phase 9 follow-ups — items deferred from Phase 8
+
+> **Created:** 2026-05-19 (Phase 8 pre-flight gate).
+> **Review by:** Phase 8 close + 90 days. If Phase 9 has not begun by
+> that date, each remaining entry must either be filed as a Filigree
+> issue, promoted into a Phase 9 plan section, or explicitly retired
+> with a rationale. Leaving entries in this file unreviewed past the
+> TTL recapitulates the failure mode documented in the project memory
+> `project_cicd_allowlist_audit_2026-05-19.md` (51% growth in 32 days
+> on the L3 allowlist because no expiry mechanism forced periodic
+> review).
+> **Cadence reference:** [20-phase-8-polish-and-telemetry.md](20-phase-8-polish-and-telemetry.md)
+> §"Phase 9 follow-ups file — review cadence (S4 — load-bearing)".
+
+This file is the durable record of every item Phase 8 explicitly
+deferred or de-scoped. Entries fall into four classes; each entry
+states which class, what triggered the deferral, and what closes it.
+
+| Class | Definition | Closure path |
+|---|---|---|
+| **Probe-miss no-op** | A conditional Phase 8 sub-task whose upstream-phase probe returned "not found" at the 2026-05-19 gate. The sub-task did not run; the gap is documented here. | Upstream phase ships the surface, then file a Filigree issue under Phase 9 to wire the deferred sub-task. |
+| **Decision deferral** | A boundary question Phase 8 chose not to resolve (Decision-2 resolution = Option C). | Phase 9 design pass resolves the boundary question; do not silently re-categorise the deferred surface. |
+| **Performance instrumentation** | B3 cohort (c) — perf signals from already-shipped phases. Reopening shipped phases for pure perf instrumentation was out of proportion to the benefit. | Phase 9 perf-instrumentation pass adds these counters with the original phase's vocabulary. |
+| **A11y medium/low finding** | Task 7 axe-core findings classified medium/low severity at audit time. High-severity findings were fixed inline; medium/low were recorded here. | Phase 9 a11y closeout sweep, or earlier if Filigree-promoted. |
+
+---
+
+## Pre-flight gate probe outcomes (recorded 2026-05-19)
+
+The Phase 8 pre-flight (W1 — operator gate) ran six probes against
+the `feat/composer-phase-8-polish` worktree branched from RC5.2
+(`dd20888f0`). Outcomes:
+
+| Probe | Hits | Gated sub-task | Class | Class-A or Class-B disposition |
+|---|---|---|---|---|
+| `grep -rn 'telemetry: deferred to Phase 8' src/elspeth/` | 0 | Task 1 Sub-task 7a markers-harvest framing | Probe-miss no-op | Class B — scope OUT of Phase 8 |
+| `grep -rn 'verify_token\|verify_share_token' src/elspeth/web/` | 0 | Task 1 Sub-task 7d (B3 cohort a — Phase 6 verify-failure / expiry-hit emits) | Probe-miss no-op | Class B — scope OUT of Phase 8 |
+| `grep -rn 'auto_interpreted_opt_out' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7e (B3 cohort b1 — Phase 5b interpretation-opt-out emit) | (HIT — scoped IN) | n/a |
+| `grep -rn 'audit_readiness\|composer/audit/readiness' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7f (B3 cohort b2 — Phase 2C audit-fetch-failure emit) | (HIT — scoped IN) | n/a |
+| `ls src/elspeth/web/frontend/src/components/sessions/HeaderSessionSwitcher.tsx` | file exists | Task 4 (session-sidebar migration) | (HIT — scoped IN) | n/a |
+| `grep -rn 'tutorial_completed' src/elspeth/web/` | 0 | Task 6 (tutorial-replay button + counter) | Probe-miss no-op | Class B — scope OUT of Phase 8 |
+
+**Operator decision rule applied (S5-reweighted):** no probe gates an
+unconditional Phase 8 task. Tasks 0, 1 infra, 2, 3, 5, 7, and 8 ran
+regardless. The three Class-B sub-tasks above each route to the
+follow-up entries listed below.
+
+---
+
+## Deferred items
+
+### 1. Cohort (a) — Phase 6 completion-gesture telemetry markers
+
+- **Class:** Probe-miss no-op (Probe 1 + Probe 2).
+- **Trigger:** No `'telemetry: deferred to Phase 8'` markers were
+  seeded by upstream phases at the 2026-05-19 gate; no
+  `verify_token` / `verify_share_token` symbols exist under
+  `src/elspeth/web/`. Phase 6 (completion gestures) merged into
+  RC5.2 (commit `dd20888f0`) but did not seed the
+  `composer.share.token_verify_failure_total` or
+  `composer.share.link_expiry_hit_total` emit sites that Phase 8
+  Task 1 Sub-task 7d was scoped to harvest.
+- **What's missing:** Two counter emits inside the future
+  shareable-reviews verify-failure and expiry-hit branches:
+  - `composer.share.token_verify_failure_total` (counter, no
+    attributes per current B3 cohort-a design — review the
+    attribute shape during Phase 9 design pass).
+  - `composer.share.link_expiry_hit_total` (counter, no
+    attributes).
+- **Closure path:**
+  1. Confirm with Phase 6's owner where the verify-failure and
+     expiry-hit branches live (likely under
+     `src/elspeth/web/shareable_reviews/`).
+  2. File a Filigree issue under Phase 9 referencing this entry
+     and the cohort-(a) design in
+     `20-phase-8-polish-and-telemetry.md` §"Cross-phase telemetry
+     — cohort split (B3 reshape)".
+  3. Wire the emits with the existing 8b helper module shape
+     (`src/elspeth/web/composer/telemetry_phase8.py` for module-local
+     counters or `_SessionsTelemetry` container if cohort lives
+     under sessions). Commit MUST include the
+     `telemetry-backfill: phase-6` trailer (B4-r3 commit-msg
+     hook enforces).
+- **Definition of done:** The cohort-a counters increment under the
+  same Q-cluster test discipline (function-scoped fixture per Q10)
+  Phase 8 used for cohorts (b1) and (b2); plan §"Cohort attribution
+  via commit trailers (A4 — load-bearing)" cited inline at the
+  emit sites.
+
+### 2. Task 6 — Tutorial-replay button (Phase 4 hello-world dependency)
+
+- **Class:** Probe-miss no-op (Probe 6).
+- **Trigger:** No `tutorial_completed` symbol exists under
+  `src/elspeth/web/` at the 2026-05-19 gate. Phase 4 (hello-world
+  tutorial) has not yet been planned (plan reference: see roadmap
+  in `00-implementation-roadmap.md`).
+- **What's missing:** The entire Task 6 surface from
+  `20-phase-8-polish-and-telemetry.md`:
+  - `src/elspeth/web/frontend/src/components/settings/TutorialReplayButton.tsx`
+    and its `.test.tsx`.
+  - Mount inside `ComposerPreferencesPanel.tsx`.
+  - `updateComposerPreferences` call site in `api/client.ts`
+    extended to clear the flag.
+  - `preferencesStore.ts` action / selector for the flag.
+  - The audit-side flag-clear path in the backend (depends on
+    Phase 4's schema decision for where `tutorial_completed`
+    actually lives).
+- **Closure path:** Phase 4 ships the `tutorial_completed`
+  surface; Phase 9 (or a Phase 4 follow-up) wires the replay button
+  per the Phase 8 plan text. The plan text for Task 6 in
+  `20-phase-8-polish-and-telemetry.md` remains canonical until then.
+- **Definition of done:** A replay click PATCHes
+  `{"tutorial_completed": false}` and the empty-state chat does
+  NOT gain a "redo tutorial" link (explicit non-feature in Phase 8
+  scope boundaries — Phase 9 should preserve that constraint).
+
+### 3. Decision 2 — `composer.tutorial.replayed_total` counter boundary question
+
+- **Class:** Decision deferral.
+- **Trigger:** Pass-2 review surfaced that the
+  `composer.tutorial.replayed_total` counter does not cleanly fit
+  CLAUDE.md's "non-decision read" superset exception — the click
+  is user-write-intent, not a read. Three options were considered:
+  - Option A: emit the counter under the superset exception
+    (rejected on pass-3 — would broaden the exception
+    project-wide or require semantic dishonesty).
+  - Option B: audit-record the replay (rejected by the original
+    B2.b reasoning — account-level preferences are operational
+    signal only).
+  - Option C: defer the boundary question to Phase 9 (chosen).
+- **What's missing:** A principled resolution. Either:
+  - Phase 9 establishes a new project-wide rule that user-write-intent
+    on operational-only surfaces can be telemetry-only (extending
+    the CLAUDE.md superset exception with explicit scope), then
+    Phase 8's plan text for Task 6 Step 7 is reactivated and the
+    counter ships.
+  - OR Phase 9 confirms the operational-only surface should
+    promote to audit when user-write-intent appears, which
+    triggers a Tier-1 schema decision (and a DB-delete) on the
+    next deploy.
+- **Closure path:** Phase 9 design pass; resolution amends both
+  CLAUDE.md (if rule changes) and the Phase 8 plan text in place.
+- **Definition of done:** The counter either ships under a named
+  rule extension or is permanently retired. The plan name
+  (`composer.tutorial.replayed_total`) stays in
+  `20-phase-8-polish-and-telemetry.md` §"Telemetry primacy
+  explicit acknowledgment" as a Phase-9 pointer until resolved —
+  do not silently delete it; the deferral itself is the artifact.
+
+### 4. B3 cohort (c) — Performance instrumentation in shipped phases
+
+- **Class:** Performance instrumentation.
+- **Trigger:** Two perf signals were identified during the
+  cross-phase telemetry split (B3 reshape) that belong to
+  already-shipped phases:
+  - `composer.audit.render_duration` (Phase 2C audit-readiness
+    panel — measures the time from a row-detail fetch to first
+    paint).
+  - `composer.interpretation.resolve_duration` (Phase 5b
+    interpretation resolve — measures latency from prompt commit
+    to interpretation render).
+- **Why deferred:** Pure perf signals; reopening shipped phases
+  for perf instrumentation is out of proportion to the benefit
+  and not security-relevant. Recorded here so the gap is
+  discoverable rather than invented later.
+- **Closure path:** Phase 9 perf-instrumentation pass adds these
+  counters as histograms (NOT counters — duration is a distribution,
+  not a count). Commits MUST include the appropriate cohort trailer
+  (`telemetry-backfill: phase-2c` or `phase-5b`) for `git blame`
+  discoverability.
+- **Definition of done:** Histograms emit under the vocabulary
+  Phase 8 established (sub-section names, naming conventions);
+  dashboards visualise p50/p95.
+
+---
+
+## A11y findings deferred from Phase 8 Task 7
+
+> This section is **lazily created** by Task 7 Step 5/7 once axe-core
+> has actually run. Phase 8 implementer: when Task 7 runs and produces
+> medium/low-severity findings, append entries below using the
+> template at the bottom of `20-phase-8-polish-and-telemetry.md`
+> §"Accessibility (axe-core) findings deferred from Phase 8 Task 7".
+> High-severity findings are fixed inline during Task 7 — do not log
+> them here.
+
+_(no entries yet)_

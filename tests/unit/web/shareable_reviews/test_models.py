@@ -24,6 +24,25 @@ from elspeth.web.shareable_reviews.models import (
 )
 
 
+def _make_composition_snapshot() -> dict[str, object]:
+    """Build a minimal valid composition_snapshot wire shape.
+
+    Mirrors the dict shape produced by ``CompositionState.to_dict()`` —
+    version, metadata, source, nodes, edges, outputs. With the FIX-A
+    tightening of SharedInspectResponse (Plan 19a:891-892) the
+    composition_snapshot field is a strict Pydantic model and partial
+    dicts are rejected at construction.
+    """
+    return {
+        "version": 1,
+        "metadata": {"name": "Demo", "description": ""},
+        "source": None,
+        "nodes": [],
+        "edges": [],
+        "outputs": [],
+    }
+
+
 def _make_audit_readiness_snapshot() -> AuditReadinessSnapshot:
     """Build a minimal valid AuditReadinessSnapshot for response-model tests.
 
@@ -128,7 +147,7 @@ def test_shared_inspect_response_carries_audit_readiness() -> None:
         session_id=str(uuid4()),
         state_id=str(uuid4()),
         pipeline_metadata={"name": "Demo", "description": ""},
-        composition_snapshot={"version": 1, "nodes": [], "edges": [], "outputs": []},
+        composition_snapshot=_make_composition_snapshot(),
         yaml="version: 1\n",
         audit_readiness=snapshot,
         created_by_user_id="user-1",
@@ -146,7 +165,7 @@ def test_shared_inspect_response_rejects_extra_field() -> None:
             session_id=str(uuid4()),
             state_id=str(uuid4()),
             pipeline_metadata={"name": "Demo", "description": ""},
-            composition_snapshot={"version": 1},
+            composition_snapshot=_make_composition_snapshot(),
             yaml="version: 1\n",
             audit_readiness=snapshot,
             created_by_user_id="user-1",
@@ -163,8 +182,76 @@ def test_shared_inspect_response_requires_audit_readiness() -> None:
             session_id=str(uuid4()),
             state_id=str(uuid4()),
             pipeline_metadata={"name": "Demo", "description": ""},
-            composition_snapshot={"version": 1},
+            composition_snapshot=_make_composition_snapshot(),
             yaml="version: 1\n",
+            created_by_user_id="user-1",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC),
+        )
+
+
+# ── FIX-A: drift-crashes-at-construction tests (Plan 19a:891-892) ─────────
+
+
+def test_shared_inspect_response_rejects_extra_pipeline_metadata_key() -> None:
+    """An unknown key inside pipeline_metadata must crash at construction.
+
+    Plan 19a:64 — "drift crashes at construction" — depends on the
+    response model being a strict Pydantic mirror of PipelineMetadata,
+    not a free-form dict. An unknown key (producer drift) must crash so
+    audit-shape regressions are caught at the wire boundary, not silently
+    accepted.
+    """
+    snapshot = _make_audit_readiness_snapshot()
+    with pytest.raises(ValidationError):
+        SharedInspectResponse(
+            session_id=str(uuid4()),
+            state_id=str(uuid4()),
+            pipeline_metadata={"name": "Demo", "description": "", "unknown_key": True},
+            composition_snapshot=_make_composition_snapshot(),
+            yaml="version: 1\n",
+            audit_readiness=snapshot,
+            created_by_user_id="user-1",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC),
+        )
+
+
+def test_shared_inspect_response_rejects_extra_composition_snapshot_key() -> None:
+    """An unknown top-level key inside composition_snapshot must crash."""
+    snapshot = _make_audit_readiness_snapshot()
+    bad_snapshot = _make_composition_snapshot()
+    bad_snapshot["unknown_top_level_key"] = "boom"
+    with pytest.raises(ValidationError):
+        SharedInspectResponse(
+            session_id=str(uuid4()),
+            state_id=str(uuid4()),
+            pipeline_metadata={"name": "Demo", "description": ""},
+            composition_snapshot=bad_snapshot,
+            yaml="version: 1\n",
+            audit_readiness=snapshot,
+            created_by_user_id="user-1",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC),
+        )
+
+
+def test_shared_inspect_response_rejects_wrong_pipeline_metadata_field_type() -> None:
+    """A wrong-type value inside pipeline_metadata must crash.
+
+    strict=True forbids int→str coercion. ``name`` is declared as str
+    on the response mirror; passing ``123`` must raise rather than
+    silently coercing to ``"123"``.
+    """
+    snapshot = _make_audit_readiness_snapshot()
+    with pytest.raises(ValidationError):
+        SharedInspectResponse(
+            session_id=str(uuid4()),
+            state_id=str(uuid4()),
+            pipeline_metadata={"name": 123, "description": ""},
+            composition_snapshot=_make_composition_snapshot(),
+            yaml="version: 1\n",
+            audit_readiness=snapshot,
             created_by_user_id="user-1",
             created_at=datetime.now(UTC),
             expires_at=datetime.now(UTC),

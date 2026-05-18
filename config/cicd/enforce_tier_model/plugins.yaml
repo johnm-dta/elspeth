@@ -180,25 +180,6 @@ allow_hits:
     is genuinely optional with empty-string default
   safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
   expires: '2026-07-02'
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:validate_output_target:fp=e908c260f2d4641a
-  owner: feature
-  reason: Display header mapping - fields not in map keep original name (transform-added
-    fields)
-  safety: Intentional fallback to original field name, not bug hiding
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=8c83b27dcbe3a2b0
-  owner: feature
-  reason: Intentional fallback - reverse mapping may not contain all fields (transform-added)
-  safety: Falls back to original field name - correct behavior for fields not in source
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=d555aa9d034e84f7
-  owner: feature
-  reason: Intentional fallback - display mapping may not contain all fields (transform-added)
-  safety: Falls back to normalized field name - correct behavior for fields not in
-    source
-- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=49df15c4ae67af78
-  owner: feature
-  reason: Display header mapping - fields not in map keep original name (transform-added
-    fields)
-  safety: Intentional fallback to original field name, not bug hiding
 - key: plugins/infrastructure/discovery.py:R9:_discover_in_file:fp=0acd1690c04355a2
   owner: architecture
   reason: sys.modules.pop cleanup on import failure — module may not be registered

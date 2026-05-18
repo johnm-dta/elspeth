@@ -349,6 +349,27 @@ class TestR1SourceRegressions:
         ]
         assert r1_findings == []
 
+    def test_sink_display_mapping_call_sites_have_no_r1_findings(self) -> None:
+        findings = [
+            *scan_file(
+                Path("src/elspeth/plugins/sinks/csv_sink.py"),
+                Path("src/elspeth"),
+            ),
+            *scan_file(
+                Path("src/elspeth/plugins/sinks/json_sink.py"),
+                Path("src/elspeth"),
+            ),
+        ]
+
+        target_contexts = {
+            ("CSVSink", "validate_output_target"),
+            ("CSVSink", "_open_file"),
+            ("CSVSink", "_get_field_names_and_display"),
+            ("JSONSink", "validate_output_target"),
+        }
+        r1_findings = [finding for finding in findings if finding.rule_id == "R1" and finding.symbol_context in target_contexts]
+        assert r1_findings == []
+
 
 # =============================================================================
 # R2: getattr() detection

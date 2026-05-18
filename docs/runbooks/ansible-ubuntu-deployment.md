@@ -1,16 +1,68 @@
 # Ansible Ubuntu Deployment Guide
 
-This guide describes how to automate ELSPETH web deployments with Ansible on
-Ubuntu 24.04 and Ubuntu 22.04. It covers three deployment contexts:
+## What This Document Is
+
+**This document is a specification, not a shipped Ansible tree.** No
+`deploy/ansible/` directory exists in this repository yet; the code
+blocks below are the reference material from which an operations
+repository (or a future in-tree `deploy/ansible/`) will be authored.
+
+Concretely:
+
+- **The role/playbook/inventory paths named below do not yet resolve.**
+  `ansible-playbook -i inventories/non-cloud.yml playbooks/elspeth-vm.yml`
+  is the *target* command; running it today fails because the files do
+  not exist. The operator's first task is to transcribe the code blocks
+  into a real Ansible tree (in an operations repo, or under
+  `deploy/ansible/` in this repo) and adapt the variable values to
+  their environment.
+- **The `VERIFY BEFORE MERGE` markers scattered through code blocks
+  refer to merging the transcribed code into the operator's Ansible
+  tree** — i.e., they flag points where the API shape of an upstream
+  Ansible module, Azure REST endpoint, or `ansible-core` Jinja
+  type-preservation behavior varies across versions and must be
+  re-confirmed against the operator's installed toolchain before the
+  task is trusted. They are **not** unresolved TODOs in this document;
+  they are operator-side verification points by design.
+- **What this document does commit to**: the deployment topology
+  (source-checkout VM, Azure Front Door fronting a VM, Container Apps
+  with revision traffic-shifting), the gate sequence (CI verification
+  → snapshot → deploy → probe → traffic-shift or rollback), the risk
+  register, and the rationale for every load-bearing choice. Those are
+  durable. The module-version-specific quirks are operator-side because
+  they change faster than this document can.
+
+This guide covers three deployment contexts:
 
 - Non-cloud Ubuntu host running the source-checkout web service behind Caddy.
 - Azure Ubuntu VM running the same service, published through Azure Front Door.
 - Azure container deployment using a built container image and Azure Container
   Apps or a comparable container host.
 
-The examples are templates for an operations repository or a future
-`deploy/ansible/` tree. Do not paste production secrets into inventory files;
-use Ansible Vault, an external secret manager, or Azure Key Vault.
+Do not paste production secrets into inventory files; use Ansible Vault, an
+external secret manager, or Azure Key Vault.
+
+### Pre-Adoption Verification Checklist
+
+Before relying on the transcribed playbooks in production, work through
+the `VERIFY BEFORE MERGE` markers in your installed toolchain:
+
+1. `azure.azcollection` version: confirm the `azure_rm_resource_info`
+   failure shape for a 404 against your installed collection version
+   (see "Distinguish 404 from auth / permission / network failures").
+2. `ansible-core` version: confirm Jinja type-preservation for
+   `template: "{{ elspeth_container_template.template }}"` (see
+   "Container Template — Single Source Of Truth").
+3. `caddy` version: confirm `format filter` field-redaction syntax
+   against your installed Caddy version (the runbook is validated
+   against Caddy 2.11.2).
+4. Container Apps API version (`api_version: "2024-03-01"`):
+   confirm `revisions` subresource shape and per-revision FQDN field
+   path against the API version available in your subscription's
+   region.
+
+Each verification is a one-off probe — once observed and pinned, the
+corresponding code block can be treated as load-bearing.
 
 ## Preflight Decisions
 
@@ -161,12 +213,12 @@ Use the same release gates for non-cloud and Azure deployments:
 
 ### CI Status Verification
 
-The "Pre-deploy CI gates pass" step above is operator-asserted unless
-you wire a CI-status check into the playbook. Two variables turn the
-assertion into a mechanical gate:
+The "Pre-deploy CI gates pass" step above is a **default-required
+gate**. Three variables control it:
 
 ```yaml
 # group_vars/elspeth_web.yml — example for GitHub status checks
+elspeth_ci_status_verification_required: true   # default-true; flip to false ONLY for one-off dev deploys
 elspeth_ci_status_url: "https://api.github.com/repos/your-org/elspeth/commits/{{ elspeth_repo_version }}/status"
 elspeth_ci_status_headers:
   Authorization: "Bearer {{ vault_github_ci_token }}"
@@ -175,9 +227,38 @@ elspeth_ci_status_success_path: "state"      # JSON field to read
 elspeth_ci_status_success_value: "success"   # value that means "green"
 ```
 
+**Default posture is strict.** When
+`elspeth_ci_status_verification_required` is true (the default), the
+preflight role requires `elspeth_ci_status_url` to be set AND requires
+the CI status at that URL to report success. Either condition failing
+refuses the deploy.
+
+To run a one-off dev / canary deploy of an unverified SHA, the
+operator must set `elspeth_ci_status_verification_required: false`
+*as an explicit variable change in Git history*. Omitting
+`elspeth_ci_status_url` while leaving `_required` at its default is
+no longer a silent skip — the assert below refuses to proceed. Same
+discipline as the HSTS one-way levers earlier in this section:
+load-bearing posture changes are auditable variable bumps, not
+omissions.
+
 Preflight tasks:
 
 ```yaml
+- name: Refuse deploy when CI status verification is required but unconfigured
+  ansible.builtin.assert:
+    that:
+      - elspeth_ci_status_url is defined
+      - elspeth_ci_status_url | length > 0
+    fail_msg: >-
+      elspeth_ci_status_verification_required=true (default) but
+      elspeth_ci_status_url is not set. Either configure the CI status
+      URL in group_vars, or explicitly set
+      elspeth_ci_status_verification_required=false to acknowledge an
+      unverified-SHA deploy. Refusing to proceed: silent omission of
+      the URL is not an opt-out.
+  when: elspeth_ci_status_verification_required | default(true) | bool
+
 - name: Verify CI status for elspeth_repo_version
   ansible.builtin.uri:
     url: "{{ elspeth_ci_status_url }}"
@@ -186,9 +267,7 @@ Preflight tasks:
     return_content: true
     status_code: 200
   register: elspeth_ci_status
-  when:
-    - elspeth_ci_status_url is defined
-    - elspeth_ci_status_url | length > 0
+  when: elspeth_ci_status_verification_required | default(true) | bool
 
 - name: Refuse deploy if CI status is not success
   ansible.builtin.assert:
@@ -199,19 +278,17 @@ Preflight tasks:
       CI status for {{ elspeth_repo_version }} is not
       "{{ elspeth_ci_status_success_value | default('success') }}".
       Refusing to deploy an unverified revision.
-  when:
-    - elspeth_ci_status_url is defined
-    - elspeth_ci_status_url | length > 0
+  when: elspeth_ci_status_verification_required | default(true) | bool
 
-- name: Warn when CI status verification is unconfigured
+- name: Warn loudly when CI verification has been explicitly disabled
   ansible.builtin.debug:
     msg: >-
-      WARNING: elspeth_ci_status_url is not set. This deploy will proceed
-      without machine-verifying that {{ elspeth_repo_version }} passed
-      pre-deploy CI gates. See "CI Status Verification" in the runbook.
-  when:
-    - (elspeth_ci_status_url is not defined) or
-      (elspeth_ci_status_url | length == 0)
+      WARNING: elspeth_ci_status_verification_required=false. This
+      deploy is proceeding WITHOUT machine-verifying that
+      {{ elspeth_repo_version }} passed pre-deploy CI gates. This is
+      an operator-asserted unverified deploy. Confirm the variable
+      bump appears in Git history alongside the deploy SHA.
+  when: not (elspeth_ci_status_verification_required | default(true) | bool)
 ```
 
 GitLab, Jenkins, and Azure DevOps all expose equivalent commit-status
@@ -336,6 +413,10 @@ vault_openrouter_api_key: ""
 vault_azure_openai_api_key: ""
 vault_azure_openai_endpoint: ""
 vault_fingerprint_key: "replace-with-stable-hmac-key"
+# Only required when elspeth_install_nodesource_repo=true. Obtain
+# from a trusted workstation:
+#   curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sha256sum
+vault_nodesource_apt_key_sha256: ""
 ```
 
 Generate the web secret key on a trusted workstation:
@@ -386,9 +467,27 @@ Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
         owner: root
         group: root
         mode: "0644"
-      # The key is fetched at provision time. Pinning the key by SHA256
-      # in a real production posture (checksum: sha256:...) is strongly
-      # recommended; the unpinned form above is the runbook example.
+        checksum: "sha256:{{ vault_nodesource_apt_key_sha256 }}"
+      # The checksum pin is the supply-chain defense: if NodeSource is
+      # compromised and serves a different key, get_url fails the task
+      # before the key is written. The SHA256 lives in the vault
+      # (vault.yml: vault_nodesource_apt_key_sha256) so it survives
+      # rotations cleanly. To obtain the current value, run from a
+      # trusted workstation:
+      #
+      #   curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      #     | sha256sum
+      #
+      # Capture the output, cross-check against the NodeSource
+      # signature documentation (https://github.com/nodesource/distributions),
+      # and commit the value to the encrypted vault.yml. Rotate when
+      # NodeSource publishes a new key (rare — typically once every
+      # 2-3 years).
+      #
+      # If you prefer to defer the pin to a follow-up commit (NOT
+      # recommended for production), comment out the `checksum:` line
+      # and accept the risk. The risk-register entry "NodeSource apt
+      # key fetched without checksum pin" applies.
 
     - name: Configure NodeSource apt source for Node 20.x
       ansible.builtin.copy:
@@ -499,13 +598,22 @@ file, and restart systemd only when inputs change.
     shell: /usr/sbin/nologin
     system: true
 
-- name: Create data directories
+- name: Create data directories with owner-only access
+  # mode 0700 — only the elspeth user can enter elspeth_data_dir. The
+  # earlier 0750 leaked the audit DB to anyone in the elspeth group;
+  # Caddy is in that group for UDS access (/run/elspeth/uvicorn.sock,
+  # managed by systemd's RuntimeDirectory and granted by the socket's
+  # 0660 mode), so 0750 here meant Caddy could read /var/lib/elspeth/
+  # at file-level. Caddy has no business reading the audit DB; the
+  # "Access-Log Hygiene" section's blast-radius argument applies here
+  # in the inverse direction. 0700 closes the path; UDS access is
+  # unaffected because it lives under /run, not /var/lib/elspeth.
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
     owner: "{{ elspeth_user }}"
     group: "{{ elspeth_group }}"
-    mode: "0750"
+    mode: "0700"
   loop:
     - "{{ elspeth_data_dir }}"
     - "{{ elspeth_data_dir }}/runs"
@@ -520,25 +628,122 @@ file, and restart systemd only when inputs change.
       elspeth_repo_version must be a commit SHA or tag, not a branch.
       Got: {{ elspeth_repo_version }}
 
-- name: Snapshot session and audit databases before upgrade
-  ansible.builtin.copy:
-    src: "{{ item }}"
-    dest: "{{ item }}.pre-deploy-of-{{ elspeth_repo_version }}-{{ ansible_date_time.iso8601_basic_short }}"
-    remote_src: true
-    owner: "{{ elspeth_user }}"
-    group: "{{ elspeth_group }}"
-    mode: "0640"
+- name: Read SHA that last deployed against this DB (if any)
+  # The project uses SQLAlchemy `metadata.create_all()` for the
+  # session DB and does NOT write PRAGMA user_version or any other
+  # in-DB schema marker. So the runbook cannot PRAGMA-check schema
+  # compatibility. Instead, we write a sidecar marker on every
+  # successful deploy recording the SHA-that-last-deployed-against-
+  # this-DB. On the next preflight, we read the marker. If the
+  # incoming SHA differs from the last-deploy SHA AND the operator
+  # has not explicitly acknowledged a schema-drift deploy, refuse.
+  # The project policy is "operator deletes sessions.db on schema
+  # change" (see "Database Lifecycle"); this preflight makes that
+  # decision explicit instead of silent. The marker is rotated to
+  # the new SHA at the end of a successful deploy.
+  ansible.builtin.slurp:
+    src: "{{ elspeth_data_dir }}/.last-deploy-sha"
+  register: elspeth_last_deploy_sha_raw
+  failed_when: false                # first deploy: marker does not exist
+  changed_when: false
+
+- name: Compute previous-deploy SHA from marker
+  ansible.builtin.set_fact:
+    elspeth_previous_deploy_sha: >-
+      {{ (elspeth_last_deploy_sha_raw.content | b64decode | trim)
+         if (elspeth_last_deploy_sha_raw.content is defined)
+         else '' }}
+
+- name: Refuse schema-drift deploy without explicit acknowledgement
+  # If the SHA changed since the last deploy, the running code may
+  # expect a different session-DB schema than what's on disk. The
+  # project's pre-1.0 policy is "operator deletes sessions.db on
+  # schema change" — but "did the schema change?" is currently a
+  # human decision, not a mechanical one. Either:
+  #   (a) operator confirms no schema change: set
+  #       elspeth_acknowledge_schema_compatible=true (the deploy is
+  #       a code-only update, not a schema change), or
+  #   (b) operator confirms schema change: set
+  #       elspeth_force_session_db_delete=true (the role deletes
+  #       sessions.db post-deploy; in-flight composer sessions
+  #       are lost as documented in "Database Lifecycle"), or
+  #   (c) neither set: refuse, because silently starting the new
+  #       code against the old schema either crashes on first write
+  #       or — worse — opens, mismatches, and corrupts in-flight
+  #       rows.
+  ansible.builtin.assert:
+    that:
+      - (elspeth_previous_deploy_sha == elspeth_repo_version)
+        or (elspeth_acknowledge_schema_compatible | default(false) | bool)
+        or (elspeth_force_session_db_delete | default(false) | bool)
+    fail_msg: >-
+      sessions.db was last touched by SHA={{ elspeth_previous_deploy_sha }};
+      this deploy is SHA={{ elspeth_repo_version }}. Either set
+      elspeth_acknowledge_schema_compatible=true (code-only update, no
+      schema change), or set elspeth_force_session_db_delete=true (schema
+      changed; delete sessions.db and drop in-flight composer sessions).
+      Project policy is "operator deletes sessions.db on schema change";
+      this gate makes the decision explicit. See "Database Lifecycle".
+  when: elspeth_previous_deploy_sha | length > 0
+
+- name: Probe whether each SQLite DB exists (first deploy: they don't yet)
+  ansible.builtin.stat:
+    path: "{{ item }}"
   loop:
     - "{{ elspeth_data_dir }}/sessions.db"
     - "{{ elspeth_data_dir }}/runs/audit.db"
-  failed_when: false                # first deploy: files do not exist yet
+  register: elspeth_db_stat
+
+- name: Snapshot session and audit databases before upgrade (WAL-safe)
+  # Use sqlite3 ".backup" rather than ansible.builtin.copy. The .backup
+  # command invokes the SQLite Online Backup API, which serializes
+  # against writers and produces a consistent point-in-time copy
+  # regardless of WAL/SHM state. A raw byte-copy under WAL captures
+  # the main .db file but NOT the .db-wal sidecar — any committed-
+  # but-not-yet-checkpointed transactions are absent from the
+  # snapshot, and the "atomic" snapshot is actually torn. See
+  # https://www.sqlite.org/backup.html for the API semantics.
+  #
+  # The .backup destination path is passed UNQUOTED in argv[2]: argv
+  # bypasses the shell, so any literal `'` characters would land
+  # inside SQLite's parser as part of the filename rather than being
+  # stripped. We rely on elspeth_data_dir + the SHA-and-timestamp
+  # suffix containing no shell-significant characters — both are
+  # asserted earlier in the role (data_dir under /var/lib/elspeth
+  # by convention; SHA matches a strict regex). If you change
+  # elspeth_data_dir to a path containing whitespace, use
+  # ansible.builtin.shell with explicit quoting instead.
+  ansible.builtin.command:
+    argv:
+      - sqlite3
+      - "{{ item.item }}"
+      - ".backup {{ item.item }}.pre-deploy-of-{{ elspeth_repo_version }}-{{ ansible_date_time.iso8601_basic_short }}"
+  loop: "{{ elspeth_db_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
   register: elspeth_db_snapshot
-  changed_when: elspeth_db_snapshot is not skipped
+  changed_when: true
   # The snapshot filename embeds the SHA we are ABOUT TO DEPLOY, not the
   # SHA currently live. To roll back FROM a failing SHA Y back TO the
   # prior X, the rollback role selects the snapshot named
   # "pre-deploy-of-Y-*" — i.e., it restores the state that existed
   # *before* Y started writing to the DB. See "Rollback Automation".
+
+- name: Tighten snapshot permissions to owner-only
+  ansible.builtin.file:
+    path: "{{ item.item }}.pre-deploy-of-{{ elspeth_repo_version }}-{{ ansible_date_time.iso8601_basic_short }}"
+    owner: "{{ elspeth_user }}"
+    group: "{{ elspeth_group }}"
+    mode: "0600"
+  loop: "{{ elspeth_db_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+  # sqlite3 .backup writes the file as the invoking user (root, when
+  # become: true) with default umask. Re-stat to elspeth:elspeth 0600
+  # so the snapshot has the same owner-only readability as the live
+  # DB after the elspeth_data_dir tightening (see "Common Variables").
 
 - name: Check out ELSPETH
   ansible.builtin.git:
@@ -881,6 +1086,102 @@ Install task (lives in the `caddy_origin` role):
   # this task and add the corresponding `import` line to your main
   # Caddyfile under operator control.
 ```
+
+### Caddy TLS Provisioning Modes
+
+Caddy auto-provisions TLS via ACME on first reload when the site
+block names a domain (e.g. `{{ elspeth_domain }} { ... }`). On a
+non-cloud VM this is convenient but the failure modes look like
+"playbook is broken" unless the operator picks a mode deliberately.
+Four modes, picked per environment:
+
+**1. HTTP-01 ACME (default, public host).** Caddy listens on port 80
+for the ACME challenge and on port 443 for HTTPS. Requires:
+
+- Public DNS A/AAAA pointing `{{ elspeth_domain }}` at the VM's
+  public IP.
+- Inbound port 80 reachable from the public Internet — the NSG / UFW
+  / `iptables` rule for the VM MUST allow `0.0.0.0/0:80` for the
+  duration of the challenge. ACME issuance retries indefinitely on
+  failure, so closing port 80 after issuance is fine but you cannot
+  *skip* opening it the first time.
+- ACME-provider rate limits (Let's Encrypt: ~50 certs / 7d / domain;
+  ~5 failed validations / 1h / domain). Pinning
+  `elspeth_repo_version` to a SHA + running the role repeatedly does
+  not re-issue certs — Caddy caches; rate limits matter mainly if
+  the operator tears down and recreates the VM frequently.
+
+No additional Caddy config needed beyond the site block above.
+
+**2. DNS-01 ACME (recommended when port 80 is closed, e.g. behind a
+bastion or private subnet).** Caddy proves domain ownership by
+writing a TXT record via the DNS provider's API. Requires:
+
+- A Caddy DNS plugin module compiled in (the apt-installed Caddy
+  *does not* include DNS plugins by default; use the
+  `xcaddy`-built binary, or a vendor RPM/DEB that bundles your
+  provider). Common providers: Cloudflare, Route53, Azure DNS.
+- API credentials in the vault and surfaced via environment to the
+  Caddy systemd unit (e.g. `Environment=CLOUDFLARE_API_TOKEN=...`
+  in a drop-in).
+- Site-block directive naming the provider:
+
+```caddyfile
+{{ elspeth_domain }} {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+    # ... reverse_proxy etc as above
+}
+```
+
+Port 80 can stay closed end-to-end.
+
+**3. `tls internal` (lab / canary / private domains).** Caddy's
+built-in internal CA issues a cert that browsers do not trust by
+default. Requires:
+
+- Operator-managed trust: each client either trusts Caddy's local
+  root (printed on first run at `~/.local/share/caddy/pki/...`),
+  uses `--insecure` for one-off probes, or skips browsers entirely
+  in favor of API-only access.
+- Suitable for staging-style hosts where TLS-ness is wanted but
+  public CA issuance is impossible (RFC1918 IPs, internal-only DNS).
+
+```caddyfile
+{{ elspeth_domain }} {
+    tls internal
+    # ... reverse_proxy etc as above
+}
+```
+
+Append `elspeth_caddy_tls_internal: true` as an opt-in variable in
+group_vars when this mode is desired; the template renders the `tls
+internal` directive only when the flag is set, so production hosts
+never fall into internal-CA mode by accident.
+
+**4. Pre-provisioned certificate (compliance jurisdictions, EV
+certs, or organizational PKI).** Operator drops cert + key files
+into a controlled path and points Caddy at them:
+
+```caddyfile
+{{ elspeth_domain }} {
+    tls /etc/caddy/certs/elspeth.pem /etc/caddy/certs/elspeth.key
+    # ... reverse_proxy etc as above
+}
+```
+
+The Ansible role must template both file paths into the site
+template and ship the cert/key from the vault (or, preferably,
+from the host's secret manager — Azure Key Vault file mount, etc.;
+do NOT carry production private keys through Ansible Vault if
+avoidable).
+
+**Picking a mode.** The decision lives in `group_vars`; treat it
+as load-bearing. The role's preflight should `assert` exactly one
+mode is selected (the four variables are mutually exclusive) so a
+half-configured site block does not silently fall back to HTTP-01
+on a host with port 80 closed.
 
 ### Access-Log Hygiene
 
@@ -1300,11 +1601,28 @@ elspeth_revision_probe_delay: 15
 elspeth_revision_probe_business_endpoints: []
 ```
 
-Container Apps **revision suffix constraint**: `elspeth_image_tag` is used
-as the revision suffix, which must be lowercase alphanumeric or hyphens
-and ≤ 64 characters. The `sha-<commit>` convention satisfies this.
-Image tags containing `.`, `_`, or uppercase characters will fail
-revision creation; choose the tag scheme accordingly.
+Container Apps **revision name length budget.** Azure documents
+`revisionSuffix` as accepting up to 64 characters, but the *full*
+revision name that gets constructed — `<azure_container_app_name>--<suffix>`
+— is itself subject to a Container Apps name-length limit. Plan for:
+
+```text
+max(len(elspeth_image_tag)) = 64 - len(azure_container_app_name) - 2
+```
+
+For the worked example with `azure_container_app_name: ca-elspeth-web-prod`
+(19 characters), the suffix budget is 43 characters. The
+`sha-<commit>` convention with a 7-character short SHA (`sha-542f348`,
+11 characters) fits comfortably; a 40-character long SHA
+(`sha-542f34874a2b...`) is 44 characters and would just barely fit
+even with the headroom budget. If your `azure_container_app_name` is
+longer, shorten the SHA portion of the tag or rename the app.
+
+**Revision suffix character constraints.** Lowercase alphanumeric and
+hyphens only. Tags containing `.`, `_`, or uppercase characters will
+fail revision creation with a non-obvious error mid-deploy. Choose the
+tag scheme accordingly — the `sha-<commit>` convention satisfies the
+character set as well as the length budget.
 
 If one user-assigned identity handles both ACR pulls and Key Vault reads, set
 `azure_container_pull_identity_id` and `azure_container_runtime_identity_id` to
@@ -1350,12 +1668,86 @@ operations gate on it:
     resource_name: "{{ azure_container_app_name }}"
     api_version: "2024-03-01"
   register: elspeth_container_app_lookup
-  failed_when: false                # 404 is an expected first-deploy state
+  failed_when: false                # decision made by the next task
+
+- name: Distinguish 404 from auth / permission / network failures
+  ansible.builtin.assert:
+    that:
+      # VERIFY BEFORE MERGE: azure_rm_resource_info's failure shape
+      # varies across azure.azcollection versions and Azure regions.
+      # Across released versions we have observed:
+      #   - newer versions: 404 returns `failed=false` with empty
+      #     `response`, so the `not failed` branch matches and the
+      #     fact below evaluates to "not exists" correctly.
+      #   - older versions: 404 returns `failed=true` with a message
+      #     containing "ResourceNotFound" or "was not found" (we have
+      #     also seen "404 Not Found" and "Resource ... not found"
+      #     across regions; this list is NOT exhaustive).
+      #
+      # Run a one-off probe in your environment with `ansible-playbook
+      # --check` against a non-existent app and confirm the actual
+      # failure shape BEFORE relying on this assert. If your installed
+      # version emits a phrase not in the match list below, a
+      # legitimate 404 will fail the assert and block deploys. Two
+      # safer alternatives if the string match is too fragile:
+      #   (a) call the ARM REST endpoint directly with `uri:` and
+      #       check `.status` explicitly (200 vs 404 vs other);
+      #   (b) treat the assert as advisory and gate the bootstrap
+      #       task on `elspeth_container_app_exists OR (lookup failed
+      #       with a phrase in the operator-curated allowlist)`.
+      #
+      # The match list below is the starting point, not the answer.
+      - >-
+        not (elspeth_container_app_lookup.failed | default(false))
+        or ('ResourceNotFound' in (elspeth_container_app_lookup.msg | default('')))
+        or ('was not found' in (elspeth_container_app_lookup.msg | default('')))
+        or ('404' in (elspeth_container_app_lookup.msg | default('')))
+    fail_msg: >-
+      Container app lookup failed for a non-404 reason:
+      {{ elspeth_container_app_lookup.msg | default('unknown error') }}.
+      This is typically an authentication or RBAC error — verify the
+      Ansible runner identity has at least Reader on
+      {{ azure_resource_group }} and Container Apps Reader (or higher)
+      on {{ azure_container_app_name }}, that the subscription is
+      reachable, and that the credentials have not expired. Refusing to
+      proceed: the bootstrap task below would otherwise misread the
+      lookup as "app does not exist" and attempt to create over the
+      running app.
 
 - name: Set container-app existence fact
   ansible.builtin.set_fact:
     elspeth_container_app_exists: >-
-      {{ (elspeth_container_app_lookup.response | default([]) | length) > 0 }}
+      {{ (not (elspeth_container_app_lookup.failed | default(false)))
+         and ((elspeth_container_app_lookup.response | default([]) | length) > 0) }}
+    # Two conditions are required for "exists": the lookup must have
+    # succeeded (not failed-and-suppressed-as-404), AND the response
+    # must contain at least one resource. A failed-but-not-404 lookup
+    # has already tripped the assert above and we never reach here.
+
+- name: Load shared container template (single source of truth)
+  ansible.builtin.set_fact:
+    elspeth_container_template: "{{ lookup('template', 'container-app-template.yml.j2') | from_yaml }}"
+  # See "Container Template — Single Source Of Truth" below for the
+  # template body. Both the bootstrap PUT and the revision-shift PATCH
+  # consume `elspeth_container_template.template` for the `template:`
+  # subtree of the request body. Without this single source, the PATCH
+  # body's abbreviated container spec would silently drop env vars,
+  # secret refs, and probes from every redeploy.
+  #
+  # VERIFY BEFORE MERGE: the downstream `body:` parameters reference
+  # this fact as `template: "{{ elspeth_container_template.template }}"`
+  # — a quoted single-expression Jinja that should resolve to a dict.
+  # Ansible's type-preservation behavior for this pattern varies
+  # across versions: most modern ansible-core releases pass the dict
+  # through correctly, but some `jinja2_native` configurations
+  # stringify it (which Azure ARM then rejects as a malformed body).
+  # Test against your installed ansible-core with
+  # `ansible -m debug -a 'var=elspeth_container_template.template'`
+  # and confirm the output is a YAML mapping, not a quoted string.
+  # If type-preservation is broken in your environment, build the
+  # entire request body via a second `set_fact` and pass
+  # `body: "{{ elspeth_container_app_body }}"` to the azure_rm_resource
+  # task instead — that pattern is unambiguous across all versions.
 
 - name: Create Container Apps environment
   azure.azcollection.azure_rm_resource:
@@ -1419,39 +1811,14 @@ operations gate on it:
             - name: elspeth-fingerprint-key
               keyVaultUrl: "{{ azure_keyvault_fingerprint_key_url }}"
               identity: "{{ azure_container_runtime_identity_id }}"
-        template:
-          # revisionSuffix makes revision names deterministic
-          # (<appName>--<suffix>). Without it Container Apps generates
-          # random suffixes and the traffic-shifting tasks below cannot
-          # construct the per-revision FQDN deterministically.
-          revisionSuffix: "{{ elspeth_image_tag }}"
-          containers:
-            - name: elspeth-web
-              image: "{{ azure_acr_login_server }}/elspeth:{{ elspeth_image_tag }}"
-              env:
-                - name: ELSPETH_WEB__HOST
-                  value: 0.0.0.0
-                - name: ELSPETH_WEB__SECRET_KEY
-                  secretRef: elspeth-web-secret-key
-                - name: ELSPETH_FINGERPRINT_KEY
-                  secretRef: elspeth-fingerprint-key
-                - name: ELSPETH_WEB__AUTH_PROVIDER
-                  value: "{{ elspeth_auth_provider }}"
-                - name: ELSPETH_WEB__REGISTRATION_MODE
-                  value: "{{ elspeth_registration_mode }}"
-                - name: ELSPETH_WEB__SESSION_DB_URL
-                  value: "{{ elspeth_session_db_url }}"
-                - name: ELSPETH_WEB__LANDSCAPE_URL
-                  value: "{{ elspeth_landscape_url }}"
-                - name: ELSPETH_WEB__PAYLOAD_STORE_PATH
-                  value: "{{ elspeth_payload_store_path }}"
-              probes:
-                - type: Liveness
-                  httpGet:
-                    path: /api/health
-                    port: 8451
-                  initialDelaySeconds: 30
-                  periodSeconds: 30
+        # `template:` is consumed from the shared
+        # `elspeth_container_template` fact loaded above. Do NOT inline
+        # a container spec here — the traffic-shift PATCH task below
+        # consumes the SAME fact, and any drift between the two
+        # destinations silently drops env vars, secret refs, or probes
+        # on every redeploy. See "Container Template — Single Source
+        # Of Truth" below for the template body.
+        template: "{{ elspeth_container_template.template }}"
   when: not elspeth_container_app_exists
   # `no_log: true` is intentionally NOT set here. Secrets are passed by
   # Key Vault reference (keyVaultUrl + identity), not by value, so the
@@ -1464,6 +1831,75 @@ operations gate on it:
 When publishing Container Apps through Azure Front Door, create the Front Door
 origin from the Container App ingress FQDN instead of the VM hostname. Keep the
 route caching disabled and reuse `/api/health` as the probe path.
+
+### Container Template — Single Source Of Truth
+
+The bootstrap PUT and the traffic-shift PATCH both consume the SAME
+container spec, loaded once into the `elspeth_container_template` fact
+by the "Load shared container template" task above. The fact reads from
+`templates/container-app-template.yml.j2`, which lives in the
+`azure_containers` role:
+
+```yaml
+# templates/container-app-template.yml.j2 — single source of truth
+# for the Container Apps `template:` subtree.
+template:
+  # revisionSuffix makes revision names deterministic
+  # (<appName>--<suffix>). Without it Container Apps generates random
+  # suffixes and the traffic-shifting tasks cannot construct the
+  # per-revision FQDN deterministically.
+  revisionSuffix: "{{ elspeth_image_tag }}"
+  containers:
+    - name: elspeth-web
+      image: "{{ azure_acr_login_server }}/elspeth:{{ elspeth_image_tag }}"
+      env:
+        - name: ELSPETH_WEB__HOST
+          value: "0.0.0.0"
+        - name: ELSPETH_WEB__SECRET_KEY
+          secretRef: elspeth-web-secret-key
+        - name: ELSPETH_FINGERPRINT_KEY
+          secretRef: elspeth-fingerprint-key
+        - name: ELSPETH_WEB__AUTH_PROVIDER
+          value: "{{ elspeth_auth_provider }}"
+        - name: ELSPETH_WEB__REGISTRATION_MODE
+          value: "{{ elspeth_registration_mode }}"
+        - name: ELSPETH_WEB__SESSION_DB_URL
+          value: "{{ elspeth_session_db_url }}"
+        - name: ELSPETH_WEB__LANDSCAPE_URL
+          value: "{{ elspeth_landscape_url }}"
+        - name: ELSPETH_WEB__PAYLOAD_STORE_PATH
+          value: "{{ elspeth_payload_store_path }}"
+      probes:
+        - type: Liveness
+          httpGet:
+            path: /api/health
+            port: 8451
+          initialDelaySeconds: 30
+          periodSeconds: 30
+```
+
+**Why this is required, not a stylistic preference.** Azure ARM
+PATCH-merge semantics on the `Microsoft.App/containerApps` resource
+treat `containers[]` as a *whole-array replacement*: any field absent
+from the PATCH body is dropped from the new revision. An inlined
+abbreviated container spec in the PATCH task — with just `name` and
+`image` and a comment that env vars are "identical to the initial
+creation task" — silently ships a broken revision whose only
+environment is what's missing. The probe against the per-revision
+FQDN then fails (because `ELSPETH_WEB__SECRET_KEY` is unset, etc.),
+the auto-rollback deactivates the revision, the operator sees
+"revision failed health probe" and chases the wrong root cause.
+
+**Adding a field.** Add it to `container-app-template.yml.j2` only.
+The bootstrap PUT and the traffic-shift PATCH both consume it on the
+next deploy. Do not edit the inline `template:` references in the
+task bodies — they only contain `"{{ elspeth_container_template.template }}"`
+and nothing else.
+
+**If you must inline a container spec for some reason** (e.g., a
+debugging session that needs to vary one field), use a *full* container
+spec, not an abbreviated one. The runbook's risk register entry for
+"PATCH with abbreviated body" is load-bearing.
 
 ### Revision Traffic-Shifting For Production Deploys
 
@@ -1546,16 +1982,16 @@ revision serving 100% and adds the new revision deactivated-for-traffic:
                 weight: 100
               - revisionName: "{{ elspeth_new_revision_name }}"
                 weight: 0
-        template:
-          revisionSuffix: "{{ elspeth_image_tag }}"
-          containers:
-            - name: elspeth-web
-              image: "{{ azure_acr_login_server }}/elspeth:{{ elspeth_image_tag }}"
-              # env/secrets/probes block is identical to the initial
-              # creation task above; omitted here for brevity. Templating
-              # tip: extract the container spec into a single Jinja
-              # include and reference it from both tasks so they cannot
-              # drift apart.
+        # `template:` is consumed from the shared
+        # `elspeth_container_template` fact loaded near the top of the
+        # Azure Containers Configuration section. This is REQUIRED, not
+        # a stylistic preference: Azure ARM PATCH-merge semantics for
+        # the containers[] array are "replace the entire array" — any
+        # field that the PATCH body omits (env vars, secret refs,
+        # probes) is dropped from the new revision. Inlining a partial
+        # container spec here is the most common way to ship a broken
+        # production redeploy. Do not do it.
+        template: "{{ elspeth_container_template.template }}"
 ```
 
 Fetch the per-revision FQDN. Azure assigns a deterministic FQDN of the
@@ -1781,23 +2217,154 @@ VM checks:
   # verification window. Treat this assertion as load-bearing.
 ```
 
-Public checks:
+**Flush handlers before verifying.** Every install task in the role
+above (`git`, `pip install -e`, `npm ci`, `npm run build`,
+`compileall`, env-file template, unit template) notifies the
+`restart elspeth web` handler. Ansible handlers fire at *end of play*
+by default — so without an explicit flush the verification probes
+below would run against the *pre-restart* binary, the marker
+rotation would lock in the new SHA as verified, and the actual
+restart with the new code would happen with no further check. Force
+handlers to run *before* verification:
+
+```yaml
+- name: Flush pending restart handlers before verifying
+  ansible.builtin.meta: flush_handlers
+  # CRITICAL: without this, the public-edge probes below report on
+  # the old code while the role is mid-deploy. The handler-driven
+  # restart would happen at end-of-play, after marker rotation, with
+  # no further verification. flush_handlers forces the queued
+  # `restart elspeth web` + `restart caddy` handlers to fire here,
+  # so verification exercises the new binary + new ingress config.
+```
+
+**Public-edge verification (Ansible-asserted).** Replace the
+copy-pastable bash one-liners with `ansible.builtin.uri` tasks so the
+play fails fast on the local-vs-edge mismatch named in the next
+paragraph. The play runs these from the *Ansible controller* against
+the public hostname, not from the VM itself, so they exercise DNS,
+TLS, ingress, and the reverse-proxy path end-to-end:
+
+```yaml
+- name: Verify public HTTPS edge (Ansible-asserted; delegated to controller)
+  ansible.builtin.uri:
+    url: "https://{{ elspeth_domain }}/api/health"
+    method: GET
+    status_code: 200
+    validate_certs: "{{ elspeth_public_probe_validate_certs | default(not (elspeth_caddy_tls_internal | default(false) | bool)) }}"
+    return_content: false
+    follow_redirects: none
+  register: elspeth_public_health
+  retries: 6
+  delay: 10
+  until: elspeth_public_health.status == 200
+  delegate_to: localhost
+  run_once: true
+  # delegate_to: localhost runs the probe from the Ansible controller,
+  # not from the VM. From the VM itself, a "public" probe can short-
+  # circuit through /etc/hosts, the local Caddy instance, or a
+  # split-horizon DNS resolver and report green without ever touching
+  # the public ingress path. Probing from the controller traverses
+  # the real DNS + TLS + Front Door / NSG path, which is the property
+  # we want to assert.
+  #
+  # validate_certs defaults to TRUE except when elspeth_caddy_tls_internal
+  # is set — Caddy's internal-CA mode (see "Caddy TLS Provisioning
+  # Modes") issues certs the controller does not trust by default,
+  # so probing such hosts with validate_certs=true would always
+  # fail. Container Apps uses Azure-managed public-CA TLS, never
+  # tls internal, so the container check below keeps validate_certs
+  # hard-coded to true.
+
+- name: Verify Azure Front Door endpoint when configured
+  ansible.builtin.uri:
+    url: "https://{{ azure_frontdoor_endpoint }}.azurefd.net/api/health"
+    method: GET
+    status_code: 200
+    validate_certs: "{{ elspeth_public_probe_validate_certs | default(not (elspeth_caddy_tls_internal | default(false) | bool)) }}"
+    return_content: false
+    follow_redirects: none
+  register: elspeth_frontdoor_health
+  retries: 6
+  delay: 10
+  until: elspeth_frontdoor_health.status == 200
+  delegate_to: localhost
+  run_once: true
+  when: azure_frontdoor_endpoint is defined
+  # Probing both the Front Door endpoint AND the public-host alias
+  # catches misconfigured custom-domain bindings on Front Door —
+  # i.e., the *.azurefd.net endpoint is green but elspeth_domain
+  # is not yet bound to the Front Door endpoint, or the binding
+  # is stale.
+
+- name: Verify Container Apps FQDN when configured
+  ansible.builtin.uri:
+    url: "https://{{ azure_container_app_fqdn }}/api/health"
+    method: GET
+    status_code: 200
+    validate_certs: true
+    return_content: false
+  register: elspeth_container_health
+  retries: 6
+  delay: 10
+  until: elspeth_container_health.status == 200
+  delegate_to: localhost
+  run_once: true
+  when: azure_container_app_fqdn is defined
+```
+
+For interactive one-off probes during incident response, the
+copy-pastable equivalents are:
 
 ```bash
 curl -fsS https://elspeth.example.com/api/health
-```
-
-Azure Front Door checks:
-
-```bash
-curl -fsS https://<front-door-endpoint>.azurefd.net/api/health
-curl -fsS https://elspeth.example.com/api/health
-```
-
-Container checks:
-
-```bash
+curl -fsS "https://${FRONT_DOOR_ENDPOINT}.azurefd.net/api/health"
 curl -fsS "https://${AZURE_CONTAINER_APP_FQDN}/api/health"
+```
+
+These are operator tools, not deploy gates — the deploy gate is the
+Ansible-asserted block above.
+
+**Post-deploy: rotate the deploy-SHA marker and handle forced
+session-DB deletion.** These tasks run AFTER public-edge verification
+has passed; a failed verification short-circuits the play before
+either task fires, so a half-deployed host keeps its old marker (and
+its old `sessions.db`) and is ready for the operator to re-run the
+playbook against the previous SHA:
+
+```yaml
+- name: Delete sessions.db when schema-change deploy was acknowledged
+  ansible.builtin.file:
+    path: "{{ elspeth_data_dir }}/sessions.db"
+    state: absent
+  when: elspeth_force_session_db_delete | default(false) | bool
+  notify: restart elspeth web
+  # In-flight composer sessions are lost. This is the documented
+  # project policy for schema-change deploys ("Database Lifecycle").
+  # The corresponding .db-wal / .db-shm sidecars are deleted by the
+  # systemd unit on next start (SQLite handles fresh sidecar
+  # creation); explicit cleanup here would race with any handler
+  # that hasn't fired yet.
+
+- name: Rotate deploy-SHA marker (records this SHA as last to touch the DB)
+  ansible.builtin.copy:
+    content: "{{ elspeth_repo_version }}"
+    dest: "{{ elspeth_data_dir }}/.last-deploy-sha"
+    owner: "{{ elspeth_user }}"
+    group: "{{ elspeth_group }}"
+    mode: "0600"
+  # The marker is the basis for the schema-drift preflight on the
+  # NEXT deploy. Rotate AFTER successful public-edge verification —
+  # rotating before would lock in this SHA as the new baseline even
+  # if the public-edge probe later fails and the deploy is rolled
+  # back. The rollback playbook is the same playbook re-run with
+  # elspeth_repo_version pointed at the previous-known-good SHA and
+  # elspeth_restore_db_from_snapshot=true; on a successful rollback
+  # this same task fires and rotates the marker to the rolled-back-
+  # to SHA, which is the correct new baseline. On a *failed*
+  # rollback the play aborts before this task and the marker is
+  # untouched, preserving the failing-SHA baseline for operator
+  # forensics.
 ```
 
 Deployment evidence to retain:
@@ -1839,6 +2406,19 @@ migration runner. For now, the deploy procedure is:
    lets the rollback role unambiguously locate the right baseline when
    more than one deploy happened in the same session — see
    [Rollback Automation](#rollback-automation).
+
+   **WAL safety.** The snapshot task uses `sqlite3 ".backup"` rather
+   than a raw `cp` / `ansible.builtin.copy` of the `.db` file. Under
+   WAL mode (which ELSPETH's web app uses for concurrent reads), a
+   raw byte-copy captures the main `.db` but not the `.db-wal`
+   sidecar — any committed-but-not-yet-checkpointed transactions are
+   absent from the snapshot, and the resulting file is torn. The
+   SQLite Online Backup API (invoked by `.backup`) serializes
+   against writers and produces a consistent point-in-time copy
+   regardless of WAL state. The restore path likewise stops the
+   service, removes stale `.db-wal` / `.db-shm` sidecars (which
+   otherwise replay over the restored file on next open), and
+   archives the pre-rollback `audit.db` off-host before overwrite.
 2. **For a schema-incompatible upgrade**, after a successful deploy and
    verification, delete the *session* DB:
    ```bash
@@ -1858,6 +2438,89 @@ migration runner. For now, the deploy procedure is:
 For container deployments, mount the audit DB on durable storage external
 to the container. Container-local SQLite for audit data is unsafe regardless
 of whether the schema is stable.
+
+### What Rollback Does To The Audit Trail
+
+When a rollback restores `audit.db` from a pre-deploy snapshot, every
+row written by the failing version between snapshot time and rollback
+time is **discarded**. This is the correct operational behaviour — the
+failing version's writes are themselves suspect, and resuming with a
+mixed-version audit DB would leave the on-disk schema in a state the
+running code does not expect — but it is *also* an auditability event
+in its own right that must be recorded.
+
+**Before any rollback that sets `elspeth_restore_db_from_snapshot=true`:**
+
+1. **Capture the discarded-window boundary** from the live
+   `audit.db` BEFORE running the rollback playbook. The on-host
+   `runs/audit.db` is about to be overwritten by the snapshot.
+   The snapshot's mtime is the floor of the discarded window — it
+   is embedded in the snapshot filename, e.g.
+   `runs/audit.db.pre-deploy-of-<sha>-20260518T143012` →
+   `2026-05-18T14:30:12`. Pass that timestamp as the `WHERE` floor:
+
+   ```bash
+   # Replace SNAPSHOT_TS with the ISO-8601 timestamp from the
+   # pre-deploy snapshot filename (the suffix after "pre-deploy-of-<sha>-").
+   # Replace column names to match your Landscape schema; the point is
+   # to record the boundary, not to copy this query verbatim.
+   SNAPSHOT_TS='2026-05-18T14:30:12'
+   sqlite3 /var/lib/elspeth/runs/audit.db <<SQL
+     SELECT MAX(run_id)     AS lost_run_id_ceiling,
+            MAX(token_id)   AS lost_token_id_ceiling,
+            COUNT(*)        AS discarded_row_count,
+            MIN(started_at) AS discarded_window_start,
+            MAX(started_at) AS discarded_window_end
+       FROM runs
+      WHERE started_at >= '$SNAPSHOT_TS';
+   SQL
+   ```
+
+   The earlier draft of this query used a `(SELECT ... ORDER BY
+   started_at DESC LIMIT 1)` subquery as the floor — that returns the
+   *single most recent row's* timestamp, so the outer `WHERE >= max`
+   matches exactly that one row. The discarded-row count was
+   structurally `1`, not "rows the failing version wrote." If you
+   copy-pasted that earlier form, re-run the corrected query above
+   before treating the boundary as authoritative.
+
+   Capture the output to the deploy log alongside `elspeth_repo_version`
+   and `elspeth_rollback_from_repo_version`.
+
+2. **Note the discarded SHA in the post-rollback audit attestation.**
+   The rollback role writes a single row into the *restored* `audit.db`
+   recording: "rolled back FROM `elspeth_rollback_from_repo_version`
+   TO `elspeth_repo_version`, discarding N rows written between T1
+   and T2." That row is the only evidence inside the audit trail that
+   the discarded window existed. Without it, the trail looks
+   contiguous — a future auditor querying "what happened between T1
+   and T2?" sees nothing, with no signal that anything was discarded.
+   The implementing tasks are in "Rollback Automation" below, gated
+   on `elspeth_restore_db_from_snapshot=true`.
+
+3. **The off-host snapshot is the record of what was discarded.** The
+   pre-deploy snapshot is named
+   `runs/audit.db.pre-deploy-of-<sha>-<ts>`; the *failing* version's
+   writes accumulated on top of that snapshot before being discarded
+   by rollback. The full pre-rollback `audit.db` (the one being
+   overwritten) should be copied off-host before the playbook restore
+   step runs, so the discarded rows are recoverable if a later auditor
+   needs them. The runbook's "Snapshot retention" item above covers
+   the *pre-deploy* snapshot but not the *pre-rollback* snapshot —
+   make sure both are shipped.
+
+**The trade-off named.** Restoring `audit.db` from snapshot favours
+*consistency* over *retention*: the audit trail post-rollback is
+internally consistent (no rows from a version that no longer runs
+anywhere) but is missing the discarded window. The alternative —
+leaving the failing version's audit rows in place and only rolling
+back code — favours retention over consistency: every row is kept,
+but the code now reads/writes a schema it wasn't written for, and any
+column added or repurposed by the failing version produces wrong
+answers on rollback queries. ELSPETH's pre-1.0 policy (no Alembic;
+delete-the-DB on schema change) makes the consistency choice the only
+safe one. When the migration runner ships, this trade-off can be
+re-evaluated.
 
 Cross-references:
 
@@ -1928,6 +2591,34 @@ restarting the service:
       abort the rollback.
   when: elspeth_restore_db_from_snapshot | default(false) | bool
 
+- name: Stop the web service before restoring DBs
+  ansible.builtin.systemd:
+    name: elspeth-web.service
+    state: stopped
+  when: elspeth_restore_db_from_snapshot | default(false) | bool
+  # The restore sequence below removes stale .db-wal / .db-shm sidecars
+  # from the failing version's writer. Doing that while the service is
+  # running races against any in-flight checkpoints. Stop first, restore
+  # main DB + sidecar cleanup, restart via handler at end-of-play.
+
+- name: Capture pre-rollback audit DB off-host before overwrite
+  # The pre-rollback audit.db contains the rows the failing version
+  # wrote between snapshot time and rollback time. The restore step
+  # below is about to overwrite it. If a later auditor needs to
+  # recover the discarded rows, the off-host copy named here is the
+  # only source. The runbook section "What Rollback Does To The Audit
+  # Trail" prescribes this capture; the task below DOES it. The
+  # default sink is local under elspeth_data_dir; override to a remote
+  # location (S3, Azure Blob, SSH target) in your environment.
+  ansible.builtin.copy:
+    src: "{{ elspeth_data_dir }}/runs/audit.db"
+    dest: "{{ elspeth_pre_rollback_audit_db_archive | default(elspeth_data_dir ~ '/runs/audit.db.pre-rollback-from-' ~ elspeth_rollback_from_repo_version ~ '-' ~ ansible_date_time.iso8601_basic_short) }}"
+    remote_src: true
+    owner: "{{ elspeth_user }}"
+    group: "{{ elspeth_group }}"
+    mode: "0600"
+  when: elspeth_restore_db_from_snapshot | default(false) | bool
+
 - name: Restore each database from its newest snapshot for the failed revision
   ansible.builtin.copy:
     src: "{{ (elspeth_db_snapshots.files
@@ -1938,24 +2629,151 @@ restarting the service:
     remote_src: true
     owner: "{{ elspeth_user }}"
     group: "{{ elspeth_group }}"
-    mode: "0640"
+    mode: "0600"
   loop:
     - sessions.db
     - runs/audit.db
   loop_control:
     loop_var: dest_relative
   when: elspeth_restore_db_from_snapshot | default(false) | bool
-  notify: restart elspeth web
   # If the same SHA was deployed twice (rare — usually means the first
   # attempt failed before the snapshot task ran on the second attempt),
   # we still pick the newest snapshot for that SHA, which is the
   # closest-to-failed-state baseline we have. The SHA filter prevents
   # crossing over into a different deploy's snapshots.
+
+- name: Remove stale WAL/SHM sidecars from the failing version
+  # CRITICAL: after restoring the .db main file, any leftover .db-wal
+  # and .db-shm from the failing version contain writes against the
+  # failing schema. SQLite replays the WAL on next open, corrupting
+  # the just-restored file. Deleting the sidecars forces SQLite to
+  # initialize fresh ones on first open of the restored DB.
+  ansible.builtin.file:
+    path: "{{ elspeth_data_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - sessions.db-wal
+    - sessions.db-shm
+    - runs/audit.db-wal
+    - runs/audit.db-shm
+  when: elspeth_restore_db_from_snapshot | default(false) | bool
+
+- name: Derive snapshot floor timestamp for attestation
+  # The pre-deploy snapshot filename embeds the deploying SHA and an
+  # ISO-8601 basic-short timestamp, e.g.:
+  #   runs/audit.db.pre-deploy-of-<sha>-20260518T143012
+  # The suffix after "pre-deploy-of-<sha>-" is the floor of the
+  # discarded window (the moment the snapshot was taken). The
+  # attestation row records that floor as discarded_window_start_basic.
+  ansible.builtin.set_fact:
+    elspeth_restored_audit_snapshot_path: "{{ (elspeth_db_snapshots.files
+      | selectattr('path', 'match', '^' ~ elspeth_data_dir ~ '/runs/audit\\.db\\.pre-deploy-of-')
+      | sort(attribute='mtime', reverse=true)
+      | list)[0].path }}"
+  when: elspeth_restore_db_from_snapshot | default(false) | bool
+
+- name: Extract snapshot floor timestamp
+  ansible.builtin.set_fact:
+    elspeth_discarded_window_floor: "{{ elspeth_restored_audit_snapshot_path
+      | regex_replace('^.*\\.pre-deploy-of-' ~ elspeth_rollback_from_repo_version ~ '-', '') }}"
+  when: elspeth_restore_db_from_snapshot | default(false) | bool
+
+- name: Ensure rollback_attestations table exists in the restored audit DB
+  # The attestation lives in a dedicated table — co-mingling with the
+  # operational `runs` table would force every auditor query to
+  # filter on a synthetic discriminator. A separate table named
+  # rollback_attestations is queryable as a first-class audit event.
+  # CREATE TABLE IF NOT EXISTS is idempotent across re-runs.
+  ansible.builtin.command:
+    argv:
+      - sqlite3
+      - "{{ elspeth_data_dir }}/runs/audit.db"
+      - >-
+        CREATE TABLE IF NOT EXISTS rollback_attestations (
+          attested_at_iso8601   TEXT NOT NULL,
+          rolled_back_from_sha  TEXT NOT NULL,
+          rolled_back_to_sha    TEXT NOT NULL,
+          snapshot_floor_basic  TEXT NOT NULL,
+          actor                 TEXT NOT NULL,
+          notes                 TEXT
+        );
+  when: elspeth_restore_db_from_snapshot | default(false) | bool
+  changed_when: false
+
+- name: Write rollback attestation row into the restored audit DB
+  # This row is the only signal inside the audit trail that a
+  # discarded window existed. The off-host pre-rollback archive
+  # (captured by "Capture pre-rollback audit DB off-host before
+  # overwrite") is the only place the discarded rows themselves live;
+  # the attestation row points to the archive's filename via
+  # `notes`. An auditor querying the rollback window sees the
+  # attestation row, learns the SHAs and floor timestamp, and
+  # retrieves the archive for the discarded rows if needed.
+  ansible.builtin.command:
+    argv:
+      - sqlite3
+      - "{{ elspeth_data_dir }}/runs/audit.db"
+      - >-
+        INSERT INTO rollback_attestations (
+          attested_at_iso8601, rolled_back_from_sha,
+          rolled_back_to_sha, snapshot_floor_basic, actor, notes
+        ) VALUES (
+          '{{ ansible_date_time.iso8601 }}',
+          '{{ elspeth_rollback_from_repo_version }}',
+          '{{ elspeth_repo_version }}',
+          '{{ elspeth_discarded_window_floor }}',
+          '{{ elspeth_deploy_actor | default(ansible_user_id) | default("unattended-rollback", true) }}',
+          'pre-rollback archive at {{ elspeth_pre_rollback_audit_db_archive | default(elspeth_data_dir ~ "/runs/audit.db.pre-rollback-from-" ~ elspeth_rollback_from_repo_version ~ "-" ~ ansible_date_time.iso8601_basic_short) }}'
+        );
+  when: elspeth_restore_db_from_snapshot | default(false) | bool
+  changed_when: true
+  notify: restart elspeth web
 ```
 
 **Automatic rollback on post-deploy probe failure.** After cutover, run a
 probe loop and trigger the rollback playbook if probes fail N
-consecutive times. The probe loop:
+consecutive times.
+
+**Where the probe script and wrappers live.** Both the probe loop
+and its wrappers live on the **Ansible controller**, not on the
+production host. The script invokes `ansible-playbook` against an
+inventory + playbook tree and reads
+`ANSIBLE_VAULT_PASSWORD_FILE` from a controller-local path — none of
+that infrastructure exists on the deploy host (and shipping it there
+would mean either deploying the whole operations repo + Ansible
+runtime + vault to production, or maintaining a controller-on-prod
+shape neither of which is desirable). Concretely:
+
+- `post-deploy-probe.sh` lives in the operations repo at
+  `scripts/post-deploy-probe.sh` (alongside the `inventories/`,
+  `playbooks/`, and `roles/` trees referenced earlier in this
+  runbook). Permissions: `0750`, owned by the controller's deploy
+  user.
+- `templates/run-deploy.sh.j2` (production wrapper) and
+  `scripts/run-deploy-staging.sh` (staging wrapper) likewise live in
+  the operations repo. The Jinja-rendered production wrapper is
+  rendered *by Ansible at deploy time* into the controller's
+  build/deploy area — the runbook shows it as a template so that
+  the rendered `{{ elspeth_repo_version }}` and
+  `{{ elspeth_previous_repo_version }}` values are pinned at the
+  moment the deploy decision is made, not at the moment bash
+  executes the wrapper.
+- `ANSIBLE_VAULT_PASSWORD_FILE` likewise points at a
+  controller-local 0400 file (read from the controller's secret
+  manager: systemd credentials, Azure Key Vault file mount,
+  HashiCorp Vault agent template). It is never copied to the
+  deploy host.
+
+If your deployment topology has the controller running on the
+production host itself (single-host shop, lab setup), the
+distinction collapses but the file paths still belong logically to
+the operations repo, not to `elspeth_app_dir`. Either way, do NOT
+deploy `post-deploy-probe.sh` to `{{ elspeth_app_dir }}/scripts/` —
+that path is reserved for application-side scripts that the
+running service or its operators need on the production host.
+
+The script body below populates the operations repo at
+`scripts/post-deploy-probe.sh`. The probe loop:
 
 1. Hits every path in `PROBE_ENDPOINTS` (space-separated) against the
    base URL. Any non-2xx response counts as a failure for that
@@ -2016,7 +2834,15 @@ probe_endpoints() {
     # endpoint failed (and its HTTP status) to stderr.
     local path status
     for path in $PROBE_ENDPOINTS; do
-        status=$(curl -s -o /dev/null -w '%{http_code}' "${BASE_URL%/}${path}" || echo "000")
+        # curl -w '%{http_code}' writes the status code to stdout with
+        # NO trailing newline. On total failure (DNS, TLS, connection
+        # refused) curl writes nothing and we substitute '000' via
+        # `printf` — also with no newline — so the integer comparison
+        # below sees a clean three-digit token in both branches.
+        # `echo` would append a newline that some shells include in
+        # the captured string and break the comparison under stricter
+        # locales / shells.
+        status=$(curl -s -o /dev/null -w '%{http_code}' "${BASE_URL%/}${path}" || printf '000')
         if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
             echo "probe ${path} returned ${status}" >&2
             return 1
@@ -2077,19 +2903,21 @@ consecutive_failures=0
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
     iteration_failed=0
+    iteration_inconclusive=0
+
     if ! probe_endpoints; then
         iteration_failed=1
     fi
 
     # Only run the error-rate gate if endpoint probes passed. If they
     # already failed there is no point checking traffic; the iteration
-    # is already counted.
+    # is already counted as failed.
     if [ "$iteration_failed" -eq 0 ]; then
         check_error_rate
         case $? in
-            0) ;;                       # healthy
-            1) iteration_failed=1 ;;    # exceeded threshold
-            2) ;;                       # inconclusive — leave counter as-is
+            0) ;;                                  # healthy
+            1) iteration_failed=1 ;;              # exceeded threshold
+            2) iteration_inconclusive=1 ;;        # no traffic / log missing
         esac
     fi
 
@@ -2098,7 +2926,14 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
         if [ "$consecutive_failures" -ge "$FAIL_THRESHOLD" ]; then
             rollback
         fi
-    else
+    elif [ "$iteration_inconclusive" -eq 0 ]; then
+        # Only reset on a CLEAN pass — neither failed nor inconclusive.
+        # An inconclusive iteration (no traffic in the error-rate
+        # window, log file missing, jq not installed) MUST leave the
+        # consecutive-failure counter unchanged, as documented in the
+        # "Treats no traffic in the window as inconclusive" paragraph
+        # above. The earlier version of this script reset the counter
+        # on inconclusive iterations, contradicting its own docs.
         consecutive_failures=0
     fi
     sleep "$INTERVAL"
@@ -2110,20 +2945,46 @@ Invoke it as the final step of the deploy pipeline. `FAILED_SHA` is
 the SHA you *just deployed* (the candidate that may need rolling
 back); `PREVIOUS_SHA` is the known-good revision you would fall back
 to. Endpoint lists, error-rate thresholds, and the Caddy log path
-should be set per-environment in your deploy wrapper:
+should be set per-environment in your deploy wrapper.
+
+The two examples below are **Ansible-rendered wrapper templates**
+(e.g. `templates/run-deploy.sh.j2`), not literal bash scripts. The
+`{{ elspeth_previous_repo_version }}` / `{{ elspeth_repo_version }}`
+placeholders are Jinja, evaluated by Ansible at render time — by the
+time bash runs the wrapper, the SHAs are baked in as plain strings.
+Do not copy-paste the production example into a hand-edited
+`.sh` file: bash will pass the literal four-character `{{ }}` tokens
+as SHAs, the rollback role's snapshot lookup will find nothing
+matching `pre-deploy-of-{{...}}-*`, and the rollback assert will
+fire. The staging example uses `"$PREVIOUS_SHA"` / `"$FAILED_SHA"`
+shell variables instead, so it can be used as a literal script
+when those vars are exported by the caller.
 
 ```bash
-# Example: production wrapper
+# templates/run-deploy.sh.j2 — production wrapper, rendered by Ansible.
+# The {{ }} placeholders are Jinja; bash never sees them after render.
 ANSIBLE_VAULT_PASSWORD_FILE=/etc/ansible/vault.pass \
 PROBE_ENDPOINTS="/api/health /api/sessions/_smoke /api/auth/_status" \
 PROBE_ERROR_RATE_LOG=/var/log/caddy/elspeth-access.log \
 PROBE_ERROR_RATE_WINDOW=60 \
 PROBE_ERROR_RATE_THRESHOLD=0.01 \
+ELSPETH_DEPLOY_ACTOR="{{ elspeth_deploy_actor | default('unknown-ci') }}" \
 scripts/post-deploy-probe.sh "https://elspeth.example.com" \
     "{{ elspeth_previous_repo_version }}" \
     "{{ elspeth_repo_version }}"
+# ELSPETH_DEPLOY_ACTOR is recorded into the audit-trail rollback
+# attestation row (see "What Rollback Does To The Audit Trail").
+# Populate elspeth_deploy_actor from CI metadata when the wrapper
+# is rendered — e.g., GITHUB_ACTOR for GitHub Actions, GITLAB_USER_LOGIN
+# for GitLab CI, BUILD_USER_ID for Jenkins. The lookup("env","USER")
+# fallback the runbook previously used is empty under unattended
+# rollback (probe-loop-driven), which is the case where attribution
+# matters most.
 
-# Example: staging wrapper — more endpoints, tighter threshold
+# Staging wrapper — usable as a literal bash script. Caller exports
+# PREVIOUS_SHA and FAILED_SHA before invoking. More endpoints, tighter
+# error-rate threshold, and a lower fail-count so staging trips
+# rollback faster than production.
 ANSIBLE_VAULT_PASSWORD_FILE=/etc/ansible/vault.pass \
 PROBE_ENDPOINTS="/api/health /api/sessions/_smoke /api/auth/_status /api/runs/_smoke /api/plugins/_list" \
 PROBE_ERROR_RATE_LOG=/var/log/caddy/elspeth-access.log \
@@ -2179,7 +3040,7 @@ that mitigation is now the variable-driven mechanism captured in the
 HSTS max-age and includeSubDomains/preload rows further down). -->
 | Post-deploy regression undetected | Service is broken in production until human notices | Rollback Automation section ships a probe-loop that triggers playbook re-run with `elspeth_previous_repo_version` on N consecutive failures |
 | Multi-host fleet builds drift between hosts | Two production hosts converge on materially different bundles | "Refuse per-host source-checkout build on multi-host plays" assert; opt-out via `elspeth_allow_per_host_build=true` for the rare deliberate case |
-| Unverified SHA reaches production | Code that never passed CI gates ships | "Verify CI status for elspeth_repo_version" preflight task; warning emitted when `elspeth_ci_status_url` is unset |
+| Unverified SHA reaches production | Code that never passed CI gates ships | Default-required gate: `elspeth_ci_status_verification_required: true` is the default; omitting `elspeth_ci_status_url` while the gate is required refuses the deploy. Opt-out requires an explicit variable bump visible in Git history |
 | Auto-rollback cannot unlock vault from unattended probe | Rollback never runs; broken deploy stays live until human returns | `post-deploy-probe.sh` requires `ANSIBLE_VAULT_PASSWORD_FILE`; `--ask-vault-pass` removed from the rollback path |
 | Rollback restores the wrong DB snapshot when multiple deploys ran in one session | Known-good binary runs against known-bad on-disk state | Snapshot filename embeds the deploying SHA (`pre-deploy-of-<sha>-<ts>`); rollback role requires `elspeth_rollback_from_repo_version` and refuses to restore on `mtime` alone |
 | Container deploy puts 100% traffic on a new revision before health check | Broken revision serves all production traffic until human notices | "Revision Traffic-Shifting For Production Deploys" deploys at 0% traffic, probes the per-revision FQDN, then either shifts to 100% on success or deactivates on failure |
@@ -2195,7 +3056,18 @@ HSTS max-age and includeSubDomains/preload rows further down). -->
 | HSTS `includeSubDomains` or `preload` enabled without explicit audit | One-way pin extends to every subdomain or to the browser preload list; rollback requires waiting out cached max-age or a multi-week preload-removal cycle | `elspeth_hsts_include_subdomains` and `elspeth_hsts_preload` are explicit booleans defaulting to `false`; both require a discrete variable change visible in Git history |
 | HSTS max-age bumped to 1 year before TLS posture is proven | Botched cert during the year-long pin bricks the domain for clients that cached the policy | `elspeth_hsts_max_age` variable with documented three-stage ramp (300 → 86400 → 31536000); ramp progression is an auditable variable change, not a Caddyfile diff |
 | Node.js missing or too old crashes the deploy late with an opaque message | Operator wastes time triaging "Node too old" without knowing which lever to pull | Two-step assert: first checks Node is present and names the three resolution paths (apt source, NodeSource repo, image bake); second checks the version is ≥ 20.19 and repeats the resolution paths with the observed version |
-| NodeSource apt key fetched without checksum pin | Supply-chain compromise of nodesource.com replaces the key and silently changes the package source | Runbook documents the unpinned form as the example but explicitly notes "pinning the key by SHA256 in a real production posture is strongly recommended" |
+| NodeSource apt key fetched without checksum pin | Supply-chain compromise of nodesource.com replaces the key and silently changes the package source | NodeSource get_url task pins the key by SHA256 via `vault_nodesource_apt_key_sha256`; runbook documents how to obtain and rotate the value |
+| Container app discovery treats auth/permission failures as "app does not exist" | One-shot bootstrap task tries to create over the running app; deploy ends in a half-applied confused state | "Distinguish 404 from auth / permission / network failures" assert fires loudly with operator guidance on the typical fix (Container Apps Reader role) |
+| Traffic-shift PATCH abbreviates the container spec | ARM PATCH-merge replaces `containers[]` wholesale and drops env vars, secret refs, probes; new revision starts up without `SECRET_KEY`, fails health probe, gets deactivated, and operator chases the wrong root cause | Container spec extracted into `templates/container-app-template.yml.j2`, loaded once into `elspeth_container_template` fact, consumed by both bootstrap PUT and traffic-shift PATCH; runbook calls this REQUIRED, not stylistic |
+| Probe script resets `consecutive_failures` on inconclusive iterations | Late-night low-traffic deploy with the error-rate gate enabled silently bypasses the consecutive-failure window | Probe loop tracks `iteration_failed` and `iteration_inconclusive` separately; counter only resets on a clean (neither failed nor inconclusive) pass |
+| Audit-row-loss on VM rollback is undocumented | Auditor querying the rollback window sees no rows but no signal that any were discarded | Database Lifecycle now has "What Rollback Does To The Audit Trail" section prescribing pre-rollback boundary capture, post-rollback attestation row, and off-host shipping of the pre-rollback `audit.db` |
+| Raw `cp` of SQLite under WAL produces a torn snapshot | Snapshot is the rollback target; if it's torn (committed-but-not-checkpointed rows missing), rollback restores corrupt state | Snapshot task uses `sqlite3 ".backup"` (Online Backup API serializes against writers); restore task stops the service, copies the snapshot, removes stale `.db-wal`/`.db-shm`, restarts |
+| Stale WAL replays over a restored DB | Sidecars (`.db-wal`/`.db-shm`) from the failing version are replayed on first open, re-corrupting the restored file with the failing version's writes | Rollback role removes both sidecars after the restore copy, before service restart |
+| Caddy in elspeth group gets incidental read on audit DB via `elspeth_data_dir` group-read | Operational reverse proxy can read the legal record on disk; an edge compromise leaks audit data | `elspeth_data_dir` and contents at mode 0700 (owner-only) — UDS access at `/run/elspeth/` is unaffected because it's a separate path under systemd's `RuntimeDirectory` |
+| Caddy ACME HTTP-01 fails because port 80 is closed | First Caddy reload floods logs with ACME failures; operator misreads this as "playbook broken"; cert never issues so HTTPS never works | "Caddy TLS Provisioning Modes" section names four mutually-exclusive modes (HTTP-01, DNS-01, `tls internal`, pre-provisioned) and assigns each to a deployment posture; preflight `assert` refuses to render the site template when zero or more than one mode is selected |
+| Schema-change deploy proceeds without operator acknowledgement | Service starts against an incompatible `sessions.db`, crashes on first session-DB write, or silently corrupts in-flight rows | Sidecar deploy-SHA marker `.last-deploy-sha` records the SHA that last touched the DB; preflight refuses to proceed when SHA differs unless the operator sets `elspeth_acknowledge_schema_compatible=true` (code-only) or `elspeth_force_session_db_delete=true` (schema-change, drop in-flight sessions) |
+| Local socket probe passes but public edge is broken | Play reports green; users see 502/503; "verification" was theatre | "Public-edge verification" block now uses `ansible.builtin.uri` delegated to the Ansible controller (not the VM), exercising the real DNS + TLS + ingress path with `retries: 6 delay: 10` and `validate_certs` gated on TLS mode; the play fails fast on any non-200 |
+| Verification probes run against the pre-restart binary because handlers fire at end-of-play | Marker rotation locks in the new SHA as verified while the actual restart still hasn't happened with the new code; broken deploy ships labeled "verified" | `ansible.builtin.meta: flush_handlers` inserted immediately before the verification block forces `restart elspeth web` + `restart caddy` to fire mid-play, so verification exercises the new binary + new ingress config |
 
 ## Operational Notes
 

@@ -7,7 +7,6 @@ from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from elspeth.web.audit_readiness.routes import create_audit_readiness_router
 from elspeth.web.auth.middleware import get_current_user
@@ -15,6 +14,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions.protocol import SessionRecord
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 _SESSION_ID = UUID("11111111-1111-1111-1111-111111111111")
 

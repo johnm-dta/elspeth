@@ -1,62 +1,14 @@
 allow_hits:
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=66d6dab65ff1dca8
-  owner: composer-guided
-  reason: "Protocol boundary validator \u2014 isinstance(turn_type, TurnType) at Tier 3 entry point where untrusted payloads\
-    \ arrive from client, distinguishes valid TurnType enum member from arbitrary string to reject malformed protocol messages\
-    \ early"
-  safety: Raises ValueError if turn_type is not a known TurnType; callers are expected to handle this exception or pass verified
-    types only
-  expires: null
 - key: web/composer/guided/protocol.py:R1:validate_payload:fp=0aaf84e80b0f3a16
   owner: composer-guided
   reason: "_NESTED_SHAPES.get(turn_type, ()) \u2014 TurnTypes without nested shapes are not in the mapping; default-empty-tuple\
     \ is idiomatic and correct here (not an error-suppressing defensive get on arbitrary data)"
   safety: Returns empty tuple when no nested shapes defined; outer loop is a no-op; no data loss or fabrication
   expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=5d05d1a4d8ee3767
-  owner: composer-guided
-  reason: "Tier 3 nested payload validator \u2014 isinstance(field_value, Mapping) validates that a nested payload field is\
-    \ the expected type; this is an offensive Tier 3 boundary check that produces a human-readable error string, not silent\
-    \ suppression"
-  safety: Returns path-rooted error string on type mismatch; does not coerce or fabricate; caller handles the returned error
-  expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=b1c238e1d15c64c6
-  owner: composer-guided
-  reason: "Tier 3 nested payload validator \u2014 isinstance(field_value, Sequence) validates that a sequence-of-mappings\
-    \ field is a Sequence; this is an offensive Tier 3 boundary check that produces a human-readable error string"
-  safety: Returns path-rooted error string on type mismatch; does not coerce or fabricate; caller handles the returned error
-  expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=7b58a70a6bb73778
-  owner: composer-guided
-  reason: "Tier 3 nested payload validator \u2014 isinstance(field_value, str) excludes bare strings from being accepted as\
-    \ a Sequence (strings are Sequences but not valid slot-list payloads); this is an offensive boundary guard"
-  safety: Returns path-rooted error string when string used where sequence-of-mappings expected; no coercion or fabrication
-  expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=7735328c4307cec9
-  owner: composer-guided
-  reason: "Tier 3 nested payload validator \u2014 isinstance(item, Mapping) validates that each element of a sequence-of-mappings\
-    \ field is a Mapping; offensive Tier 3 boundary check producing a human-readable error string"
-  safety: Returns path-rooted error string on type mismatch; does not coerce or fabricate; caller handles the returned error
-  expires: null
-- key: web/composer/guided/protocol.py:R5:validate_payload:fp=845eb3459de42a86
-  owner: composer-guided
-  reason: "Tier 3 schema_form payload validator \u2014 recipe_context is client-provided wire data and must be Mapping-shaped\
-    \ before recipe_name, description, and alternatives are checked."
-  safety: Returns a schema_form.recipe_context type error string on mismatch; no coercion or fallback recipe context is fabricated.
-  expires: null
 - key: web/catalog/routes.py:R1:get_schema:fp=bc80b0854f0cb34e
   owner: web-catalog
   reason: "Tier 3 boundary \u2014 plugin_type from URL path parameter, lookup in constant dict"
   safety: Returns None on miss, handled by 404 response
-  expires: null
-- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=1d4fbdc28be0b96a
-  owner: architecture
-  reason: "Pydantic before-validator at Tier 3 config boundary \u2014 isinstance(v, str) distinguishes raw YAML string input\
-    \ (which may be all-whitespace) from already-coerced Path values or None, rejecting blank strings before Pydantic's str\u2192\
-    Path coercion silently accepts them. Mode=before runs prior to coercion so the type is not yet guaranteed, which is why\
-    \ isinstance rather than direct .strip() is used."
-  safety: Raises ValueError on blank string input; non-string values pass through to Pydantic's normal path validation; no
-    silent coercion
   expires: null
 - key: web/catalog/service.py:R1:CatalogServiceImpl:_extract_config_fields:fp=3d4e5fd71f36517d
   owner: web-catalog
@@ -123,22 +75,10 @@ allow_hits:
   reason: "False positive \u2014 httpx.AsyncClient.get() is an HTTP GET request, not dict.get()"
   safety: HTTP errors caught by raise_for_status() and except block
   expires: null
-- key: web/auth/local.py:R5:_required_visible_string_claim:fp=c14910a0090fd290
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 signed local JWT payload claims are still external token data, and sub/username must be\
-    \ validated as visible strings before database lookup or UserIdentity construction"
-  safety: Non-string, missing, or blank required claims raise AuthenticationError(\"Invalid token\"); no coercion, fallback,
-    or claim fabrication occurs
-  expires: null
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=c10514f46a44024c
   owner: web-auth
   reason: "Tier 3 boundary \u2014 JWT header kid field is optional per RFC 7515"
   safety: Missing kid falls through to AuthenticationError path (no matching key); no silent acceptance
-  expires: null
-- key: web/auth/oidc.py:R5:JWKSTokenValidator:_validate_discovery_document:fp=43769328789fd4a6
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 OIDC discovery JSON top-level shape (dict vs. list/string) must be validated before indexing"
-  safety: Non-dict raises AuthenticationError with got-type in message; no silent coercion; converts to HTTP 401
   expires: null
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:_validate_discovery_document:fp=e21f32481fc9784c
   owner: web-auth
@@ -146,42 +86,15 @@ allow_hits:
     \ mask malformed JSON"
   safety: Missing or non-string raises AuthenticationError; validated string is returned to caller; no caching before validation
   expires: null
-- key: web/auth/oidc.py:R5:JWKSTokenValidator:_validate_discovery_document:fp=1b5e6264226f977f
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 jwks_uri must be a non-empty string; IdPs have been observed returning integers/nulls for\
-    \ this field"
-  safety: Non-string or empty raises AuthenticationError with a specific message; no silent fallback
-  expires: null
-- key: web/auth/oidc.py:R5:JWKSTokenValidator:_validate_jwks_document:fp=a60b1a48d6e94df5
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 JWKS JSON top-level shape must be dict before passing to PyJWKSet.from_dict (which raises\
-    \ AttributeError on non-dict)"
-  safety: Non-dict raises AuthenticationError before self._jwks is assigned; malformed responses cannot poison the cache
-  expires: null
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:_validate_jwks_document:fp=6494c39fcc6d20fc
   owner: web-auth
   reason: "Tier 3 boundary \u2014 jwks.get('keys') permits shape-checking the value type before handing off to PyJWKSet"
   safety: Non-list raises AuthenticationError; validation happens before cache assignment
   expires: null
-- key: web/auth/oidc.py:R5:JWKSTokenValidator:_validate_jwks_document:fp=7ce8eecc4fc808f2
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 'keys' field must be a list per RFC 7517; IdPs have been observed returning objects or nulls"
-  safety: Non-list raises AuthenticationError; cache not written until shape is verified
-  expires: null
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:_get_token_algorithm:fp=08a628af082bd78b
   owner: web-auth
   reason: "Tier 3 boundary \u2014 JWT header alg is external token metadata and may be absent before decode"
   safety: Missing alg raises AuthenticationError before jwt.decode selects an algorithm
-  expires: null
-- key: web/auth/oidc.py:R5:JWKSTokenValidator:_get_token_algorithm:fp=1b6c3e7e0365078d
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 JWT header alg must be a non-empty string before decode"
-  safety: Non-string or blank alg raises AuthenticationError; no silent fallback to another algorithm
-  expires: null
-- key: web/auth/oidc.py:R5:JWKSTokenValidator:_get_jwk_algorithm:fp=fdc07e4037357d31
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 individual JWKS entries may be non-object values even when the top-level keys list is valid"
-  safety: Non-dict entries are skipped during kid matching; malformed entries do not crash the auth path
   expires: null
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:_get_jwk_algorithm:fp=57b015b09222f296
   owner: web-auth
@@ -192,11 +105,6 @@ allow_hits:
   owner: web-auth
   reason: "Tier 3 boundary \u2014 JWK alg is optional metadata and is only enforced when the matched key advertises one"
   safety: None preserves honest absence; non-empty mismatches raise AuthenticationError before decode
-  expires: null
-- key: web/auth/oidc.py:R5:JWKSTokenValidator:_get_jwk_algorithm:fp=a9bce0e66794efd8
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 matched JWK alg must be a non-empty string if present"
-  safety: Invalid alg raises AuthenticationError; malformed IdP metadata is rejected rather than silently ignored
   expires: null
 - key: web/auth/oidc.py:R1:OIDCAuthProvider:authenticate:fp=5b6d0378675eb2f2
   owner: web-auth
@@ -209,20 +117,10 @@ allow_hits:
     \ token payload"
   safety: Missing claims return None so callers preserve honest absence instead of fabricating display data
   expires: null
-- key: web/auth/oidc.py:R5:optional_profile_claim:fp=3a0327cd494cb516
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 optional cosmetic claims must be visible strings before surfacing in the UI"
-  safety: Non-string or blank values return None; malformed IdP data is dropped rather than exposed
-  expires: null
 - key: web/auth/oidc.py:R1:OIDCAuthProvider:get_user_info:fp=b8b1270a71192d97
   owner: web-auth
   reason: "Tier 3 boundary \u2014 groups claim is optional in OIDC tokens; None = no groups"
   safety: None returns empty groups; non-list raises AuthenticationError; no silent discard
-  expires: null
-- key: web/auth/oidc.py:R5:OIDCAuthProvider:get_user_info:fp=2a6e3dfe68c13daa
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 groups claim type is not guaranteed by external IdP"
-  safety: Non-list raises AuthenticationError with type info for debugging
   expires: null
 - key: web/auth/oidc.py:R1:OIDCAuthProvider:get_user_info:fp=cd4ba5b028a35026
   owner: web-auth
@@ -238,31 +136,6 @@ allow_hits:
   owner: web-auth
   reason: "Tier 3 boundary \u2014 preferred_username is optional in Entra tokens, falls back to sub"
   safety: Default is payload['sub'] which is required
-  expires: null
-- key: web/auth/models.py:R5:UserIdentity:__post_init__:fp=085af69aa85f4acc
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 isinstance check on user_id from external IdP JWT payload (sub claim is Any)"
-  safety: Raises AuthenticationError on non-string; validated at construction time
-  expires: null
-- key: web/auth/models.py:R5:UserIdentity:__post_init__:fp=fc1331f656d792bc
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 isinstance check on username from external IdP JWT payload (preferred_username is Any)"
-  safety: Raises AuthenticationError on non-string; validated at construction time
-  expires: null
-- key: web/auth/models.py:R5:UserProfile:__post_init__:fp=1e107c02a0aae95c
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 isinstance check on user_id from external IdP JWT payload (sub claim is Any)"
-  safety: Raises AuthenticationError on non-string; validated at construction time
-  expires: null
-- key: web/auth/models.py:R5:UserProfile:__post_init__:fp=94dab5ba5bbf7397
-  owner: web-auth
-  reason: "Tier 3 boundary \u2014 isinstance check on username from external IdP JWT payload (preferred_username is Any)"
-  safety: Raises AuthenticationError on non-string; validated at construction time
-  expires: null
-- key: web/app.py:R5:_settings_from_env:fp=8e0c1f2124b4e290  # fp rotated 2026-05-16 (was 7005fcaaf4870147) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
-  owner: web-app
-  reason: "Tier 3 boundary \u2014 JSON-parsed env var may be a list; isinstance check classifies for tuple conversion"
-  safety: isinstance used only for type dispatch; no contract masking
   expires: null
 - key: web/app.py:R6:_settings_from_env:fp=655cd13604862d5b  # fp rotated 2026-05-16 (was 1383fb34dd416d9c) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
   owner: web-app
@@ -316,24 +189,6 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 invalid JWT token raises PyJWTError during best-effort unverified claim parsing; auth_provider.authenticate still makes the trust decision"
   safety: Only PyJWTError caught; auth_claims is set to None as an explicit downstream result; authenticate still runs and failures are now recorded as auth_failure audit events
   expires: null
-- key: web/composer/state.py:R5:_declared_input_fields_option:fp=da59224f00d4c042
-  owner: web-composer
-  reason: Composer state options are Tier 3 LLM/user-supplied plugin config; wrapper-shaped aggregation options may carry
-    an optional nested options mapping that must be inspected only when it is actually a mapping
-  safety: Non-mapping wrapper values are not accepted as valid; existing schema-contract validation reports malformed aggregation
-    wrapper options as blocking ValidationEntry results, while top-level required_input_fields is still rejected
-  expires: null
-- key: web/composer/state.py:R5:_check_schema_contracts:_is_config_probe_exception:fp=51462aff37ea2a73
-  owner: web-composer
-  reason: "Composer preview classifies only known plugin config/probe exception types while probing plugin-computed output\
-    \ contracts for shape-changing transforms. The caught exception message is NOT surfaced to the UI \u2014 only type(exc).__name__\
-    \ is embedded in the contract warning to prevent plugin-option leaks (URLs, credentials, filesystem paths) via the preview\
-    \ response. ADR-007 adds fail-closed handling for known pass-through plugins; non-pass-through plugins retain the v2 fallback\
-    \ to raw guarantees."
-  safety: Unexpected exceptions are re-raised. Known config/probe exceptions are converted into a warning and preview falls
-    back to raw declared schema guarantees (or frozenset() for known pass-through plugins, which then forces Stage 1 rejection)
-    instead of crashing or fabricating a stronger contract
-  expires: null
 - key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=c1ab924542230479
   owner: web-composer
   reason: _producer_emit_set looks up a producer's NodeSpec in node_by_id; sources have producer_id == "source" which is not
@@ -342,19 +197,6 @@ allow_hits:
   safety: Missing-key triggers the established declared-set fallback used by all source/non-transform producers \u2014 Rule
     A/B membership check then operates on the source's raw guarantee set rather than crashing. No data fabrication; no audit
     divergence
-  expires: null
-- key: web/composer/_semantic_validator.py:R5:_is_config_probe_exception:fp=f4dd333a133b13c6
-  owner: web-composer
-  reason: "The semantic-contract validator probes producer plugins to read their output_semantics() during draft pipeline\
-    \ composition. Producer construction can fail with known draft/config exceptions (PluginConfigError, PluginNotFoundError,\
-    \ TemplateError, UnknownPluginTypeError, or \"Invalid configuration for transform\" ValueError) when the user has not\
-    \ finished filling in options. Mirrors the same predicate at web/composer/state.py:_is_config_probe_exception used by\
-    \ the schema-contract probe path. The caught exception text is NEVER embedded in any ValidationEntry or SemanticEdgeContract\
-    \ \u2014 the only signal exposed downstream is \"no semantic facts\" (treated as UNKNOWN by compare_semantic), preventing\
-    \ plugin-option leaks via validator diagnostics."
-  safety: Unexpected exceptions are re-raised (per CLAUDE.md plugin-as-system-code policy). Known draft/config exceptions
-    yield producer_decl=None, which compare_semantic translates to SemanticOutcome.UNKNOWN; FAIL-policy consumers then emit
-    a structured error naming only the requirement_code and plugin names, never the exception text.
   expires: null
 - key: web/composer/state.py:R6:_check_schema_contracts:fp=db3842952ebf2845
   owner: web-composer
@@ -435,54 +277,12 @@ allow_hits:
   safety: parse_failures counter accumulates and is reported in warnings; no row is fabricated and the partial sample that
     did parse is still surfaced.
   expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_jsonl:fp=77e99bb3bbd0b0d8
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that a parsed JSONL line is a dict (object). External JSONL is zero-trust\
-    \ and may contain top-level non-objects (arrays, scalars). isinstance is the correct Tier-3 coercion gate."
-  safety: Non-dict values are rejected as parse failures; the partial sample that was dict-shaped still surfaces.
-  expires: null
 - key: web/composer/source_inspection.py:R6:_inspect_json:fp=89a51481c4c122bc
   owner: web-composer
   reason: "Tier-3 trust boundary \u2014 full JSON document parsing of operator-supplied blob content. JSONDecodeError is expected\
     \ when the 8 KiB peek truncates mid-object on a large file. Surfaced via warning."
   safety: loaded=None on parse failure; inspection returns 0 sampled rows with the truncation warning, so caller cannot confuse
     "no rows" with "successfully parsed empty array".
-  expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=cac031d880cb9a48
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 discriminating between JSON array, wrapped object, and single object shapes. Each\
-    \ branch routes to the correct extraction; without isinstance, the boundary cannot be enforced."
-  safety: Each branch handles its shape explicitly; unexpected shapes (e.g., scalar at top level) fall through to the "single
-    object" branch which still produces a faithful one-row inspection.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=ae992e74acb83b4e
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that an array element is a dict before treating it as a row. JSON arrays\
-    \ can contain mixed types per RFC 8259; non-dict elements are skipped, not coerced."
-  safety: Non-dict array elements silently skipped from row sample; matches Tier-3 quarantine semantics.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=bf54f6b8b93ca1da
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that a wrapped object's value is a list (data_key shape detection). The wrapped-object\
-    \ pattern is `{\"results\": [...]}` and the value-must-be-a-list check is the heuristic for it."
-  safety: If the wrapped value is not a list, the heuristic falls through to the next value or to the "single object" branch;
-    no row is fabricated.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=e46d4b7b2c6d4b96
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 same wrapped-object value-is-list check (sibling check on data_key path)."
-  safety: Same as the prior entry; the heuristic only fires when both the value is a list AND its first element is a dict.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=45b8f4792285e7a4
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that a wrapped-list element is a dict before treating it as a row."
-  safety: Non-dict elements within the wrapped list are skipped; matches Tier-3 quarantine semantics.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_inspect_json:fp=256b261289ce6d35
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 final isinstance check confirms the picked element is dict-shaped before adding it\
-    \ to the sampled-objects list."
-  safety: Non-dict elements skipped; no fabrication.
   expires: null
 - key: web/composer/source_inspection.py:R8:_facts_from_objects:fp=45f57db550590ed2
   owner: web-composer
@@ -492,107 +292,12 @@ allow_hits:
   safety: All access is via isinstance dispatch (allowlisted as R5 Tier-3) so there is no key-error path; keys absent from
     a particular row record as "null" rather than crashing or coercing.
   expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=16333fe9927fc250
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that a sampled row entry is a dict before iterating its keys."
-  safety: Non-dict entries silently skipped from row sample; matches Tier-3 quarantine semantics.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=d691bdc0cdc579ea
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that an observed value is a bool before promoting bool. Required because\
-    \ bool is a subclass of int in Python; without the bool isinstance check first, every bool would be misclassified as int\
-    \ (a fabrication)."
-  safety: bool check is ordered before int check; mismatched values fall through to the str branch which is the type-conservative
-    answer per the merge ladder.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=2f92bd37b56a1b9e
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 int isinstance check during type inference of operator-supplied JSON values."
-  safety: Mis-typed values fall through to the str branch.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=9998e9ad9692408b
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 float isinstance check during type inference of operator-supplied JSON values."
-  safety: Mis-typed values fall through to the str branch.
-  expires: null
 - key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=ba36ce466c780739
   owner: web-composer
   reason: "Tier-3 trust boundary \u2014 `obj.get(h)` for membership probing on operator-supplied JSON. Returns None for absent\
     \ fields (not a fabricated default \u2014 None is \"absence\" per the manifesto), then the next isinstance check routes\
     \ the value or falls through."
   safety: None values caught explicitly by the isinstance(v, list/dict) gate; no fabrication, no coercion.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=eff3e061a0667f6f
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking whether a probed JSON value is a list or dict (nested structure). Used to\
-    \ emit the json_explode warning so the operator knows the field will need exploding before downstream consumption."
-  safety: Only used to surface a warning; no row is dropped or coerced.
-  expires: null
-- key: web/composer/source_inspection.py:R5:_facts_from_objects:fp=bf6b7120b97f1f97
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that a value is a string before scanning it for URL candidates. Non-string\
-    \ values skipped from URL extraction."
-  safety: Non-string values silently skipped; URL candidates list is best-effort.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=c4263279c40a5961
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that a blob_id slot value is a string before UUID parsing. Operator may supply\
-    \ any JSON type; non-string values are rejected with a repair hint pointing to create_blob."
-  safety: Non-string values raise RecipeValidationError with repair guidance; never silently coerced.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=69736596ab831836
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 checking that a str slot value is actually a string before passing through."
-  safety: Non-string values raise RecipeValidationError; never silently coerced.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=32ce9b85f3061d4a
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 explicit bool check before numeric coercion. bool is a subclass of int in Python,\
-    \ so without this guard True/False would silently coerce to 1.0/0.0 (a fabrication risk)."
-  safety: bool values raise RecipeValidationError telling operator to use 0.0/1.0 explicitly.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=37c487dc79354562
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 int/float check for numeric-slot pass-through. Both are valid numeric representations\
-    \ and are coerced to float for downstream gate comparisons."
-  safety: Other types fall through to the str-coercion branch or to the type-mismatch error.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=4ef2359b87975a9c
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 string check before float coercion. Operator may supply numeric thresholds as strings\
-    \ (\"99.95\"); we coerce explicitly at the boundary."
-  safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=3340edc2278b02c2
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 bool check for the int slot type (same fabrication-risk reason as the float branch)."
-  safety: bool values raise RecipeValidationError; never coerced.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=26252daa7c5d88b7
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 int check for int-slot pass-through."
-  safety: Non-int values fall through to the str-coercion branch or the type-mismatch error.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=7a2c78322baa89e8
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 string check before int coercion. Same pattern as the float branch."
-  safety: Unparseable strings raise RecipeValidationError with the original raw value in the message.
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=be30a8e022576252
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 list/tuple check for str_list slot type before iteration. Operator-supplied JSON arrays\
-    \ arrive at this boundary with no static type guarantee; rejecting non-iterables with a RecipeValidationError preserves\
-    \ the explicit-failure-mode contract for the apply_pipeline_recipe entrypoint."
-  safety: "Non-iterable values raise RecipeValidationError naming the slot and observed type \u2014 never silently coerces\
-    \ or fabricates a list."
-  expires: null
-- key: web/composer/recipes.py:R5:_coerce_slot:fp=f611b51374d3f4ea
-  owner: web-composer
-  reason: "Tier-3 trust boundary \u2014 per-element string check inside str_list slot iteration. Same fabrication risk reasoning\
-    \ as the str/blob_id branches; rejecting non-string elements before they pass through to LLM/transform options preserves\
-    \ the recipe's explicit-failure-mode contract."
-  safety: "Non-string elements raise RecipeValidationError with the offending index in the message \u2014 never silently coerces\
-    \ or fabricates a string element."
   expires: null
 - key: web/composer/recipes.py:R1:get_recipe:fp=2669127d1300bf00
   owner: web-composer
@@ -732,27 +437,10 @@ allow_hits:
   reason: "Tier 3 \u2014 request.headers.get('content-length') reads an optional HTTP header from untrusted client input; absent header means no declared size and the request proceeds to per-field Pydantic caps which are the actual guarantee."
   safety: "Absent header is the expected control-flow branch (Content-Length is optional in HTTP); when present and over the 10 MB ceiling, the request short-circuits with a 413 before any handler or downstream middleware touches the body. The Pydantic per-field caps (SendMessageRequest.content 64 KiB, _InlineBlobModel.content 256 KiB) remain the binding contract."
   expires: null
-- key: web/sessions/telemetry.py:R5:observed_value:fp=ddb6681dc6b30e95
-  owner: web-sessions
-  reason: "Test-only helper that asserts a contract invariant \u2014 observed_value() is callable only against the _FakeCounter\
-    \ test double, never against the real OTel Counter (which has no observation API). The isinstance check exists to fail\
-    \ loudly with a TypeError naming the misuse (e.g., a test that wired build_sessions_telemetry with a real meter and then\
-    \ tried to read counter values back) rather than producing a confusing AttributeError. This is offensive programming per\
-    \ CLAUDE.md (\"Can I detect an invalid state and throw a meaningful error? \u2192 Assert it\"), not defensive masking\
-    \ \u2014 production code never imports observed_value."
-  safety: Raises TypeError with explicit error message naming the invariant violation; no silent fallback or coerced default
-  expires: null
 - key: web/app.py:R1:create_app:fp=c6352adc498c00b5  # fp rotated 2026-05-16 (was ac4def58895142ba) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (ELSPETH_ENV env var) (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional ELSPETH_ENV"
   safety: Returns None when absent; only used for test guard
-  expires: null
-- key: web/execution/routes.py:R5:_run_integrity_http:fp=869196b901b5f49d
-  owner: web-execution
-  reason: Internal response-shaping helper dispatches the closed union of Pydantic ValidationError versus _RunStatusIntegrityError
-    to decide which diagnostic fields are safe for the 500 response body.
-  safety: Both branches return explicit HTTP 500 run_integrity_error detail; no exception is discarded and no successful RunEvent/RunStatusResponse
-    is fabricated.
   expires: null
 - key: web/execution/routes.py:R1:create_execution_router:websocket_run_progress:fp=2e7290677ad9bc65
   owner: web-execution
@@ -823,75 +511,6 @@ allow_hits:
   reason: contextlib.suppress(CancelledError) is the expected shutdown path for the periodic orphan cleanup task
   safety: Clean cancellation during app shutdown; no error suppression
   expires: null
-- key: web/composer/audit.py:R5:begin_dispatch:fp=de305c20080b5e87
-  owner: composer-audit
-  reason: "Typed-union narrowing inside the audit envelope helper \u2014 begin_dispatch accepts Mapping[str, Any] | str (parsed\
-    \ dict from successful json.loads, or raw string from the JSON-decode-failure branch). isinstance(arguments, str) selects\
-    \ the truncated-canonical path for raw input. Same pattern as _cached_runtime_preflight's union narrowing. Helper hoisted\
-    \ from web/composer/service.py to web/composer/audit.py during the dispatch_with_audit extraction (panel-review B1/B2\
-    \ fix)."
-  safety: Both branches build a canonical_json + stable_hash payload; no defensive access of attributes; no silent fallback.
-    The dispatch site documents which call pattern is allowed.
-  expires: null
-- key: web/composer/audit.py:R5:_normalize_audit_payload:fp=40b234ca7e3778ba
-  owner: composer-audit
-  reason: "Pydantic-aware audit-payload normalization (elspeth-281f259235 fix). The web composer audit canonicalizes payloads\
-    \ via canonical_json -> rfc8785.dumps which rejects Pydantic BaseModel; without this normalization, discovery tool results\
-    \ (PluginSummary, PluginSchemaInfo) trigger the sentinel-canonical fallback and obliterate the actual catalog data the\
-    \ LLM saw. The isinstance(value, BaseModel) check selects the Pydantic-conversion branch (model_dump) inside a recursive\
-    \ walker \u2014 structurally identical to deep_freeze/deep_thaw in contracts/freeze.py. Mirrors the working pattern in\
-    \ composer_mcp/server.py:_ensure_serializable. Type-dispatch, not contract-violation hiding."
-  safety: "BaseModel branch returns a fully-converted dict via model_dump (Pydantic's canonical serializer). No silent fallback;\
-    \ types that are neither BaseModel nor Mapping nor list|tuple pass through and rfc8785 will reject them (sentinel fallback\
-    \ fires) \u2014 same fail-closed discipline as before this normalization step."
-  expires: null
-- key: web/composer/audit.py:R5:_normalize_audit_payload:fp=70c834a8c9944af6
-  owner: composer-audit
-  reason: "Recursive container walking inside _normalize_audit_payload. isinstance(value, Mapping) is the standard JSON-tree\
-    \ dispatch pattern (Mapping covers dict, MappingProxyType, OrderedDict, and any future Mapping subclass). Same shape as\
-    \ deep_freeze in contracts/freeze.py and _ensure_serializable in composer_mcp/server.py. Not defensive access \u2014 type\
-    \ dispatch on a heterogeneous Any-typed input from ToolResult.to_dict() / cache-hit hand-built dicts."
-  safety: Mapping branch recurses into key/value pairs; non-Mapping containers fall through to the list|tuple branch; scalars
-    and opaque types pass through. rfc8785 rejection downstream still fires the sentinel fallback.
-  expires: null
-- key: web/composer/audit.py:R5:_normalize_audit_payload:fp=2cd1d47c9a297586
-  owner: composer-audit
-  reason: List/tuple branch of the recursive normalizer. isinstance(value, list | tuple) ensures lists of Pydantic models
-    (e.g. list[PluginSummary] from catalog.list_sources()) get walked element-wise. Type dispatch, not defensive access.
-  safety: Returns a freshly-constructed list of normalized items; the original frozen tuples from ToolResult.data are not
-    mutated. Downstream rfc8785 rejection still fires sentinel fallback for unsupported element types.
-  expires: null
-- key: web/composer/audit.py:R5:build_canonicalization_sentinel:fp=313242b6c0f63d5a
-  owner: composer-audit
-  reason: Allowlist policy gate for the sentinel-detail capture (elspeth-281f259235 diagnostic upgrade). isinstance(exc, rfc8785.CanonicalizationError)
-    selects exception classes whose messages are bounded and value-free by spec (rfc8785 reports type names and JCS rule violations,
-    never echoes payload bytes). Other ValueError/TypeError paths (e.g. core/canonical.py raising non-finite-float ValueError
-    with the offending Decimal/float interpolated) are excluded from detail capture to prevent Tier-3 leak into the Tier-1
-    audit row. This is leak-prevention policy, not contract-violation hiding.
-  safety: rfc8785 detail captured at 512-char cap (belt-and-braces against future rfc8785 versions inlining longer fragments);
-    other exception paths get type-name-only treatment. Exact policy pinned by test_canonicalization_sentinel_omits_detail_for_non_rfc8785_errors
-    and companions in tests/unit/web/composer/test_compose_loop_audit_wiring.py.
-  expires: null
-- key: web/composer/audit.py:R5:build_canonicalization_sentinel:fp=c9698b60d5007f6e
-  owner: composer-audit
-  reason: "Audit-payload-shape diagnostic \u2014 isinstance(payload, Mapping) selects the branch that records sorted top-level\
-    \ keys into _payload_keys. Lets auditors fingerprint the failure shape (discovery-tool result vs compose-state mutation\
-    \ vs unparseable arguments) without correlating with operational logs. Non-Mapping payloads (the str branch from begin_dispatch's\
-    \ raw-string path, or future list-shaped shapes) skip the diagnostic to avoid emitting a noisy index- key list. Type dispatch,\
-    \ not defensive access \u2014 the helper is purposely called with Any so policy lives in one place."
-  safety: Captures only key NAMES (sorted, str-coerced), not values. No nested traversal. Bounded by definition (a composition
-    state has O(10) top-level keys; an LLM tool-call argument set is similar). Pinned by test_canonicalization_sentinel_omits_payload_keys_for_non_mapping.
-  expires: null
-- key: web/composer/audit.py:R5:begin_dispatch_or_arg_error:fp=1315badb26edc93b
-  owner: composer-audit
-  reason: Pass-through gate for the sentinel-diagnostic helper. begin_dispatch accepts Mapping[str, Any] | str and the arg-canonicalization-failure
-    path needs to forward the right shape to build_canonicalization_sentinel. The isinstance(arguments, Mapping) check selects
-    the Mapping branch (so _payload_keys gets meaningful key names) and discards the str branch (so a raw-string truncation
-    site doesn't emit a single-char index key list). Type dispatch on the same union narrowing as begin_dispatch's primary
-    isinstance check.
-  safety: Both branches feed build_canonicalization_sentinel a typed-correct value. No silent fallback; the sentinel still
-    records the exception class name regardless of payload shape.
-  expires: null
 - key: web/composer/audit.py:R6:finish_success:fp=12ea97ccaadab07e
   owner: composer-audit
   reason: "Sentinel-canonical fallback for canonical_json failures on the SUCCESS path. Closes panel-review blocker B1 \u2014\
@@ -907,24 +526,6 @@ allow_hits:
     \ is unaffected \u2014 this path runs on the SUCCESS branch where the handler returned a result and the state was already\
     \ advanced. The _canonicalization_error key is an internal sentinel name reserved by the audit subsystem (composer_mcp/server.py\
     \ and web/composer/audit.py \u2014 single source of truth)."
-  expires: null
-- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=da5debd409bb2115
-  owner: composer-audit
-  reason: "Coerce a tool-handler result into a canonicalizable Mapping. The compose loop's handler returns a ToolResult dataclass\
-    \ with a to_dict() method; the helper is callback-driven and does not import the concrete type. Tests pass a dict directly,\
-    \ production passes a ToolResult \u2014 the isinstance(Mapping) branch admits both shapes without coupling to the concrete\
-    \ handler type. Not defensive access, structural pre-dispatch on a small typed shape."
-  safety: Anything that is neither a Mapping nor exposes to_dict() crashes loud via the AttributeError below. The isinstance(Mapping)
-    check fast-paths the test/dict case; the ``result.to_dict`` path serves the production case.
-  expires: null
-- key: web/composer/audit.py:R5:_result_to_audit_payload:fp=e163f0a5d52d8d15
-  owner: composer-audit
-  reason: "Offensive guard \u2014 verify ``result.to_dict()`` actually returned a Mapping before passing it to canonical_json.\
-    \ A handler whose to_dict() drifted to return a list/tuple/scalar would silently corrupt the audit row; the explicit raise\
-    \ crashes loud per CLAUDE.md \"Plugin Ownership\" \u2014 a handler bug must surface, not be papered over with a fallback."
-  safety: "TypeError raised with the actual returned class name and the expected shape. The exception leaves the helper via\
-    \ the general PLUGIN_CRASH path, so the audit row still lands recording \"the dispatch produced an unrecordable result\"\
-    \ \u2014 rather than the alternative of silently writing zero into the audit trail."
   expires: null
 - key: web/app.py:R6:_periodic_orphan_cleanup:fp=5b047a7f12bbbf87  # fp rotated 2026-05-16 (was 891711143f3fbeef) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
   owner: web-execution
@@ -966,86 +567,6 @@ allow_hits:
     \ which is raw JSON from the DB. Not all source shapes include \"options\"."
   safety: "Returns input unchanged when \"options\" absent \u2014 no data loss or fabrication"
   expires: null
-- key: web/composer/redaction.py:R5:_has_sensitive:fp=b139fd016caf44f7
-  owner: web-composer
-  reason: "Marker-class discrimination over an Annotated metadata tuple (spec \xA74.2.5). The metadata comes from Python typing\
-    \ primitives at module load \u2014 not external input. _SensitiveMarker is a sentinel class introduced by Sensitive();\
-    \ isinstance is the only mechanism to identify it among arbitrary metadata entries (pydantic uses the same pattern internally).\
-    \ No defensive coercion of unknown data."
-  safety: "Returns bool; never silently substitutes a default for malformed input \u2014 metadata tuple is always well-typed\
-    \ because we control its construction site."
-  expires: null
-- key: web/composer/redaction.py:R5:_count_sensitive:fp=e9775883f773b8f5
-  owner: web-composer
-  reason: "Same as _has_sensitive \u2014 marker discrimination over Annotated metadata. The count is used solely to detect\
-    \ the spec \xA74.2.5 violation of multiple Sensitive() markers in one field's Annotated tuple, which raises ValueError."
-  safety: Returns int >= 0; downstream consumer raises on count > 1 with field name in the error message.
-  expires: null
-- key: web/composer/redaction.py:R5:walk_model_schema:fp=59b5b8548b68bd37
-  owner: web-composer
-  reason: "Reflection over Python typing \u2014 isinstance(model, type) and issubclass(model, BaseModel) verify that the input\
-    \ is a pydantic schema class. There is no other way in Python to test \"is this a BaseModel subclass?\". Pydantic itself\
-    \ relies on the same primitive throughout its public API."
-  safety: Raises TypeError with descriptive message if a non-BaseModel is passed. No silent default; no coercion.
-  expires: null
-- key: web/composer/redaction.py:R5:_walk_type:fp=1c1358e437d69675
-  owner: web-composer
-  reason: "Reflection over Python typing \u2014 isinstance(field_type, type) and issubclass(field_type, BaseModel) tests whether\
-    \ a Union/container element is a nested model that requires further descent (spec \xA74.2.5). Same justification as walk_model_schema's\
-    \ entry-point guard; no other Python primitive answers this question."
-  safety: If neither container nor BaseModel, falls through to the scalar-leaf emission branch. No silent error suppression.
-  expires: null
-- key: web/composer/redaction.py:R5:_is_descendable:fp=c80a2f0ff0ed6d52
-  owner: web-composer
-  reason: "Reflection helper used during Union-arm fan-out \u2014 same BaseModel detection primitive as the surrounding walker.\
-    \ Decides whether a Union arm carries structure worth descending into vs. being a scalar arm to skip."
-  safety: Returns bool; scalar arms are skipped explicitly; the rev-3 W8a path routes Annotated[scalar, Sensitive()] arms
-    through _has_sensitive instead so Sensitive markers on scalar Union arms still emit a node.
-  expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=be6376f6aa29f5c4
-  owner: web-composer
-  reason: "Marker-class discrimination over Annotated metadata tuple \u2014 identical to _has_sensitive/_count_sensitive (spec\
-    \ \xA74.2.5). _SensitiveMarker is a sentinel class introduced by Sensitive(); the only way to detect it inside an Annotated\
-    \ metadata tuple is isinstance."
-  safety: "Markers are constructed at module load from Python typing primitives \u2014 never from external input. Mismatched\
-    \ metadata entries fall through to the skip branch."
-  expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=62ed45ad12063d2c
-  owner: web-composer
-  reason: "Tier-1 invariant guard immediately before raising AuditIntegrityError \u2014 the summarizer contract (spec \xA7\
-    4.2.6) requires str return; a non-str return means a summarizer is misimplemented and the audit record would be poisoned.\
-    \ Offensive programming pattern per CLAUDE.md (Defensive Forbidden / Offensive Encouraged) decision-test row \"Can I detect\
-    \ an invalid state and throw a meaningful error?\". The Task-8 refactor moved this check into a per-node closure (``_apply``)\
-    \ so the same Sensitive-field summarizer contract applies at top-level, nested-BaseModel, list-element, dict-element,\
-    \ and tuple-element paths uniformly."
-  safety: Raises AuditIntegrityError with the path and the offending type name so the operator can identify the misbehaving
-    summarizer.
-  expires: null
-- key: web/composer/redaction.py:R5:_redact_via_policy:fp=8dece4c2db439e42
-  owner: web-composer
-  reason: "Tier-1 invariant guard immediately before raising AuditIntegrityError \u2014 declarative-branch counterpart of\
-    \ the _redact_via_schema._apply isinstance guard. The summarizer contract (spec \xA74.2.6) requires str return for both\
-    \ type-driven and declarative entries; a non-str return means a summarizer registered in ToolRedactionPolicy.argument_summarizers\
-    \ is misimplemented and the audit record would be poisoned. Offensive programming pattern per CLAUDE.md (Defensive Forbidden\
-    \ / Offensive Encouraged)."
-  safety: Raises AuditIntegrityError naming the tool, the argument key, and the offending return type so the operator can
-    identify the misbehaving summarizer.
-  expires: null
-- key: web/composer/redaction.py:R5:_build_substitute_provider:provider:fp=b7e8fcdb3f276802
-  owner: web-composer
-  reason: "Optional-container traversal guard introduced by Task 14 (set_pipeline promotion) for nested Sensitive paths under\
-    \ Optional[BaseModel]. The walker emits paths like ``source.inline_blob.content`` regardless of whether ``inline_blob``\
-    \ is None at runtime; the substitute_provider closure must skip frontier entries whose intermediate-attribute lookup returns\
-    \ None (e.g., ``source.inline_blob is None``) because there is no leaf to write into.  ``isinstance(current, Mapping)``\
-    \ is the standard typing primitive for \"is this a dict-shaped node I can descend into?\" \u2014 identical pattern to\
-    \ walk_model_schema's ``isinstance(model, type)`` BaseModel-detection primitive on the structural side.  The current dict\
-    \ shape is constructed by the redactor from ``model_dump()`` of a Pydantic-validated input, so the type discriminator\
-    \ is part of the walker's structural contract, not external-data coercion."
-  safety: "Skips frontier entries whose intermediate value is None (correct disposition \u2014 the absent Optional container\
-    \ has no leaf to write into). The substitution callable is only ever invoked for Sensitive nodes whose intermediate path\
-    \ actually exists at runtime; absent paths produce no substitution effect and no error, matching the \"Sensitive marker\
-    \ on an absent Optional path\" semantic that Pydantic + walker establish at the type layer."
-  expires: null
 - key: web/composer/redaction.py:R1:_build_substitute_provider:provider:fp=813cd59ea05de4da
   owner: web-composer
   reason: "Companion to the R5 entry above \u2014 the ``.get(name)`` call inside the Optional-container traversal handles\
@@ -1070,60 +591,25 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 csv.Error during MIME sniffing on untrusted upload content"
   safety: Continues to next delimiter; returns None for uncertain content; no data loss
   expires: null
-- key: web/execution/preflight.py:R5:resolve_runtime_yaml_paths:fp=7f72acae2e41bb1d
-  owner: web-execution
-  reason: "Offensive programming \u2014 isinstance assertion on YAML generator output (source must be dict)"
-  safety: Raises TypeError with diagnostic message on generator bug
-  expires: null
-- key: web/execution/preflight.py:R5:resolve_runtime_yaml_paths:fp=5e0c3dc17498063e
-  owner: web-execution
-  reason: "Offensive programming \u2014 isinstance assertion on YAML generator output (source.options must be dict)"
-  safety: Raises TypeError with diagnostic message on generator bug
-  expires: null
 - key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=d0e7e2507b117f2d
   owner: web-execution
   reason: "YAML navigation \u2014 source.options keys (path/file) may be absent"
   safety: Absent keys skipped; no fabrication
-  expires: null
-- key: web/execution/preflight.py:R5:resolve_runtime_yaml_paths:fp=27b0eea4a848386d
-  owner: web-execution
-  reason: "Offensive programming \u2014 isinstance assertion on YAML generator output (sinks must be dict)"
-  safety: Raises TypeError with diagnostic message on generator bug
   expires: null
 - key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=5f1f81fee41e3e1a
   owner: web-execution
   reason: "YAML navigation \u2014 sink options keys (path/file) may be absent"
   safety: Absent keys skipped; no fabrication
   expires: null
-- key: web/execution/preflight.py:R5:resolve_runtime_yaml_paths:fp=126f6792a20126fc
-  owner: web-execution
-  reason: "Offensive programming \u2014 isinstance assertion on YAML generator output (sink config must be dict)"
-  safety: Raises TypeError with diagnostic message naming the sink
-  expires: null
 - key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=c876a96667c425f7
   owner: web-execution
   reason: "YAML navigation \u2014 sink options keys (path/file) may be absent"
   safety: Absent keys skipped; no fabrication
   expires: null
-- key: web/execution/preflight.py:R5:resolve_runtime_yaml_paths:fp=94ce4eef74759672
-  owner: web-execution
-  reason: "Offensive programming \u2014 isinstance assertion on YAML generator output (sink options must be dict)"
-  safety: Raises TypeError with diagnostic message naming the sink
-  expires: null
-- key: web/execution/preflight.py:R5:resolve_runtime_yaml_paths:fp=a04e52dbfb1f9b7f
-  owner: web-execution
-  reason: "Tier 3 \u2014 isinstance check on YAML top-level after safe_load (may be non-dict)"
-  safety: Raises TypeError with diagnostic; no silent default
-  expires: null
 - key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=42996be95a89dd56
   owner: web-execution
   reason: "YAML navigation \u2014 source key may be absent in generated YAML"
   safety: Returns None; source path rewriting skipped
-  expires: null
-- key: web/execution/preflight.py:R5:resolve_runtime_yaml_paths:fp=0f19a6c6477e904b
-  owner: web-execution
-  reason: "Tier 3 \u2014 isinstance check on pipeline_yaml argument type"
-  safety: Raises TypeError with diagnostic; no silent default
   expires: null
 - key: web/app.py:R2:create_app:_request_id:fp=34279d80c3f5fff9  # fp rotated 2026-05-16 (was b70a21188e4a6164) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware) (re-rotated 2026-05-18 for F-17/F-21 — sessions_telemetry block + ExecutionServiceImpl telemetry kwarg added inside create_app/lifespan; was 257c9c5cad0f7b4a)
   owner: web-app
@@ -1244,17 +730,6 @@ allow_hits:
   safety: Exception is stored on RuntimePreflightFailure.original_exc and re-raised at the caller site with full chain preservation;
     no silent swallowing
   expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_reject_epoch_timestamp:fp=2c02f8924e73db14
-  owner: web-execution
-  reason: "Pydantic before-validator at WebSocket JSON round-trip boundary — isinstance(v, (datetime, str)) allows real datetimes and ISO strings while rejecting Unix epoch integers before lax datetime parsing can coerce them."
-  safety: Raises ValueError for non-datetime/non-string timestamps; no fallback timestamp is fabricated.
-  expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=a98e3006866ec802
-  owner: web-execution
-  reason: "Pydantic before-validator \u2014 isinstance(values, dict) gates JSON round-trip path; non-dict values handled by\
-    \ Pydantic"
-  safety: Structural dispatch for deserialization, not error suppression
-  expires: null
 - key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=ed314e0fdc5c4326
   owner: web-execution
   reason: "Pydantic before-validator \u2014 .get() on pre-validated Tier 3 input from JSON round-trip"
@@ -1264,24 +739,6 @@ allow_hits:
   owner: web-execution
   reason: "Pydantic before-validator \u2014 .get() on pre-validated Tier 3 input from JSON round-trip"
   safety: Missing keys fall through to Pydantic field validation downstream
-  expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_resolve_data_from_event_type:fp=d63f3e89ba34fb0b
-  owner: web-execution
-  reason: "Pydantic before-validator \u2014 isinstance(values, dict) gates JSON round-trip path; non-dict values handled by\
-    \ Pydantic"
-  safety: Structural dispatch for deserialization, not error suppression
-  expires: null
-- key: web/execution/schemas.py:R5:RunEvent:_enforce_data_type:fp=8252ea31744de4ae
-  owner: web-execution
-  reason: "Offensive programming \u2014 isinstance enforces event_type/data type correspondence at construction time"
-  safety: Raises ValueError on mismatch; belt-and-suspenders with before-validator
-  expires: null
-- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=30ba4b5ab512ef53
-  owner: web-execution
-  reason: "Security boundary \u2014 isinstance dispatches SecretResolutionError to safe message (no secret name leakage).\
-    \ Fingerprint shifted from 4486e02baecf252d by the F-17/F-21 pre-execute placeholder gate adding ImportFroms above this\
-    \ block in web/execution/service.py (telemetry container + UnresolvedInterpretationPlaceholderError + tools detector)."
-  safety: Type dispatch for sanitization, not error suppression
   expires: null
 - key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=a1f5bb8ebb43976b
   owner: web-execution
@@ -1334,12 +791,6 @@ allow_hits:
     pre-execute placeholder gate ImportFroms.
   safety: Returns None if absent; no silent default
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=0be535ff323489b2
-  owner: web-execution
-  reason: "Tier 3 \u2014 config from YAML deserialization may be non-dict. Fingerprint shifted from 5236108f6efbcdde by\
-    \ the F-17/F-21 pre-execute placeholder gate ImportFroms."
-  safety: Raises TypeError if not dict; no silent default
-  expires: null
 - key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=dbdef7455198b0e4
   owner: web-execution
   reason: "Scope-to-audit-source mapping \u2014 .get() on explicit mapping dict with crash-on-unknown guard. Fingerprint\
@@ -1357,14 +808,6 @@ allow_hits:
   reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation. Fingerprint shifted from
     266193e08add405b by the F-17/F-21 pre-execute placeholder gate ImportFroms.
   safety: Classified as cancelled; separated from BaseException failure path
-  expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=829f02764f9c1fad
-  owner: web-execution
-  reason: "Signal-exception classification (KeyboardInterrupt/SystemExit) inside the BaseException recovery block \u2014 programmer\
-    \ signals must propagate; only normal exceptions are classified to the failed path and routed through the post-completion\
-    \ run-state probe. Fingerprint shifted from 7eee4ffbb251ed6b by the F-17/F-21 pre-execute placeholder gate ImportFroms."
-  safety: KeyboardInterrupt/SystemExit re-raised by the surrounding handler; non-signal exceptions become operator-visible
-    structured failures
   expires: null
 - key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=8f81977d810d0f31
   owner: web-execution
@@ -1403,124 +846,12 @@ allow_hits:
     BlobStateError); RuntimeError deliberately excluded (too broad); programmer bugs propagate; partial failures logged from
     structured result
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=6629de3e74360d70
-  owner: web-execution
-  reason: "Last-resort safety net \u2014 isinstance check excludes KeyboardInterrupt/SystemExit from diagnostic logging.\
-    \ Fingerprint shifted from 19d74b552fc39dd4 by the F-17/F-21 pre-execute placeholder gate ImportFroms."
-  safety: Only suppresses signal exceptions; all other exceptions logged as last-resort diagnostic
-  expires: null
-- key: web/composer/state.py:R5:_is_static_contract_probe_exception:fp=50c677dd72339245
-  owner: web-composer
-  reason: Composer static-contract probes instantiate draft plugins while the user/LLM may still be filling options. Known
-    config/probe exception classes are classified so the validator can return unknown contract facts instead of crashing.
-  safety: Unexpected exceptions are re-raised. Known exception text is never surfaced to the UI; downstream validation treats
-    absent facts as unknown/fail-closed where required.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=37783254993bc717
-  owner: web-execution
-  reason: Launch guard inspects user-authored LLM plugin options at the execution boundary; queries may be a mapping for named
-    multi-query prompts.
-  safety: Only the query count is used for spend estimation; malformed options still go through plugin/runtime validation
-    before any provider call.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=4f09759c469258d0
-  owner: web-execution
-  reason: Launch guard inspects user-authored LLM plugin options at the execution boundary; queries may be a sequence for
-    multi-query prompts.
-  safety: Strings and byte sequences are excluded from the sequence count; malformed options still go through plugin/runtime
-    validation before any provider call.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_provider_calls_per_row:fp=bbfb386271aa5a70
-  owner: web-execution
-  reason: Launch guard distinguishes scalar string-like values from query sequences when estimating LLM provider calls from
-    user-authored plugin options.
-  safety: Scalar string-like values fall back to one provider call per row; plugin/runtime validation remains the authority
-    for option correctness.
-  expires: null
 - key: web/execution/fanout_guard.py:R6:_estimate_source_rows:fp=fdf1ab16ee8462d4
   owner: web-execution
   reason: Fanout estimation reads user-provided source files before execution; filesystem, encoding, CSV, or JSON parse failures
     mean cardinality is unknown.
   safety: The guard never fabricates a row count from unreadable data; execution still validates/opens the source on the normal
     path before any downstream provider calls.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_source_path:fp=ddcfcb5be92f7e23
-  owner: web-execution
-  reason: Source path/file options are user-authored plugin options and may be absent or non-string before plugin validation
-    runs.
-  safety: Non-string values are treated as unavailable for local row estimation only; normal execution validation remains
-    responsible for rejecting invalid source options.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_remote_source_limit:fp=f3e8691c99939d74
-  owner: web-execution
-  reason: Remote source limit/top/max_rows options are user-authored plugin options and only integer row caps can safely inform
-    spend estimation.
-  safety: Non-integer values do not reduce the guard's estimate; plugin/runtime validation remains responsible for option
-    correctness.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_count_csv_source_rows:fp=4de1a38e6489f86a
-  owner: web-execution
-  reason: CSV skip_rows is a user-authored option inspected before execution so the launch guard can estimate source cardinality.
-  safety: Only integer skip_rows affects the estimator; invalid values are still rejected by plugin/runtime validation on
-    the normal execution path.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=4de14b5c3571bbc7
-  owner: web-execution
-  reason: JSON source files are external/user data; data_key counting must first verify the decoded payload is an object before
-    indexing it.
-  safety: Non-object payloads return unknown cardinality for the estimator instead of fabricating a count; execution source
-    validation still handles malformed data.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_count_json_source_rows:fp=b90c5294dec6686f
-  owner: web-execution
-  reason: JSON source files are external/user data; only top-level arrays have a directly countable row cardinality for this
-    launch guard.
-  safety: Non-array payloads return unknown cardinality for the estimator instead of fabricating a count; execution source
-    validation still handles malformed data.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_string_option:fp=551453a6d1751fa2
-  owner: web-execution
-  reason: Fanout estimation reads optional user-authored plugin string options such as provider, model, encoding, delimiter,
-    format, and data_key.
-  safety: Only nonblank strings are surfaced into the guard payload; absent or malformed values remain unknown and normal
-    plugin/runtime validation remains authoritative.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=195a89405c54ca1d
-  owner: web-execution
-  reason: LLM credential configuration can be either an inline string or a secret-ref mapping in user-authored plugin options.
-  safety: The guard emits only credential category/ref metadata and never the secret value; actual secret resolution remains
-    on the execution path.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=24c08e5d0ce127d5
-  owner: web-execution
-  reason: Secret-ref mappings are user-authored plugin options and the nested secret_ref value must be a visible nonblank
-    string before being identified in the guard payload.
-  safety: The guard emits only the secret_ref name marker and never resolves or logs the secret value; invalid shapes remain
-    unknown for the guard.
-  expires: null
-- key: web/execution/fanout_guard.py:R5:_credential_ref:fp=b0754fca2fa41500
-  owner: web-execution
-  reason: Inline LLM API keys are user-authored plugin options and must be identified without exposing their contents in the
-    launch guard.
-  safety: Nonblank inline strings are reported only as the category inline_api_key; the actual credential value is never included
-    in the guard payload.
-  expires: null
-- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=6968e3004a57e1a9
-  owner: web-composer
-  reason: "Composer state options are Tier 3 LLM/user-supplied plugin config; the rule inspects web_scrape's options.http.abuse_contact\
-    \ at composer-validate time, which means traversing an opaque dict whose internal shape is only constrained by the plugin's\
-    \ own pydantic schema. isinstance(options, Mapping) and isinstance(http, Mapping) and isinstance(abuse_contact, str) are\
-    \ early-return shape guards at this Tier 3 boundary so the rule short-circuits cleanly when plugin schema validation will\
-    \ already reject the malformed shape elsewhere (missing http block, non-string abuse_contact like a {secret_ref:...} dict).\
-    \ The rule fires only when the value is a real-shaped email and exists to reject RFC 2606/6761 reserved-domain emails\
-    \ (example.com/.org/.net, *.test, *.invalid, *.localhost, *.example) as fabricated wire-visible identity values that ship\
-    \ as HTTP headers to scraped third parties \u2014 a Tier-1 audit-integrity defect. Backstops the skill-prompt rule in\
-    \ pipeline_composer.md (web_scrape.http section) introduced in commit 848ec5a1; observation obs-69697091d9 predicted the\
-    \ need for this mechanical rule after a fresh dashboard test on session 3dda63b9 showed the prompt rule alone was insufficient."
-  safety: All three isinstance early-returns yield None (no error reported); the plugin's pydantic schema is the authoritative
-    reporter for missing/malformed http or abuse_contact, so silence here does not mask any defect. When the shape matches
-    and the domain is reserved, returns a high-severity blocking ValidationEntry naming the node and field, rendering the
-    pipeline invalid.
   expires: null
 - key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=32b2a5953161fe53
   owner: web-composer
@@ -1540,13 +871,6 @@ allow_hits:
     \ treat the artifact as not-downloadable."
   safety: An unresolvable path produces downloadable=false; the UI suppresses the Download button. The audit trail still shows
     the artifact's recorded path_or_uri, exists_now, and content_hash. No bytes are served on a False result.
-  expires: null
-- key: web/composer/state.py:R5:_validate_web_scrape_abuse_contact_not_reserved:fp=addf5c66492da749
-  owner: web-composer
-  reason: "Tier 3 boundary \u2014 LLM/operator-supplied node options may shape `http` as a non-Mapping (e.g., null, list).\
-    \ Validator returns None on shape mismatch and delegates to the plugin schema rule, which surfaces malformed `http` as\
-    \ a structured error rather than crashing the validate path."
-  safety: Returns None; downstream plugin schema rule reports the malformed http block as a separate ValidationEntry.
   expires: null
 - key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=a9087bd477d14430
   owner: web-composer
@@ -1617,61 +941,12 @@ allow_hits:
   safety: Default path value matches the registered SlotSpec default in _RECIPE2_SLOTS["below_output_path"]; operator confirms
     or overrides via recipe_offer turn.
   expires: null
-- key: web/composer/audit.py:R5:canonicalize_pydantic_cause:fp=cfa196ada35b2be8
-  owner: composer-audit
-  reason: "Tier-3 boundary check (F2 \u2014 spec \xA74.2.6). canonicalize_pydantic_cause accepts BaseException | None (a chained\
-    \ ``__cause__`` from ToolArgumentError, sourced from LLM tool-call validation). The isinstance(exc, ValidationError) check\
-    \ selects the Pydantic-aware projection branch (loc/msg/type tuples, leak-stripped) vs the opt-out None return for non-Pydantic\
-    \ causes. This is type dispatch at a documented external-system boundary, not contract-violation hiding \u2014 the function\
-    \ is invoked from a closure factory whose input is ``ToolArgumentError.__cause__`` (untyped by language design; any BaseException\
-    \ class can be chained). FP rotated during RC5.2 per-step-chat merge."
-  safety: "Non-Pydantic causes return None (no validation_errors key added to the audit payload \u2014 absence is the signal,\
-    \ never an empty list). Pydantic causes feed ``errors()`` unwrapped (offensive \u2014 if Pydantic's own errors() raises,\
-    \ that's a Pydantic-internal bug and propagates). Pinned by tests/unit/web/composer/test_audit_arg_error_validation_errors.py."
-  expires: null
-- key: web/composer/state.py:R5:NodeSpec:from_dict:fp=7a0c2bc83ef309ae
-  owner: web-composer
-  reason: "CompositionState JSON deserialization boundary for coalesce branches; persisted/runtime state may contain either legacy list shape or transformed-recipe mapping shape and must be reconstructed without losing branch-output labels."
-  safety: Mapping shape is copied to a dict for freezing; sequence shape is converted to tuple; absent branch metadata remains None and malformed values are rejected by state validation.
-  expires: null
-- key: web/composer/state.py:R5:_coalesce_branch_names:fp=f7a6fba340932491
-  owner: web-composer
-  reason: "Coalesce branch helper reads the validated union shape; mapping branches expose output-key identities while sequence branches expose direct branch identities."
-  safety: Returns tuple(branches.keys()) for mapping form and the existing tuple for sequence form; no fabricated branch names are introduced.
-  expires: null
-- key: web/composer/state.py:R5:_coalesce_branch_connections:fp=9fa211264ac04d90
-  owner: web-composer
-  reason: "Coalesce branch helper reads the validated union shape; mapping branches carry output-key to input-connection mapping while sequence branches use the same value for name and connection."
-  safety: Returns tuple(branches.values()) for mapping form and the existing tuple for sequence form; malformed branch data is handled by composer validation.
-  expires: null
-- key: web/composer/state.py:R5:_serialize_branches:fp=8a0260b30783d070
-  owner: web-composer
-  reason: "CompositionState serialization must preserve the two validated coalesce branch shapes so transformed recipe output keys survive DB/YAML round trips."
-  safety: Mapping branches are deep-thawed to plain dict; sequence branches serialize as list; no cross-shape coercion occurs.
-  expires: null
-# Phase 5 remediation hook closeout entries, generated from enforce_tier_model
-# findings on 2026-05-19 after reviewing the touched boundary contexts.
-- key: "web/composer/service.py:R5:_litellm_completion_supports_param:fp=d40a2d203d663509"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_provider_details_payload:fp=206d2b5b4e36edd6"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
 - key: "web/composer/service.py:R2:_provider_details_payload:fp=640087d117718ba3"
   owner: composer-audit
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
   expires: null
 - key: "web/composer/service.py:R2:_token_usage_from_response:fp=ac808107f741299f"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_token_usage_from_response:fp=40cd795f76de2aad"
   owner: composer-audit
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
@@ -1702,21 +977,6 @@ allow_hits:
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
   expires: null
 - key: "web/composer/service.py:R1:_token_usage_from_response:fp=51b91d37dd7d184e"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_token_usage_from_response:fp=db42e2ad8522dde5"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_token_usage_from_response:fp=d4a7327f2eb90339"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_token_usage_from_response:fp=b25726e493e4ef9a"
   owner: composer-audit
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
@@ -1786,11 +1046,6 @@ allow_hits:
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
   expires: null
-- key: "web/composer/service.py:R5:_provider_cost_from_response:fp=eed2a0dac0ae1f95"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
 - key: "web/composer/service.py:R2:_provider_cost_from_response:fp=30f7fd2a7b4947de"
   owner: composer-audit
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
@@ -1801,22 +1056,7 @@ allow_hits:
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
   expires: null
-- key: "web/composer/service.py:R5:_safe_response_model:fp=80191aa48bc687ab"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
 - key: "web/composer/service.py:R2:_safe_provider_request_id:fp=31fef3217298fde4"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_safe_provider_request_id:fp=b14a474e9934b652"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_response_field:fp=15f8783ad6bc1fdd"
   owner: composer-audit
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
@@ -1827,31 +1067,6 @@ allow_hits:
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
   expires: null
 - key: "web/composer/service.py:R2:_response_field:fp=b4ce018d3ebd7fda"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_first_response_message:fp=f262cf56b5257b3e"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_json_safe_provider_artifact:fp=81db5ea0e67eeb77"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_json_safe_provider_artifact:fp=6b60a635e5399179"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_json_safe_provider_artifact:fp=450cc4ed5f338d8b"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_json_safe_provider_artifact:fp=96e92d054ae81d82"
   owner: composer-audit
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
@@ -1871,30 +1086,10 @@ allow_hits:
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
   expires: null
-- key: "web/composer/service.py:R5:_reasoning_metadata_from_response:fp=1343609e81fbd58b"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_reasoning_metadata_from_response:fp=0cc752e60622389f"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_supports_anthropic_prompt_cache_markers:fp=f27fa7fe167ff89a"
-  owner: composer-audit
-  reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
-  safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
 - key: "web/composer/service.py:R1:_apply_anthropic_cache_markers:fp=402b4ad333b01d39"
   owner: composer-audit
   reason: "Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped, object-shaped, absent, or provider-specific."
   safety: "Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed optional fields remain None and no token counts or costs are fabricated."
-  expires: null
-- key: "web/composer/service.py:R5:_optional_ancestor_present:fp=0a90717c26f54ed9"
-  owner: web-composer
-  reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
-  safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
   expires: null
 - key: "web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=c4813e2e29c02105"
   owner: web-composer
@@ -1911,40 +1106,10 @@ allow_hits:
   reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
   safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
   expires: null
-- key: "web/composer/service.py:R5:_matching_interpretation_placeholder_count:fp=a8832d22733928a8"
-  owner: web-composer
-  reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
-  safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
-  expires: null
 - key: "web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=d4471b25106a8098"
   owner: web-composer
   reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
   safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=b840d7e1c3d80570"
-  owner: web-composer
-  reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
-  safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=172340dfb3f2f7a9"
-  owner: web-composer
-  reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
-  safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=effc065888cb10ae"
-  owner: web-composer
-  reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
-  safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_try_apply_freeform_recipe_intent:fp=c4ee7d3c2383f5eb"
-  owner: web-composer
-  reason: "Composer service dynamic state boundary; optional cached/proposal/placeholder shapes are inspected without fabricating missing values."
-  safety: "Absent or malformed optional data fails closed or returns the conservative branch; no state mutation is hidden."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=ab7e2602f746de53"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
   expires: null
 - key: "web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=54eb834c4e95210f"
   owner: web-composer
@@ -1952,41 +1117,6 @@ allow_hits:
   safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
   expires: null
 - key: "web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=889c6332e5a732e8"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=3c32b6770cbbe4f0"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=df457507814781d8"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=9cb41ab2915228c1"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=112143027299c499"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=457f5d7574dc5205"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=a3e88f82b418264b"
-  owner: web-composer
-  reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
-  safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
-  expires: null
-- key: "web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=490f0669b2212c3a"
   owner: web-composer
   reason: "Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses must be shape-checked before mutation or audit persistence."
   safety: "Malformed arguments route through ARG_ERROR or plugin-crash audit paths; unexpected programmer bugs still surface outside the reviewed catch branches."
@@ -2046,11 +1176,6 @@ allow_hits:
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
   expires: null
-- key: "web/sessions/routes.py:R5:_extract_runtime_model_snapshot:fp=8ee0d24b6b2f63a4"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
 - key: "web/sessions/routes.py:R1:_extract_runtime_model_snapshot:fp=f97b494234fea2ca"
   owner: web-sessions
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
@@ -2061,17 +1186,7 @@ allow_hits:
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
   expires: null
-- key: "web/sessions/routes.py:R5:_composer_persisted_validation:fp=b2e1cf67e8e1121b"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
 - key: "web/sessions/routes.py:R6:_state_data_from_composer_state:fp=3e908c8516594e35"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_state_data_from_composer_state:fp=4286cb4849d824e4"
   owner: web-sessions
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
@@ -2087,71 +1202,6 @@ allow_hits:
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
   expires: null
 - key: "web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=97a87684fb2ad86a"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=37129a59b92c1e2e"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=1f75957d2240454f"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=a13edffb82d7d1a4"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=0ac906a373f16124"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=c44bb03804f2488b"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=9f6d7a6150773737"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=85e5fa6cee000e25"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=13f3506af9163530"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=02f5f3c264fd70b5"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=3e0625392576f750"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=9718446b16a6f9cc"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:_dispatch_guided_respond:fp=03ace6482720e8f7"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:create_session_router:accept_composition_proposal:fp=70517c5ef4e3c941"
   owner: web-sessions
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
@@ -2191,27 +1241,12 @@ allow_hits:
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
   expires: null
-- key: "web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=13d13111e718c408"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
 - key: "web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=65898b8b62534848"
   owner: web-sessions
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
   expires: null
-- key: "web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=ce591bd1e5c929de"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
 - key: "web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=2ac6791588f4f26f"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=d4e416fbf4dc14bc"
   owner: web-sessions
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
@@ -2222,11 +1257,6 @@ allow_hits:
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
   expires: null
 - key: "web/sessions/routes.py:R1:create_session_router:fork_from_message:fp=3f91217508326bf8"
-  owner: web-sessions
-  reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
-  safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
-  expires: null
-- key: "web/sessions/routes.py:R5:create_session_router:fork_from_message:fp=574a5f5c3d4e42db"
   owner: web-sessions
   reason: "HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches."
   safety: "Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics."
@@ -2306,16 +1336,6 @@ allow_hits:
   reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
   safety: "Missing optional links remain absent, narrow cleanup failures are surfaced as recovery notes, and programmer bugs propagate."
   expires: null
-- key: "web/sessions/service.py:R5:_patch_llm_transform_prompt:fp=e1a3c65ba6a3af93"
-  owner: web-sessions
-  reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
-  safety: "Missing optional links remain absent, narrow cleanup failures are surfaced as recovery notes, and programmer bugs propagate."
-  expires: null
-- key: "web/sessions/service.py:R5:_patch_llm_transform_prompt:fp=839c38bcddf9096f"
-  owner: web-sessions
-  reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
-  safety: "Missing optional links remain absent, narrow cleanup failures are surfaced as recovery notes, and programmer bugs propagate."
-  expires: null
 - key: "web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=d0aa671528aca977"
   owner: web-sessions
   reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
@@ -2346,11 +1366,6 @@ allow_hits:
   reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
   safety: "Missing optional links remain absent, narrow cleanup failures are surfaced as recovery notes, and programmer bugs propagate."
   expires: null
-- key: "web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=ebcc49294d254200"
-  owner: web-sessions
-  reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
-  safety: "Missing optional links remain absent, narrow cleanup failures are surfaced as recovery notes, and programmer bugs propagate."
-  expires: null
 - key: "web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=5cc4a02868598f16"
   owner: web-sessions
   reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
@@ -2366,42 +1381,12 @@ allow_hits:
   reason: "Session persistence boundary; optional envelope, fork, archive, and lock state is inspected while preserving audit/session invariants."
   safety: "Missing optional links remain absent, narrow cleanup failures are surfaced as recovery notes, and programmer bugs propagate."
   expires: null
-- key: "web/sessions/_auto_title.py:R5:_auto_title_exception_class:fp=aa1e8f18152965f4"
-  owner: web-sessions
-  reason: "Best-effort auto-title provider boundary; external/provider exceptions and optional title output are classified without blocking message persistence."
-  safety: "Title absence is honest optional UI metadata; non-title failures do not mutate persisted chat content."
-  expires: null
-- key: "web/sessions/_auto_title.py:R5:_auto_title_exception_class:fp=cfcb5c1873df9b12"
-  owner: web-sessions
-  reason: "Best-effort auto-title provider boundary; external/provider exceptions and optional title output are classified without blocking message persistence."
-  safety: "Title absence is honest optional UI metadata; non-title failures do not mutate persisted chat content."
-  expires: null
-- key: "web/sessions/_auto_title.py:R5:_auto_title_exception_class:fp=8c5bc5a9b7def743"
-  owner: web-sessions
-  reason: "Best-effort auto-title provider boundary; external/provider exceptions and optional title output are classified without blocking message persistence."
-  safety: "Title absence is honest optional UI metadata; non-title failures do not mutate persisted chat content."
-  expires: null
-- key: "web/sessions/_auto_title.py:R5:maybe_auto_title_session:fp=38dfc1377fb5257b"
-  owner: web-sessions
-  reason: "Best-effort auto-title provider boundary; external/provider exceptions and optional title output are classified without blocking message persistence."
-  safety: "Title absence is honest optional UI metadata; non-title failures do not mutate persisted chat content."
-  expires: null
 - key: "web/sessions/_auto_title.py:R6:maybe_auto_title_session:fp=6eeb90e8c33babf8"
   owner: web-sessions
   reason: "Best-effort auto-title provider boundary; external/provider exceptions and optional title output are classified without blocking message persistence."
   safety: "Title absence is honest optional UI metadata; non-title failures do not mutate persisted chat content."
   expires: null
-- key: "web/execution/validation.py:R5:_infer_component_type_from_plugin_error:fp=2adfa47027f74b06"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
 - key: "web/execution/validation.py:R1:_find_identity_node_advisories:fp=5e2ab5c61fe96705"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:_find_identity_node_advisories:fp=e05eb8f7a91fdc95"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
@@ -2411,17 +1396,7 @@ allow_hits:
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R5:_find_identity_node_advisories:fp=721606586f860989"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
 - key: "web/execution/validation.py:R1:_find_identity_node_advisories:fp=3da70901199f9592"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:_find_identity_node_advisories:fp=78275508f80d5b41"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
@@ -2431,32 +1406,7 @@ allow_hits:
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R5:_find_identity_node_advisories:fp=4b5da7037ff5fb4a"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:_collect_secret_refs:fp=7ad855ab948c1fa3"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:_collect_secret_refs:fp=cf09d6a8fefc06cb"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:_collect_secret_refs:fp=6ec0a2d4ae9a1833"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
 - key: "web/execution/validation.py:R1:_mask_pending_interpretation_placeholders_for_authoring_preflight:fp=1cae14e3dcac957f"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:_mask_pending_interpretation_placeholders_for_authoring_preflight:fp=263cf7280729f8cd"
   owner: web-execution
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
@@ -2471,27 +1421,6 @@ allow_hits:
   reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
   safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
   expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=8aaa2e045fb617fe"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=f18dbb6dcccabb64"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=770ad21b8f11dbc6"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-- key: "web/execution/validation.py:R5:validate_pipeline:fp=8b9ecec696634113"
-  owner: web-execution
-  reason: "Runtime validation inspects user-authored pipeline dictionaries and composer-only placeholder tokens at the Tier 3 config boundary."
-  safety: "Malformed or unresolved data produces validation errors/advisories; no runtime prompt or secret value is fabricated."
-  expires: null
-
 per_file_rules:
 - pattern: web/composer/guided/chat_solver.py
   rules:

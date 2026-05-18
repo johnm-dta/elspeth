@@ -41,12 +41,6 @@ per_file_rules:
   reason: Deep-freeze guards and enum validation at construction
   expires: null
   max_hits: 5
-- pattern: contracts/checkpoint.py
-  rules:
-  - R5
-  reason: Tier 1 __post_init__ type guards on ResumePoint — validates checkpoint, token_id, node_id, sequence_number, aggregation_state, coalesce_state
-  expires: null
-  max_hits: 8
 - pattern: contracts/call_data.py
   rules:
   - R5
@@ -113,12 +107,6 @@ per_file_rules:
   reason: Offensive __post_init__ type guards — validates artifact is ArtifactDescriptor, diversions is tuple, elements are RowDiversion
   expires: null
   max_hits: 3
-- pattern: contracts/routing.py
-  rules:
-  - R5
-  reason: Enum validation (RoutingKind, RoutingMode, RouteDestinationKind) at construction
-  expires: null
-  max_hits: 5
 - pattern: contracts/token_usage.py
   rules:
   - R1
@@ -182,14 +170,6 @@ allow_hits:
   owner: bugfix
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
   safety: Falls back to str(a) for display purposes only; used in error message, not logic
-- key: contracts/declaration_contracts.py:R5:BoundaryInputs:__post_init__:fp=db78bae36c2f61ba
-  owner: architecture
-  reason: Row-attributed source/sink boundary DTO — row_data must be a mapping before deep_freeze so declaration-contract adopters never receive arbitrary sequence/scalar payloads
-  safety: Non-mapping values raise TypeError immediately; no coercion or fallback is attempted
-- key: contracts/run_result.py:R5:RunResult:__post_init__:fp=fac5bfd1b22037fa
-  owner: architecture
-  reason: Offensive guard — validates status is RunStatus enum at contract construction
-  safety: TypeError raised immediately; prevents str from leaking through to consumers
 - key: contracts/schema_contract_factory.py:R1:create_contract_from_config:fp=caa0070eb7edad8e
   owner: feature
   reason: Intentional identity fallback - fields without resolution mapping use normalized name as original name
@@ -239,26 +219,6 @@ allow_hits:
   owner: architecture
   reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization helper for emitted row bundles; tuple inputs are accepted as the already-normalized immutable shape."
   safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
-  expires: null
-- key: contracts/declaration_contracts.py:R5:BatchFlushInputs:__post_init__:fp=a2e0caa17576e635
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for BatchFlushInputs.buffered_tokens — isinstance dispatch mirrors RuntimeCheckOutputs pattern; non-list/non-tuple raises TypeError (offensive guard per CLAUDE.md §Offensive Programming)."
-  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
-  expires: null
-- key: contracts/declaration_contracts.py:R5:BatchFlushInputs:__post_init__:fp=4ec415cce6bbe35e
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for BatchFlushInputs.buffered_tokens — isinstance dispatch mirrors RuntimeCheckOutputs pattern; non-list/non-tuple raises TypeError (offensive guard per CLAUDE.md §Offensive Programming)."
-  safety: TypeError raised immediately on any non-list/non-tuple input; no silent passthrough
-  expires: null
-- key: contracts/declaration_contracts.py:R5:ExampleBundle:__post_init__:fp=ea9262fbccfdb527
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for ExampleBundle.args — list inputs are normalized to deep-frozen tuples and any non-list/non-tuple input must crash immediately."
-  safety: TypeError raised immediately on any non-list/non-tuple input; tuple members are deep-frozen before storage
-  expires: null
-- key: contracts/declaration_contracts.py:R5:ExampleBundle:__post_init__:fp=4f2d78378d9ca2ea
-  owner: architecture
-  reason: "ADR-010 H2 (2026-04-20) freeze-guard normalization for ExampleBundle.args — the tuple-only branch is an offensive invariant check, not a silent fallback."
-  safety: TypeError raised immediately when args is not list or tuple; no coercion beyond the explicit list->tuple normalization
   expires: null
 - key: contracts/declaration_contracts.py:R2:_collect_contract_sites:fp=8d6e48bba4566067
   owner: architecture

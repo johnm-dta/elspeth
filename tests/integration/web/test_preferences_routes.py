@@ -22,7 +22,6 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.auth.middleware import get_current_user
@@ -32,6 +31,7 @@ from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.schema import initialize_session_schema
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 def _make_app(

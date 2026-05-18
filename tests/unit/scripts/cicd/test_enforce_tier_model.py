@@ -455,6 +455,173 @@ class TestR4BroadExcept:
 
 
 # =============================================================================
+# R5: isinstance() lattice classification
+# =============================================================================
+
+
+class TestR5IsinstanceClassification:
+    """Tests for R5: isinstance() should only flag Tier-2 defensive checks."""
+
+    @staticmethod
+    def _r5_findings(source: str, filename: str = "test.py") -> list[Finding]:
+        findings = parse_and_visit(source, filename=filename)
+        return [f for f in findings if f.rule_id == "R5"]
+
+    def test_regular_isinstance_still_flagged(self) -> None:
+        """Ordinary isinstance() remains R5c and should be flagged."""
+        source = dedent("""
+            def process(value):
+                if isinstance(value, str):
+                    return value.strip()
+                return value
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_frozen_dataclass_post_init_self_field_guard_not_flagged(self) -> None:
+        """Frozen dataclass __post_init__ self-field guards are Tier-1 offensive guards."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True, slots=True)
+            class TokenInfo:
+                row_id: str
+
+                def __post_init__(self) -> None:
+                    if not isinstance(self.row_id, str):
+                        raise TypeError("row_id must be str")
+        """)
+
+        assert self._r5_findings(source) == []
+
+    def test_frozen_dataclass_post_init_non_self_value_still_flagged(self) -> None:
+        """The post-init exclusion is limited to self.<field> invariant guards."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True)
+            class TokenInfo:
+                row_id: str
+
+                def __post_init__(self) -> None:
+                    value = object()
+                    if isinstance(value, str):
+                        raise TypeError("unexpected value")
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_frozen_dataclass_post_init_self_field_alias_not_flagged(self) -> None:
+        """A local alias of self.<field> in frozen __post_init__ is still an invariant guard."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True)
+            class ExampleBundle:
+                args: tuple[object, ...]
+
+                def __post_init__(self) -> None:
+                    value = self.args
+                    if isinstance(value, list):
+                        object.__setattr__(self, "args", tuple(value))
+        """)
+
+        assert self._r5_findings(source) == []
+
+    def test_frozen_dataclass_post_init_later_self_field_alias_still_flagged(self) -> None:
+        """Only aliases assigned before the isinstance() call count as self-field guards."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True)
+            class ExampleBundle:
+                args: tuple[object, ...]
+
+                def __post_init__(self) -> None:
+                    if isinstance(value, list):
+                        object.__setattr__(self, "args", tuple(value))
+                    value = self.args
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_non_frozen_dataclass_post_init_self_field_still_flagged(self) -> None:
+        """Mutable dataclasses are not part of the Tier-1 frozen-DTO guard exclusion."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass
+            class TokenInfo:
+                row_id: str
+
+                def __post_init__(self) -> None:
+                    if not isinstance(self.row_id, str):
+                        raise TypeError("row_id must be str")
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_pydantic_before_validator_boundary_not_flagged(self) -> None:
+        """Pydantic before validators consume Tier-3 input and may use isinstance."""
+        source = dedent("""
+            from pydantic import BaseModel, field_validator
+
+            class RunEvent(BaseModel):
+                payload: object
+
+                @field_validator("payload", mode="before")
+                @classmethod
+                def _validate_payload(cls, value):
+                    if not isinstance(value, dict):
+                        raise ValueError("payload must be an object")
+                    return value
+        """)
+
+        assert self._r5_findings(source, filename="web/execution/schemas.py") == []
+
+    def test_fastapi_route_handler_boundary_not_flagged(self) -> None:
+        """FastAPI route handlers are Tier-3 request boundaries."""
+        source = dedent("""
+            from fastapi import APIRouter
+
+            router = APIRouter()
+
+            @router.post("/sessions")
+            async def create_session(payload):
+                if not isinstance(payload, dict):
+                    raise ValueError("payload must be an object")
+                return payload
+        """)
+
+        assert self._r5_findings(source, filename="web/sessions/routes.py") == []
+
+    def test_named_tier3_boundary_helper_not_flagged(self) -> None:
+        """Closed-list boundary helper contexts can validate external provider payloads."""
+        source = dedent("""
+            from collections.abc import Mapping
+
+            def _token_usage_from_response(response):
+                usage = getattr(response, "usage", None)
+                if isinstance(usage, Mapping):
+                    return usage
+                return None
+        """)
+
+        assert self._r5_findings(source, filename="web/composer/service.py") == []
+
+    def test_unlisted_web_helper_still_flagged(self) -> None:
+        """The boundary-helper split must not suppress arbitrary web helpers."""
+        source = dedent("""
+            def ordinary_helper(value):
+                if isinstance(value, str):
+                    return value.strip()
+                return value
+        """)
+
+        assert len(self._r5_findings(source, filename="web/composer/service.py")) == 1
+
+
+# =============================================================================
 # Finding and canonical key generation
 # =============================================================================
 

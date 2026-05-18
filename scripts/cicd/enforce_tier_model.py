@@ -27,7 +27,7 @@ from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 
@@ -292,11 +292,132 @@ def _find_type_checking_lines(tree: ast.Module) -> set[int]:
 class TierModelVisitor(ast.NodeVisitor):
     """AST visitor that detects bug-hiding patterns."""
 
+    _FASTAPI_ROUTE_METHODS: ClassVar[frozenset[str]] = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "websocket"})
+    # CLOSED LIST: audited R5b boundary-normalization helpers from
+    # docs/audit/2026-05-19-cicd-allowlist-audit.md and findings/fp-analyst.md.
+    # Do not replace this with a broad ``web/**`` or ``plugins/**`` glob; new
+    # contexts need their own audit evidence and regression tests.
+    _R5_NAMED_BOUNDARY_CONTEXTS: ClassVar[dict[str, frozenset[str]]] = {
+        "engine/dependency_resolver.py": frozenset({"_load_depends_on"}),
+        "plugins/infrastructure/clients/retrieval/azure_search.py": frozenset({"_parse_response"}),
+        "plugins/infrastructure/clients/retrieval/chroma.py": frozenset({"_parse_and_build_chunks"}),
+        "plugins/transforms/azure/prompt_shield.py": frozenset({"_analyze_prompt"}),
+        "web/app.py": frozenset({"_settings_from_env"}),
+        "web/auth/local.py": frozenset({"_required_visible_string_claim"}),
+        "web/auth/oidc.py": frozenset(
+            {
+                "_get_jwk_algorithm",
+                "_get_token_algorithm",
+                "_validate_discovery_document",
+                "_validate_jwks_document",
+                "get_user_info",
+                "optional_profile_claim",
+            }
+        ),
+        "web/composer/_semantic_validator.py": frozenset({"_is_config_probe_exception"}),
+        "web/composer/audit.py": frozenset(
+            {
+                "_normalize_audit_payload",
+                "_result_to_audit_payload",
+                "begin_dispatch",
+                "begin_dispatch_or_arg_error",
+                "build_canonicalization_sentinel",
+                "canonicalize_pydantic_cause",
+            }
+        ),
+        "web/composer/guided/protocol.py": frozenset({"validate_payload"}),
+        "web/composer/recipes.py": frozenset({"_coerce_slot"}),
+        "web/composer/redaction.py": frozenset(
+            {
+                "_apply",
+                "_count_sensitive",
+                "_has_sensitive",
+                "_is_descendable",
+                "_redact_via_policy",
+                "_redact_via_schema",
+                "_walk_type",
+                "provider",
+                "walk_model_schema",
+            }
+        ),
+        "web/composer/service.py": frozenset(
+            {
+                "_cached_runtime_preflight",
+                "_compose_loop",
+                "_first_response_message",
+                "_json_safe_provider_artifact",
+                "_litellm_completion_supports_param",
+                "_matching_interpretation_placeholder_count",
+                "_optional_ancestor_present",
+                "_provider_cost_from_response",
+                "_provider_details_payload",
+                "_reasoning_metadata_from_response",
+                "_response_field",
+                "_safe_provider_request_id",
+                "_safe_response_model",
+                "_supports_anthropic_prompt_cache_markers",
+                "_token_usage_from_response",
+                "_try_apply_freeform_recipe_intent",
+                "_validate_advisor_arguments",
+            }
+        ),
+        "web/composer/source_inspection.py": frozenset({"_facts_from_objects", "_inspect_json", "_inspect_jsonl"}),
+        "web/composer/state.py": frozenset(
+            {
+                "_coalesce_branch_connections",
+                "_coalesce_branch_names",
+                "_declared_input_fields_option",
+                "_is_config_probe_exception",
+                "_is_static_contract_probe_exception",
+                "_serialize_branches",
+                "_validate_web_scrape_abuse_contact_not_reserved",
+                "from_dict",
+            }
+        ),
+        "web/execution/fanout_guard.py": frozenset(
+            {
+                "_count_csv_source_rows",
+                "_count_json_source_rows",
+                "_credential_ref",
+                "_provider_calls_per_row",
+                "_remote_source_limit",
+                "_source_path",
+                "_string_option",
+            }
+        ),
+        "web/execution/preflight.py": frozenset({"resolve_runtime_yaml_paths"}),
+        "web/execution/routes.py": frozenset({"_run_integrity_http"}),
+        "web/execution/schemas.py": frozenset({"_enforce_data_type"}),
+        "web/execution/service.py": frozenset({"_on_pipeline_done", "_run_pipeline", "_sanitize_error_for_client"}),
+        "web/execution/validation.py": frozenset(
+            {
+                "_collect_secret_refs",
+                "_find_identity_node_advisories",
+                "_infer_component_type_from_plugin_error",
+                "_mask_pending_interpretation_placeholders_for_authoring_preflight",
+                "validate_pipeline",
+            }
+        ),
+        "web/sessions/_auto_title.py": frozenset({"_auto_title_exception_class", "maybe_auto_title_session"}),
+        "web/sessions/routes.py": frozenset(
+            {
+                "_composer_persisted_validation",
+                "_dispatch_guided_respond",
+                "_extract_runtime_model_snapshot",
+                "_state_data_from_composer_state",
+            }
+        ),
+        "web/sessions/service.py": frozenset({"_patch_llm_transform_prompt", "_unwrap_envelope"}),
+        "web/sessions/telemetry.py": frozenset({"observed_value"}),
+    }
+
     def __init__(self, file_path: str, source_lines: list[str]) -> None:
         self.file_path = file_path
         self.source_lines = source_lines
         self.findings: list[Finding] = []
         self.symbol_stack: list[str] = []
+        self.class_stack: list[ast.ClassDef] = []
+        self.function_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.path_stack: list[str] = []
         self._decorator_lines: set[int] = set()  # Track lines that are decorators
 
@@ -337,7 +458,9 @@ class TierModelVisitor(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Track class context."""
         self.symbol_stack.append(node.name)
+        self.class_stack.append(node)
         self.generic_visit(node)
+        self.class_stack.pop()
         self.symbol_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -346,7 +469,9 @@ class TierModelVisitor(ast.NodeVisitor):
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
+        self.function_stack.append(node)
         self.generic_visit(node)
+        self.function_stack.pop()
         self.symbol_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
@@ -355,7 +480,9 @@ class TierModelVisitor(ast.NodeVisitor):
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
+        self.function_stack.append(node)
         self.generic_visit(node)
+        self.function_stack.pop()
         self.symbol_stack.pop()
 
     def _is_default_return_value(self, value: ast.expr | None) -> bool:
@@ -416,6 +543,115 @@ class TierModelVisitor(ast.NodeVisitor):
         call_keywords = {kw.arg for kw in node.keywords if kw.arg is not None}
         return bool(call_keywords & chromadb_keywords)
 
+    def _decorator_leaf_name(self, decorator: ast.expr) -> str | None:
+        """Return the called/decorated symbol leaf name for decorator classification."""
+        expr = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            return expr.attr
+        return None
+
+    def _constant_keyword_value(self, node: ast.Call, keyword_name: str) -> object:
+        for keyword in node.keywords:
+            if keyword.arg == keyword_name and isinstance(keyword.value, ast.Constant):
+                return keyword.value.value
+        return None
+
+    def _current_function(self) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        return self.function_stack[-1] if self.function_stack else None
+
+    def _current_class(self) -> ast.ClassDef | None:
+        return self.class_stack[-1] if self.class_stack else None
+
+    def _current_class_is_frozen_dataclass(self) -> bool:
+        current_class = self._current_class()
+        if current_class is None:
+            return False
+        for decorator in current_class.decorator_list:
+            if self._decorator_leaf_name(decorator) != "dataclass":
+                continue
+            if isinstance(decorator, ast.Call) and self._constant_keyword_value(decorator, "frozen") is True:
+                return True
+        return False
+
+    def _post_init_self_field_aliases_before(self, lineno: int) -> set[str]:
+        current_function = self._current_function()
+        if current_function is None or current_function.name != "__post_init__":
+            return set()
+        aliases: set[str] = set()
+        for stmt in current_function.body:
+            if stmt.lineno >= lineno:
+                continue
+            target: ast.expr | None = None
+            value: ast.expr | None = None
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                value = stmt.value
+            elif isinstance(stmt, ast.AnnAssign):
+                target = stmt.target
+                value = stmt.value
+            if not (
+                isinstance(target, ast.Name)
+                and isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name)
+                and value.value.id == "self"
+            ):
+                continue
+            aliases.add(target.id)
+        return aliases
+
+    def _is_self_field_isinstance(self, node: ast.Call) -> bool:
+        if not node.args:
+            return False
+        target = node.args[0]
+        if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self":
+            return True
+        return isinstance(target, ast.Name) and target.id in self._post_init_self_field_aliases_before(node.lineno)
+
+    def _is_tier1_frozen_dataclass_post_init_guard(self, node: ast.Call) -> bool:
+        current_function = self._current_function()
+        if current_function is None or current_function.name != "__post_init__":
+            return False
+        return self._current_class_is_frozen_dataclass() and self._is_self_field_isinstance(node)
+
+    def _is_pydantic_before_validator(self) -> bool:
+        current_function = self._current_function()
+        if current_function is None:
+            return False
+        for decorator in current_function.decorator_list:
+            name = self._decorator_leaf_name(decorator)
+            if not isinstance(decorator, ast.Call):
+                continue
+            if name in {"field_validator", "model_validator"}:
+                return self._constant_keyword_value(decorator, "mode") == "before"
+            if name == "validator":
+                return self._constant_keyword_value(decorator, "pre") is True
+        return False
+
+    def _is_fastapi_route_handler(self) -> bool:
+        if not self.file_path.startswith("web/"):
+            return False
+        current_function = self._current_function()
+        if current_function is None:
+            return False
+        return any(self._decorator_leaf_name(decorator) in self._FASTAPI_ROUTE_METHODS for decorator in current_function.decorator_list)
+
+    def _is_named_tier3_boundary_context(self) -> bool:
+        current_function = self._current_function()
+        if current_function is None:
+            return False
+        return current_function.name in self._R5_NAMED_BOUNDARY_CONTEXTS.get(self.file_path, frozenset())
+
+    def _is_allowed_r5_context(self, node: ast.Call) -> bool:
+        """Return True for R5a/R5b contexts where isinstance is the desired guard."""
+        return (
+            self._is_tier1_frozen_dataclass_post_init_guard(node)
+            or self._is_pydantic_before_validator()
+            or self._is_fastapi_route_handler()
+            or self._is_named_tier3_boundary_context()
+        )
+
     def visit_Call(self, node: ast.Call) -> None:
         """Detect R1 (dict.get), R2 (getattr), R3 (hasattr), R5 (isinstance), R8/R9 defaults."""
         # R1: dict.get() - Call(func=Attribute(attr="get"))
@@ -460,7 +696,7 @@ class TierModelVisitor(ast.NodeVisitor):
             )
 
         # R5: isinstance() - runtime type checks can mask contract violations
-        if isinstance(node.func, ast.Name) and node.func.id == "isinstance":
+        if isinstance(node.func, ast.Name) and node.func.id == "isinstance" and not self._is_allowed_r5_context(node):
             self._add_finding(
                 "R5",
                 node,

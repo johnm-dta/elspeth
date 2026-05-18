@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient, Response
 
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
@@ -32,6 +33,28 @@ from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetad
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.service import SessionServiceImpl
 from tests.unit.web.conftest import _make_session
+
+
+async def _post(test_client: TestClient, url: str, *, json: dict[str, Any]) -> Response:
+    async with AsyncClient(
+        transport=ASGITransport(app=test_client.app),
+        base_url="http://test",
+        cookies=test_client.cookies,
+    ) as client:
+        response = await client.post(url, json=json)
+        test_client.cookies.update(response.cookies)
+        return response
+
+
+async def _get(test_client: TestClient, url: str) -> Response:
+    async with AsyncClient(
+        transport=ASGITransport(app=test_client.app),
+        base_url="http://test",
+        cookies=test_client.cookies,
+    ) as client:
+        response = await client.get(url)
+        test_client.cookies.update(response.cookies)
+        return response
 
 
 def _llm_node(
@@ -102,7 +125,18 @@ async def _seed_session_with_pending_event(
         _make_session(conn, session_id=str(sid), user_id=user_id)
     state = await service.save_composition_state(
         sid,
-        CompositionStateData(nodes=[node], is_valid=True),
+        CompositionStateData(
+            nodes=[node],
+            metadata_=CompositionState(
+                source=None,
+                nodes=(),
+                edges=(),
+                outputs=(),
+                metadata=PipelineMetadata(name="Phase 5b Routes Test", description=""),
+                version=1,
+            ).to_dict()["metadata"],
+            is_valid=True,
+        ),
         provenance="tool_call",
     )
     event = await service.create_pending_interpretation_event(
@@ -135,7 +169,8 @@ async def test_01_resolve_accepted_as_drafted_returns_resolved_event_and_advance
     event_id = seeded["event"].id
     initial_version = seeded["state"].version
 
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{session_id}/interpretations/{event_id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -158,7 +193,8 @@ async def test_02_resolve_amended_returns_amended_value_as_accepted(
     session_id = seeded["session_id"]
     event_id = seeded["event"].id
 
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{session_id}/interpretations/{event_id}/resolve",
         json={"choice": "amended", "amended_value": "Strikingly original"},
     )
@@ -178,7 +214,8 @@ async def test_19_resolve_records_runtime_model_snapshot_from_current_state(
     session_id = seeded["session_id"]
     event_id = seeded["event"].id
 
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{session_id}/interpretations/{event_id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -201,7 +238,8 @@ async def test_19b_resolve_runtime_model_nulls_when_node_has_no_model_config(
     session_id = seeded["session_id"]
     event_id = seeded["event"].id
 
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{session_id}/interpretations/{event_id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -223,7 +261,8 @@ async def test_03_resolve_amended_without_amended_value_returns_422(
 ) -> None:
     """Spec test 3: choice=amended without amended_value → 422 (model_validator)."""
     seeded = await _seed_session_with_pending_event(test_client)
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve",
         json={"choice": "amended"},
     )
@@ -236,7 +275,8 @@ async def test_04_resolve_accepted_with_amended_value_returns_422(
 ) -> None:
     """Spec test 4: choice=accepted_as_drafted WITH amended_value → 422."""
     seeded = await _seed_session_with_pending_event(test_client)
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve",
         json={"choice": "accepted_as_drafted", "amended_value": "drift"},
     )
@@ -247,7 +287,8 @@ async def test_04_resolve_accepted_with_amended_value_returns_422(
 async def test_05_resolve_opted_out_choice_returns_422(test_client: TestClient) -> None:
     """Spec test 5: choice=opted_out → 422 (Literal restricts the field set)."""
     seeded = await _seed_session_with_pending_event(test_client)
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve",
         json={"choice": "opted_out"},
     )
@@ -264,10 +305,10 @@ async def test_06_double_resolve_returns_409(test_client: TestClient) -> None:
     """Spec test 6: TOCTOU — second resolve for same event → 409 (already resolved)."""
     seeded = await _seed_session_with_pending_event(test_client)
     url = f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve"
-    first = test_client.post(url, json={"choice": "accepted_as_drafted"})
+    first = await _post(test_client, url, json={"choice": "accepted_as_drafted"})
     assert first.status_code == 200, first.text
 
-    second = test_client.post(url, json={"choice": "amended", "amended_value": "different"})
+    second = await _post(test_client, url, json={"choice": "amended", "amended_value": "different"})
     assert second.status_code == 409, second.text
 
 
@@ -278,7 +319,8 @@ async def test_07_resolve_unknown_event_id_returns_404(test_client: TestClient) 
     with test_client.app.state.phase3_engine.begin() as conn:
         _make_session(conn, session_id=str(sid), user_id="alice")
     bogus_event_id = uuid4()
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{sid}/interpretations/{bogus_event_id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -296,7 +338,8 @@ async def test_08_resolve_event_from_different_session_returns_404(
     # Try to resolve session-B's event_id via session-A's path.  Both sessions
     # belong to alice, so ownership succeeds for session-A's path — but the
     # service's WHERE filter on session_id rejects the cross-session event.
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{seeded_a['session_id']}/interpretations/{seeded_b['event'].id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -313,7 +356,8 @@ async def test_08b_resolve_existing_event_with_consumed_placeholder_returns_422(
         node=_llm_node(user_term="cool") | {"options": {"prompt_template": "No interpretation placeholder remains."}},
     )
 
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -349,12 +393,13 @@ async def test_09_list_status_pending_returns_only_pending_events(
         provider="anthropic",
         composer_skill_hash="a" * 64,
     )
-    test_client.post(
+    await _post(
+        test_client,
         f"/api/sessions/{session_id}/interpretations/{seeded['event'].id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
 
-    response = test_client.get(f"/api/sessions/{session_id}/interpretations?status=pending")
+    response = await _get(test_client, f"/api/sessions/{session_id}/interpretations?status=pending")
     assert response.status_code == 200, response.text
     events = response.json()["events"]
     assert len(events) == 1
@@ -367,12 +412,13 @@ async def test_10_list_status_all_returns_every_event(test_client: TestClient) -
     """Spec test 10: status=all ⇒ every row including resolved."""
     seeded = await _seed_session_with_pending_event(test_client)
     session_id = seeded["session_id"]
-    test_client.post(
+    await _post(
+        test_client,
         f"/api/sessions/{session_id}/interpretations/{seeded['event'].id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
 
-    response = test_client.get(f"/api/sessions/{session_id}/interpretations?status=all")
+    response = await _get(test_client, f"/api/sessions/{session_id}/interpretations?status=all")
     assert response.status_code == 200, response.text
     events = response.json()["events"]
     assert len(events) == 1
@@ -390,7 +436,8 @@ async def test_11_idor_post_resolve_on_other_users_session_returns_404(
 ) -> None:
     """Spec test 11: alice cannot resolve bob's session-A event → 404, not 403."""
     seeded_bob = await _seed_session_with_pending_event(test_client, user_id="bob")
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{seeded_bob['session_id']}/interpretations/{seeded_bob['event'].id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -403,7 +450,8 @@ async def test_12_idor_get_list_on_other_users_session_returns_404(
 ) -> None:
     """Spec test 12: alice cannot list bob's session interpretations → 404."""
     seeded_bob = await _seed_session_with_pending_event(test_client, user_id="bob")
-    response = test_client.get(
+    response = await _get(
+        test_client,
         f"/api/sessions/{seeded_bob['session_id']}/interpretations?status=all",
     )
     assert response.status_code == 404, response.text
@@ -423,7 +471,8 @@ async def test_13_idor_f7_cross_session_event_id_returns_404(
     seeded_alice = await _seed_session_with_pending_event(test_client, user_id="alice")
     seeded_bob = await _seed_session_with_pending_event(test_client, user_id="bob")
 
-    response = test_client.post(
+    response = await _post(
+        test_client,
         f"/api/sessions/{seeded_alice['session_id']}/interpretations/{seeded_bob['event'].id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -540,7 +589,7 @@ async def test_18_opt_out_summary_returns_both_auto_sources_ordered_by_created_a
         created_at=newer,
     )
 
-    response = test_client.get(f"/api/sessions/{session_id}/interpretations/opt_out_summary")
+    response = await _get(test_client, f"/api/sessions/{session_id}/interpretations/opt_out_summary")
     assert response.status_code == 200, response.text
     events = response.json()["events"]
     assert len(events) == 2
@@ -555,7 +604,8 @@ async def test_19_opt_out_summary_excludes_user_approved_rows(test_client: TestC
     session_id = seeded["session_id"]
 
     # Resolve the seeded event (now choice=accepted_as_drafted, source=user_approved).
-    test_client.post(
+    await _post(
+        test_client,
         f"/api/sessions/{session_id}/interpretations/{seeded['event'].id}/resolve",
         json={"choice": "accepted_as_drafted"},
     )
@@ -566,7 +616,7 @@ async def test_19_opt_out_summary_excludes_user_approved_rows(test_client: TestC
         source=InterpretationSource.AUTO_INTERPRETED_NO_SURFACES,
     )
 
-    response = test_client.get(f"/api/sessions/{session_id}/interpretations/opt_out_summary")
+    response = await _get(test_client, f"/api/sessions/{session_id}/interpretations/opt_out_summary")
     assert response.status_code == 200, response.text
     events = response.json()["events"]
     assert len(events) == 1
@@ -587,5 +637,5 @@ async def test_20_idor_opt_out_summary_on_other_users_session_returns_404(
         source=InterpretationSource.AUTO_INTERPRETED_OPT_OUT,
     )
 
-    response = test_client.get(f"/api/sessions/{session_id}/interpretations/opt_out_summary")
+    response = await _get(test_client, f"/api/sessions/{session_id}/interpretations/opt_out_summary")
     assert response.status_code == 404, response.text

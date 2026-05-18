@@ -58,6 +58,17 @@ export function ChatInput({
   const setTextRef = useRef(setText);
   setTextRef.current = setText;
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  // Phase 5a Task 1 — empty-state placeholder primes the user to type data
+  // directly into chat (URL / a few rows / a short brief).  Reads two
+  // singleton fields on sessionStore (verified: sessionStore.ts:154-155):
+  //   - messages: ChatMessage[]                  → message count
+  //   - compositionState: CompositionState | null → version (0 when null)
+  // Both must read as "empty" to keep the data-priming wording; either
+  // signal flipping reverts to the canonical placeholder.
+  const messageCount = useSessionStore((s) => s.messages.length);
+  const compositionVersion = useSessionStore(
+    (s) => s.compositionState?.version ?? 0,
+  );
   const uploadBlob = useBlobStore((s) => s.uploadBlob);
 
   // Listen for prefill events dispatched by InlineChatSourceEntry (catalog
@@ -145,6 +156,16 @@ export function ChatInput({
 
   const canSend = !disabled && text.trim().length > 0;
 
+  // Phase 5a Task 1 — derive the effective placeholder.  Precedence:
+  //   1. explicit `placeholder` prop (Phase A slice 4 guided-mode nudge)
+  //   2. empty-state data-priming wording (no messages, no composition)
+  //   3. canonical "describe the pipeline" wording
+  const isEmptyState = messageCount === 0 && compositionVersion === 0;
+  const defaultPlaceholder = isEmptyState
+    ? "Describe your pipeline, paste a URL, or type a few rows of data to start..."
+    : "Describe the pipeline you want to build...";
+  const effectivePlaceholder = placeholder ?? defaultPlaceholder;
+
   return (
     <div className="chat-input">
       {uploadStatus && (
@@ -159,7 +180,7 @@ export function ChatInput({
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={placeholder ?? "Describe the pipeline you want to build..."}
+          placeholder={effectivePlaceholder}
           aria-label="Message input"
           rows={2}
           className="chat-input-textarea"

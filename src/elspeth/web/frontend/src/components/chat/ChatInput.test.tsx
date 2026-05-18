@@ -19,6 +19,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { useBlobStore } from "@/stores/blobStore";
 import { resetStore } from "@/test/store-helpers";
 import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
+import type { ChatMessage, CompositionState } from "@/types";
 
 describe("ChatInput — controlled-mode prefill listener", () => {
   beforeEach(() => {
@@ -161,5 +162,100 @@ describe("ChatInput — controlled-mode prefill listener", () => {
     expect(textarea.value).toBe("");
 
     window.removeEventListener("error", errorListener);
+  });
+});
+
+// ============================================================================
+// ChatInput — empty-state placeholder (Phase 5a Task 1).
+//
+// Primes the user to type data directly into the chat when the session is
+// fresh (no messages, no composition state).  Reverts to the canonical
+// "Describe the pipeline you want to build..." wording the moment either
+// signal flips.  An explicit `placeholder` prop continues to win — Phase A
+// slice 4 (guided-mode per-step nudge) depends on that override semantics.
+// ============================================================================
+
+describe("ChatInput empty-state placeholder", () => {
+  const DATA_PRIMING =
+    "Describe your pipeline, paste a URL, or type a few rows of data to start...";
+  const STANDARD = "Describe the pipeline you want to build...";
+
+  function StandaloneHarness(props: { placeholder?: string }) {
+    const inputRef = useRef<HTMLTextAreaElement>(
+      null,
+    ) as RefObject<HTMLTextAreaElement>;
+    return (
+      <ChatInput
+        onSend={vi.fn()}
+        disabled={false}
+        inputRef={inputRef}
+        placeholder={props.placeholder}
+      />
+    );
+  }
+
+  function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
+    return {
+      id: overrides.id ?? "m1",
+      session_id: overrides.session_id ?? "s1",
+      role: overrides.role ?? "user",
+      content: overrides.content ?? "hello",
+      tool_calls: overrides.tool_calls ?? null,
+      created_at: overrides.created_at ?? "2026-05-18T00:00:00Z",
+      ...overrides,
+    };
+  }
+
+  function makeCompositionState(version: number): CompositionState {
+    return {
+      id: "comp-1",
+      version,
+      source: null,
+      nodes: [],
+      edges: [],
+      outputs: [],
+      metadata: {} as CompositionState["metadata"],
+    };
+  }
+
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+  });
+
+  it("shows the data-priming placeholder when the session has no messages and no composition state", () => {
+    // arrange: fresh store — messages=[], compositionState=null (version=0)
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(DATA_PRIMING);
+  });
+
+  it("reverts to the standard placeholder once the user has sent a message", () => {
+    useSessionStore.setState({ messages: [makeMessage({ role: "user" })] });
+
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(STANDARD);
+  });
+
+  it("reverts to the standard placeholder once a composition state exists", () => {
+    useSessionStore.setState({ compositionState: makeCompositionState(1) });
+
+    render(<StandaloneHarness />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe(STANDARD);
+  });
+
+  it("respects an explicit `placeholder` prop override even in empty state", () => {
+    // Empty state — store untouched — but the prop must still win.
+    // This pins the Phase A slice 4 contract: guided-mode per-step nudges
+    // override the empty-state default.
+    render(<StandaloneHarness placeholder="custom" />);
+
+    const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    expect(textarea.placeholder).toBe("custom");
   });
 });

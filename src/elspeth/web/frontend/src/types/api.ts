@@ -43,6 +43,8 @@ export type {
   AuditReadinessSnapshot,
   AuditReadinessExplain,
   InlineSourceSummary,
+  InlineSourceProvenance,
+  BlobCreationModalityWire,
 } from "./index";
 export type {
   ComposerRecoveryErrorFields,

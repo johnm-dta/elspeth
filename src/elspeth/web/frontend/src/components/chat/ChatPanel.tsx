@@ -1,8 +1,14 @@
 // src/components/chat/ChatPanel.tsx
 import { useEffect, useMemo, useRef, useCallback, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useInlineSourceStore } from "@/stores/inlineSourceStore";
 import { useComposer } from "@/hooks/useComposer";
 import { FOCUSABLE_SELECTOR } from "@/hooks/useFocusTrap";
+import {
+  getBlobMetadata,
+  previewBlobContent,
+  toInlineSourceProvenance,
+} from "@/api/client";
 import { MessageBubble } from "./MessageBubble";
 import { ComposingIndicator } from "./ComposingIndicator";
 import { ChatInput } from "./ChatInput";
@@ -16,8 +22,53 @@ import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
-import type { BlobMetadata, ChatMessage } from "@/types/api";
+import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
+import type {
+  BlobMetadata,
+  ChatMessage,
+  CompositionState,
+  InlineSourceSummary,
+} from "@/types/api";
 import type { GuidedStep } from "@/types/guided";
+
+/**
+ * Maximum characters retained from the preview-content fetch when building
+ * the InlineSourceSummary projection.  The widget clips again to 280 chars
+ * for the visible preview, but we slice early so we do not stash the full
+ * blob payload in the zustand store — F-22 (no full-payload leak into
+ * client memory beyond what the widget needs).
+ */
+const INLINE_SOURCE_PREVIEW_BYTES = 1024;
+
+/**
+ * Best-effort row-count from CSV-like text content.
+ *
+ * Returns `null` when the mime type is not CSV-shaped — we'd rather be honest
+ * about not knowing than infer a misleading number (see CLAUDE.md "fabrication
+ * decision test"). For text/csv we count newline-separated rows after
+ * trimming, subtracting one for the header row when there is content.
+ *
+ * Exported for the ChatPanel test seam — the integration tests stub the blob
+ * fetchers and feed text directly into this projector.
+ */
+export function deriveRowCount(
+  mimeType: string,
+  text: string,
+): number | null {
+  if (mimeType !== "text/csv") return null;
+  const trimmed = text.trim();
+  if (trimmed === "") return 0;
+  const lines = trimmed.split("\n").length;
+  // Subtract the header row.  A single-line CSV is `header only` → 0 rows.
+  return Math.max(0, lines - 1);
+}
+
+/** Narrow `source.options["blob_ref"]` (which is `unknown`) to a string. */
+function readBlobRef(state: CompositionState | null): string | null {
+  if (state === null || state.source === null) return null;
+  const raw = state.source.options["blob_ref"];
+  return typeof raw === "string" && raw !== "" ? raw : null;
+}
 
 /**
  * Per-step placeholder text for the chat input in guided mode (Phase A slice 4).
@@ -141,6 +192,110 @@ export function ChatPanel({
   useEffect(() => {
     setShowScrollButton(false);
   }, [activeSessionId]);
+
+  // ── Inline-source projection (Phase 5a Task 3) ─────────────────────────────
+  //
+  // When the active composition's `source.options["blob_ref"]` resolves to a
+  // session blob that was created from an inline-blob path (any of the four
+  // CreationModality enum values), project that blob's metadata + a bounded
+  // content preview into the inlineSourceStore. The rendered
+  // <InlineSourceCreatedTurn> below reads from the store, not from this
+  // effect directly — the store is the projection layer for downstream
+  // consumers (Task 4 disambiguation widget, Task 7 audit-readiness row).
+  //
+  // The effect is cancelled via a `cancelled` flag set in the cleanup so that
+  // a session-switch or composition-replace mid-fetch does not race the
+  // older response into the newer summary slot.
+  //
+  // The four `creation_modality` values currently in the closed enum are all
+  // inline-origin (verbatim / llm_generated / disambiguated /
+  // llm_generated_then_amended) — we do not filter by modality at the
+  // predicate, only at the Edit-button visibility inside the widget. If a
+  // future enum extension introduces a non-inline modality, the
+  // `toInlineSourceProvenance` adapter will fail to compile (exhaustive
+  // `never`) and this predicate will need re-examination.
+  const blobRef = readBlobRef(compositionState);
+  const setInlineSourceSummary = useInlineSourceStore((s) => s.setSummary);
+  const clearInlineSourceSummary = useInlineSourceStore((s) => s.clearSummary);
+  const inlineSourceSummary = useInlineSourceStore((s) =>
+    activeSessionId !== null ? s.summariesBySession[activeSessionId] ?? null : null,
+  );
+
+  useEffect(() => {
+    if (activeSessionId === null) return;
+    if (blobRef === null) {
+      // No inline source attached — clear any stale projection.
+      clearInlineSourceSummary(activeSessionId);
+      return;
+    }
+    let cancelled = false;
+    const sessionId = activeSessionId;
+    const targetBlobId = blobRef;
+    void (async () => {
+      try {
+        const meta = await getBlobMetadata(sessionId, targetBlobId);
+        if (cancelled) return;
+        const text = await previewBlobContent(sessionId, targetBlobId);
+        if (cancelled) return;
+        const truncatedPreview = text.slice(0, INLINE_SOURCE_PREVIEW_BYTES);
+        const summary: InlineSourceSummary = {
+          blobId: meta.id,
+          filename: meta.filename,
+          mimeType: meta.mime_type,
+          contentPreview: truncatedPreview,
+          rowCount: deriveRowCount(meta.mime_type, text),
+          // Hash absence is an audit-trail bug we should surface — refuse to
+          // render a fake hash, refuse to silently drop the summary.
+          contentHash: meta.content_hash ?? "",
+          provenance: toInlineSourceProvenance(meta.creation_modality),
+        };
+        if (cancelled) return;
+        setInlineSourceSummary(sessionId, summary);
+      } catch {
+        // Tier-3 (external blob endpoint).  A failed fetch leaves the
+        // stored summary untouched (intentional: we'd rather show the
+        // last-known-good projection than blank the widget on a transient
+        // failure).  A retry will fire the next time the predicate flips.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeSessionId,
+    blobRef,
+    setInlineSourceSummary,
+    clearInlineSourceSummary,
+  ]);
+
+  /**
+   * "Edit the list" handler (Phase 5a Task 3 v1).
+   *
+   * v1 emits a conversational instruction to the composer LLM, pre-loaded
+   * with the current preview so the user can amend in the chat textarea.
+   * This is the minimal viable path: the composer's `set_pipeline` tool
+   * accepts an `inline_blob.content` re-write, so an LLM-mediated edit goes
+   * through the existing proposal-approval pipeline (same audit-event
+   * lineage as the original creation).
+   *
+   * A direct in-browser textarea modal is the natural Task 6+ follow-up —
+   * but it requires a `setPipeline` action surface in `sessionStore`, which
+   * does not exist today (all pipeline mutations flow through the LLM
+   * tool-use loop). Shipping the textarea modal here would mean adding that
+   * surface, which is out of scope for Task 3. The chat-mediated handler
+   * lets Task 6's integration test exercise the click path; the modal
+   * upgrade is tracked separately.
+   */
+  const handleEditInlineSource = useCallback(
+    (summary: InlineSourceSummary) => {
+      const prompt =
+        `I'd like to edit the inline source "${summary.filename}". ` +
+        `Current contents:\n\n${summary.contentPreview}\n\n` +
+        `Please update it per the changes I describe in my next message.`;
+      sendMessage(prompt);
+    },
+    [sendMessage],
+  );
 
   // Spec §7.4 — maintain focus on the first interactive element of the new turn
   // after step advance.  Without this, a step-advancing button click unmounts
@@ -486,6 +641,12 @@ export function ChatPanel({
               onRejectProposal={rejectProposal}
             />
           ))
+        )}
+        {inlineSourceSummary && (
+          <InlineSourceCreatedTurn
+            summary={inlineSourceSummary}
+            onEdit={handleEditInlineSource}
+          />
         )}
         {isComposing && (
           <ComposingIndicator

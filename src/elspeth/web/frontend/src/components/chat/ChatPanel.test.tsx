@@ -2,9 +2,13 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPanel } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useInlineSourceStore } from "@/stores/inlineSourceStore";
 import { resetStore } from "@/test/store-helpers";
 import { useComposer } from "@/hooks/useComposer";
+import { makeComposition } from "@/test/composerFixtures";
+import * as apiClient from "@/api/client";
 import type {
+  BlobMetadata,
   ChatMessage,
   ComposerProgressSnapshot,
   CompositionProposal,
@@ -21,6 +25,18 @@ import type {
 vi.mock("@/hooks/useComposer", () => ({
   useComposer: vi.fn(),
 }));
+
+// Spy-style mock of the blob-fetch surface so the inline-source-projection
+// effect can be driven from the test. The actual module is preserved
+// (`...actual`) so we don't accidentally stub other exports the file uses.
+vi.mock("@/api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/client")>();
+  return {
+    ...actual,
+    getBlobMetadata: vi.fn(),
+    previewBlobContent: vi.fn(),
+  };
+});
 
 vi.mock("./MessageBubble", () => ({
   MessageBubble: ({
@@ -919,5 +935,140 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
 
     // Focus must remain on the API button; effect did not pull it back to CSV.
     expect(document.activeElement).toBe(apiButton);
+  });
+});
+
+// ── Inline-source projection (Phase 5a Task 3) ────────────────────────────────
+//
+// These tests cover the wiring that derives an InlineSourceSummary from
+// `compositionState.source.options["blob_ref"]` and the corresponding session
+// blob's metadata + preview, then surfaces the InlineSourceCreatedTurn widget
+// in the message stream.
+//
+// The widget itself is tested in InlineSourceCreatedTurn.test.tsx; here we
+// only assert the predicate ("widget renders iff inline source is bound to
+// the active session") and the absence case ("no inline source → no
+// widget"). Detailed widget rendering, edit-button visibility per
+// provenance, and audit-info disclosure all live in the widget test.
+describe("ChatPanel inline-source projection", () => {
+  const sessionFixture: Session = {
+    id: "session-inline",
+    title: "Inline session",
+    created_at: "2026-05-18T10:00:00Z",
+    updated_at: "2026-05-18T10:00:00Z",
+  };
+
+  function makeBlobMetadata(): BlobMetadata {
+    return {
+      id: "blob-inline-1",
+      session_id: "session-inline",
+      filename: "chat.csv",
+      mime_type: "text/csv",
+      size_bytes: 42,
+      content_hash: "abc123def456",
+      created_at: "2026-05-18T10:00:01Z",
+      created_by: "user",
+      source_description: null,
+      status: "ready",
+      creation_modality: "llm_generated",
+      created_from_message_id: "msg-1",
+      creating_model_identifier: "claude-opus-4-7",
+      creating_model_version: "20260101",
+      creating_provider: "anthropic",
+      creating_composer_skill_hash: "skill-hash",
+      creating_arguments_hash: "args-hash",
+    };
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    Element.prototype.scrollIntoView = vi.fn();
+    resetStore(useSessionStore);
+    resetStore(useInlineSourceStore);
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: null,
+    });
+  });
+
+  it("renders the widget when compositionState.source.options['blob_ref'] resolves to a session blob", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata(),
+    );
+    (
+      apiClient.previewBlobContent as ReturnType<typeof vi.fn>
+    ).mockResolvedValue("url\nhttps://a.gov.au\nhttps://b.gov.au");
+
+    const composition = makeComposition(1, {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: "blob-inline-1" },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("region", { name: /source created/i }),
+      ).toBeInTheDocument();
+    });
+
+    // Provenance-derived: llm_generated → llm-generated (display form) →
+    // Edit affordance present (F-4). Asserted here AS A WIRING TEST to
+    // confirm the projection carries provenance end-to-end; the widget's
+    // own test owns the per-provenance rendering matrix.
+    expect(
+      screen.getByRole("button", { name: /edit the list/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("does NOT render the widget when compositionState has no inline source", () => {
+    const composition = makeComposition(1, {
+      source: { plugin: "csv_file", options: { path: "data.csv" } },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /source created/i }),
+    ).toBeNull();
+    // No blob fetch attempted when no blob_ref is present.
+    expect(apiClient.getBlobMetadata).not.toHaveBeenCalled();
+    expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
+  });
+
+  it("does NOT render the widget when compositionState.source is null", () => {
+    const composition = makeComposition(1, { source: null });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /source created/i }),
+    ).toBeNull();
   });
 });

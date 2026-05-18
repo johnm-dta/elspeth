@@ -960,3 +960,232 @@ async def test_resolve_round_trips_through_state_from_record_and_yaml(service) -
     assert f"resolved_prompt_template_hash: {resolved.resolved_prompt_template_hash}" in yaml_str
     # Negative assertion: the placeholder must not survive into the YAML.
     assert "{{interpretation:cool}}" not in yaml_str
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5b Task 11 — orphan-PENDING rehydration (refreshPending contract)
+#
+# A compose-loop crash between ``create_pending_interpretation_event``
+# returning the row and the ToolResult propagating back to the frontend
+# leaves an "orphan" PENDING interpretation_events row: written to the
+# session DB, but the frontend never received the in-band notification
+# that would normally raise the review affordance.
+#
+# Recovery contract (18a Task 11, spec lines 3053-3091): on session reload
+# the frontend calls ``refreshPending``, which hits
+# ``GET /api/sessions/{id}/interpretations?status=pending``. That route
+# delegates to ``SessionServiceImpl.list_interpretation_events`` with
+# ``status='pending'``. This test pins the service-layer contract that the
+# orphan row IS visible to that read path.
+#
+# Scope discipline: per the spec, the optional cleanup job (auto-resolve
+# orphans older than 7 days as ``choice='abandoned'``) is deferred to
+# Phase 11 — NOT implemented here. The Task 11 backend deliverable is
+# narrowly the rehydration test.
+#
+# Operates under the operator-acknowledged assumption that 18a Task 0
+# (empirical LLM gate ≥ 8/10 staging runs emit ``{{interpretation:<term>}}``)
+# passes.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_16_refresh_pending_rehydrates_orphan_event_without_in_band_notification(
+    service,
+) -> None:
+    """Spec Task 11 deliverable: a PENDING row the frontend never saw in-band
+    is still discoverable via ``list_interpretation_events(status='pending')``.
+
+    Models the orphan scenario: the writer commits the row to the session
+    DB; the in-band ToolResult is lost (compose-loop crash, transport drop,
+    or session abandonment between write and notification). On reload, the
+    frontend's ``refreshPending`` path — i.e. ``list_interpretation_events``
+    with ``status='pending'`` — must rediscover the orphan and re-raise the
+    review affordance.
+
+    Note on simulation: in unit tests there is no "in-band notification"
+    channel to selectively suppress — the writer simply commits the row and
+    the test then exercises the read path without any intervening tool-loop
+    interaction. That mirrors the orphan scenario faithfully: from the read
+    path's perspective, an orphan row is indistinguishable from a fresh
+    pending row, which is exactly the contract that allows rehydration to
+    work.
+    """
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(service, session_id=session_id)
+
+    # Writer commits the PENDING row. In the orphan scenario, the ToolResult
+    # that would normally propagate this event to the frontend in-band is
+    # lost between this call returning and the next user action. The unit
+    # test simulates that by simply not invoking any further frontend-side
+    # path before the refresh.
+    orphan = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_orphan",
+        user_term="cool",
+        llm_draft="An orphan-scenario draft",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    # refreshPending → GET /interpretations?status=pending →
+    # list_interpretation_events(status='pending'). Must return the orphan.
+    rehydrated = await service.list_interpretation_events(session_id, status="pending")
+
+    assert len(rehydrated) == 1
+    record = rehydrated[0]
+    assert record.id == orphan.id
+    assert record.choice is InterpretationChoice.PENDING
+    assert record.interpretation_source is InterpretationSource.USER_APPROVED
+    assert record.session_id == session_id
+    assert record.composition_state_id == state.id
+    assert record.affected_node_id == "llm_transform_1"
+    assert record.tool_call_id == "call_orphan"
+    assert record.user_term == "cool"
+    assert record.llm_draft == "An orphan-scenario draft"
+    # PENDING invariants: no resolution metadata yet.
+    assert record.accepted_value is None
+    assert record.resolved_at is None
+    assert record.arguments_hash is None
+    assert record.hash_domain_version is None
+
+
+@pytest.mark.asyncio
+async def test_17_refresh_pending_is_idempotent_across_repeated_calls(service) -> None:
+    """The rehydration path is read-only and stable under repeated reload.
+
+    Refreshing twice without resolving the orphan returns the same row both
+    times — no implicit consumption, no side-effects on the DB. This is the
+    contract that lets the frontend retry ``refreshPending`` on transient
+    network failures without altering the audit state.
+    """
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(service, session_id=session_id)
+
+    orphan = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_orphan_idem",
+        user_term="cool",
+        llm_draft="A draft",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    first = await service.list_interpretation_events(session_id, status="pending")
+    second = await service.list_interpretation_events(session_id, status="pending")
+
+    assert [e.id for e in first] == [orphan.id]
+    assert [e.id for e in second] == [orphan.id]
+    # The two reads must produce equal records (same row, same choice, same
+    # resolved_at=None). Equality on the dataclass would suffice; we spot-
+    # check the load-bearing fields for clarity.
+    assert first[0].id == second[0].id
+    assert first[0].choice is second[0].choice is InterpretationChoice.PENDING
+    assert first[0].resolved_at is None
+    assert second[0].resolved_at is None
+
+
+@pytest.mark.asyncio
+async def test_18_refresh_pending_drops_orphan_after_resolution(service) -> None:
+    """Once the rehydrated orphan is resolved, ``status='pending'`` no longer
+    returns it — the row remains in the table (audit-honest) but the
+    refreshPending read filter excludes resolved rows.
+
+    Pins the post-resolution contract: a session that has worked through an
+    orphan does not see it on subsequent reloads, which is what the UX
+    requires (the review affordance must come down).
+    """
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(service, session_id=session_id)
+
+    orphan = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_orphan_resolve",
+        user_term="cool",
+        llm_draft="Draft to be accepted",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    # Rehydrate the orphan, then resolve it.
+    before = await service.list_interpretation_events(session_id, status="pending")
+    assert [e.id for e in before] == [orphan.id]
+
+    await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=orphan.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+        runtime_model_identifier=None,
+        runtime_model_version=None,
+    )
+
+    # status='pending' no longer surfaces it...
+    after_pending = await service.list_interpretation_events(session_id, status="pending")
+    assert after_pending == []
+    # ...but status='all' still does (audit-honest: the row persists).
+    after_all = await service.list_interpretation_events(session_id, status="all")
+    assert [e.id for e in after_all] == [orphan.id]
+    assert after_all[0].choice is InterpretationChoice.ACCEPTED_AS_DRAFTED
+
+
+@pytest.mark.asyncio
+async def test_19_refresh_pending_isolates_orphans_by_session(service) -> None:
+    """An orphan in session A does not leak into session B's refreshPending.
+
+    Models the multi-session reload case: two sessions, each with its own
+    orphan row. ``refreshPending`` for session A must return only A's
+    orphan; session B's orphan must not be surfaced.
+
+    Closes the would-be regression where a missing
+    ``session_id`` predicate on the rehydration read would cross-pollinate
+    review affordances between sessions — a privacy and correctness fault.
+    """
+    session_a = uuid4()
+    state_a = await _seed_state_with_llm_node(service, session_id=session_a)
+    session_b = uuid4()
+    state_b = await _seed_state_with_llm_node(service, session_id=session_b)
+
+    orphan_a = await service.create_pending_interpretation_event(
+        session_id=session_a,
+        composition_state_id=state_a.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_A",
+        user_term="cool",
+        llm_draft="Draft A",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+    orphan_b = await service.create_pending_interpretation_event(
+        session_id=session_b,
+        composition_state_id=state_b.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_B",
+        user_term="cool",
+        llm_draft="Draft B",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    a_pending = await service.list_interpretation_events(session_a, status="pending")
+    b_pending = await service.list_interpretation_events(session_b, status="pending")
+
+    assert [e.id for e in a_pending] == [orphan_a.id]
+    assert [e.id for e in b_pending] == [orphan_b.id]

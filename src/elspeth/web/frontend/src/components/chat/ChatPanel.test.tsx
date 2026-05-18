@@ -1,6 +1,12 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatPanel, deriveRowCount } from "./ChatPanel";
+import {
+  ChatPanel,
+  deriveRowCount,
+  findOriginatingMessageId,
+  isAmbiguousInlineProposal,
+  parseProposedRowsFromUserInput,
+} from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
 import { resetStore } from "@/test/store-helpers";
@@ -1162,5 +1168,368 @@ describe("deriveRowCount", () => {
 
   it("returns 0 for empty content", () => {
     expect(deriveRowCount("text/csv", "")).toBe(0);
+  });
+});
+
+// ── isAmbiguousInlineProposal unit tests (Phase 5a Task 4) ────────────────────
+//
+// Phase 5a Task 4 ambiguity heuristic v1. False negatives are recoverable
+// (proposal still routes through the standard banner); false positives are
+// disruptive (a disambiguation widget appears where a banner would have
+// sufficed). The canonical demo prompt MUST be a false negative — that's
+// the load-bearing constraint.
+describe("isAmbiguousInlineProposal", () => {
+  function makeInlineProposal(
+    summary: string,
+    overrides: Partial<CompositionProposal> = {},
+  ): CompositionProposal {
+    return {
+      id: "prop-1",
+      session_id: "session-1",
+      tool_call_id: "tc-1",
+      tool_name: "set_pipeline",
+      status: "pending",
+      summary,
+      rationale: "",
+      affects: ["source"],
+      arguments_redacted_json: {
+        source: {
+          plugin: "inline_blob",
+          inline_blob: {
+            filename: "chat.csv",
+            mime_type: "text/csv",
+            content: "<inline-blob:42-bytes>",
+          },
+        },
+      },
+      base_state_id: null,
+      committed_state_id: null,
+      audit_event_id: null,
+      created_at: "2026-05-18T10:00:00Z",
+      updated_at: "2026-05-18T10:00:00Z",
+      ...overrides,
+    };
+  }
+
+  it("returns true when summary contains 'I read'", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your message as 3 separate URLs."),
+      ),
+    ).toBe(true);
+  });
+
+  it("returns true when summary contains 'interpreted as'", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("Input interpreted as 3 rows for the inline source."),
+      ),
+    ).toBe(true);
+  });
+
+  it("is case-insensitive on the phrase match", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I READ this as several rows."),
+      ),
+    ).toBe(true);
+  });
+
+  // The canonical demo proposal MUST be classified as non-ambiguous. The
+  // composer narration for that case describes generation ("a list of 5
+  // government web pages") not interpretation of user input.
+  it("returns FALSE for the canonical demo proposal (no ambiguity phrases)", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal(
+          "Created an inline source with 5 Australian government web pages " +
+            "and wired an LLM transform to rate each on coolness.",
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when the tool_name is not set_pipeline", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          tool_name: "patch_source_options",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when arguments lack an inline_blob", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: { plugin: "csv_file", options: { path: "x.csv" } },
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+});
+
+// ── findOriginatingMessageId unit tests ───────────────────────────────────────
+describe("findOriginatingMessageId", () => {
+  const userMessage: ChatMessage = {
+    id: "user-1",
+    session_id: "s",
+    role: "user",
+    content: "check these URLs: a, b, c",
+    tool_calls: null,
+    created_at: "2026-05-18T10:00:00Z",
+  };
+  const assistantMessage: ChatMessage = {
+    id: "asst-1",
+    session_id: "s",
+    role: "assistant",
+    content: "I'll add those.",
+    tool_calls: [
+      { id: "tc-1", type: "function", function: { name: "set_pipeline", arguments: "{}" } },
+    ],
+    created_at: "2026-05-18T10:00:01Z",
+  };
+
+  it("returns the immediately-preceding user message id", () => {
+    expect(
+      findOriginatingMessageId([userMessage, assistantMessage], "tc-1"),
+    ).toBe("user-1");
+  });
+
+  it("returns null when no message carries that tool_call_id", () => {
+    expect(
+      findOriginatingMessageId([userMessage, assistantMessage], "tc-other"),
+    ).toBeNull();
+  });
+
+  it("returns null when no user message precedes the assistant turn", () => {
+    expect(findOriginatingMessageId([assistantMessage], "tc-1")).toBeNull();
+  });
+});
+
+// ── parseProposedRowsFromUserInput unit tests ─────────────────────────────────
+describe("parseProposedRowsFromUserInput", () => {
+  it("splits a colon-led list on commas", () => {
+    expect(
+      parseProposedRowsFromUserInput("check these URLs: a.com, b.com, c.com"),
+    ).toEqual(["a.com", "b.com", "c.com"]);
+  });
+
+  it("splits on newlines", () => {
+    expect(parseProposedRowsFromUserInput("rows:\na\nb\nc")).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("returns the whole input as one row when no delimiter is present", () => {
+    expect(parseProposedRowsFromUserInput("just one line")).toEqual([
+      "just one line",
+    ]);
+  });
+});
+
+// ── ChatPanel disambiguation wiring tests (Phase 5a Task 4) ───────────────────
+//
+// Verifies the routing layer in ChatPanel that decides whether a pending
+// inline-blob proposal surfaces via the disambiguation widget or via the
+// standard PendingProposalsBanner. The widget itself is tested in
+// InlineSourceDisambiguationTurn.test.tsx; here we only check the
+// predicate-and-guard plumbing.
+describe("ChatPanel inline-source disambiguation routing", () => {
+  const sessionFixture: Session = {
+    id: "session-disamb",
+    title: "Disambiguation session",
+    created_at: "2026-05-18T10:00:00Z",
+    updated_at: "2026-05-18T10:00:00Z",
+  };
+
+  function makeAmbiguousProposalAndMessages(): {
+    proposal: CompositionProposal;
+    userMessage: ChatMessage;
+    assistantMessage: ChatMessage;
+  } {
+    const userMessage: ChatMessage = {
+      id: "user-disamb-1",
+      session_id: sessionFixture.id,
+      role: "user",
+      content: "check these URLs: a.com, b.com, c.com",
+      tool_calls: null,
+      created_at: "2026-05-18T10:00:00Z",
+    };
+    const assistantMessage: ChatMessage = {
+      id: "asst-disamb-1",
+      session_id: sessionFixture.id,
+      role: "assistant",
+      content: "I'll add those.",
+      tool_calls: [
+        {
+          id: "tc-disamb-1",
+          type: "function",
+          function: { name: "set_pipeline", arguments: "{}" },
+        },
+      ],
+      created_at: "2026-05-18T10:00:01Z",
+    };
+    const proposal: CompositionProposal = {
+      id: "prop-disamb-1",
+      session_id: sessionFixture.id,
+      tool_call_id: "tc-disamb-1",
+      tool_name: "set_pipeline",
+      status: "pending",
+      summary: "I read your message as 3 separate URLs.",
+      rationale: "",
+      affects: ["source"],
+      arguments_redacted_json: {
+        source: {
+          plugin: "inline_blob",
+          inline_blob: {
+            filename: "chat.csv",
+            mime_type: "text/csv",
+            content: "<inline-blob:42-bytes>",
+          },
+        },
+      },
+      base_state_id: null,
+      committed_state_id: null,
+      audit_event_id: null,
+      created_at: "2026-05-18T10:00:00Z",
+      updated_at: "2026-05-18T10:00:00Z",
+    };
+    return { proposal, userMessage, assistantMessage };
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    Element.prototype.scrollIntoView = vi.fn();
+    resetStore(useSessionStore);
+    resetStore(useInlineSourceStore);
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: null,
+    });
+  });
+
+  it("renders the disambiguation widget for an ambiguous inline-blob proposal", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [proposal],
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.getByRole("region", { name: /row count/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("excludes the ambiguous proposal from the standard PendingProposalsBanner", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [proposal],
+    });
+
+    render(<ChatPanel />);
+
+    // The PendingProposalsBanner uses aria-label="Pending changes (N)".
+    // When the only pending proposal is claimed by the disambiguation
+    // widget the banner has zero actionable items and returns null.
+    expect(
+      screen.queryByRole("region", { name: /pending changes/i }),
+    ).toBeNull();
+  });
+
+  it("skips the widget when the originating message is in userRequestedSingleRowForMessageIds (F-11)", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [proposal],
+    });
+    // Seed the F-11 guard BEFORE render.
+    act(() => {
+      useInlineSourceStore
+        .getState()
+        .addUserRequestedSingleRow(userMessage.id);
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /row count/i }),
+    ).toBeNull();
+    // Falls back to the standard banner.
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("skips the widget when the originating message is in nonSourceMessageIds (F-10)", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [proposal],
+    });
+    act(() => {
+      useInlineSourceStore.getState().addNonSourceMessage(userMessage.id);
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /row count/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("does NOT render the widget for a non-ambiguous proposal (canonical demo)", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    // Rewrite the summary to the canonical demo narration; the
+    // heuristic should classify this as non-ambiguous.
+    const demoProposal: CompositionProposal = {
+      ...proposal,
+      summary:
+        "Created an inline source with 5 Australian government web pages " +
+          "and wired an LLM transform to rate each on coolness.",
+    };
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [demoProposal],
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /row count/i }),
+    ).toBeNull();
+    // Falls back to the standard banner.
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toBeInTheDocument();
   });
 });

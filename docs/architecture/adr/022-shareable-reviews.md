@@ -166,7 +166,7 @@ Two deploy-time gates documented in `docs/composer/ux-redesign-2026-05/19a-phase
 1. **Delete the staging sessions DB** before deploying — `SESSION_SCHEMA_EPOCH` bumps from 3 to 4 and the validator refuses to start against the old DB. Any composer sessions saved since the Phase 18 deploy are lost; this is acknowledged cost.
 2. **Add `web.shareable_link_signing_key`** to staging config (generate with `openssl rand -base64 32`). The field is `Field(...)` (required, no default) — the service refuses to start without it.
 
-The signing key is per-deployment, MUST be ≥32 bytes, and MUST NOT appear in version control. Rotating it invalidates every outstanding shareable link.
+The signing key is per-deployment, MUST be ≥32 bytes (HMAC-SHA256's digest size; the natural entropy floor for a tag produced by this hash — *not* the 64-byte block size), and MUST NOT appear in version control. Rotating it invalidates every outstanding shareable link.
 
 ## References
 

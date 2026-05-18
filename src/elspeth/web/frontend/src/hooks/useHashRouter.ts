@@ -70,7 +70,14 @@ function buildCanonicalHash(sessionId: string | null): string {
   return sessionId ? `#/${sessionId}` : "";
 }
 
-export function useHashRouter(): { redirectToast: RedirectToast | null } {
+interface UseHashRouterOptions {
+  enabled?: boolean;
+}
+
+export function useHashRouter(
+  options: UseHashRouterOptions = {},
+): { redirectToast: RedirectToast | null } {
+  const enabled = options.enabled ?? true;
   const lastWrittenHash = useRef<string>("");
   const applying = useRef(false);
 
@@ -147,6 +154,7 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
   };
 
   useEffect(() => {
+    if (!enabled) return;
     const initial = parseHash();
     if (initial.sessionId) {
       lastWrittenHash.current = window.location.hash;
@@ -163,9 +171,10 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
         );
       }
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     function handleHashChange() {
       const newHash = window.location.hash;
       if (newHash === lastWrittenHash.current) return;
@@ -179,9 +188,10 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
       window.removeEventListener("popstate", handleHashChange);
       window.removeEventListener("hashchange", handleHashChange);
     };
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     const unsub = useSessionStore.subscribe((state, prevState) => {
       if (applying.current) return;
       if (state.activeSessionId === prevState.activeSessionId) return;
@@ -203,9 +213,10 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
       }
     });
     return unsub;
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     const unsub = useSessionStore.subscribe((state, prevState) => {
       if (prevState.sessions.length > 0 || state.sessions.length === 0) return;
 
@@ -220,7 +231,7 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
       }
     });
     return unsub;
-  }, []);
+  }, [enabled]);
 
   return { redirectToast };
 }

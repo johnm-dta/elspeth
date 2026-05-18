@@ -1,20 +1,30 @@
 /**
- * Zustand store for the Phase 6B shareable-reviews dialog state.
+ * Zustand store for the shareable-reviews dialog state.
  *
- * Holds:
+ * Canonical internal model: a discriminated union over the request
+ * lifecycle. The legacy flat fields (`inFlight`, `error`, `latestResponse`,
+ * `sessionIdForResponse`) are derived from the union on every transition
+ * so existing consumers (CompletionBar, SaveForReviewDialog, integration
+ * tests) keep working unchanged.
  *
- * * ``dialogOpen`` — whether the SaveForReviewDialog is mounted.
- * * ``latestResponse`` — the most recent MarkReadyForReviewResponse, used
- *   by the dialog to render the share URL + copy-to-clipboard affordance.
- * * ``inFlight`` — true while the POST is being awaited; the
- *   CompletionBar's "Save for review" button disables itself.
- * * ``error`` — the error message from the most recent failed mark
- *   attempt (typed-parse failure, 409, 404). Generic; the dialog
- *   surfaces it as a banner.
+ *   request.kind === "idle"      ↔ no request has run since the last reset
+ *   request.kind === "pending"   ↔ a POST is in-flight; carries its session
+ *                                  id + monotonic epoch (used to drop stale
+ *                                  late responses)
+ *   request.kind === "resolved"  ↔ the most recent attempt produced a
+ *                                  token; carries the response + session
+ *   request.kind === "error"     ↔ the most recent attempt failed; carries
+ *                                  the user-facing message + session
  *
- * The store is deliberately session-scoped via the caller's ``sessionId``
- * argument — opening the dialog clears the previous session's response
- * so the dialog never shows alice's token while bob is composing.
+ * The epoch lives inside the pending state — when it would have been a
+ * module-scope scalar in the old design, it now cannot exist outside the
+ * phase that actually has a request in flight. Stale-response detection is
+ * `request.kind === "pending" && request.epoch === myEpoch` at await
+ * resume; if either side mismatches, the late response is dropped.
+ *
+ * ``dialogOpen`` is orthogonal to the request phase: closing the dialog
+ * preserves the previous response so reopening shows the same URL. The
+ * union models the *request lifecycle*, not the UI dialog state.
  */
 
 import { create } from "zustand";
@@ -22,60 +32,56 @@ import { create } from "zustand";
 import { markReadyForReview } from "../api/shareableReviews";
 import type { ApiError, MarkReadyForReviewResponse } from "../types/api";
 
-export interface ShareableReviewState {
-  /** Whether the SaveForReviewDialog is mounted. */
-  dialogOpen: boolean;
-  /** Most recent successful response from POST /mark-ready-for-review. */
-  latestResponse: MarkReadyForReviewResponse | null;
-  /** True while the POST is in-flight. The bar button reads this to
-   *  disable itself; the dialog renders a spinner while true. */
-  inFlight: boolean;
-  /** Error message from the most recent attempt, or null on success. */
-  error: string | null;
-  /** Session_id the latestResponse belongs to, or null. Used to clear
-   *  stale responses when the user switches sessions. */
-  sessionIdForResponse: string | null;
+/**
+ * Request-lifecycle discriminated union.
+ *
+ * Exported for tests that want to assert on the canonical state shape;
+ * normal consumers read the derived flat fields below.
+ */
+export type RequestPhase =
+  | { kind: "idle" }
+  | { kind: "pending"; sessionId: string; epoch: number }
+  | { kind: "resolved"; sessionId: string; response: MarkReadyForReviewResponse }
+  | { kind: "error"; sessionId: string; message: string };
 
-  /** Open the dialog and POST mark-ready-for-review.  Resolves the
-   *  in-flight promise on success/failure; state reflects the outcome
-   *  via ``latestResponse`` or ``error``.
-   *
-   *  Re-entrancy: if a POST is already in flight, the call is a no-op
-   *  (returns immediately without minting a second audit row). The
-   *  CompletionBar button's ``inFlight`` disable handles UI; this guard
-   *  closes the programmatic-re-entry hole (Enter spam, double-click
-   *  before re-render).
-   *
-   *  Session safety: the sessionId is captured at call entry. If the
-   *  store's tracking sessionId changes before the POST resolves (the
-   *  user switched sessions, or another openAndMark for a different
-   *  session completed first), the late response is dropped on the
-   *  floor — the audit row is still minted server-side, but we never
-   *  surface session A's token while session B is composing. */
+export interface ShareableReviewState {
+  /** Whether the SaveForReviewDialog is mounted (orthogonal to request phase). */
+  dialogOpen: boolean;
+  /** Canonical request-lifecycle state (discriminated union). */
+  request: RequestPhase;
+
+  // ── Derived (kept in lockstep with `request` on every set()) ──
+  /** True while a POST is being awaited. Derived from request.kind === "pending". */
+  inFlight: boolean;
+  /** Latest successful response, preserved across close()/error so reopening
+   *  the dialog can show the same share URL. Derived: present whenever the
+   *  most recent terminal phase was "resolved" for the active session. */
+  latestResponse: MarkReadyForReviewResponse | null;
+  /** Session id of the latestResponse. Tracks the session that minted it. */
+  sessionIdForResponse: string | null;
+  /** Error message from the most recent attempt. Derived from request.kind === "error". */
+  error: string | null;
+
+  // ── Mutators ──
   openAndMark: (sessionId: string) => Promise<void>;
-  /** Close the dialog. Does NOT clear ``latestResponse`` — the user can
-   *  reopen the dialog to see the same response. ``reset()`` is the
-   *  explicit clear path. */
   close: () => void;
-  /** Clear all dialog/response state if ``sessionId`` matches the
-   *  session that owns the current response. No-op if the id doesn't
-   *  match (we don't own that session's state). Use from
-   *  session-switch handlers — the documented "switching sessions
-   *  clears the store" contract. */
   clearForSession: (sessionId: string) => void;
-  /** Reset the store entirely (clears response + error + dialog state). */
   reset: () => void;
 }
 
-const _initial: Omit<
-  ShareableReviewState,
-  "openAndMark" | "close" | "clearForSession" | "reset"
-> = {
+interface InternalState {
+  dialogOpen: boolean;
+  request: RequestPhase;
+  /** Cached last-successful response so closing the dialog (or hitting an
+   *  error) does not blank the URL the user already saw. Promoted from
+   *  `request.kind === "resolved"` when that phase exits. */
+  lastSuccess: { sessionId: string; response: MarkReadyForReviewResponse } | null;
+}
+
+const _internalInitial: InternalState = {
   dialogOpen: false,
-  latestResponse: null,
-  inFlight: false,
-  error: null,
-  sessionIdForResponse: null,
+  request: { kind: "idle" },
+  lastSuccess: null,
 };
 
 function _isApiError(value: unknown): value is ApiError {
@@ -86,136 +92,155 @@ function _isApiError(value: unknown): value is ApiError {
   );
 }
 
-/**
- * Module-scoped state for ``openAndMark`` race control.
- *
- * - ``_openAndMarkEpoch`` is a monotonic counter; each invocation captures
- *   its epoch at start, then re-checks after the network await. Mismatch
- *   means a later call superseded us and our response must be dropped
- *   (gap 1 — stale-response race).
- * - ``_inFlightSessionId`` records which session currently has a POST in
- *   flight, used by the double-click guard (gap 2). Tracking this in
- *   module scope rather than store state keeps it out of the public
- *   ``ShareableReviewState`` type (consumers shouldn't care) and avoids
- *   needing a separate field next to the user-visible ``inFlight`` /
- *   ``sessionIdForResponse`` pair.
- */
-let _openAndMarkEpoch = 0;
-let _inFlightSessionId: string | null = null;
+/** Project canonical InternalState onto the public flat-field surface. */
+function _project(internal: InternalState): Omit<
+  ShareableReviewState,
+  "openAndMark" | "close" | "clearForSession" | "reset"
+> {
+  const inFlight = internal.request.kind === "pending";
+  const error = internal.request.kind === "error" ? internal.request.message : null;
+  // latestResponse precedence: the *cached* lastSuccess wins for view-state
+  // continuity (so a transient error or a close()/reopen does not blank
+  // the URL). When the current request resolved successfully, lastSuccess
+  // is already updated to the same payload, so the two agree.
+  const latestResponse = internal.lastSuccess?.response ?? null;
+  const sessionIdForResponse = internal.lastSuccess?.sessionId ?? null;
+  return {
+    dialogOpen: internal.dialogOpen,
+    request: internal.request,
+    inFlight,
+    latestResponse,
+    sessionIdForResponse,
+    error,
+  };
+}
 
-export const useShareableReviewStore = create<ShareableReviewState>((set, get) => ({
-  ..._initial,
+/** Stash for the internal source-of-truth state. Zustand stores the
+ *  projected (flat) surface so consumers can subscribe to `inFlight` etc.
+ *  directly; the internal record is updated alongside on each transition. */
+let _internal: InternalState = _internalInitial;
 
-  async openAndMark(sessionId: string) {
-    // DC-7 gap 2: double-click race. If a POST is already in-flight for
-    // the SAME session, drop the re-entrant call — minting a second token
-    // would create a duplicate audit row (append-only, can't undo). A
-    // different session is allowed to proceed; the in-flight call's
-    // post-await check will discard its stale response (gap 1).
-    //
-    // The button's UI inFlight-disable handles single-session double-click
-    // at the view layer; this guard closes the programmatic-re-entry hole
-    // (rapid Enter, keyboard repeat, click-before-render).
-    if (_inFlightSessionId === sessionId) {
-      return;
-    }
-    // DC-7 gap 1 prep: capture this call's epoch. After the await we
-    // re-check against the live counter; mismatch means a later call
-    // superseded us and our response must be dropped.
-    _openAndMarkEpoch += 1;
-    const myEpoch = _openAndMarkEpoch;
-    _inFlightSessionId = sessionId;
+export const useShareableReviewStore = create<ShareableReviewState>((set, _get) => {
+  function _commit(next: InternalState): void {
+    _internal = next;
+    set(_project(next));
+  }
 
-    // Clear any stale response from a previous session before opening,
-    // so the dialog never flashes the previous session's URL while the
-    // new POST is in flight.
-    const current = get();
-    const staleSessionResponse =
-      current.sessionIdForResponse !== null && current.sessionIdForResponse !== sessionId;
-    set({
-      dialogOpen: true,
-      inFlight: true,
-      error: null,
-      latestResponse: staleSessionResponse ? null : current.latestResponse,
-      sessionIdForResponse: staleSessionResponse ? sessionId : current.sessionIdForResponse,
-    });
+  return {
+    ..._project(_internal),
 
-    try {
-      const response = await markReadyForReview(sessionId);
-      // DC-7 gap 1: post-await captured-epoch check. If another
-      // openAndMark started after us (different session, or our own
-      // entry was overtaken), our epoch is stale — drop the response.
-      // Audit row was minted server-side regardless; we just don't
-      // surface session A's token while session B is composing.
-      // Note: do NOT touch _inFlightSessionId here — the superseding
-      // call already owns it.
-      if (_openAndMarkEpoch !== myEpoch) {
+    async openAndMark(sessionId: string) {
+      // Double-click guard: if a POST is already in-flight for the same
+      // session, drop the re-entrant call. Audit rows are append-only —
+      // minting a second token would create a duplicate audit row.
+      if (_internal.request.kind === "pending" && _internal.request.sessionId === sessionId) {
         return;
       }
-      _inFlightSessionId = null;
-      set({
-        latestResponse: response,
-        sessionIdForResponse: sessionId,
-        inFlight: false,
-        error: null,
+
+      // Capture this call's epoch BEFORE awaiting. The next openAndMark
+      // (same or different session) will bump the epoch when it sets its
+      // own pending phase; on resume we re-check our captured epoch against
+      // the live one. Mismatch ⇒ we were superseded; drop our late response.
+      const myEpoch =
+        _internal.request.kind === "pending" ? _internal.request.epoch + 1 : 1;
+
+      // Switching sessions while a previous response is still cached:
+      // wipe the cached lastSuccess so the dialog does not flash session
+      // A's URL while session B's POST is in flight. Same-session reentry
+      // keeps the cache.
+      const sessionSwitch =
+        _internal.lastSuccess !== null && _internal.lastSuccess.sessionId !== sessionId;
+
+      _commit({
+        ..._internal,
+        dialogOpen: true,
+        request: { kind: "pending", sessionId, epoch: myEpoch },
+        lastSuccess: sessionSwitch ? null : _internal.lastSuccess,
       });
-    } catch (exc) {
-      // Same epoch check on the error path: a stale failure must not
-      // overwrite the current session's successful response with an
-      // error banner from a prior session.
-      if (_openAndMarkEpoch !== myEpoch) {
+
+      try {
+        const response = await markReadyForReview(sessionId);
+        // Stale-epoch check: a later openAndMark superseded us while we
+        // were awaiting. Our response must NOT clobber the new pending /
+        // resolved state. The server-side audit row was minted regardless;
+        // we just suppress the late client-side surfacing.
+        if (
+          _internal.request.kind !== "pending" ||
+          _internal.request.epoch !== myEpoch ||
+          _internal.request.sessionId !== sessionId
+        ) {
+          return;
+        }
+        _commit({
+          ..._internal,
+          request: { kind: "resolved", sessionId, response },
+          lastSuccess: { sessionId, response },
+        });
+      } catch (exc) {
+        if (
+          _internal.request.kind !== "pending" ||
+          _internal.request.epoch !== myEpoch ||
+          _internal.request.sessionId !== sessionId
+        ) {
+          return;
+        }
+        let message = "Could not mint a shareable link";
+        if (_isApiError(exc)) {
+          if (exc.status === 409) {
+            message =
+              exc.detail ??
+              "The composition is not ready for sharing — fix the surfaced errors and try again.";
+          } else if (exc.status === 404) {
+            message = "Session not found.";
+          } else if (exc.status === 401) {
+            message = "Authentication required.";
+          } else if (typeof exc.detail === "string") {
+            message = exc.detail;
+          }
+        } else if (exc instanceof Error) {
+          message = exc.message;
+        } else {
+          // Fallback: exc is neither an ApiError nor an Error instance.
+          // The generic banner remains, but record the actual exception
+          // for debugging — a silent fallback would hide misbehaviour at
+          // a lower layer (e.g. a `throw "string"` from a fetch wrapper).
+          // eslint-disable-next-line no-console
+          console.warn(
+            "shareableReviewStore: openAndMark failed with unexpected exception shape:",
+            exc,
+          );
+        }
+        _commit({
+          ..._internal,
+          // Cached lastSuccess is wiped on error to match the previous
+          // store's behaviour (the original code set
+          // `latestResponse: null` on the error path).
+          request: { kind: "error", sessionId, message },
+          lastSuccess: null,
+        });
+      }
+    },
+
+    close() {
+      _commit({ ..._internal, dialogOpen: false });
+    },
+
+    clearForSession(sessionId: string) {
+      // No-op unless the cached response belongs to this session. We
+      // deliberately do NOT consult `request` here: a pending POST for
+      // sessionId is allowed to continue; the stale-epoch check on its
+      // resume will see the reset and drop its result.
+      if (_internal.lastSuccess?.sessionId !== sessionId) {
         return;
       }
-      _inFlightSessionId = null;
-      let message = "Could not mint a shareable link";
-      if (_isApiError(exc)) {
-        if (exc.status === 409) {
-          message =
-            exc.detail ??
-            "The composition is not ready for sharing — fix the surfaced errors and try again.";
-        } else if (exc.status === 404) {
-          message = "Session not found.";
-        } else if (exc.status === 401) {
-          message = "Authentication required.";
-        } else if (typeof exc.detail === "string") {
-          message = exc.detail;
-        }
-      } else if (exc instanceof Error) {
-        message = exc.message;
-      }
-      set({ inFlight: false, error: message, latestResponse: null });
-    }
-  },
+      // Mint a "fresh" epoch by way of resetting the request — any
+      // pending POST for this session will re-check and find phase=idle
+      // (epoch mismatch by construction), so its response drops.
+      _commit({ ..._internalInitial });
+    },
 
-  close() {
-    set({ dialogOpen: false });
-  },
-
-  clearForSession(sessionId: string) {
-    // No-op unless the current response belongs to this session. We
-    // don't blow away state that came from a different session — the
-    // caller has only authority to clear what they own.
-    const current = get();
-    if (current.sessionIdForResponse !== sessionId) {
-      return;
-    }
-    // Bump the epoch so any pending openAndMark for this session sees a
-    // stale epoch on resume and drops its response. Also clear the
-    // in-flight tracker so a subsequent openAndMark for the same id
-    // isn't accidentally suppressed by the double-click guard.
-    _openAndMarkEpoch += 1;
-    if (_inFlightSessionId === sessionId) {
-      _inFlightSessionId = null;
-    }
-    set(_initial);
-  },
-
-  reset() {
-    // Bump epoch + clear in-flight tracker for the same reason as
-    // clearForSession: any pending await that resumes after reset
-    // must see a stale epoch and drop its response.
-    _openAndMarkEpoch += 1;
-    _inFlightSessionId = null;
-    set(_initial);
-  },
-}));
+    reset() {
+      _commit({ ..._internalInitial });
+    },
+  };
+});

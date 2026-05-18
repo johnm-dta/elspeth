@@ -1,7 +1,5 @@
 """``ShareableReviewService`` — business logic for the "Save for review" verb.
 
-Phase 6A Task 5 (UX redesign 2026-05).
-
 Responsibilities:
 
 * Validate the composition before marking (validation + readiness gates).
@@ -13,7 +11,7 @@ Responsibilities:
 * Mint a signed capability token that encodes the content-address.
 * Resolve an inbound token back to the frozen snapshot for the reviewer.
 
-Audit-first ordering (load-bearing — see plan §"Audit-event recording"):
+Audit-first ordering (load-bearing):
 
 1. Build snapshot dict in memory.
 2. Canonical-JSON-serialize → compute ``payload_digest``.
@@ -26,7 +24,7 @@ If the audit insert fails, no blob is ever written. If the blob write fails
 after the audit insert, the audit row stands as honest evidence of the
 attempt; no token is returned.
 
-Frozen-at-mark-time discipline (load-bearing — see plan §Task 5):
+Frozen-at-mark-time discipline (load-bearing):
 
 * ``resolve_token`` reads ``audit_readiness`` directly from the blob; it
   never re-calls ``ReadinessService.compute_snapshot``. This means:
@@ -52,7 +50,7 @@ import json
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol, TypedDict, cast
+from typing import Any, Final, Protocol, TypedDict, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import insert
@@ -78,8 +76,8 @@ from elspeth.web.shareable_reviews.signer import (
 # Path-only share URL — the frontend's `location.origin` plus this string
 # resolves to a full clickable URL. Avoids adding yet another deployment-
 # base-URL setting to ``WebSettings``. The ``/#/shared/`` shape matches the
-# SPA hash route documented in plan 19b §"Sibling work in 19b" — the
-# recipient's browser opens the SPA at the hash, which calls the
+# SPA hash route in ``hooks/useHashRouter.ts`` — the recipient's browser
+# opens the SPA at the hash, which calls the
 # ``GET /api/sessions/shared/{token}`` backend route.
 _SHARE_URL_PREFIX = "/#/shared/"
 
@@ -153,6 +151,25 @@ class _BlobShape(TypedDict):
     created_by_user_id: str
 
 
+# Closed-set producer-side guard. The digest only proves bytes-on-disk
+# integrity; it does NOT detect a producer drift that emits an extra or
+# missing key (the buggy bytes round-trip cleanly through the digest).
+# ``_assert_blob_shape`` catches that class of drift at the producer so
+# the bug surfaces in the owner's request instead of several frames away
+# in the reviewer's Pydantic construction. Update both ``_BlobShape`` AND
+# this constant in the same commit — and bump the signer payload version
+# per the ``_BlobShape`` docstring.
+_BLOB_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "pipeline_metadata",
+        "composition_snapshot",
+        "yaml",
+        "audit_readiness",
+        "created_by_user_id",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _Snapshot:
     """In-memory snapshot built once at mark-time.
@@ -220,6 +237,20 @@ def _build_snapshot(
         "audit_readiness": audit_readiness_dict,
         "created_by_user_id": created_by_user_id,
     }
+    # Producer-side drift guard. ``_BlobShape: TypedDict`` is a static
+    # type — Python does not enforce it at runtime. Without this assert,
+    # a future refactor adding/dropping a key would produce a digest-stable
+    # but shape-drifted blob; the bug would surface in Pydantic
+    # construction in ``SharedInspectResponse`` several frames downstream.
+    # Crash here so the bug surfaces at the producer.
+    actual_keys = frozenset(blob.keys())
+    if actual_keys != _BLOB_KEYS:
+        missing = _BLOB_KEYS - actual_keys
+        extra = actual_keys - _BLOB_KEYS
+        raise RuntimeError(
+            f"shareable-review snapshot blob shape drift: missing={sorted(missing)!r} extra={sorted(extra)!r}. "
+            "Update _BlobShape and _BLOB_KEYS together, and bump the signer payload version."
+        )
     canonical_str = canonical_json(blob)
     canonical_bytes = canonical_str.encode("utf-8")
     digest_hex = hashlib.sha256(canonical_bytes).hexdigest()
@@ -398,10 +429,13 @@ class ShareableReviewService:
         """Verify the token and return the frozen-at-mark-time snapshot.
 
         The audit_readiness is read directly from the blob — this method
-        never calls ``ReadinessService.compute_snapshot``. See plan §Task 5
-        ("Why audit_readiness is frozen into the blob") for the three
-        rationales (audit-trail integrity, content-addressing completeness,
-        permission-boundary collapse).
+        never calls ``ReadinessService.compute_snapshot``. Three reasons:
+        audit-trail integrity (the reviewer sees what the owner saw at
+        mark-time, not what readiness reports right now); content-addressing
+        completeness (the payload_digest covers the readiness panel too);
+        and permission-boundary collapse (resolve never calls the readiness
+        service, so the reviewer-vs-owner permission question never arises
+        at resolve time). ADR-022 §D4 documents the full reasoning.
 
         Raises:
             InvalidToken: signature mismatch, malformed envelope, or

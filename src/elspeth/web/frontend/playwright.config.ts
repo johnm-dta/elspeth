@@ -10,14 +10,18 @@ const BACKEND_HEALTH_URL = `http://127.0.0.1:${BACKEND_PORT}/api/health`;
 
 const REPO_ROOT_FROM_FRONTEND = "../../../..";
 
-const E2E_DATA_DIR = "./.e2e-data";
-
 // Anchor path resolution to this config file rather than process.cwd() —
 // Playwright's runtime cwd varies (config-load vs test-run vs globalSetup)
 // and a relative storageState path produced subtly different files in each
 // phase. Keep it absolute here and share the same anchor with globalSetup.
 const HERE = dirname(fileURLToPath(import.meta.url));
+const E2E_RUN_ID = process.env.PLAYWRIGHT_E2E_RUN_ID ?? `run-${process.pid}`;
+const E2E_DATA_DIR = process.env.PLAYWRIGHT_E2E_DATA_DIR
+  ? resolve(process.env.PLAYWRIGHT_E2E_DATA_DIR)
+  : resolve(HERE, ".e2e-data", E2E_RUN_ID);
 const STORAGE_STATE_PATH = resolve(HERE, "tests", "e2e", ".auth", "user.json");
+
+process.env.PLAYWRIGHT_E2E_DATA_DIR = E2E_DATA_DIR;
 
 const isCI = !!process.env.CI;
 
@@ -36,6 +40,10 @@ const composerSettingsEnv: Record<string, string> = {
   // the ELSPETH_WEB__SECRET_KEY guard in src/elspeth/web/config.py is
   // satisfied even if a non-loopback CORS origin is configured later.
   ELSPETH_WEB__secret_key: "e2e-jwt-placeholder", // secret-scan: allow-this-line
+  // Local-only shareable-review HMAC key for the Playwright-managed backend.
+  // WebSettings requires an operator-provided base64 string and decodes it to
+  // bytes before constructing ShareTokenSigner.
+  ELSPETH_WEB__shareable_link_signing_key: "ZWxzcGV0aC1lMmUtc2hhcmUta2V5LTAwMDAwMDAwMDA=", // secret-scan: allow-this-line
 
   ELSPETH_WEB__cors_origins: JSON.stringify([FRONTEND_URL]),
 };

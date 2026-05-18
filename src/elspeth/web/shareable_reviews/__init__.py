@@ -18,6 +18,11 @@ in those lower layers.
 
 from __future__ import annotations
 
+from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
+from elspeth.web.shareable_reviews.service import (
+    CompositionNotRunnableError,
+    ShareableReviewService,
+)
 from elspeth.web.shareable_reviews.signer import (
     InvalidToken,
     ShareTokenPayload,
@@ -25,7 +30,10 @@ from elspeth.web.shareable_reviews.signer import (
 )
 
 __all__ = [
+    "CompositionNotRunnableError",
     "InvalidToken",
     "ShareTokenPayload",
     "ShareTokenSigner",
+    "ShareableReviewService",
+    "create_shareable_reviews_router",
 ]

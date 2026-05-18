@@ -39,15 +39,16 @@ const BLOB_FILENAME = "playwright-orders.csv";
 // Minimal CSV content: header + one data row.
 const SAMPLE_CSV = "id,name,value\n1,widget,42\n";
 
-// Worktree root: playwright.config.ts starts uvicorn from cwd="../../../.."
-// relative to the frontend dir (= worktree root, 4 levels up from frontend/).
-// This spec lives at tests/e2e/ (2 levels inside frontend/).
-// Total: 6 levels up from this file's __dirname.
-const WORKTREE_ROOT = resolve(
+// Frontend root: playwright.config.ts passes an absolute .e2e-data path
+// anchored to the frontend directory, and the backend stores uploaded blobs
+// relative to that data_dir.
+const FRONTEND_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../../../../../../",
+  "../..",
 );
-const E2E_DATA_DIR = resolve(WORKTREE_ROOT, ".e2e-data");
+const E2E_DATA_DIR = process.env.PLAYWRIGHT_E2E_DATA_DIR
+  ? resolve(process.env.PLAYWRIGHT_E2E_DATA_DIR)
+  : resolve(FRONTEND_ROOT, ".e2e-data");
 
 // Construct the blob storage path.
 // service.py:207-211: data_dir/blobs/{session_id}/{blob_id}_{filename}
@@ -82,11 +83,16 @@ test.describe("composer-guided — recipe-match happy path", () => {
         const blob = await uploadBlob(ctx, sessionId, BLOB_FILENAME, SAMPLE_CSV);
 
         // ── Navigate to the session ──────────────────────────────────────────
-        // Auto-start fix (Gap 1): selectSession now calls startGuided() in
-        // sessionStore.ts; the wizard renders on navigation.
+        // The default-freeform contract renders the chat composer after
+        // selectSession(); enter guided mode explicitly so this test is not
+        // affected by account-level default-mode preference changes in other
+        // Playwright specs.
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();
+        await page.getByRole("button", { name: "Switch to guided" }).click();
+        clicks++;
+        await expect(page.getByLabel(/guided composer/i)).toBeVisible();
 
         // ── Step 1 source: SINGLE_SELECT — pick "csv" ──────────────────────
         // Chip label = plugin.name verbatim (emitters.py:127).
@@ -105,6 +111,8 @@ test.describe("composer-guided — recipe-match happy path", () => {
         // Path must be under data_dir/blobs/ (S2, tools.py:2086-2108) [Gap 2].
         // We construct the blob storage path from session_id + blob.id.
         const sourcePath = blobStoragePath(sessionId, blob.id);
+        await expect(page.getByLabel(/^schema$/i)).toBeVisible();
+        await page.getByLabel(/^schema$/i).fill('{"mode":"observed"}');
         await expect(page.getByLabel(/^path$/i)).toBeVisible();
         await page.getByLabel(/^path$/i).fill(sourcePath);
         await expect(page.getByLabel(/on\s+validation\s+failure/i)).toBeVisible();
@@ -127,14 +135,13 @@ test.describe("composer-guided — recipe-match happy path", () => {
 
         // ── Step 2 sink: SCHEMA_FORM — fill path + collision_policy, Continue
         // JSON sink: REQUIRED path, OPTIONAL collision_policy.
-        // collision_policy is REQUIRED in composer mode [Gap 4], hidden behind
-        // "Show advanced".  We expand and set "auto_increment".
+        // collision_policy is REQUIRED in composer mode [Gap 4].
+        await expect(page.getByLabel(/^schema$/i)).toBeVisible();
+        await page.getByLabel(/^schema$/i).fill('{"mode":"observed"}');
         await expect(page.getByLabel(/^path$/i)).toBeVisible();
         await page.getByLabel(/^path$/i).fill(SINK_OUTPUT_PATH);
-        await page.getByRole("button", { name: /show advanced/i }).click();
-        clicks++;
-        await expect(page.getByLabel(/collision.?policy/i)).toBeVisible();
-        await page.getByLabel(/collision.?policy/i).fill('"auto_increment"');
+        await page.getByLabel(/collision.?policy/i).selectOption("auto_increment");
+        await page.getByLabel(/^format$/i).selectOption("json");
         await expect(
           page.getByRole("button", { name: "Continue", exact: true }),
         ).toBeEnabled();

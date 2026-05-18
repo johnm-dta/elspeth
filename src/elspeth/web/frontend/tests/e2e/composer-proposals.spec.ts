@@ -87,6 +87,15 @@ async function installDeterministicComposerRoutes(page: Page): Promise<void> {
     });
   });
 
+  await page.route("**/api/composer-preferences", async (route) => {
+    await route.fulfill({
+      json: {
+        default_mode: "freeform",
+        banner_dismissed_at: null,
+      },
+    });
+  });
+
   await page.route("**/api/sessions**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());

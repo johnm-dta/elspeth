@@ -874,6 +874,22 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         ),
     ),
     ReviewedWriter(
+        path="tests/unit/web/sessions/test_composer_completion_events_table.py",
+        enclosing_symbol="_seed_composition_state",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 6A schema-test helper: seeds a composition_states row to "
+            "satisfy the per-event-type CHECK constraint "
+            "ck_composer_completion_events_composition_state_id_required "
+            "and the composite FK on composer_completion_events. Helper is "
+            "named _seed_composition_state (not _insert_composition_state) "
+            "so the lock-discipline scanner does not conflate it with the "
+            "production SessionServiceImpl._insert_composition_state. "
+            "Schema-test direct insert — no production lock required."
+        ),
+    ),
+    ReviewedWriter(
         path="tests/unit/web/sessions/test_interpretation_events_table.py",
         enclosing_symbol="TestCompositionStatesProvenanceEnum.test_interpretation_resolve_provenance_accepted",
         table="composition_states",

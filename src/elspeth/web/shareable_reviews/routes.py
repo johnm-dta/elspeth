@@ -75,7 +75,13 @@ def create_shareable_reviews_router() -> APIRouter:
         try:
             result = await service.mark_ready_for_review(session_id=session_id, user_id=user.user_id)
         except CompositionNotRunnableError as exc:
-            raise HTTPException(status_code=409, detail=exc.detail or exc.reason) from None
+            # ``from exc``: preserves the server-side __context__ chain for
+            # logs. Wire-facing ``detail`` is unaffected — only the internal
+            # traceback chain. The probing-attacker rationale that justifies
+            # ``from None`` on InvalidToken (below) does NOT apply here: a
+            # 409 leaks no signal an authenticated session owner could not
+            # already obtain by inspecting their own session.
+            raise HTTPException(status_code=409, detail=exc.detail or exc.reason) from exc
         return JSONResponse(
             content=result.model_dump(mode="json"),
             headers={"Cache-Control": _NO_STORE},

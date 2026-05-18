@@ -15,12 +15,12 @@ consumer, not a co-owner.
 
 ``pipeline_metadata`` and ``composition_snapshot`` are typed as strict
 Pydantic mirrors of the ``CompositionState`` / ``PipelineMetadata``
-dataclasses defined in ``web/composer/state.py`` (Plan 19a:891-892). The
-underlying authoritative state is a frozen dataclass; the wire-side mirror
-is a Pydantic model so the FIX-A claim from Plan 19a:64 ("drift crashes
-at construction") holds — an unknown key from a producer that has drifted
-ahead of the consumer, or a wrong-type value, raises ``ValidationError``
-at ``SharedInspectResponse(...)``.
+dataclasses defined in ``web/composer/state.py``. The underlying
+authoritative state is a frozen dataclass; the wire-side mirror is a
+Pydantic model so producer/consumer drift crashes at construction — an
+unknown key from a producer that has drifted ahead of the consumer, or
+a wrong-type value, raises ``ValidationError`` at
+``SharedInspectResponse(...)``.
 
 The wire shape mirrored here is exactly the one emitted by
 ``CompositionState.to_dict()`` (the producer in
@@ -86,7 +86,7 @@ class ShareableLinkResponse(_StrictResponse):
 # The authoritative in-process types are the frozen dataclasses in
 # ``web/composer/state.py``. The mirror exists so producer/consumer drift
 # crashes at construction rather than being silently accepted as a free-
-# form dict (Plan 19a:64, 19a:891-892; gap-analysis FIX-A).
+# form dict.
 #
 # Field shapes track ``CompositionState.to_dict()`` exactly. Optional
 # NodeSpec fields default to None — the producer omits the key when None,
@@ -94,14 +94,14 @@ class ShareableLinkResponse(_StrictResponse):
 
 
 class PipelineMetadataResponse(_StrictResponse):
-    """Strict wire mirror of ``PipelineMetadata`` (state.py:58)."""
+    """Strict wire mirror of ``PipelineMetadata`` (web/composer/state.py)."""
 
     name: str
     description: str
 
 
 class SourceSpecResponse(_StrictResponse):
-    """Strict wire mirror of ``SourceSpec`` (state.py:77)."""
+    """Strict wire mirror of ``SourceSpec`` (web/composer/state.py)."""
 
     plugin: str
     on_success: str
@@ -113,7 +113,7 @@ class SourceSpecResponse(_StrictResponse):
 
 
 class NodeSpecResponse(_StrictResponse):
-    """Strict wire mirror of ``NodeSpec`` (state.py:107).
+    """Strict wire mirror of ``NodeSpec`` (web/composer/state.py).
 
     Optional fields (condition, routes, fork_to, branches, policy, merge,
     trigger, output_mode, expected_output_count) default to None to match
@@ -142,7 +142,7 @@ class NodeSpecResponse(_StrictResponse):
 
 
 class EdgeSpecResponse(_StrictResponse):
-    """Strict wire mirror of ``EdgeSpec`` (state.py:214)."""
+    """Strict wire mirror of ``EdgeSpec`` (web/composer/state.py)."""
 
     id: str
     from_node: str
@@ -152,7 +152,7 @@ class EdgeSpecResponse(_StrictResponse):
 
 
 class OutputSpecResponse(_StrictResponse):
-    """Strict wire mirror of ``OutputSpec`` (state.py:244)."""
+    """Strict wire mirror of ``OutputSpec`` (web/composer/state.py)."""
 
     name: str
     plugin: str
@@ -161,7 +161,7 @@ class OutputSpecResponse(_StrictResponse):
 
 
 class CompositionStateResponse(_StrictResponse):
-    """Strict wire mirror of ``CompositionState`` (state.py:1654).
+    """Strict wire mirror of ``CompositionState`` (web/composer/state.py).
 
     Shape tracks ``CompositionState.to_dict()`` exactly. ``guided_session``
     is intentionally absent — the producer (``to_dict``) does not emit it,
@@ -185,14 +185,14 @@ class SharedInspectResponse(_StrictResponse):
     The read-only inspect view for a recipient. ``yaml`` is the rendered
     pipeline YAML (regenerated from the snapshot, not stored verbatim, so
     a YAML-generator improvement automatically flows through). The
-    ``audit_readiness`` field is the same Phase-2 / Phase-18 snapshot the
-    owner sees — including the ``llm_interpretations`` row added in Phase
-    18 (see plan 19a §"Post-Phase-18 merge fact"). No extra aggregation
-    happens in Phase 6.
+    ``audit_readiness`` field is the same snapshot the owner sees —
+    including the ``llm_interpretations`` row inherited from the
+    interpretation-events surface. No extra aggregation happens at the
+    shared-inspect boundary.
 
     ``pipeline_metadata`` and ``composition_snapshot`` are typed as
     strict Pydantic mirrors of their respective dataclasses so producer/
-    consumer drift fails at construction (FIX-A; Plan 19a:64, 19a:891-892).
+    consumer drift fails at construction.
 
     ``created_by_user_id`` is surfaced so the reviewer can see who shared
     the pipeline. ``expires_at`` lets the frontend show "this link expires

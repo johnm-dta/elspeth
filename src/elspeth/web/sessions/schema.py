@@ -36,8 +36,8 @@ _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 #   permanent audit fact. Unconditional UPDATE ABORT, no PENDING-row
 #   carve-out (completion events have no recovery path).
 # * ``trg_composer_completion_events_no_delete`` — same posture for DELETE.
-#   Both triggers ship from day 1, correcting the Phase 18 omission
-#   tracked at filigree elspeth-9aba8da942.
+#   Both triggers ship from day 1 — completion events have no recovery
+#   path, unlike the ``interpretation_events`` PENDING-row carve-out.
 # * ``trg_chat_messages_immutable_content`` — ``chat_messages.content`` is
 #   append-only once written.
 # * ``trg_chat_messages_no_delete`` — ``chat_messages`` rows cannot be
@@ -64,7 +64,11 @@ _REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
 
 
 class SessionSchemaError(RuntimeError):
-    """Raised when a session database does not match the current V0 schema."""
+    """Raised when a session database does not match the current schema epoch.
+
+    Actionable instruction is always the same: delete the session DB file and
+    restart. Pre-release ELSPETH has no migration pathway for session DBs.
+    """
 
 
 def initialize_session_schema(engine: Engine) -> None:
@@ -455,7 +459,7 @@ def _dialect_where(index: Any, dialect_key: str) -> Any:
 
 def _schema_error(detail: str, *, expected: object | None = None, actual: object | None = None) -> NoReturn:
     message = (
-        "Session database schema does not match the current V0 schema. "
+        f"Session database schema does not match SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. "
         "Delete the old session database and restart; pre-release ELSPETH "
         f"does not migrate web session databases. Detail: {detail}."
     )

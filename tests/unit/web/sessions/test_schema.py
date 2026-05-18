@@ -49,7 +49,7 @@ def test_initialize_session_schema_rejects_legacy_alembic_database() -> None:
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('007')"))
         conn.execute(text("CREATE TABLE _alembic_tmp_blobs (id VARCHAR PRIMARY KEY)"))
 
-    with pytest.raises(SessionSchemaError, match="current V0 schema"):
+    with pytest.raises(SessionSchemaError, match="SESSION_SCHEMA_EPOCH"):
         initialize_session_schema(eng)
 
 
@@ -58,7 +58,7 @@ def test_initialize_session_schema_rejects_partial_stale_schema() -> None:
     with eng.begin() as conn:
         conn.execute(text("CREATE TABLE sessions (id VARCHAR PRIMARY KEY)"))
 
-    with pytest.raises(SessionSchemaError, match="current V0 schema"):
+    with pytest.raises(SessionSchemaError, match="SESSION_SCHEMA_EPOCH"):
         initialize_session_schema(eng)
 
 

@@ -28,6 +28,7 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     SESSION_SCHEMA_EPOCH,
     composer_completion_events_table,
+    composition_states_table,
     metadata,
     sessions_table,
 )
@@ -54,16 +55,17 @@ def test_table_present_in_engine(engine) -> None:
     assert "composer_completion_events" in inspector.get_table_names()
 
 
-def test_session_schema_epoch_bumped_to_4() -> None:
-    """Phase 6 schema-change cohort: SESSION_SCHEMA_EPOCH must bump from 3 to 4.
+def test_session_schema_epoch_is_post_phase_6a_completion() -> None:
+    """SESSION_SCHEMA_EPOCH must be at least the Phase-6A bump.
 
     Per project_db_migration_policy, bumping the epoch is the mechanical signal
-    that triggers the operator's DB-delete action on next deploy. Without the
-    bump, live deployments crash mid-request on first INSERT — see filigree
-    finding elspeth-c03e9bfcf8 for the analogous Landscape-DB defect.
+    that triggers the operator's DB-delete action on next deploy. The Phase-6A
+    cohort took the epoch to 4 (table added); a Phase-6A follow-up cohort took
+    it to 5 (per-event-type partial CHECKs added — SQLite cannot ALTER
+    constraints, so the constraint change is a fresh-schema bump).
     """
 
-    assert SESSION_SCHEMA_EPOCH == 4
+    assert SESSION_SCHEMA_EPOCH >= 4
 
 
 def test_user_version_stamped_with_new_epoch(engine) -> None:
@@ -94,14 +96,40 @@ def _insert_session(conn, session_id: str = "s1", user_id: str = "user1") -> Non
     )
 
 
+def _seed_composition_state(
+    conn,
+    state_id: str = "cs1",
+    session_id: str = "s1",
+) -> None:
+    """Insert a minimal valid composition_states row.
+
+    Required by the per-event-type CHECK constraints on
+    ``composer_completion_events`` — every event row references a
+    composition state, and the schema-level NOT NULL is enforced by
+    ``ck_composer_completion_events_composition_state_id_required``.
+    """
+    conn.execute(
+        insert(composition_states_table).values(
+            id=state_id,
+            session_id=session_id,
+            version=1,
+            is_valid=True,
+            created_at=datetime.now(UTC),
+            provenance="tool_call",
+        )
+    )
+
+
 def test_check_constraint_rejects_invalid_event_type(engine) -> None:
     with engine.connect() as conn:
         _insert_session(conn)
+        _seed_composition_state(conn)
         with pytest.raises(IntegrityError):
             conn.execute(
                 insert(composer_completion_events_table).values(
                     id="e1",
                     session_id="s1",
+                    composition_state_id="cs1",
                     event_type="invalid_type",
                     actor="user1",
                     created_at=datetime.now(UTC),
@@ -113,10 +141,12 @@ def test_check_constraint_rejects_invalid_event_type(engine) -> None:
 def test_check_constraint_accepts_mark_ready_for_review(engine) -> None:
     with engine.connect() as conn:
         _insert_session(conn)
+        _seed_composition_state(conn)
         conn.execute(
             insert(composer_completion_events_table).values(
                 id="e1",
                 session_id="s1",
+                composition_state_id="cs1",
                 event_type="mark_ready_for_review",
                 actor="user1",
                 created_at=datetime.now(UTC),
@@ -130,16 +160,130 @@ def test_check_constraint_accepts_mark_ready_for_review(engine) -> None:
 def test_check_constraint_accepts_export_yaml(engine) -> None:
     with engine.connect() as conn:
         _insert_session(conn)
+        _seed_composition_state(conn)
         conn.execute(
             insert(composer_completion_events_table).values(
                 id="e2",
                 session_id="s1",
+                composition_state_id="cs1",
                 event_type="export_yaml",
                 actor="user1",
                 created_at=datetime.now(UTC),
             )
         )
         conn.commit()
+
+
+# ---- per-event-type partial CHECK constraints ----
+
+
+def test_mark_ready_for_review_requires_payload_digest(engine) -> None:
+    """mark_ready_for_review without payload_digest must fail the partial CHECK."""
+
+    with engine.connect() as conn:
+        _insert_session(conn)
+        _seed_composition_state(conn)
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id="e1",
+                    session_id="s1",
+                    composition_state_id="cs1",
+                    event_type="mark_ready_for_review",
+                    actor="user1",
+                    created_at=datetime.now(UTC),
+                    payload_digest=None,
+                    expires_at=datetime.now(UTC),
+                )
+            )
+            conn.commit()
+
+
+def test_mark_ready_for_review_requires_expires_at(engine) -> None:
+    """mark_ready_for_review without expires_at must fail the partial CHECK."""
+
+    with engine.connect() as conn:
+        _insert_session(conn)
+        _seed_composition_state(conn)
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id="e1",
+                    session_id="s1",
+                    composition_state_id="cs1",
+                    event_type="mark_ready_for_review",
+                    actor="user1",
+                    created_at=datetime.now(UTC),
+                    payload_digest="sha256:" + ("ab" * 32),
+                    expires_at=None,
+                )
+            )
+            conn.commit()
+
+
+def test_export_yaml_rejects_payload_digest(engine) -> None:
+    """export_yaml carrying a payload_digest must fail — payload_digest is
+    a mark_ready_for_review-specific column."""
+
+    with engine.connect() as conn:
+        _insert_session(conn)
+        _seed_composition_state(conn)
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id="e1",
+                    session_id="s1",
+                    composition_state_id="cs1",
+                    event_type="export_yaml",
+                    actor="user1",
+                    created_at=datetime.now(UTC),
+                    payload_digest="sha256:" + ("ab" * 32),
+                    expires_at=None,
+                )
+            )
+            conn.commit()
+
+
+def test_export_yaml_rejects_expires_at(engine) -> None:
+    """export_yaml carrying an expires_at must fail — expires_at is a
+    mark_ready_for_review-specific column."""
+
+    with engine.connect() as conn:
+        _insert_session(conn)
+        _seed_composition_state(conn)
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id="e1",
+                    session_id="s1",
+                    composition_state_id="cs1",
+                    event_type="export_yaml",
+                    actor="user1",
+                    created_at=datetime.now(UTC),
+                    payload_digest=None,
+                    expires_at=datetime.now(UTC),
+                )
+            )
+            conn.commit()
+
+
+def test_composition_state_id_required(engine) -> None:
+    """composition_state_id is NOT NULL for both event types."""
+
+    with engine.connect() as conn:
+        _insert_session(conn)
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id="e1",
+                    session_id="s1",
+                    composition_state_id=None,
+                    event_type="export_yaml",
+                    actor="user1",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            conn.commit()
 
 
 # ---- append-only triggers ----
@@ -150,10 +294,12 @@ def test_update_trigger_blocks_mutation(engine) -> None:
 
     with engine.connect() as conn:
         _insert_session(conn)
+        _seed_composition_state(conn)
         conn.execute(
             insert(composer_completion_events_table).values(
                 id="e1",
                 session_id="s1",
+                composition_state_id="cs1",
                 event_type="export_yaml",
                 actor="user1",
                 created_at=datetime.now(UTC),
@@ -168,16 +314,17 @@ def test_update_trigger_blocks_mutation(engine) -> None:
 def test_delete_trigger_blocks_removal(engine) -> None:
     """Audit table is append-only — DELETE must raise unconditionally.
 
-    Phase 6 ships both UPDATE and DELETE triggers from day 1, correcting the
-    Phase 18 omission tracked at filigree elspeth-9aba8da942.
+    Phase 6 ships both UPDATE and DELETE triggers from day 1.
     """
 
     with engine.connect() as conn:
         _insert_session(conn)
+        _seed_composition_state(conn)
         conn.execute(
             insert(composer_completion_events_table).values(
                 id="e1",
                 session_id="s1",
+                composition_state_id="cs1",
                 event_type="export_yaml",
                 actor="user1",
                 created_at=datetime.now(UTC),
@@ -201,10 +348,12 @@ def test_session_fk_cascade_is_blocked_by_append_only_trigger(engine) -> None:
 
     with engine.connect() as conn:
         _insert_session(conn)
+        _seed_composition_state(conn)
         conn.execute(
             insert(composer_completion_events_table).values(
                 id="e1",
                 session_id="s1",
+                composition_state_id="cs1",
                 event_type="export_yaml",
                 actor="user1",
                 created_at=datetime.now(UTC),

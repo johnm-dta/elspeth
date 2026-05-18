@@ -188,14 +188,16 @@ class WebSettings(BaseModel):
     # ``docs/guides/sharing-pipelines.md`` (Task 12 of plan 19a) with the
     # generation step ``openssl rand -base64 32``.
     #
-    # 32-byte minimum mirrors HMAC-SHA256's block size. Longer keys
-    # (e.g. the 44-char base64 string from ``openssl rand -base64 32``
-    # interpreted as utf-8 bytes) are accepted as opaque key material.
+    # 32-byte minimum matches HMAC-SHA256's digest (output) size — the
+    # natural entropy floor for a tag of this hash, and the byte count
+    # produced by the documented operator recipe ``openssl rand -base64 32``
+    # after base64 decode. (HMAC-SHA256's *block* size is 64 bytes; the
+    # floor here is the digest size, not the block size.) Longer keys
+    # are accepted as opaque key material.
     #
     # Rotating this key invalidates EVERY outstanding shareable link.
-    # There is no dual-key acceptance window in v1; see plan 19a §"Scope
-    # boundaries" → "Out of scope: Key rotation tooling."
-    # DC-2 FIX-L (Phase 6A gap-analysis):
+    # There is no dual-key acceptance window in v1 — key rotation tooling
+    # is out of scope.
     #
     # ``SecretBytes`` masks the value in ``repr()`` so tracebacks, debug
     # logs, and REPL inspection do not exfiltrate the HMAC key. Pydantic v2's
@@ -283,14 +285,15 @@ class WebSettings(BaseModel):
     @field_validator("shareable_link_signing_key", mode="before")
     @classmethod
     def _decode_signing_key_from_string(cls, v: object) -> object:
-        """DC-2 FIX-L [MEDIUM] — explicit base64 decoding for str inputs.
+        """Explicit base64 decoding for str inputs.
 
         Env-var ingestion (``ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY``)
         delivers the key as a ``str``. With ``strict=True`` on the field,
         Pydantic would reject the str outright; without it, Pydantic would
-        silently utf-8-encode the str — and that's the bug DC-2 flagged:
-        ``'a' * 30 + 'ñ'`` (31 characters) encodes to 32 utf-8 bytes and
-        slips past the byte-length floor with 31 characters of entropy.
+        silently utf-8-encode the str — and that is the bug: a 31-character
+        string containing a 2-byte codepoint
+        (``'a' * 30 + 'ñ'``) encodes to 32 utf-8 bytes and slips past the
+        byte-length floor with only 31 characters of entropy.
 
         The documented operator recipe is ``openssl rand -base64 32`` (44-char
         base64 string, 32 raw bytes of entropy). We decode str as base64
@@ -318,10 +321,12 @@ class WebSettings(BaseModel):
     @field_validator("shareable_link_signing_key")
     @classmethod
     def _signing_key_min_length(cls, v: SecretBytes) -> SecretBytes:
-        """Phase 6A — reject signing keys shorter than HMAC-SHA256's block size.
+        """Phase 6A — reject signing keys shorter than HMAC-SHA256's digest size.
 
-        32 bytes is the minimum; ``openssl rand -base64 32`` produces 44 utf-8
-        characters that base64-decode to exactly 32 raw bytes — the floor.
+        32 bytes is the minimum — the digest (output) size of HMAC-SHA256
+        and the natural entropy floor for a tag produced by this hash.
+        ``openssl rand -base64 32`` produces 44 utf-8 characters that
+        base64-decode to exactly 32 raw bytes — the floor.
         Shorter keys reduce the effective entropy of the HMAC tag and make
         brute-force token forgery easier; pre-release ELSPETH refuses to start
         a service with such a key.
@@ -456,8 +461,7 @@ class WebSettings(BaseModel):
 
     @model_validator(mode="after")
     def _reject_known_weak_signing_key(self) -> WebSettings:
-        """DC-2 FIX-L [LOW] — refuse uniform-byte placeholder signing keys on
-        non-loopback hosts.
+        """Refuse uniform-byte placeholder signing keys on non-loopback hosts.
 
         Test fixtures across the suite use ``b'\\x00' * 32`` and ``b'0' * 32``
         as convenient 32-byte placeholders. Those values are operationally

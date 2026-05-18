@@ -27,11 +27,22 @@ import type {
 import { validateAuditReadinessSnapshot } from "./auditReadiness";
 import { authHeaders, parseResponse } from "./client";
 
-function unexpectedShape(status: number, where: string): ApiError {
-  return {
+function unexpectedShape(status: number, where: string, cause?: unknown): ApiError {
+  // ``cause`` (optional): attach the inner validation exception so server-
+  // side debugging keeps the original locator information (e.g. "row 2
+  // status not one of..."). Wire-facing ``detail`` stays the labelled
+  // summary; ``cause`` is an out-of-band breadcrumb readers can inspect
+  // in the browser console / error reporter. ApiError carries it as a
+  // free-form field — we deliberately do not promote it into the public
+  // wire-error type because consumers should not branch on it.
+  const err: ApiError = {
     status,
     detail: `Unexpected response shape from ${where} endpoint`,
   };
+  if (cause !== undefined) {
+    (err as ApiError & { cause?: unknown }).cause = cause;
+  }
+  return err;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -138,8 +149,12 @@ function validateSharedInspectResponse(body: unknown, status: number): SharedIns
   let audit_readiness;
   try {
     audit_readiness = validateAuditReadinessSnapshot(body.audit_readiness, status);
-  } catch (_exc) {
-    throw unexpectedShape(status, "shared-inspect");
+  } catch (exc) {
+    // Preserve the inner validation cause (e.g. "row 2 status not one
+    // of...") on the relabelled ApiError so operators debugging a wire-
+    // shape rejection have the locator instead of just the endpoint
+    // label.
+    throw unexpectedShape(status, "shared-inspect", exc);
   }
   return {
     session_id: body.session_id,

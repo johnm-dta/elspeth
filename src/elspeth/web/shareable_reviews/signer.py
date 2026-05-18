@@ -18,8 +18,9 @@ Threat-model discipline:
   comparison. New discipline at the boundary; the exporter's ``.hexdigest()``
   pattern is NOT a precedent here because the exporter does not verify at
   attacker-controlled boundaries. Existing precedents for ``compare_digest``
-  at boundary verifiers: ``core/payload_store.py:111,163``,
-  ``web/blobs/service.py:759``.
+  at boundary verifiers in this project: ``core/payload_store.py`` and
+  ``web/blobs/service.py`` (both compare caller-supplied content hashes
+  against stored hashes — the same pattern this signer follows).
 * The 32-byte signing-key floor is enforced both at the WebSettings field
   validator AND at the signer's constructor — defense in depth. Direct unit
   construction (e.g. ``ShareTokenSigner(b"short")``) must fail fast.
@@ -48,13 +49,19 @@ from typing import Final
 from uuid import UUID
 
 # Closed enum: the v1 envelope schema. Bumping this requires landing a new
-# signer version side-by-side and is out-of-scope for Phase 6A. See plan 19a
-# §"Scope boundaries" → "Out of scope: Key rotation tooling" for adjacent
-# forward-compat discussion.
+# signer version side-by-side; do NOT alter v1 verify semantics in place.
+# Adjacent forward-compat concern: key rotation tooling is out of scope —
+# rotating the signing key invalidates EVERY outstanding token.
 _PAYLOAD_VERSION: Final[int] = 1
 
 # HMAC-SHA256 emits a 32-byte digest. The envelope appends the raw bytes.
 _SIGNATURE_BYTES: Final[int] = 32
+
+# Existing precedents in the project for `hmac.compare_digest` at boundary
+# verifiers — both compare a caller-supplied content_hash against a stored
+# hash, the same pattern this signer follows:
+#   * core/payload_store.py (content-hash verification on retrieve)
+#   * web/blobs/service.py  (content-hash verification on share-link consume)
 
 # Length-prefix byte count (4 BE bytes ⇒ up to 4 GiB payload). The payload
 # is canonical-JSON of a small dict, so a 4-byte prefix is comfortable
@@ -62,7 +69,10 @@ _SIGNATURE_BYTES: Final[int] = 32
 _LENGTH_PREFIX_BYTES: Final[int] = 4
 
 # Signing-key floor: matches WebSettings.shareable_link_signing_key validator.
-# Defense in depth.
+# 32 bytes is HMAC-SHA256's digest (output) size — the natural entropy floor
+# for a tag produced by this hash. (NB: HMAC-SHA256's block size is 64 bytes;
+# the floor here is the digest size, not the block size.) Matches the
+# documented operator recipe `openssl rand -base64 32`. Defense in depth.
 _MIN_SIGNING_KEY_BYTES: Final[int] = 32
 
 

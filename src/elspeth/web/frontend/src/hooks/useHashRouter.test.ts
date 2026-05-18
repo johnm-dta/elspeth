@@ -91,6 +91,28 @@ describe("useHashRouter Phase 3B fragment migration", () => {
       screen.getByRole("dialog", { name: /pipeline graph/i }),
     ).toBeInTheDocument();
   });
+
+  it("defers cold-load graph actions until enabled", async () => {
+    const handler = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
+    window.history.replaceState(null, "", "#/sess-1/graph");
+
+    const { rerender } = renderHook(
+      ({ enabled }) => useHashRouter({ enabled }),
+      { initialProps: { enabled: false } },
+    );
+    await act(async () => {});
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe("#/sess-1/graph");
+
+    rerender({ enabled: true });
+    await act(async () => {});
+
+    expect(handler).toHaveBeenCalled();
+    expect(window.location.hash).toBe("#/sess-1");
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
+  });
 });
 
 describe("useHashRouter — Batch 2 fixes", () => {

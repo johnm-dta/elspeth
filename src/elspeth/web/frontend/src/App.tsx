@@ -77,9 +77,12 @@ function App() {
   // in this mode (see useHashRouter._isSharedRoute), so the hash is
   // preserved across the entire shared-view lifecycle.
   const sharedToken = useSharedToken();
+  const { isAuthenticated } = useAuth();
 
   // Sync URL hash ↔ session/tab state for deep linking & back/forward
-  const { redirectToast } = useHashRouter();
+  const { redirectToast } = useHashRouter({
+    enabled: isAuthenticated && sharedToken === null,
+  });
   useSessionLifecycle();
 
   const createSession = useSessionStore((s) => s.createSession);
@@ -89,7 +92,6 @@ function App() {
   const applyRecoveredState = useSessionStore((s) => s.applyRecoveredState);
   const discardRecovery = useSessionStore((s) => s.discardRecovery);
   const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
-  const { isAuthenticated } = useAuth();
   const bootstrapPrefs = usePreferencesStore((s) => s.bootstrap);
 
   useEffect(() => {

@@ -76,10 +76,16 @@ function sessionDbPathForDirectCleanup(): string | null {
   const configured = process.env.PLAYWRIGHT_SESSION_DB_PATH;
   if (configured) return resolve(configured);
 
-  // Local Playwright config starts the backend from the repo root with
-  // ELSPETH_WEB__data_dir=./.e2e-data. Source-checkout staging on this host
-  // uses /home/john/elspeth/data/sessions.db; other staging targets should set
-  // PLAYWRIGHT_SESSION_DB_PATH explicitly when a reused account needs reset.
+  const configuredDataDir = process.env.PLAYWRIGHT_E2E_DATA_DIR;
+  if (configuredDataDir) {
+    return resolve(configuredDataDir, "sessions.db");
+  }
+
+  // Local Playwright config starts the backend from the repo root, but passes
+  // an absolute ELSPETH_WEB__data_dir anchored to the frontend directory.
+  // Source-checkout staging on this host uses /home/john/elspeth/data/sessions.db;
+  // other staging targets should set PLAYWRIGHT_SESSION_DB_PATH explicitly when
+  // a reused account needs reset.
   if (process.env.PLAYWRIGHT_BACKEND_BASE_URL) {
     const sourceCheckoutStagingDb = "/home/john/elspeth/data/sessions.db";
     const stagingBase =
@@ -90,7 +96,7 @@ function sessionDbPathForDirectCleanup(): string | null {
       ? sourceCheckoutStagingDb
       : null;
   }
-  return resolve(process.cwd(), "../../../..", ".e2e-data", "sessions.db");
+  return resolve(process.cwd(), ".e2e-data", "sessions.db");
 }
 
 async function clearBannerDismissalDirectly(
@@ -176,7 +182,8 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     // ComposerPage.createSession() waits for aria-label="Chat panel", which
     // only matches the freeform/empty body. In guided mode the body's
     // aria-label is "Guided composer" — so click + wait inline here.
-    await page.getByRole("button", { name: "Create new session" }).click();
+    await page.getByRole("button", { name: /session switcher/i }).click();
+    await page.getByRole("menuitem", { name: /new session/i }).click();
     await page
       .getByLabel(/guided composer/i)
       .waitFor({ state: "visible" });
@@ -285,7 +292,8 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
   }) => {
     const composer = new ComposerPage(page);
     await composer.goto();
-    await page.getByRole("button", { name: "Create new session" }).click();
+    await page.getByRole("button", { name: /session switcher/i }).click();
+    await page.getByRole("menuitem", { name: /new session/i }).click();
     await page
       .getByLabel(/guided composer/i)
       .waitFor({ state: "visible" });

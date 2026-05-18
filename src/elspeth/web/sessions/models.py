@@ -55,7 +55,13 @@ from sqlalchemy.types import JSON
 #        accepting a deferred proposal.
 #   4 → composer_completion_events_table added (Phase 6A completion
 #        gestures: mark_ready_for_review, export_yaml audit events).
-SESSION_SCHEMA_EPOCH = 4
+#   5 → composer_completion_events gains per-event-type partial CHECK
+#        constraints (Phase 6A post-merge hardening): payload_digest +
+#        expires_at are NOT NULL iff event_type='mark_ready_for_review';
+#        composition_state_id is NOT NULL for both event types. SQLite
+#        does not support ALTER TABLE ADD CONSTRAINT, so the constraint
+#        change is a fresh-schema bump.
+SESSION_SCHEMA_EPOCH = 5
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -700,6 +706,34 @@ composer_completion_events_table = Table(
         "event_type IN ('mark_ready_for_review', 'export_yaml')",
         name="ck_composer_completion_events_type",
     ),
+    # Per-event-type partial NULL/NOT-NULL constraints.
+    #
+    # ``payload_digest`` and ``expires_at`` are nullable at the column
+    # level because ``export_yaml`` rows don't carry them — but they MUST
+    # be present for ``mark_ready_for_review`` rows (the audit row would
+    # otherwise be useless: no blob pointer, no token expiry). The
+    # ``(A) = (B IS NOT NULL)`` idiom asserts the iff relation:
+    #   1 = 1  (event=mark... and digest present): OK
+    #   0 = 0  (event=export and digest absent):   OK
+    #   1 = 0  (event=mark... and digest absent):  CHECK fails — bug
+    #   0 = 1  (event=export and digest present):  CHECK fails — bug
+    #
+    # ``composition_state_id`` is the audit-anchor for both event types
+    # (the state being marked / the state being exported). Both writers
+    # populate it; the constraint pins that contract at the DB level so
+    # a future writer cannot silently drop it.
+    CheckConstraint(
+        "(event_type = 'mark_ready_for_review') = (payload_digest IS NOT NULL)",
+        name="ck_composer_completion_events_digest_iff_mark_ready",
+    ),
+    CheckConstraint(
+        "(event_type = 'mark_ready_for_review') = (expires_at IS NOT NULL)",
+        name="ck_composer_completion_events_expires_iff_mark_ready",
+    ),
+    CheckConstraint(
+        "composition_state_id IS NOT NULL",
+        name="ck_composer_completion_events_composition_state_id_required",
+    ),
 )
 
 Index(
@@ -798,10 +832,9 @@ event.listen(
 # are **unconditional ABORT**: every recorded mark-ready-for-review or YAML
 # export is a permanent audit fact.
 #
-# Shipping both UPDATE and DELETE triggers from day 1 corrects the Phase 18
-# omission tracked at filigree elspeth-9aba8da942 (where the
-# ``interpretation_events`` DELETE trigger was added in a follow-up rather
-# than the original cohort).
+# Both triggers ship from day 1 — completion events have no recovery
+# path, unlike the ``interpretation_events`` PENDING-row carve-out where a
+# follow-up landed the DELETE trigger after the original cohort.
 event.listen(
     composer_completion_events_table,
     "after_create",
@@ -884,7 +917,6 @@ runs_table = Table(
         ["composition_states.id", "composition_states.session_id"],
         name="fk_runs_state_session",
     ),
-    # elspeth-0de989c56d: four-value terminal taxonomy.
     # The constraint mirrors SessionRunStatus in web/sessions/protocol.py;
     # adding a value to the Literal without updating this CheckConstraint
     # would let the dataclass validator pass while the DB rejects the row,

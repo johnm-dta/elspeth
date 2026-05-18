@@ -203,6 +203,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
           aria-haspopup="menu"
           aria-expanded={open}
           aria-controls={MENU_ID}
+          aria-label={`Session switcher: ${triggerLabel}`}
           onClick={() => setOpen((v) => !v)}
           className="header-session-switcher-trigger"
         >

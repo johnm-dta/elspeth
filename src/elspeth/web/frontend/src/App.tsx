@@ -27,7 +27,9 @@ import { useSessionStore } from "./stores/sessionStore";
 import { useExecutionStore } from "./stores/executionStore";
 import { usePreferencesStore } from "./stores/preferencesStore";
 import { useHashRouter } from "./hooks/useHashRouter";
+import { useSharedToken } from "./hooks/useSharedToken";
 import { useAuth } from "./hooks/useAuth";
+import { SharedInspectView } from "./components/shared/SharedInspectView";
 import { useSessionLifecycle } from "./hooks/useSession";
 import {
   OPEN_GRAPH_MODAL_EVENT,
@@ -68,6 +70,13 @@ function App() {
     [],
   );
   const healthCheckRef = useRef<number | null>(null);
+
+  // Phase 6B Task 8: shared-inspect route detection. When the URL hash is
+  // `#/shared/{token}`, render the read-only inspect view and short-circuit
+  // the regular composer UI. The session router's URL-writes are dormant
+  // in this mode (see useHashRouter._isSharedRoute), so the hash is
+  // preserved across the entire shared-view lifecycle.
+  const sharedToken = useSharedToken();
 
   // Sync URL hash ↔ session/tab state for deep linking & back/forward
   const { redirectToast } = useHashRouter();
@@ -243,6 +252,21 @@ function App() {
       }
     };
   }, [checkHealth]);
+
+  // Phase 6B Task 8 short-circuit: if the URL hash is `#/shared/{token}`,
+  // render the read-only inspect view inside AuthGuard. The token is a
+  // CAPABILITY, not an authenticator — the recipient must still be logged
+  // in. AuthGuard preserves the hash through the login redirect, so the
+  // reviewer lands back here after authenticating.
+  if (sharedToken !== null) {
+    return (
+      <AuthGuard>
+        <div className="app-root app-root--shared-inspect">
+          <SharedInspectView token={sharedToken} />
+        </div>
+      </AuthGuard>
+    );
+  }
 
   return (
     <AuthGuard>

@@ -35,6 +35,17 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
+
+# Phase 8 cohort-emit helper (Sub-task 7e — B3 cohort b1). The opt-out
+# audit row is committed inside ``record_session_interpretation_opt_out``
+# below, and the helper must fire only on the INSERT path (not the F-29
+# idempotent re-fire). The helper module lives under ``web/composer``
+# per project plan; the sessions→composer import direction follows the
+# precedent set by ``_auto_title.py``, ``_guided_step_chat.py``, and
+# ``converters.py``. The W5 try/except wrap inside the helper preserves
+# the audit-primacy rule (a broken OTel exporter must not 500 a POST
+# whose audit row already wrote).
+from elspeth.web.composer.telemetry_phase8 import record_interpretation_opt_out
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
     audit_access_log_table,
@@ -2359,13 +2370,19 @@ class SessionServiceImpl:
         ``interpretation_events`` table is the single source of truth for
         all interpretation-related decisions.
 
-        Telemetry: NONE — composition-time user decisions are audit-primary;
-        no ephemeral operational signal required.
+        Telemetry: ``composer.interpretation.opt_out_total`` fires on the
+        INSERT path only (B3 cohort b1 — Sub-task 7e in Phase 8 plan). The
+        F-29 idempotent re-fire returns the existing row without writing a
+        new audit row, so emitting there would over-count and break the
+        superset rule (the counter must aggregate over audit rows, not over
+        route hits). Emission happens AFTER the transaction commits, in
+        line with the ``record_audit_grade_view`` pattern elsewhere in
+        this module.
         """
         now = self._ensure_utc(opted_out_at) if opted_out_at is not None else self._now()
         sid = str(session_id)
 
-        def _sync() -> InterpretationEventRecord:
+        def _sync() -> tuple[InterpretationEventRecord, bool]:
             with self._engine.begin() as conn, self._session_write_lock(conn, sid):
                 # F-29: idempotency. SELECT inside the lock so the
                 # SELECT-then-INSERT sequence is atomic against concurrent
@@ -2381,7 +2398,7 @@ class SessionServiceImpl:
                     .limit(1)
                 ).one_or_none()
                 if existing is not None:
-                    return _interpretation_event_record_from_row(existing)
+                    return _interpretation_event_record_from_row(existing), False
 
                 event_id = str(uuid.uuid4())
                 conn.execute(
@@ -2414,9 +2431,20 @@ class SessionServiceImpl:
                     update(sessions_table).where(sessions_table.c.id == sid).values(interpretation_review_disabled=True, updated_at=now)
                 )
                 row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
-                return _interpretation_event_record_from_row(row)
+                return _interpretation_event_record_from_row(row), True
 
-        return cast(InterpretationEventRecord, await self._run_sync(_sync))
+        record, was_inserted = cast(
+            "tuple[InterpretationEventRecord, bool]",
+            await self._run_sync(_sync),
+        )
+        # B3 cohort b1 — Phase 5b interpretation opt-out (Sub-task 7e).
+        # Helper-based emit. The helper applies W5 wrapping so a broken
+        # OTel exporter cannot 500 a POST whose audit row already wrote.
+        # Fires only on the INSERT path; idempotent re-fires do not emit
+        # (no new audit row → no aggregate increment, per superset rule).
+        if was_inserted:
+            record_interpretation_opt_out(self._telemetry)
+        return record
 
     async def upsert_skill_markdown_history(
         self,

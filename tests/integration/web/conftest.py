@@ -497,6 +497,18 @@ def audit_readiness_mismatched_provider_session_id(
     )
 
 
+# ---------------------------------------------------------------------------
+# Shareable-reviews integration fixtures (Phase 6A Task 6)
+# ---------------------------------------------------------------------------
+#
+# Shareable-reviews tests reuse the audit-readiness app harness (same
+# ``create_app`` path, same passthrough composition fixture). For the
+# "recipient is not the creator" test, the alice-authed client mints a
+# token, then the test swaps ``app.dependency_overrides[get_current_user]``
+# to return ``bob`` and re-issues the GET — same app, same signing key,
+# same payload store. No additional fixture needed.
+
+
 @pytest.fixture
 def inject_commit_OperationalError() -> object:
     """Integration-scope one-shot SQLAlchemy COMMIT failure hook."""

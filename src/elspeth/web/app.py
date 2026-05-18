@@ -57,6 +57,10 @@ from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
+from elspeth.web.shareable_reviews.service import ShareableReviewService
+from elspeth.web.shareable_reviews.signer import ShareTokenSigner
+from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -251,6 +255,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_service=session_service,
         scoped_secret_resolver=app.state.scoped_secret_resolver,
         settings=settings,
+    )
+
+    # ShareableReviewService — Phase 6A completion gestures.
+    #
+    # Depends on:
+    #   * ``execution_service`` (for mark-time validation)
+    #   * ``readiness_service`` (for the frozen-at-mark-time audit-readiness
+    #     snapshot embedded in the share blob)
+    #   * the sessions-DB engine (for ``composer_completion_events_table``
+    #     audit writes)
+    #   * a ``FilesystemPayloadStore`` (for the content-addressed snapshot
+    #     blob — created here, not shared with ``BlobServiceImpl`` because
+    #     ``BlobServiceImpl`` owns its own internal payload store with a
+    #     different retention semantics)
+    #   * the ``ShareTokenSigner`` primitive (HMAC over WebSettings'
+    #     required ``shareable_link_signing_key``)
+    payload_store = FilesystemPayloadStore(settings.get_payload_store_path())
+    app.state.payload_store = payload_store
+    share_token_signer = ShareTokenSigner(settings.shareable_link_signing_key)
+    app.state.share_token_signer = share_token_signer
+    app.state.shareable_review_service = ShareableReviewService(
+        session_service=session_service,
+        execution_service=execution_service,
+        readiness_service=app.state.readiness_service,
+        signer=share_token_signer,
+        settings=settings,
+        sessions_db_engine=app.state.session_engine,
+        payload_store=payload_store,
     )
 
     # Periodic orphan cleanup — catches runs orphaned by SIGKILL/OOM
@@ -613,6 +645,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.include_router(create_secrets_router())
     app.include_router(create_execution_router())
     app.include_router(create_audit_readiness_router())
+    app.include_router(create_shareable_reviews_router())
 
     # --- Seam contract D: RunAlreadyActiveError -> 409 with error_type ---
     @app.exception_handler(RunAlreadyActiveError)

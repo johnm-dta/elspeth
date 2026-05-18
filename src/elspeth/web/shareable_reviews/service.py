@@ -75,11 +75,13 @@ from elspeth.web.shareable_reviews.signer import (
     ShareTokenSigner,
 )
 
-# Path-only share URL — the frontend prepends ``location.origin`` to obtain
-# an absolute URL it can copy to the clipboard. Avoids adding yet another
-# deployment-base-URL setting to ``WebSettings``; the recipient's browser
-# resolves the same path against whatever origin served the inspect page.
-_SHARE_URL_PREFIX = "/shared/"
+# Path-only share URL — the frontend's `location.origin` plus this string
+# resolves to a full clickable URL. Avoids adding yet another deployment-
+# base-URL setting to ``WebSettings``. The ``/#/shared/`` shape matches the
+# SPA hash route documented in plan 19b §"Sibling work in 19b" — the
+# recipient's browser opens the SPA at the hash, which calls the
+# ``GET /api/sessions/shared/{token}`` backend route.
+_SHARE_URL_PREFIX = "/#/shared/"
 
 # All payload-digest values on the wire carry the ``sha256:`` prefix so the
 # hash algorithm is self-describing. The payload store accepts only the raw
@@ -200,11 +202,22 @@ def _build_snapshot(
     # mint-time live in the token envelope (and the audit row), not here,
     # so two re-mints over an unchanged composition yield the same
     # payload_digest.
+    #
+    # The readiness snapshot is normalised: its ``checked_at`` is pinned
+    # to the composition state's ``created_at`` rather than the live
+    # ``datetime.now()``. Without this normalisation the
+    # ``AuditReadinessSnapshot`` would carry a fresh wall-clock on each
+    # re-mint, breaking digest stability even on an otherwise unchanged
+    # composition. Pinning to state.created_at is semantically defensible:
+    # the readiness panel describes "what readiness signal accompanied
+    # the state when it was committed," not "when was this query run."
+    audit_readiness_dict = audit_readiness.model_dump(mode="json")
+    audit_readiness_dict["checked_at"] = state_record.created_at.isoformat()
     blob: _BlobShape = {
         "pipeline_metadata": pipeline_metadata,
         "composition_snapshot": composition_dict,
         "yaml": yaml_text,
-        "audit_readiness": audit_readiness.model_dump(mode="json"),
+        "audit_readiness": audit_readiness_dict,
         "created_by_user_id": created_by_user_id,
     }
     canonical_str = canonical_json(blob)

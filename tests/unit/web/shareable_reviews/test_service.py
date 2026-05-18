@@ -66,7 +66,8 @@ class _StateRecord:
     """Subset of CompositionStateRecord the service needs.
 
     The real CompositionStateRecord has many more fields; this shim carries
-    only what ``state_from_record``-equivalent paths in the service touch.
+    only what ``state_from_record``-equivalent paths and the service's
+    blob-normalisation path touch.
     """
 
     id: UUID
@@ -78,6 +79,7 @@ class _StateRecord:
     outputs: Any
     source: Any
     composer_meta: Any
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +135,7 @@ def state_record(session_id: UUID, state_id: UUID) -> _StateRecord:
         outputs=(),
         source=None,
         composer_meta=None,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
 

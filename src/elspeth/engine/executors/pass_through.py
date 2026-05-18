@@ -48,25 +48,13 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.schema_contract import PipelineRow
 
 # Module-level counter — both call sites import this module and share the
-# same instrument.  Constructed lazily (on first call to verify_pass_through)
-# rather than at module-import time so the counter binds to whichever
-# MeterProvider is globally set when the first violation is checked — not to
-# whatever happened to be the global provider when this module was first
-# imported.  After B1-r3 a real MeterProvider is always installed before the
-# engine runs, but tests may import this module before the provider is set.
-# Lazy initialization guarantees the counter binds to the real provider and
-# is visible in the test's metric reader.
-_VIOLATIONS_COUNTER: metrics.Counter | None = None
-
-
-def _get_violations_counter() -> metrics.Counter:
-    global _VIOLATIONS_COUNTER
-    if _VIOLATIONS_COUNTER is None:
-        _VIOLATIONS_COUNTER = metrics.get_meter(__name__).create_counter(
-            "pass_through_cross_check_violations_total",
-            description="Count of passes_through_input=True transforms that dropped input fields at runtime",
-        )
-    return _VIOLATIONS_COUNTER
+# same instrument.  Tests that need to assert on increments should monkeypatch
+# this module global with a counter created from a local MeterProvider+reader
+# pair; see tests/unit/engine/test_executors.py for the canonical pattern.
+_VIOLATIONS_COUNTER: metrics.Counter = metrics.get_meter(__name__).create_counter(
+    "pass_through_cross_check_violations_total",
+    description="Count of passes_through_input=True transforms that dropped input fields at runtime",
+)
 
 
 def verify_pass_through(
@@ -97,7 +85,7 @@ def verify_pass_through(
     if not emitted_rows:
         if can_drop_rows or not input_fields:
             return
-        _get_violations_counter().add(1, {"transform": transform_name})
+        _VIOLATIONS_COUNTER.add(1, {"transform": transform_name})
         raise PassThroughContractViolation(
             transform=transform_name,
             transform_node_id=transform_node_id,
@@ -122,7 +110,7 @@ def verify_pass_through(
         runtime_observed = runtime_contract_fields & runtime_payload_fields
         divergence = input_fields - runtime_observed
         if divergence:
-            _get_violations_counter().add(1, {"transform": transform_name})
+            _VIOLATIONS_COUNTER.add(1, {"transform": transform_name})
             raise PassThroughContractViolation(
                 transform=transform_name,
                 transform_node_id=transform_node_id,

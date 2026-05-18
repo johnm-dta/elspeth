@@ -6040,7 +6040,7 @@ class TestPassThroughCrossCheck:
         Monkeypatching the module-level singleton is the correct post-B1-r3 approach.
         """
         from opentelemetry.sdk.metrics import MeterProvider
-        from opentelemetry.sdk.metrics._internal.export import InMemoryMetricReader
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
         import elspeth.engine.executors.pass_through as pass_through_mod
 

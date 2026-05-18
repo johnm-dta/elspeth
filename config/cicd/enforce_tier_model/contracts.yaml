@@ -159,10 +159,12 @@ allow_hits:
   expires: '2026-08-15'  # Renewed 2026-05-16: contracts/data.py:141 _get_allow_inf_nan unchanged; fingerprint still matches; safety justification still applies.
 - key: contracts/transform_contract.py:R2:_get_python_type:fp=24df5cf5593bf5fa
   owner: bugfix
+  pattern: display-fallback
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
   safety: Falls back to str(a) for display purposes only; used in error message, not logic
 - key: contracts/transform_contract.py:R2:_get_python_type:fp=37ef1f2fbd33537f
   owner: bugfix
+  pattern: display-fallback
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
   safety: Falls back to str(a) for display purposes only; used in error message, not logic
 - key: contracts/schema_contract_factory.py:R1:create_contract_from_config:fp=caa0070eb7edad8e

@@ -138,6 +138,7 @@ allow_hits:
   expires: '2026-07-02'
 - key: core/security/secret_loader.py:R6:CompositeSecretLoader:get_secret:fp=cb4d8fc57f9917d4
   owner: bugfix
+  pattern: ordered-fallback
   reason: Intentional fallback pattern - CompositeSecretLoader tries loaders in priority order
   safety: SecretNotFoundError from one loader triggers fallback to next; raises if all fail
   expires: null
@@ -153,6 +154,7 @@ allow_hits:
   expires: '2026-11-13'
 - key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=0d32fa231299f2d6
   owner: bugfix
+  pattern: tier3-narrow-catch
   reason: Tier-3 boundary - PayloadStore.delete() is external I/O (filesystem/blob storage)
   safety: Exception caught and logged, ref added to failed_refs, loop continues
 - key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=6e0f00f363e89415
@@ -176,10 +178,12 @@ allow_hits:
   safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=ec4658370df974ec
   owner: bugfix
+  pattern: audit-record-fallback
   reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity that canonical_json rejects
   safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=f234b4284f04a49d
   owner: bugfix
+  pattern: audit-record-fallback
   reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity that canonical_json rejects
   safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved
 - key: core/security/web.py:R4:validate_url_for_ssrf:_resolve_worker:fp=bdf07052a9f75058
@@ -189,10 +193,12 @@ allow_hits:
   expires: '2026-11-13'
 - key: core/security/secret_loader.py:R6:KeyVaultSecretLoader:get_secret:fp=e77b2a357f43e9a2
   owner: bugfix
+  pattern: external-dependency-optional
   reason: Sentinel class definition in except ImportError — not a runtime error handler
   safety: _get_client() raises ImportError before any Azure API call; sentinel class is never caught
 - key: core/retention/purge.py:R4:PurgeManager:purge_payloads:fp=ed928398c920ef43
   owner: bugfix
+  pattern: post-point-of-no-return-recovery
   reason: Post-point-of-no-return recovery — payloads are already irreversibly deleted, so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures in PurgeResult, operator informed via CLI output
 - key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=7a2f9a2b860707a7

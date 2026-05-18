@@ -1696,6 +1696,86 @@ class TestBannedRuleKeyValidation:
         assert entries[0].key == "core/events.py:R1:SomeClass:fp=abc123"
 
 
+class TestAllowHitPatternTags:
+    """Tests for allow_hit pattern tag schema validation."""
+
+    def test_valid_pattern_tag_is_preserved(self) -> None:
+        """A valid pattern tag is parsed into the AllowlistEntry."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Type object display fallback",
+                    "safety": "Used only in error message text",
+                    "pattern": "display-fallback",
+                }
+            ]
+        }
+
+        entries = _parse_allow_hits(data)
+
+        assert entries[0].pattern == "display-fallback"
+
+    def test_unknown_pattern_tag_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Pattern tags must come from the closed project vocabulary."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Type object display fallback",
+                    "safety": "Used only in error message text",
+                    "pattern": "whatever-this-is",
+                }
+            ]
+        }
+
+        with pytest.raises(SystemExit) as exc_info:
+            _parse_allow_hits(data)
+
+        assert exc_info.value.code == 1
+        assert "unknown pattern tag" in capsys.readouterr().err
+
+    def test_permanent_bugfix_entry_requires_pattern(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """owner=bugfix entries need expires or a pattern tag."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Type object display fallback",
+                    "safety": "Used only in error message text",
+                    "expires": None,
+                }
+            ]
+        }
+
+        with pytest.raises(SystemExit) as exc_info:
+            _parse_allow_hits(data)
+
+        assert exc_info.value.code == 1
+        assert "owner=bugfix" in capsys.readouterr().err
+
+    def test_bugfix_entry_with_expiry_does_not_require_pattern(self) -> None:
+        """Bounded bugfix entries may rely on expiry instead of a permanent pattern."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/data.py:R6:_get_allow_inf_nan:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Temporary narrow TypeError catch",
+                    "safety": "Only catches TypeError from vars()",
+                    "expires": "2099-01-01",
+                }
+            ]
+        }
+
+        entries = _parse_allow_hits(data)
+
+        assert entries[0].pattern is None
+
+
 class TestMaxHitsParseError:
     """Tests for elspeth-cdeeeccde3: int(raw_max_hits) should give contextual error."""
 

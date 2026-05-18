@@ -321,6 +321,7 @@ allow_hits:
   expires: '2026-07-02'
 - key: plugins/infrastructure/manager.py:R4:PluginManager:register:fp=0e88b71c015f8aa0
   owner: bugfix
+  pattern: rollback-preserves-primary-error
   reason: Rollback protection — catch any rollback failure so secondary exception
     doesn't bury original diagnostic
   safety: Logs rollback error then re-raises the original exception unchanged
@@ -352,6 +353,7 @@ allow_hits:
   expires: '2026-07-17'
 - key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=5ce04fa54ab80b94
   owner: bugfix
+  pattern: union-dispatch
   reason: Nominal discriminated-union dispatch — retryable_error is PluginRetryableError
     | CapacityError and only CapacityError carries a status_code. isinstance narrows
     the union so the status_code field is only populated when it exists, rather than
@@ -361,6 +363,7 @@ allow_hits:
   expires: null
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_single:fp=71e586ef9fbea49d
   owner: bugfix
+  pattern: retry-orchestration
   reason: CapacityError is one arm of the retryable-error control flow — caught so
     the worker can release the semaphore, throttle, and retry within the capacity-retry
     budget. This is explicit retry orchestration, not silent swallowing.
@@ -585,6 +588,7 @@ allow_hits:
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=d3ae8b449f567803
   owner: bugfix
+  pattern: tier3-boundary-validator
   reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid
     score type
   safety: Captured in skipped_items for audit; no data corruption
@@ -609,6 +613,7 @@ allow_hits:
   expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=423ca2aea34a9f56
   owner: bugfix
+  pattern: tier3-boundary-validator
   reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid
     content type
   safety: Captured in skipped_items for audit; no data corruption
@@ -662,6 +667,7 @@ allow_hits:
   expires: null
 - key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=f8441bff114d7133
   owner: bugfix
+  pattern: external-boundary-validator
   reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
     values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
     rows instead of crashing the batch
@@ -670,6 +676,7 @@ allow_hits:
   expires: null
 - key: plugins/infrastructure/discovery.py:R6:discover_plugins_in_directory:fp=17b3c58c5cf147b9
   owner: bugfix
+  pattern: external-dependency-optional
   reason: Optional extras (e.g. chromadb for [rag]) are external dependencies — ImportError
     is expected when not installed
   safety: Only catches ImportError/ModuleNotFoundError; logs warning with file name

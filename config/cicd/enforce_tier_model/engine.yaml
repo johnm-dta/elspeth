@@ -106,18 +106,21 @@ allow_hits:
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=8ae24dda2209d609
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates sink.write() returns SinkWriteResult, not a bare ArtifactDescriptor\
     \ or other type"
   safety: Crashes immediately with PluginContractViolation identifying the buggy sink plugin
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=333193edcab82132
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates plugin return type to crash with PluginContractViolation\
     \ instead of opaque AttributeError"
   safety: Crashes immediately with clear error identifying the buggy sink plugin
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=6bf4f058589b3c6f
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates failsink.write() returns SinkWriteResult, crashing with\
     \ PluginContractViolation identifying the buggy failsink plugin instead of propagating an opaque AttributeError\
     \ from the downstream artifact access"
@@ -126,6 +129,7 @@ allow_hits:
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=00755313e7e139d5
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates the artifact attached to the failsink's SinkWriteResult\
     \ is an ArtifactDescriptor, crashing with PluginContractViolation identifying the buggy failsink plugin\
     \ instead of propagating an opaque AttributeError from later artifact_path access"
@@ -231,6 +235,7 @@ allow_hits:
   expires: null
 - key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=28abc6a4bd80595e
   owner: bugfix
+  pattern: audit-record-fallback
   reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity
     rejected by stable_hash. Coercion at the source/quarantine boundary is the one
     Tier-3 location where canonical hashing must accept non-canonical floats. The

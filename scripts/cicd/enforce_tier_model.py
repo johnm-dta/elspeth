@@ -86,6 +86,7 @@ class AllowlistEntry:
     reason: str
     safety: str
     expires: date | None
+    pattern: str | None = None
     matched: bool = field(default=False, compare=False)
     source_file: str = field(default="", compare=False)
 
@@ -1634,6 +1635,23 @@ def render_dump_edges_dot(
 
 _BANNED_RULES = frozenset(rule_id for rule_id, rule_def in RULES.items() if rule_def.get("banned"))
 _ALL_RULE_IDS = frozenset(RULES.keys())
+_ALLOWLIST_PATTERN_TAGS = frozenset(
+    {
+        "audit-record-fallback",
+        "display-fallback",
+        "external-boundary-validator",
+        "external-dependency-optional",
+        "ordered-fallback",
+        "plugin-contract-offensive-guard",
+        "post-init-offensive-guard",
+        "post-point-of-no-return-recovery",
+        "rollback-preserves-primary-error",
+        "retry-orchestration",
+        "tier3-boundary-validator",
+        "tier3-narrow-catch",
+        "union-dispatch",
+    }
+)
 
 # Directories that are always excluded from scanning — vendored/third-party code
 # that happens to contain .py files but is not part of the ELSPETH codebase.
@@ -1676,14 +1694,37 @@ def _parse_allow_hits(data: dict[str, Any], source_file: str = "") -> list[Allow
                     f"Warning: Invalid date format for expires: {expires_str}",
                     file=sys.stderr,
                 )
+        pattern = item.get("pattern")
+        if pattern is not None:
+            if not isinstance(pattern, str) or not pattern:
+                print(
+                    f"Error: allow_hits entry has invalid pattern tag{source_ctx}: {pattern!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if pattern not in _ALLOWLIST_PATTERN_TAGS:
+                print(
+                    f"Error: allow_hits entry has unknown pattern tag{source_ctx}: {pattern!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        owner = item.get("owner", "unknown")
+        if owner == "bugfix" and expires_date is None and pattern is None:
+            print(
+                f"Error: owner=bugfix allow_hits entry must define expires or pattern{source_ctx}: {key}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         entries.append(
             AllowlistEntry(
                 key=item["key"],
-                owner=item.get("owner", "unknown"),
+                owner=owner,
                 reason=item.get("reason", ""),
                 safety=item.get("safety", ""),
                 expires=expires_date,
+                pattern=pattern,
                 source_file=source_file,
             )
         )

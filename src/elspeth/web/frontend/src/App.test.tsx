@@ -134,6 +134,18 @@ vi.mock("./api/client", () => ({
   updateUserComposerPreferences: vi.fn(),
 }));
 
+// ── Shareable-reviews API stub ───────────────────────────────────────────────
+// SharedInspectView (Phase 6B Task 8) calls fetchSharedInspect on mount. The
+// shared-route test below never resolves the promise — that leaves the view
+// in its "loading" state, which is enough to assert (a) SharedInspectView is
+// mounted, (b) the composer Layout is suppressed.
+
+vi.mock("./api/shareableReviews", () => ({
+  fetchSharedInspect: vi.fn().mockReturnValue(new Promise(() => {})),
+  markReadyForReview: vi.fn(),
+  fetchShareableLink: vi.fn(),
+}));
+
 // ── Store subscriptions ──────────────────────────────────────────────────────
 // initStoreSubscriptions() runs at module load when App is imported and is
 // idempotent (guarded by `initialized` flag), so it is benign here.
@@ -603,5 +615,78 @@ describe("App preferences bootstrap (Phase 1B)", () => {
     expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
 
     consoleError.mockRestore();
+  });
+});
+
+// ── Phase 6B Task 8: shared-route Layout suppression ─────────────────────
+//
+// Plan §Task 8 test case 9 (`docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md`):
+// when the URL hash is `#/shared/{token}`, the composer Layout (chat +
+// side rail) MUST NOT be rendered. The SharedInspectView mounts in its
+// place. A future refactor that accidentally drops the App.tsx
+// short-circuit and renders Layout under a shared route would convert
+// every shared link into a full composer session for the reviewer — this
+// test pins the suppression so that regression is caught.
+describe("App shared-route Layout suppression (Phase 6B Task 8)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(useSessionStore);
+    useExecutionStore.getState().reset();
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-001",
+        username: "test-operator",
+        display_name: null,
+        email: null,
+        groups: [],
+      } as never,
+    } as never);
+    localStorage.clear();
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    } satisfies SystemStatus);
+  });
+
+  it("renders SharedInspectView and does NOT mount the composer Layout for #/shared/{token}", async () => {
+    // Set the hash BEFORE render — App reads it via useSharedToken on first
+    // render. Setting after render would defeat the short-circuit branch
+    // this test exists to pin.
+    window.history.replaceState(null, "", "#/shared/tok-abc");
+
+    render(<App />);
+
+    // SharedInspectView is mounted. fetchSharedInspect is stubbed with a
+    // never-resolving promise (see top-level vi.mock), so the view stays
+    // in the loading state — which is exactly what we want to assert
+    // against. We do NOT depend on the eventual resolution.
+    expect(
+      await screen.findByTestId("shared-inspect-loading"),
+    ).toBeInTheDocument();
+
+    // The composer Layout (mocked above as data-testid="layout-stub") is
+    // NOT rendered under a shared route. If a refactor drops the
+    // short-circuit in App.tsx, this assertion fails and the regression
+    // is caught.
+    expect(screen.queryByTestId("layout-stub")).toBeNull();
+    // The chat panel is part of Layout; pin its absence too, because the
+    // layout-stub testid is one indirection away from the actual chrome.
+    expect(screen.queryByTestId("chat-panel-stub")).toBeNull();
+  });
+
+  it("renders the composer Layout when the hash is NOT a shared route", async () => {
+    // Counterpoint: with no hash, the regular composer flow runs. This
+    // protects the test above from a false-positive caused by the
+    // Layout mock simply never rendering.
+    window.history.replaceState(null, "", "/");
+
+    render(<App />);
+
+    expect(await screen.findByTestId("layout-stub")).toBeInTheDocument();
+    expect(screen.queryByTestId("shared-inspect-loading")).toBeNull();
   });
 });

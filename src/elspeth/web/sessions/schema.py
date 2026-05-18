@@ -31,6 +31,13 @@ _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 # * ``trg_interpretation_events_no_delete_resolved`` — resolved
 #   ``interpretation_events`` rows cannot be deleted, while unresolved
 #   PENDING rows remain deletable for orphan recovery.
+# * ``trg_composer_completion_events_no_update`` — Phase 6A: every
+#   completion-gesture row (mark_ready_for_review, export_yaml) is a
+#   permanent audit fact. Unconditional UPDATE ABORT, no PENDING-row
+#   carve-out (completion events have no recovery path).
+# * ``trg_composer_completion_events_no_delete`` — same posture for DELETE.
+#   Both triggers ship from day 1, correcting the Phase 18 omission
+#   tracked at filigree elspeth-9aba8da942.
 # * ``trg_chat_messages_immutable_content`` — ``chat_messages.content`` is
 #   append-only once written.
 # * ``trg_chat_messages_no_delete`` — ``chat_messages`` rows cannot be
@@ -48,6 +55,8 @@ _REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
     {
         "trg_interpretation_events_immutable_resolved",
         "trg_interpretation_events_no_delete_resolved",
+        "trg_composer_completion_events_no_update",
+        "trg_composer_completion_events_no_delete",
         "trg_chat_messages_immutable_content",
         "trg_chat_messages_no_delete",
     }

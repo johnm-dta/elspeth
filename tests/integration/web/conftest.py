@@ -104,6 +104,7 @@ def composer_test_client(tmp_path: Path) -> TestClient:
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
@@ -198,6 +199,7 @@ def _build_audit_readiness_app(
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     app = create_app(settings=settings)
 
@@ -555,6 +557,18 @@ def audit_readiness_mismatched_provider_session_id(
         user_id=_TEST_AUTHED_USER_ID,
         auth_provider_type="oidc",
     )
+
+
+# ---------------------------------------------------------------------------
+# Shareable-reviews integration fixtures (Phase 6A Task 6)
+# ---------------------------------------------------------------------------
+#
+# Shareable-reviews tests reuse the audit-readiness app harness (same
+# ``create_app`` path, same passthrough composition fixture). For the
+# "recipient is not the creator" test, the alice-authed client mints a
+# token, then the test swaps ``app.dependency_overrides[get_current_user]``
+# to return ``bob`` and re-issues the GET — same app, same signing key,
+# same payload store. No additional fixture needed.
 
 
 @pytest.fixture

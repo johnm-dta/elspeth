@@ -5,6 +5,11 @@
  *         #/{sessionId}/graph           -> open graph modal, then rewrite
  *         #/{sessionId}/yaml            -> open YAML modal, then rewrite
  *         #/{sessionId}/{anything-else} -> silently strip the verb
+ *         #/shared/{token}              -> IGNORED — owned by useSharedToken
+ *                                          (Phase 6B Task 8); the hook below
+ *                                          short-circuits without touching the
+ *                                          hash so SharedInspectView keeps
+ *                                          control of the URL.
  *
  * Phase 3B uses action fragments rather than steady-state view fragments.
  * The fragment is an arrival action, not steady-state URL state.
@@ -44,8 +49,18 @@ const RETIRED_VERBS: Record<string, string> = {
 
 const TOAST_DISMISSED_KEY = "elspeth_redirect_toast_dismissed";
 
+const SHARED_HASH_PREFIX = "#/shared/";
+
+/** True when the current hash is a Phase 6B shared-inspect route. The
+ *  session router short-circuits on this so SharedInspectView keeps
+ *  control of the URL and the session store is not mutated. */
+function _isSharedRoute(hash: string): boolean {
+  return hash.startsWith(SHARED_HASH_PREFIX);
+}
+
 function parseHash(): HashState {
   const hash = window.location.hash;
+  if (_isSharedRoute(hash)) return { sessionId: null, verb: null };
   const match = hash.match(/^#\/([^/]+?)(?:\/([a-z]+))?$/);
   if (!match) return { sessionId: null, verb: null };
   return { sessionId: match[1], verb: match[2] ?? null };
@@ -71,6 +86,14 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
   );
 
   const applyHash = (state: HashState) => {
+    // Phase 6B Task 8: when the live hash is a shared-inspect route the
+    // session router is dormant — SharedInspectView owns the URL. Apply
+    // is a no-op in that mode so the hash is preserved verbatim and the
+    // active session is not mutated by the (deliberately empty) parsed
+    // state we'd otherwise act on.
+    if (_isSharedRoute(window.location.hash)) {
+      return;
+    }
     applying.current = true;
     try {
       const { sessionId, verb } = state;
@@ -162,6 +185,12 @@ export function useHashRouter(): { redirectToast: RedirectToast | null } {
     const unsub = useSessionStore.subscribe((state, prevState) => {
       if (applying.current) return;
       if (state.activeSessionId === prevState.activeSessionId) return;
+      // Phase 6B Task 8: do not mutate the URL while a shared-inspect
+      // route is live — SharedInspectView owns the hash. The session
+      // store may legitimately change activeSessionId via background
+      // bootstrap while a reviewer is on the shared route; the change
+      // is irrelevant to the rendered view and must not strip the token.
+      if (_isSharedRoute(window.location.hash)) return;
 
       const hash = buildCanonicalHash(state.activeSessionId);
       if (hash === lastWrittenHash.current) return;

@@ -36,6 +36,7 @@ def _settings(tmp_path: Path, **overrides) -> WebSettings:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
     defaults.update(overrides)
     return WebSettings(**defaults)
@@ -514,6 +515,19 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS", "10")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS", "85.0")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE", "10")
+        # Phase 6A required: shareable_link_signing_key.
+        #
+        # DC-2 FIX-L: env-var ingestion now requires the value to be a
+        # base64-encoded string (the documented ``openssl rand -base64 32``
+        # recipe). The model's ``mode="before"`` validator decodes it
+        # explicitly — no utf-8 multibyte ambiguity. 32 raw bytes decoded
+        # is the validator floor; a 44-char base64 string satisfies it.
+        import base64
+
+        monkeypatch.setenv(
+            "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY",
+            base64.b64encode(b"\x00" * 32).decode("ascii"),
+        )
 
     def test_parses_json_tuple_values(self, monkeypatch) -> None:
         """JSON-encoded lists are converted to tuples for tuple-typed fields."""
@@ -827,6 +841,7 @@ class TestDataDirCreation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         create_app(settings)
         assert fresh_dir.exists()

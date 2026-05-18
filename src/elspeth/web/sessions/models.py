@@ -53,7 +53,9 @@ from sqlalchemy.types import JSON
 #   3 → composition_proposals gains user_message_id so explicit-approval
 #        replay can preserve inline-blob chat-message provenance when
 #        accepting a deferred proposal.
-SESSION_SCHEMA_EPOCH = 3
+#   4 → composer_completion_events_table added (Phase 6A completion
+#        gestures: mark_ready_for_review, export_yaml audit events).
+SESSION_SCHEMA_EPOCH = 4
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -646,6 +648,66 @@ Index(
     interpretation_events_table.c.composition_state_id,
 )
 
+# ``composer_completion_events_table`` (Phase 6A — completion gestures).
+#
+# One row per completion-gesture audit event. Two event types in v1:
+#
+#   * ``mark_ready_for_review`` — user signed a snapshot of a composition
+#     state for review-only sharing. ``payload_digest`` carries the
+#     content-address of the snapshot blob in the payload store;
+#     ``expires_at`` carries the lifetime stamped onto the signed token.
+#   * ``export_yaml`` — user exported the pipeline YAML for the named
+#     composition state. ``payload_digest`` and ``expires_at`` stay NULL.
+#
+# Mirrors the Phase 18 ``interpretation_events_table`` precedent of "one new
+# table per event family, closed-enum CHECK on event_type, nullable optional
+# columns for event-type-specific data" rather than splitting into two tables
+# or extending ``proposal_events_table`` / ``audit_access_log_table`` whose
+# closed CHECKs are governance boundaries (see plan 19a §"Audit-event
+# recording" for the adjudication).
+#
+# CLOSED LIST on ``event_type``. Adding a third value requires (a) amending
+# 19a (or its successor), (b) the same four-step ceremony as the other
+# closed enums in this file, and (c) a schema-change cohort with epoch bump.
+# NO SILENT EXTENSION.
+composer_completion_events_table = Table(
+    "composer_completion_events",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column(
+        "composition_state_id",
+        String,
+        ForeignKey("composition_states.id"),
+        nullable=True,
+    ),
+    Column("event_type", String, nullable=False),
+    Column("actor", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    # Content-address of the snapshot blob in the payload store.
+    # Populated for ``mark_ready_for_review`` events; NULL for ``export_yaml``.
+    Column("payload_digest", String, nullable=True),
+    # Token expiry stamped on the signed share token at issuance time.
+    # Populated for ``mark_ready_for_review`` events; NULL for ``export_yaml``.
+    Column("expires_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint(
+        "event_type IN ('mark_ready_for_review', 'export_yaml')",
+        name="ck_composer_completion_events_type",
+    ),
+)
+
+Index(
+    "ix_composer_completion_events_session_created",
+    composer_completion_events_table.c.session_id,
+    composer_completion_events_table.c.created_at,
+)
+
 # ``skill_markdown_history`` (F-5c) — content-addressed archive of every
 # distinct ``pipeline_composer.md`` version seen at runtime.
 #
@@ -725,6 +787,41 @@ event.listen(
         "WHEN OLD.resolved_at IS NOT NULL "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'interpretation_events: resolved rows are append-only'); "
+        "END;"
+    ),
+)
+
+# Phase 6A — completion-event triggers.
+#
+# Unlike ``interpretation_events`` (which permits DELETE on PENDING rows for
+# orphan recovery) completion events have no recovery path. Both triggers
+# are **unconditional ABORT**: every recorded mark-ready-for-review or YAML
+# export is a permanent audit fact.
+#
+# Shipping both UPDATE and DELETE triggers from day 1 corrects the Phase 18
+# omission tracked at filigree elspeth-9aba8da942 (where the
+# ``interpretation_events`` DELETE trigger was added in a follow-up rather
+# than the original cohort).
+event.listen(
+    composer_completion_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_composer_completion_events_no_update "
+        "BEFORE UPDATE ON composer_completion_events "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'composer_completion_events is append-only; UPDATE is forbidden'); "
+        "END;"
+    ),
+)
+
+event.listen(
+    composer_completion_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_composer_completion_events_no_delete "
+        "BEFORE DELETE ON composer_completion_events "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'composer_completion_events is append-only; DELETE is forbidden'); "
         "END;"
     ),
 )

@@ -124,6 +124,7 @@ def composer_freeform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         composer_max_discovery_turns=5,
         composer_timeout_seconds=30.0,
         composer_rate_limit_per_minute=100,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     catalog = create_catalog_service()
     composer_service = ComposerServiceImpl(

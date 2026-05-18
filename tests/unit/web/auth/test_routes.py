@@ -55,6 +55,7 @@ def _create_test_app(provider, auth_provider_type: str = "local", **settings_ove
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
         **settings_overrides,
     )
     app.state.oidc_authorization_endpoint = None

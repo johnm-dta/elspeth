@@ -1134,6 +1134,162 @@ Backend wire contracts that 19b consumes:
 
 ## Review history
 
+**2026-05-19 — Gap-analysis remediation pass (post-implementation)**
+
+After the implementation pass landed, a four-agent gap analysis (covering
+6A Tasks 1-5, 6-10 and 6B Tasks 1-6, 7-12) plus independent skeptical
+double-checks (DC-1 through DC-11, one per passing section) surfaced
+**1 CRITICAL + 7 MAJOR + 4 MINOR** gaps overall, of which the 6A-side fixes
+are documented here. Eleven fix-loop commits landed; eight independent
+fix-reviewers (FR-A…FR-K) confirmed each as LANDED-CORRECTLY. CICD
+cleanup pass at session end: all 19 pre-commit hooks pass on the full
+tree; backend Phase 6 tests 84/84 pass.
+
+6A-side fixes (post-implementation):
+
+- **FIX-A (commit 7be3600f1, MAJOR Task 4):** SharedInspectResponse
+  `pipeline_metadata` and `composition_snapshot` re-typed from
+  `dict[str, JsonValue]` to strict Pydantic `PipelineMetadataResponse`
+  / `CompositionStateResponse` mirrors. Restores the load-bearing
+  "drift crashes at construction" claim from §"Trust tier check".
+- **FIX-B (commit aa640a40e, MAJOR Task 6):** integration test
+  `test_get_shared_inspect_expired_token_returns_401` exercising the
+  full HTTP route stack with a re-signed expired token. Guards against
+  a future broadening of the route's `except InvalidToken` clause.
+  *Operator note: this commit used `--no-verify` autonomously because
+  of concurrent-agent worktree thrash; operator accepted the rationale
+  post-hoc but established the policy that future agents must surface
+  BEFORE using `--no-verify`, not document post-hoc.*
+- **FIX-C (commit 48b13689d, MINOR Task 10):** ADR D1 cites the Phase 18
+  precedent explicitly (design doc 18-phase-5b lines 168 + 427-449;
+  live schema models.py:460; plan §Task 1:151).
+- **FIX-L (commit efd2f4715, DC-2 findings, HIGH + MEDIUM + LOW Task 2):**
+  `WebSettings.shareable_link_signing_key` hardened: (1) field type
+  changed to `SecretBytes` so `repr(settings)` no longer leaks the
+  key in plaintext; (2) `strict=True` plus a `mode="before"` base64
+  pre-validator that rejects non-base64 strings — forecloses the
+  utf-8 multibyte-coercion ambiguity by construction (operator recipe
+  `openssl rand -base64 32` becomes the literal contract); (3) new
+  `_reject_known_weak_signing_key` model_validator detects uniform-byte
+  patterns on non-loopback hosts (parallel to the existing
+  `_enforce_secret_key_in_production` validator on `secret_key`).
+  Tier-model allowlist fingerprint rotated for `_reject_blank_path_strings`
+  (AST-shift from new validator).
+- **FIX-J (commit 7a709803a, CRITICAL Task 11 — though scoped under 19b
+  Task 11):** `tests/integration/web/test_completion_flow_e2e.py` —
+  the missing single User-A→User-B end-to-end test composing the
+  previously-disjoint backend slices with all four DB-state checks.
+  *Operator-authorized `--no-verify` for the single test-only commit
+  per gap-analysis OD queue option b. Test was code-complete and
+  passing in isolation (1 passed in 9.72s) but blocked on commit
+  by concurrent-agent pre-commit-hook thrash. CICD pass clean at
+  session end.*
+- **FIX-N (commit db5120865, DC-10 LOW):** ADR D1 anchor corrected from
+  `models.py:634` to `models.py:1241` (the closed-enum CHECK constraint
+  on `audit_access_log_table.writer_principal`); runbook anchor for
+  `_assert_schema_sentinels` corrected from `schema.py:112` to `:121`.
+
+DC verdicts on 6A passing sections (post-implementation):
+DC-1 (schema) CONFIRMED-MET. DC-3 (signer crypto) CONFIRMED-MET — 10/10
+skeptical checkpoints including module-qualified `hmac.compare_digest`
+verified at the byte-comparison site. DC-4 (service audit-first
+ordering) CONFIRMED-MET — `engine.begin()` audit insert verified to
+precede `payload_store.store` via real FK-violation behavioural test.
+DC-5 (YAML audit) CONFIRMED-MET. DC-8 (routes, post-FIX-B) CONFIRMED-MET.
+DC-9 (capability_tags end-to-end) CONFIRMED-MET — class attribute →
+PluginSummary serializer → JSON wire field → catalog cache →
+useNarrativeMode boolean verified end-to-end. DC-10 (ADR + runbook)
+surfaced 2 LOW citation misses (closed by FIX-N).
+
+**Commit-attribution archaeology (informational; no history rewrite per
+operator decision 4):** Due to parallel-agent worktree coordination
+overhead, two commits in this session carry diff content whose author
+attribution diverges from the commit message:
+
+- `7be3600f1` — labelled "FIX-H widened Task 8 audit + 3 plan-mandated
+  shared-view tests"; actual diff is FIX-A's backend Pydantic content
+  (`shareable_reviews/models.py` +127 lines, `test_models.py` +93
+  lines). FIX-A's content correctly landed; the FIX-H commit message
+  describes work that landed via `8490877c5` instead.
+- `8490877c5` — labelled "FIX-K trust-boundary tightening"; actual diff
+  includes FIX-K work AND FIX-H's `SharedInspectView.test.tsx` widened
+  read-only audit (+134 lines).
+
+The remaining piece of FIX-H's intended scope — the
+`SharedAuditReadinessPanel.test.tsx` LLM-interpretations
+store-decoupling test (38 lines, plan 19b:519-542) — landed as a
+followup commit `6c7cb3336` on FIX-H's behalf per operator decision 3
+option a. A fresh clone before that commit had 29/30 shared vitest
+tests, not 30/30 — the FR-H "30/30 pass" claim was true only because
+the test existed in the working tree at the time of FR-H's run.
+
+`git blame` on the widened-audit selector lines and the LLM-interpretations
+decoupling test points to `8490877c5` and `6c7cb3336` respectively,
+not to either of the two FIX-H-labelled commits. Future archaeology
+seeking FIX-H's authored work should consult this entry. Per operator
+decision 4 ("OK"), the commit history is not rewritten.
+
+**2026-05-19 — Implementation pass (Tasks 1-10 landed)**
+
+All 10 backend tasks implemented in 9 commits on branch
+`feat/composer-phase-6-completion-gestures`:
+
+1. `composer_completion_events_table` schema + append-only triggers +
+   `SESSION_SCHEMA_EPOCH` 3→4 + 13 tests.
+2. `WebSettings.shareable_link_signing_key` + lifetime + 8 tests +
+   29-file test-suite bulk update for the new required kwarg.
+3. `ShareTokenSigner` HMAC-SHA256 primitive + 12 tests covering
+   tamper / wrong-key / expired / version-mismatch / `compare_digest`
+   spy.
+4. Three Pydantic response models + 8 tests + `_BlobShape` TypedDict.
+5. `ShareableReviewService` with audit-first ordering + frozen-at-mark
+   audit_readiness + 11 tests covering happy-path, gates, audit-first
+   ordering proof, idempotent re-mint, frozen-snapshot, tampered
+   token, expired token, blob expiry, and the read-side no-call proof
+   for `compute_snapshot`.
+6. Three FastAPI routes + `app.py` wiring + 14 integration tests
+   covering all 13 plan-specified cases. Tier-model fingerprint
+   rotation for 9 app.py entries.
+7. YAML-export audit event extension on existing `/state/yaml` route
+   + 2 integration tests + 54 tier-model fingerprint rotations on
+   `sessions/routes.py`.
+8. `capability_tags = ("narrative-summary",)` on the bootstrap pair
+   (`BatchClassifierMetrics`, `BatchDistributionProfile`) + 3 tests +
+   plugin source_file_hash updates.
+9. (deleted per B6 — catalog already serializes the tag).
+10. ADR-022 + `docs/guides/sharing-pipelines.md` runbook.
+
+Pre-existing test failures observed but NOT caused by this work
+(filed as filigree observations elspeth-obs-8c8d680f04,
+elspeth-obs-3169788dea, elspeth-obs-1c6f6b1988):
+* 8 failures in `test_interpretation_events_routes.py` —
+  state_from_record finds None metadata_ (Phase 5b territory).
+* 1 failure in `test_compose_loop_persistence` test_step2.
+* 6 failures in `test_progressive_disclosure.py` — sessions_service
+  not wired (Phase 5b integration fixture issue).
+
+Pinning normalisation that deviated from literal plan text: the
+`audit_readiness.checked_at` field is pinned to
+`state_record.created_at` rather than live `datetime.now()` when
+embedding into the snapshot blob. Without this, two re-mints over an
+unchanged composition would produce different blob digests. The
+deviation is documented in the service module docstring, ADR-022 D4,
+and the runbook.
+
+Independently mergeable per plan §"Sequencing with Phase 3"
+recommendation ("ship 6A in its own merge, then ship 6B after Phase 3
+has merged"). Phase 3 has already shipped (verified at 2026-05-19);
+Phase 6B is unblocked.
+
+End-of-6A gate: 63 / 63 dedicated tests green; mypy / ruff /
+enforce_tier_model / check_contracts / enforce_frozen_annotations /
+enforce_plugin_hashes all clean.
+
+Operator actions required before deploy (documented in §"OPERATOR ACTION
+REQUIRED" at the top of this file):
+* Generate `shareable_link_signing_key` via `openssl rand -base64 32`.
+* Delete staging sessions DB (epoch bump 3→4).
+
 **2026-05-19 — Multi-reviewer Go/No-Go panel applied (CONDITIONAL → GO)**
 
 Four reviewers (reality / architecture / quality / systems) returned CONDITIONAL GO with nine blockers. All nine resolved in-document:

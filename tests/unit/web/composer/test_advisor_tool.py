@@ -138,6 +138,7 @@ def _make_settings(
         composer_advisor_enabled=advisor_enabled,
         composer_advisor_max_calls_per_compose=budget,
         composer_advisor_timeout_seconds=advisor_timeout_seconds,
+        shareable_link_signing_key=b"\x00" * 32,
     )
 
 
@@ -411,6 +412,7 @@ async def test_advisor_only_turn_does_not_consume_discovery_budget() -> None:
         composer_advisor_enabled=True,
         composer_advisor_max_calls_per_compose=3,
         composer_advisor_timeout_seconds=60.0,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     service = ComposerServiceImpl(catalog=catalog, settings=settings)
     state = _empty_state()
@@ -581,6 +583,7 @@ async def test_exhausted_advisor_turn_charges_discovery_budget() -> None:
         composer_advisor_enabled=True,
         composer_advisor_max_calls_per_compose=0,
         composer_advisor_timeout_seconds=60.0,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     service = ComposerServiceImpl(catalog=catalog, settings=settings)
     state = _empty_state()
@@ -1099,6 +1102,7 @@ async def test_f3b_advisor_rejects_oversized_prompt() -> None:
         composer_advisor_enabled=True,
         composer_advisor_max_calls_per_compose=3,
         composer_advisor_max_prompt_tokens=1000,  # → ~4000 char cap
+        shareable_link_signing_key=b"\x00" * 32,
     )
     service = ComposerServiceImpl(catalog=catalog, settings=settings)
     state = _empty_state()
@@ -1165,6 +1169,7 @@ async def test_f3c_advisor_prompt_size_counts_formatting_overhead() -> None:
         composer_advisor_enabled=True,
         composer_advisor_max_calls_per_compose=3,
         composer_advisor_max_prompt_tokens=20,  # -> ~80 char variable-prompt cap
+        shareable_link_signing_key=b"\x00" * 32,
     )
     service = ComposerServiceImpl(catalog=catalog, settings=settings)
     state = _empty_state()

@@ -29,6 +29,7 @@ import type {
 } from "../../types/api";
 import { ReadinessRowDetail } from "./ReadinessRowDetail";
 import { ExplainDialog } from "./ExplainDialog";
+import { AuditReadinessRow, type RowPresentation } from "./AuditReadinessRow";
 
 /** Glyph + accessible label for each row status. */
 function statusGlyph(status: ReadinessStatus): { glyph: string; aria: string } {
@@ -508,62 +509,32 @@ export function AuditReadinessPanel() {
                 return null;
               }
               const heading = row.label || rowHeading(row.id);
+              const presentation: RowPresentation = {
+                id: row.id,
+                status: row.status,
+                heading,
+                summaryText: formatted.summaryText,
+                glyph: formatted.glyph,
+                ariaStatusLabel: formatted.ariaStatusLabel,
+                extraClassName: "audit-readiness-row--llm-interpretations",
+                testId: "audit-readiness-row-llm-interpretations",
+              };
               // Clickability mirrors the generic `isActionable` semantics
               // — only warning/error open the detail drawer. The opt-out
               // and "not yet surfaced" overrides land on `not_applicable`
               // statuses, which are not clickable. Users access the
               // session-level opt-out via the chat widget, not via the
               // audit panel.
-              const clickable = isActionable(row.status);
               return (
-                <li
+                <AuditReadinessRow
                   key={row.id}
-                  className={`audit-readiness-row audit-readiness-row--${row.status} audit-readiness-row--llm-interpretations`}
-                  data-testid="audit-readiness-row-llm-interpretations"
-                >
-                  {clickable ? (
-                    <button
-                      type="button"
-                      className="audit-readiness-row-btn"
-                      onClick={() => setSelectedRowId(row.id)}
-                    >
-                      <span
-                        className="audit-readiness-glyph"
-                        aria-hidden="true"
-                      >
-                        {formatted.glyph}
-                      </span>
-                      <span className="sr-only">{formatted.ariaStatusLabel}.</span>
-                      <span className="audit-readiness-row-label">{heading}</span>
-                      <span className="audit-readiness-row-summary">
-                        {formatted.summaryText}
-                      </span>
-                    </button>
-                  ) : (
-                    <div
-                      className="audit-readiness-row-static"
-                      role="group"
-                      aria-label={heading}
-                    >
-                      <span
-                        className="audit-readiness-glyph"
-                        aria-hidden="true"
-                      >
-                        {formatted.glyph}
-                      </span>
-                      <span className="sr-only">{formatted.ariaStatusLabel}.</span>
-                      <span className="audit-readiness-row-label">{heading}</span>
-                      <span className="audit-readiness-row-summary">
-                        {formatted.summaryText}
-                      </span>
-                    </div>
-                  )}
-                </li>
+                  row={presentation}
+                  onSelect={setSelectedRowId}
+                />
               );
             }
             const { glyph, aria } = statusGlyph(row.status);
             const heading = row.label || rowHeading(row.id);
-            const clickable = isActionable(row.status);
             // Phase 5a Task 7: inline-source provenance override. The
             // backend `summary` is replaced (not appended to) with a
             // hash-prefix line when an inline_blob source is bound. The
@@ -574,45 +545,20 @@ export function AuditReadinessPanel() {
               row.id === "provenance" && inlineSummary !== null
                 ? `Inline content hashed (SHA-256: ${inlineSummary.contentHash.slice(0, 12)}…)`
                 : row.summary;
+            const presentation: RowPresentation = {
+              id: row.id,
+              status: row.status,
+              heading,
+              summaryText,
+              glyph,
+              ariaStatusLabel: aria,
+            };
             return (
-              <li
+              <AuditReadinessRow
                 key={row.id}
-                className={`audit-readiness-row audit-readiness-row--${row.status}`}
-              >
-                {clickable ? (
-                  <button
-                    type="button"
-                    className="audit-readiness-row-btn"
-                    onClick={() => setSelectedRowId(row.id)}
-                  >
-                    <span
-                      className="audit-readiness-glyph"
-                      aria-hidden="true"
-                    >
-                      {glyph}
-                    </span>
-                    <span className="sr-only">{aria}.</span>
-                    <span className="audit-readiness-row-label">{heading}</span>
-                    <span className="audit-readiness-row-summary">{summaryText}</span>
-                  </button>
-                ) : (
-                  <div
-                    className="audit-readiness-row-static"
-                    role="group"
-                    aria-label={heading}
-                  >
-                    <span
-                      className="audit-readiness-glyph"
-                      aria-hidden="true"
-                    >
-                      {glyph}
-                    </span>
-                    <span className="sr-only">{aria}.</span>
-                    <span className="audit-readiness-row-label">{heading}</span>
-                    <span className="audit-readiness-row-summary">{summaryText}</span>
-                  </div>
-                )}
-              </li>
+                row={presentation}
+                onSelect={setSelectedRowId}
+              />
             );
           })}
         </ul>

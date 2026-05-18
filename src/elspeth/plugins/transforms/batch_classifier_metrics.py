@@ -132,14 +132,24 @@ class BatchClassifierMetricsConfig(TransformDataConfig):
 
 
 class BatchClassifierMetrics(BaseTransform):
-    """Compute classifier confusion matrix and F-score metrics over a batch."""
+    """Compute classifier confusion matrix and F-score metrics over a batch.
+
+    Phase 6A B6 — opts into Phase 6B's narrative-mode result rendering via
+    ``capability_tags = ("narrative-summary",)``. The frontend reads this tag
+    on the catalog response and, when set, renders the run result as a
+    narrative panel (consuming any Phase 5b interpretation events as an
+    overlay) rather than the default tabular preview. The wire contract for
+    the tag is: the transform's output schema must include a ``summary`` field
+    that the narrative renderer surfaces.
+    """
 
     name = "batch_classifier_metrics"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8585f70fac811b00"
+    source_file_hash: str | None = "sha256:56f86b4c42d1d21d"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
+    capability_tags: tuple[str, ...] = ("narrative-summary",)
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

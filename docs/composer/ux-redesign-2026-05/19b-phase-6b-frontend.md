@@ -702,6 +702,234 @@ The design doc 09 explicitly says the completion bar **replaces** the previous s
 
 ## Review history
 
+**2026-05-19 — Gap-analysis remediation pass (post-implementation)**
+
+After the implementation pass landed, a four-agent gap analysis (covering
+6A Tasks 1-5, 6-10 and 6B Tasks 1-6, 7-12) plus independent skeptical
+double-checks (DC-1 through DC-11, one per passing section) surfaced
+**1 CRITICAL + 7 MAJOR + 4 MINOR** gaps overall, of which the 6B-side
+fixes are documented here. The frontend test count rose from 1079 to
+1114 (+35 plan-mandated tests). All FR-A…FR-K fix-reviewers confirmed
+LANDED-CORRECTLY. CICD cleanup pass at session end: typecheck clean,
+1114/1114 vitest pass, all 19 pre-commit hooks pass on the full tree.
+
+6B-side fixes (post-implementation):
+
+- **FIX-D (commit d296d6e9e, MAJOR×3 Task 6):** NarrativeResults compound
+  rewrite — (AC1) Markdown rendering via existing MarkdownRenderer,
+  (AC3) "Download full output" button with synthetic-anchor object-URL
+  download (deviated from plan's `<a href>` because the artifact endpoint
+  requires `Authorization: Bearer` and browsers don't attach bearer
+  tokens to top-level navigations — uses the canonical pattern from
+  `RunOutputsPanel.tsx:126-138`), (AC4) live-mode summary extraction
+  from executionStore (fetches `fetchRunOutputs(activeRunId)`, walks
+  file artifacts, parses JSONL/JSON, concatenates rows whose `summary`
+  field is non-empty string with `\n\n` separator; `summaryOverride`
+  supplied skips live fetch). 19/19 tests pass including plan tests
+  5/6/7 (load-bearing run-window filter preserved).
+- **FIX-G (commit 70084b8bb, MAJOR×2 Task 7):** InlineRunResults narrative
+  dispatch restored to XOR (plan 19b:365): `return narrativeMode ?
+  <NarrativeResults /> : <RunOutputsPanel />`. Plus two missing
+  plan-mandated dispatch tests.
+- **FIX-H (split landing — see commit-attribution archaeology below,
+  MAJOR×4 Task 8):** widened read-only enforcement audit (plan
+  19b:484-494) covers all 8 element classes — input, textarea, select,
+  contentEditable, draggable, role={combobox, listbox, textbox,
+  spinbutton}, and interactive button — with the interactive-button
+  scan scoped to metadata header + audit-readiness panel only
+  (deliberately excluding YamlDisplay's legitimate Copy/Download
+  buttons in read-only). Plus Test 7 (no CompletionBar/chat panel
+  in shared view; uses `queryByLabelText(/^Chat panel$/i)` because
+  ChatPanel renders `<div aria-label="Chat panel">` without a
+  semantic role — `queryByRole("complementary")` would silently
+  pass), Test 8 (metadata-not-editable, scoped to the pipeline-name
+  header), and the LLM-interpretations store-decoupling test
+  (plan 19b:519-542).
+- **FIX-I (commit db552e857, MAJOR Task 9):** SideRail slot reorder:
+  audit-readiness → validation-banner → graph-mini → completion-bar
+  → catalog (plan 19b:602 "below audit-readiness, above Catalog").
+  Position test asserts `auditIdx < completionIdx < catalogIdx` via
+  DOM-order `querySelectorAll`.
+- **FIX-J (commit 7a709803a, CRITICAL Task 11):** the missing single
+  end-to-end test exercising User-A→User-B handoff with all four
+  DB-state checks the plan mandates (plan 19b:640-664). Previously
+  what existed was disjoint slices (CompletionFlow.integration.test.tsx
+  for the CompletionBar side, test_shareable_reviews_routes.py for
+  multi-user resolve at the API level, test_yaml_export_audit_event.py
+  for the export audit row) — none composed into Step 3-6 jointly.
+  See 19a's Review-history entry for FIX-J's commit-discipline note.
+- **FIX-K (commit 8490877c5, MAJOR×2 DC-6 findings, Task 1):** frontend
+  trust-boundary tightening. (1) `fetchSharedInspect` now invokes the
+  full `validateAuditReadinessSnapshot` per-row validator (exported
+  from `api/auditReadiness.ts`); previously the comment promised
+  deferred validation that never ran on the shared-inspect path —
+  a real Tier-3 → Tier-1 hole. (2) `pipeline_metadata` and
+  `composition_snapshot` re-typed from `Record<string, unknown>` to
+  the plan-specified `PipelineMetadata` and `CompositionState`
+  (per 19b:100-101), with per-field runtime validators
+  `isPipelineMetadata` and `isCompositionSnapshot`. (3) Deleted the
+  now-redundant `_narrowCompositionSnapshot` in SharedInspectView.tsx
+  (wire-boundary now guarantees the shape). **Wire-vs-runtime drift
+  documented:** the backend `CompositionStateResponse` Pydantic mirror
+  emits `{version, metadata, source, nodes, edges, outputs}` — narrower
+  than the TS `CompositionState` interface's runtime-only `id` /
+  `validation_*` fields. Test fixtures use `as unknown as` cast.
+- **FIX-M (commit e8d08ebf0, MEDIUM×3 DC-7 findings, Task 2):**
+  shareableReviewStore hardening. (1) Captured-epoch post-await check
+  prevents stale-response-clobber on session switch — chosen over
+  AbortController because audit rows are append-only and aborting
+  mid-flight would mint server-side row never surfaced. (2) Module-scoped
+  `_inFlightSessionId` guard prevents double-click double-POST →
+  duplicate audit row. (3) `clearForSession(sessionId)` action
+  implemented per plan Task 2 Step 1.5 (was unimplemented in original
+  pass despite being documented in the store's own doc comment).
+- **FIX-E (commit c496949c7, MAJOR×3 Task 3):** CompletionBar test
+  coverage: AC4 Export-YAML always-enabled (asserts under both null
+  and invalid validation states), AC6 Run-pipeline dispatches
+  `executionStore.execute(activeSessionId)` via spy, AC7 Export-YAML
+  click opens `ExportYamlModal` (via `OPEN_YAML_MODAL_EVENT`
+  CustomEvent; verified with `waitFor(() => getByRole("dialog", {
+  name: /export yaml/i }))`).
+- **FIX-F (commit 5c56f3510, MAJOR + MINOR×3 Task 4):** SaveForReviewDialog
+  Esc-to-close (listener mounted on `document` not the dialog element —
+  the canonical React modal pattern because `role="dialog"` doesn't
+  auto-focus in jsdom and dialog-element listeners no-op when focus
+  is elsewhere). Plus transient "Copied!" 2000ms auto-clear test
+  (vitest fixture trap: `vi.useFakeTimers({ toFake: ["setTimeout",
+  "clearTimeout"] })` must be selective or the clipboard promise
+  deadlocks against waitFor's setInterval), plus open-in-new-tab
+  anchor assertion test.
+
+DC verdicts on 6B passing sections (post-implementation):
+DC-6 (API client) surfaced 2 MAJOR (closed by FIX-K). DC-7 (store)
+surfaced 3 MEDIUM (closed by FIX-M). DC-11 (useNarrativeMode hook)
+CONFIRMED-MET with cosmetic notes only (scope extension to source/sink
+plugin tag detection beyond plan's transforms-only pseudocode — broader
+than spec but matches plan description).
+
+See 19a's Review history (same date entry) for the operator-decision
+queue items, the commit-message-vs-diff archaeology for FIX-A/FIX-H/FIX-K,
+and the FIX-B `--no-verify` discipline policy established post-hoc.
+
+**2026-05-19 — Implementation pass (Tasks 1-12 landed)**
+
+All 12 frontend tasks implemented in 10 commits on branch
+`feat/composer-phase-6-completion-gestures`:
+
+1. API client + types (8 tests) — `api/shareableReviews.ts`,
+   types/api.ts extension.
+2. `shareableReviewStore` (7 tests).
+3. `CompletionBar` three-button component (7 tests) — reuses
+   `ExecuteButton` + `ExportYamlButton` for Phase 5b interpretation-
+   gating + YAML modal dispatch preservation.
+4. `SaveForReviewDialog` with copy-to-clipboard + retry + clipboard
+   fallback (8 tests).
+5. `useNarrativeMode` hook + module-level catalog cache (7 tests).
+6. `NarrativeResults` with overlay model + opt-out indicator (7 tests).
+   Simplified vs plan: the live executionStore doesn't yet aggregate
+   a narrative-summary field; v1 surfaces a placeholder in live mode
+   and reads from `summaryOverride` (Task 8 path). Phase 5b
+   interpretation-event overlay is opt-out-flag-only because
+   `interpretationEventsStore` does not expose a resolved-event list;
+   a future store extension can surface the full list inline without
+   changing this component's prop surface.
+7. `InlineRunResults` wiring with the `NarrativeResultsBranch`
+   dispatcher rendering narrative ABOVE the tabular outputs.
+8. `useSharedToken` hook (10 tests) + `useHashRouter` shared-route
+   guards (no regressions in 17 existing tests) + `SharedInspectView`
+   component (6 tests).
+9. + 10. CompletionBar mounted in SideRail's `completionBarSlot`;
+   `executeButtonSlot` + `exportYamlSlot` retired to `null` (the verbs
+   now live inside CompletionBar). SaveForReviewDialog mounted at
+   app-root for cross-view availability.
+11. Cross-cutting integration test (4 tests) covering end-to-end
+   click → dialog → success → copy → close; 409 error path; disabled-
+   button no-op; cross-session staleness clear.
+12. Documentation: this Review history entry +
+    `docs/guides/sharing-pipelines.md` extended with the "Frontend
+    surfaces (post-Phase-6B)" section.
+
+End-of-6B gate: full vitest run = **1040 tests pass** (was 976 baseline;
++64 new). Typecheck clean. No regressions in any existing test file.
+
+**Post-spec-review remediation (Task 8 substantive gap, FIX-C, 2026-05-19):**
+The Task 8 SharedInspectView shipped here used an inline 3-column
+`<table>` for the readiness panel and a raw `<pre><code>` block for the
+YAML — both inline in `SharedInspectView.tsx`. The spec-compliance
+reviewer flagged this as NON-COMPLIANT vs. the plan's `InspectorPanel`
+/ "reused YamlView" / `AuditReadinessRow` / `SharedAuditReadinessPanel`
+/ `ReadOnlyContext` / jest-axe / sessionStorage-round-trip targets.
+
+The FIX-C remediation pass discovered that the plan's literal text
+referenced infrastructure that doesn't exist in this codebase:
+`InspectorPanel` was never built, and `YamlView` / `GraphMiniView` are
+both session-store-coupled so neither can be reused with frozen-blob
+data without a substantial refactor. The honest delivery shape: extract
+the actual reusable primitives, then compose the read-only inspect view
+from them.
+
+Files added or modified by FIX-C (commit on top of the original Task 8):
+
+* `components/audit/AuditReadinessRow.tsx` + test — extracted from
+  `AuditReadinessPanel` as a pure row renderer taking a
+  `RowPresentation` and an optional `onSelect`; honours the
+  `useReadOnly()` signal by forcing the static variant under
+  read-only.
+* `contexts/ReadOnlyContext.tsx` + test — provides the
+  `ReadOnlyProvider` + `useReadOnly()` hook. Default value `false` so
+  composer-side components mounted outside the provider are unchanged.
+* `components/shared/SharedAuditReadinessPanel.tsx` + test — renders
+  six `AuditReadinessRow`s from a frozen `AuditReadinessSnapshot`
+  inside `<ReadOnlyProvider value={true}>`. No live overlays (no
+  inline-blob provenance override, no Phase 5b LLM stylising — those
+  belong on the live composer's `AuditReadinessPanel` only).
+* `components/inspector/YamlDisplay.tsx` + test — extracted the
+  Copy + Download + syntax-highlight chrome from `YamlView` as a pure
+  primitive (`yaml: string`, `filename?: string`). `YamlView` retains
+  its fetch effect, empty/loading/error states, and proposal panel; it
+  now delegates display to `<YamlDisplay>`. SharedInspectView mounts
+  `YamlDisplay` directly with the wire YAML.
+* `components/sidebar/GraphMiniView.tsx` — gained an optional
+  `compositionStateOverride` prop. When supplied, used in place of the
+  session-store read. SharedInspectView passes the frozen
+  `composition_snapshot` (narrowed at the boundary via an offensive
+  shape guard — `nodes` and `outputs` must be arrays or the boundary
+  crashes).
+* `components/common/AuthGuard.tsx` + test — sessionStorage round-trip
+  for the shared-route hash. While unauthenticated on a `#/shared/`
+  hash, the save effect persists the hash to
+  `sessionStorage.elspeth_post_login_redirect`. On unauth→auth
+  transition, the restore effect writes the saved hash back to
+  `window.location.hash` and removes the key (self-disarming).
+* `components/shared/SharedInspectView.tsx` — rewritten to compose
+  the new primitives inside `<ReadOnlyProvider value={true}>`. The
+  inline 3-column table and raw `<pre>` are deleted. A jest-axe
+  accessibility assertion is added on the loaded state (plan line
+  470).
+
+Test deltas: 1048 → 1079 (+31 across the new test files plus extension
+of the existing SharedInspectView / GraphMiniView tests). Typecheck
+clean. All existing AuditReadinessPanel / YamlView / GraphMiniView /
+App / AuthGuard tests pass unchanged.
+
+The plan's literal-text references to `InspectorPanel` and "reused
+YamlView" were aspirational — the post-spec-review fix produces the
+spec'd user-visible behaviour through smaller primitives the codebase
+can actually support.
+
+The shared-route hash format (`#/shared/{token}`) required extending
+the hash router which previously only knew `#/{sessionId}` /
+`#/{sessionId}/{verb}`. The extension is two guards (in `parseHash`
+and in the session-change subscription) that short-circuit when the
+hash starts with `#/shared/`; the SharedInspectView owns the URL for
+its lifecycle.
+
+Implementation surfaces deferred (not blocking demo):
+
+* Per-token revocation UI — no backend support in v1; Phase 9.
+* Reviewer "approve / request changes" surface — read-only only.
+* Email-this-link UI — copy-to-clipboard is the v1 affordance.
+
 **2026-05-19 — Multi-reviewer Go/No-Go panel applied (CONDITIONAL → GO)**
 
 Four reviewers (reality / architecture / quality / systems) returned CONDITIONAL GO. Frontend-side blockers resolved:

@@ -24,6 +24,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_invalid_auth_provider_kerberos_rejected(self) -> None:
@@ -34,6 +35,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_port_zero_rejected(self) -> None:
@@ -44,6 +46,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_port_negative_rejected(self) -> None:
@@ -54,6 +57,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_port_above_65535_rejected(self) -> None:
@@ -64,6 +68,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_composer_max_composition_turns_zero_rejected(self) -> None:
@@ -73,6 +78,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_composer_max_discovery_turns_zero_rejected(self) -> None:
@@ -82,6 +88,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=0,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_composer_max_tool_calls_per_turn_defaults_to_16(self) -> None:
@@ -90,6 +97,7 @@ class TestWebSettingsValidation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
 
         assert settings.composer_max_tool_calls_per_turn == 16
@@ -102,6 +110,7 @@ class TestWebSettingsValidation:
                 composer_max_tool_calls_per_turn=0,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_composer_timeout_zero_rejected(self) -> None:
@@ -111,6 +120,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_composer_timeout_must_leave_transport_headroom(self) -> None:
@@ -120,6 +130,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=300.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_composer_timeout_allows_explicit_larger_transport_ceiling(self) -> None:
@@ -130,6 +141,7 @@ class TestWebSettingsValidation:
             composer_transport_idle_ceiling_seconds=360.0,
             composer_transport_headroom_seconds=30.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
 
         assert settings.composer_timeout_seconds == 300.0
@@ -141,12 +153,13 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=0,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_composer_fields_required_no_defaults(self) -> None:
         """Regression: composer fields must be explicitly configured — no silent defaults."""
         with pytest.raises(ValidationError):
-            WebSettings()  # type: ignore[call-arg]  # intentionally omitted to test validation
+            WebSettings(shareable_link_signing_key=b"\x00" * 32)  # type: ignore[call-arg]  # intentionally omitted to test validation
 
     def test_composer_model_default_uses_current_openai_frontier_model(self) -> None:
         settings = WebSettings(
@@ -154,6 +167,7 @@ class TestWebSettingsValidation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
 
         assert settings.composer_model == "gpt-5.5"
@@ -166,6 +180,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_payload_store_retention_days_zero_rejected(self) -> None:
@@ -181,6 +196,7 @@ class TestWebSettingsValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
 
@@ -194,6 +210,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         url = settings.get_landscape_url()
         assert url == "sqlite:////app/data/runs/audit.db"
@@ -205,6 +222,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         url = settings.get_landscape_url()
         assert url == "postgresql://db/audit"
@@ -216,6 +234,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         path = settings.get_payload_store_path()
         assert path == Path("/app/data/payloads")
@@ -227,6 +246,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         path = settings.get_payload_store_path()
         assert path == Path("/mnt/payloads")
@@ -240,6 +260,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         url = settings.get_landscape_url()
         expected_data_dir = Path("data").resolve()
@@ -253,6 +274,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         path = settings.get_payload_store_path()
         assert path == Path("data").resolve() / "payloads"
@@ -264,6 +286,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         url = settings.get_session_db_url()
         assert url == "sqlite:////app/data/sessions.db"
@@ -275,6 +298,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         url = settings.get_session_db_url()
         assert url == "postgresql://db/sessions"
@@ -287,6 +311,7 @@ class TestWebSettingsDerivedAccessors:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         url = settings.get_session_db_url()
         expected_data_dir = Path("data").resolve()
@@ -304,6 +329,7 @@ class TestSecretKeyGuard:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_default_secret_key_allowed_on_localhost(self) -> None:
@@ -314,6 +340,7 @@ class TestSecretKeyGuard:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.secret_key == "change-me-in-production"
 
@@ -324,6 +351,7 @@ class TestSecretKeyGuard:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.secret_key == "change-me-in-production"
 
@@ -334,10 +362,13 @@ class TestSecretKeyGuard:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.secret_key == "change-me-in-production"
 
     def test_custom_secret_key_allowed_on_any_host(self) -> None:
+        # DC-2 FIX-L: non-loopback hosts also need a non-weak signing key.
+        # Uniform-byte placeholders are rejected by the weak-key validator.
         settings = WebSettings(
             host="0.0.0.0",
             secret_key="my-real-secret",
@@ -345,6 +376,7 @@ class TestSecretKeyGuard:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\xab\xcd" * 16,
         )
         assert settings.secret_key == "my-real-secret"
 
@@ -359,6 +391,7 @@ class TestSecretKeyGuard:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
 
@@ -373,6 +406,7 @@ class TestAuthFieldValidation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.auth_provider == "local"
 
@@ -396,6 +430,7 @@ class TestAuthFieldValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_oidc_provider_missing_fields_raises(self) -> None:
@@ -407,6 +442,7 @@ class TestAuthFieldValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
 
@@ -431,6 +467,7 @@ class TestPathFieldValidation:
                     "composer_max_discovery_turns": 10,
                     "composer_timeout_seconds": 85.0,
                     "composer_rate_limit_per_minute": 10,
+                    "shareable_link_signing_key": b"\x00" * 32,
                 }
             )
 
@@ -441,6 +478,7 @@ class TestPathFieldValidation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         expected = Path("~/data").expanduser().resolve()
         assert settings.data_dir == expected
@@ -455,6 +493,7 @@ class TestPathFieldValidation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.get_payload_store_path() == Path("~/payloads").expanduser().resolve()
         assert settings.get_payload_store_path().is_absolute()
@@ -474,6 +513,7 @@ class TestPathFieldValidation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         # Captured at validation time, anchored to tmp_path.
         expected = (tmp_path / "data").resolve()
@@ -496,6 +536,7 @@ class TestServerSecretAllowlistValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
 
@@ -513,6 +554,7 @@ class TestAuthFieldValidationContinued:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.auth_provider == "oidc"
         assert settings.oidc_issuer == "https://issuer.example.com"
@@ -527,6 +569,7 @@ class TestAuthFieldValidationContinued:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_entra_provider_missing_fields_raises(self) -> None:
@@ -538,6 +581,7 @@ class TestAuthFieldValidationContinued:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_entra_provider_missing_tenant_id_raises(self) -> None:
@@ -552,6 +596,7 @@ class TestAuthFieldValidationContinued:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
     def test_entra_provider_with_all_fields_valid(self) -> None:
@@ -566,6 +611,7 @@ class TestAuthFieldValidationContinued:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.auth_provider == "entra"
         assert settings.entra_tenant_id == "my-tenant-id"
@@ -579,6 +625,7 @@ class TestOIDCBlankStringRejection:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
 
     def test_oidc_empty_string_issuer_rejected(self) -> None:
@@ -670,6 +717,7 @@ class TestDBURLValidation:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
 
     def test_landscape_url_empty_rejected(self) -> None:
@@ -767,6 +815,7 @@ class TestFieldValidatorCoverage:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
 
     @pytest.mark.parametrize("field_name", _optional_string_field_names())
@@ -796,6 +845,7 @@ class TestJWKSFailureRetryFloor:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
 
     @pytest.mark.parametrize("below_floor", [1, 2, 5, 9])

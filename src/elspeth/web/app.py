@@ -29,6 +29,7 @@ from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
+from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.audit_readiness.routes import create_audit_readiness_router
 from elspeth.web.audit_readiness.service import ReadinessService
 from elspeth.web.auth.audit import AuthAuditRecorder
@@ -62,6 +63,9 @@ from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
+from elspeth.web.shareable_reviews.service import ShareableReviewService
+from elspeth.web.shareable_reviews.signer import ShareTokenSigner
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -253,6 +257,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
     )
 
+    # ShareableReviewService — Phase 6A completion gestures.
+    #
+    # Depends on:
+    #   * ``execution_service`` (for mark-time validation)
+    #   * ``readiness_service`` (for the frozen-at-mark-time audit-readiness
+    #     snapshot embedded in the share blob)
+    #   * the sessions-DB engine (for ``composer_completion_events_table``
+    #     audit writes)
+    #   * a ``FilesystemPayloadStore`` (for the content-addressed snapshot
+    #     blob — created here, not shared with ``BlobServiceImpl`` because
+    #     ``BlobServiceImpl`` owns its own internal payload store with a
+    #     different retention semantics)
+    #   * the ``ShareTokenSigner`` primitive (HMAC over WebSettings'
+    #     required ``shareable_link_signing_key``)
+    payload_store = FilesystemPayloadStore(settings.get_payload_store_path())
+    app.state.payload_store = payload_store
+    # ``shareable_link_signing_key`` is a ``SecretBytes`` (DC-2 FIX-L —
+    # masks repr to prevent plaintext leakage in tracebacks/logs).
+    # ``.get_secret_value()`` returns the raw bytes the HMAC primitive needs.
+    share_token_signer = ShareTokenSigner(settings.shareable_link_signing_key.get_secret_value())
+    app.state.share_token_signer = share_token_signer
+    app.state.shareable_review_service = ShareableReviewService(
+        session_service=session_service,
+        execution_service=execution_service,
+        readiness_service=app.state.readiness_service,
+        signer=share_token_signer,
+        settings=settings,
+        sessions_db_engine=app.state.session_engine,
+        payload_store=payload_store,
+    )
+
     # Periodic orphan cleanup — catches runs orphaned by SIGKILL/OOM
     # between restarts. Startup cleanup (above) handles the bulk case;
     # this catches runs orphaned while the server is still running.
@@ -313,7 +348,13 @@ def _settings_from_env() -> WebSettings:
                 kwargs[field_name] = None
             else:
                 kwargs[field_name] = value
-    return WebSettings(**kwargs)
+    # DC-2 FIX-L: ``shareable_link_signing_key`` is typed ``SecretBytes`` on
+    # the model, but the env-var ingest path passes a str (base64-encoded)
+    # which a ``mode="before"`` validator on the field decodes to bytes.
+    # Mypy can't see through Pydantic's pre-validators, so the **kwargs
+    # widening is reported as a type error here. The cast is safe because
+    # Pydantic raises ``ValidationError`` on any mismatch at runtime.
+    return WebSettings(**kwargs)  # type: ignore[arg-type]
 
 
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
@@ -613,6 +654,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.include_router(create_secrets_router())
     app.include_router(create_execution_router())
     app.include_router(create_audit_readiness_router())
+    app.include_router(create_shareable_reviews_router())
 
     # --- Seam contract D: RunAlreadyActiveError -> 409 with error_type ---
     @app.exception_handler(RunAlreadyActiveError)

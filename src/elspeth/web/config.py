@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.core.config import PayloadStoreSettings
@@ -176,6 +176,69 @@ class WebSettings(BaseModel):
     # Separate from landscape_url (audit DB)
     session_db_url: str | None = None
 
+    # Phase 6A — shareable-review token signing.
+    #
+    # The HMAC key backs the ``ShareTokenSigner`` primitive at
+    # ``web/shareable_reviews/signer.py``. Required (Field(...)): the web
+    # service refuses to start without it — there is no test-friendly
+    # default because rotation/recovery is "re-issue all links," and a
+    # silent dev-mode default would let a misconfigured staging deploy
+    # ship outstanding links signed with the well-known dev key. Pair the
+    # operator-action runbook entry at
+    # ``docs/guides/sharing-pipelines.md`` (Task 12 of plan 19a) with the
+    # generation step ``openssl rand -base64 32``.
+    #
+    # 32-byte minimum mirrors HMAC-SHA256's block size. Longer keys
+    # (e.g. the 44-char base64 string from ``openssl rand -base64 32``
+    # interpreted as utf-8 bytes) are accepted as opaque key material.
+    #
+    # Rotating this key invalidates EVERY outstanding shareable link.
+    # There is no dual-key acceptance window in v1; see plan 19a §"Scope
+    # boundaries" → "Out of scope: Key rotation tooling."
+    # DC-2 FIX-L (Phase 6A gap-analysis):
+    #
+    # ``SecretBytes`` masks the value in ``repr()`` so tracebacks, debug
+    # logs, and REPL inspection do not exfiltrate the HMAC key. Pydantic v2's
+    # default repr otherwise prints every field value in plaintext.
+    #
+    # ``strict=True`` forbids the lax ``str → bytes`` utf-8 coercion. Without
+    # this, a 31-character string containing a 2-byte codepoint
+    # (``'a' * 30 + 'ñ'``) silently passes the 32-byte floor with only 31
+    # characters of entropy. Strict mode rejects non-bytes inputs at the
+    # boundary.
+    #
+    # Consumer site (web/app.py:276) unwraps with ``.get_secret_value()``
+    # when constructing the ``ShareTokenSigner`` primitive — the signer's
+    # constructor signature is unchanged (still ``bytes``).
+    shareable_link_signing_key: SecretBytes = Field(
+        ...,
+        strict=True,
+        description=(
+            "HMAC-SHA256 key for shareable-review tokens. Required — the "
+            "service refuses to start without it. Rotating invalidates "
+            "ALL outstanding shareable links. Generate with "
+            "``openssl rand -base64 32`` and store as utf-8 bytes. "
+            "Wrapped in ``SecretBytes``: ``repr()`` shows a mask; call "
+            "``.get_secret_value()`` to obtain the raw bytes."
+        ),
+    )
+
+    # Phase 6A — shareable-review token lifetime.
+    #
+    # Stamps ``expires_at = now() + this delta`` on every newly minted
+    # signed token. The signer verifies expiry on resolve (see
+    # ``ShareTokenSigner.verify``). Default is 30 days; operators may
+    # lower or raise as appropriate to their review cadence.
+    shareable_link_lifetime_seconds: int = Field(
+        default=30 * 24 * 3600,
+        gt=0,
+        description=(
+            "Lifetime (in seconds) for shareable-review tokens. Default: "
+            "30 days. The service stamps expires_at = now() + this delta "
+            "when creating a token."
+        ),
+    )
+
     @field_validator(
         "oidc_issuer",
         "oidc_audience",
@@ -215,6 +278,62 @@ class WebSettings(BaseModel):
     def _reject_blank_secret_key(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("must not be blank")
+        return v
+
+    @field_validator("shareable_link_signing_key", mode="before")
+    @classmethod
+    def _decode_signing_key_from_string(cls, v: object) -> object:
+        """DC-2 FIX-L [MEDIUM] — explicit base64 decoding for str inputs.
+
+        Env-var ingestion (``ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY``)
+        delivers the key as a ``str``. With ``strict=True`` on the field,
+        Pydantic would reject the str outright; without it, Pydantic would
+        silently utf-8-encode the str — and that's the bug DC-2 flagged:
+        ``'a' * 30 + 'ñ'`` (31 characters) encodes to 32 utf-8 bytes and
+        slips past the byte-length floor with 31 characters of entropy.
+
+        The documented operator recipe is ``openssl rand -base64 32`` (44-char
+        base64 string, 32 raw bytes of entropy). We decode str as base64
+        explicitly here — same encoding the operator used to generate the
+        key. Invalid base64 raises ``ValueError`` (no fall-back to utf-8
+        coercion). Bytes pass through unchanged; strict mode then rejects any
+        remaining non-bytes types.
+
+        Multibyte-utf-8 ambiguity is foreclosed at the boundary by requiring
+        base64 — the only way to express N raw bytes through a string medium
+        without character-vs-byte conflation.
+        """
+        if isinstance(v, str):
+            import base64
+            import binascii
+
+            try:
+                return base64.b64decode(v, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(
+                    "shareable_link_signing_key string inputs must be base64-encoded (e.g. ``openssl rand -base64 32``). Decoding failed."
+                ) from exc
+        return v
+
+    @field_validator("shareable_link_signing_key")
+    @classmethod
+    def _signing_key_min_length(cls, v: SecretBytes) -> SecretBytes:
+        """Phase 6A — reject signing keys shorter than HMAC-SHA256's block size.
+
+        32 bytes is the minimum; ``openssl rand -base64 32`` produces 44 utf-8
+        characters that base64-decode to exactly 32 raw bytes — the floor.
+        Shorter keys reduce the effective entropy of the HMAC tag and make
+        brute-force token forgery easier; pre-release ELSPETH refuses to start
+        a service with such a key.
+
+        The floor is on raw byte length. The ``mode="before"`` companion
+        validator above performs explicit base64 decoding for str inputs, so
+        this byte count equals the operator-supplied raw byte count —
+        multibyte-utf-8 ambiguity is foreclosed at the boundary, not papered
+        over here.
+        """
+        if len(v.get_secret_value()) < 32:
+            raise ValueError("shareable_link_signing_key must be at least 32 bytes")
         return v
 
     @field_validator("data_dir", "payload_store_path", mode="before")
@@ -332,6 +451,34 @@ class WebSettings(BaseModel):
             raise ValueError(
                 "secret_key must be set to a secure value for non-local deployments "
                 "(host is not a loopback address). Set ELSPETH_WEB__SECRET_KEY or pass secret_key explicitly."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_known_weak_signing_key(self) -> WebSettings:
+        """DC-2 FIX-L [LOW] — refuse uniform-byte placeholder signing keys on
+        non-loopback hosts.
+
+        Test fixtures across the suite use ``b'\\x00' * 32`` and ``b'0' * 32``
+        as convenient 32-byte placeholders. Those values are operationally
+        indistinguishable from "the operator forgot to generate a real key" —
+        on a non-loopback host that is a security incident waiting to happen.
+        Mirrors the shape of ``_enforce_secret_key_in_production`` above.
+
+        A real key from ``openssl rand -base64 32`` is uniformly distributed;
+        a single repeated byte (any value) is the signature of a placeholder.
+        The check is intentionally simple — "all bytes identical" — to avoid
+        false positives on legitimate (if unusual) high-entropy keys.
+        """
+        if self.host in _LOCAL_HOSTS:
+            return self
+        raw_key = self.shareable_link_signing_key.get_secret_value()
+        if len(set(raw_key)) == 1:
+            raise ValueError(
+                "shareable_link_signing_key is a known-weak placeholder "
+                "(uniform-byte pattern detected); generate a real key with "
+                "``openssl rand -base64 32`` for non-loopback deployments. "
+                f"Host '{self.host}' is not a loopback address."
             )
         return self
 

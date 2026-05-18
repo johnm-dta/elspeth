@@ -145,7 +145,19 @@ function isValidationResult(result: unknown): result is ValidationResult {
   );
 }
 
-function validateSnapshot(body: unknown, status: number): AuditReadinessSnapshot {
+/**
+ * Validate a wire-shape `AuditReadinessSnapshot`. Exported so other API
+ * clients (e.g. the shareable-reviews `SharedInspectResponse` which embeds
+ * the same snapshot verbatim — see plan 19a §"Post-Phase-18 merge fact")
+ * can re-use the full per-row + per-validation-check validation without
+ * duplicating logic at every consumer. Throws an `ApiError` whose `detail`
+ * mentions the audit-readiness endpoint; callers that need a different
+ * `where` label should wrap and re-throw with their own context.
+ */
+export function validateAuditReadinessSnapshot(
+  body: unknown,
+  status: number,
+): AuditReadinessSnapshot {
   assertBaseEnvelope(body, status);
   if (
     typeof body.checked_at !== "string" ||
@@ -188,7 +200,7 @@ export async function fetchAuditReadiness(
     `/api/sessions/${sessionId}/audit-readiness`,
     { method: "GET", headers: authHeaders(), signal },
   );
-  return validateSnapshot(await parseResponse<unknown>(response), response.status);
+  return validateAuditReadinessSnapshot(await parseResponse<unknown>(response), response.status);
 }
 
 export async function fetchAuditReadinessExplain(

@@ -1,0 +1,37 @@
+{
+  "scenario_id": "phase5b_numeric_quantifier_trap",
+  "phase": "5b-interpretation",
+  "summary": "False-positive resistance — numeric quantifier trap. Prompt mixes numeric quantifiers ('top 5', '1-10 scale') and one subjective term ('helpful'). The LLM MUST surface 'helpful' but MUST NOT surface '5', '1-10', 'top', or 'scale'. Backs the 18a Task 12 row 2 assertion (numeric quantifiers not surfaced) directly.",
+  "opening_prompt": "find the top 5 customer reviews from reviews.csv and use an LLM to rate each one on a 1-10 scale for how helpful it would be to a potential buyer",
+  "phase5b_assertions": {
+    "must_call_request_interpretation_review_with_user_term": "helpful",
+    "must_call_request_interpretation_review_with_user_term_note": "Lexical variants accepted: 'helpfulness', 'helpful-to-buyer'.",
+    "must_not_call_request_interpretation_review_with_user_terms": ["5", "top", "1-10", "1 to 10", "scale", "top 5"],
+    "must_not_call_request_interpretation_review_with_user_terms_note": "All numeric/structural quantifiers. 'top 5' is a deterministic sort+limit operation. '1-10' is an explicit bounded scale. None are subjective; surfacing them is a false positive. THIS IS THE CRITICAL FALSE-POSITIVE-RESISTANCE ASSERTION for spec 18a Task 12 row 2: ≥9/10 runs must avoid these.",
+    "must_emit_placeholder_in_prompt_template": "{{interpretation:helpful}}",
+    "must_emit_placeholder_in_prompt_template_same_turn": true
+  },
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["llm"]
+    ],
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  }
+}

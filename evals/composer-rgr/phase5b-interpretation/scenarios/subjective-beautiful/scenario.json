@@ -1,0 +1,37 @@
+{
+  "scenario_id": "phase5b_subjective_beautiful",
+  "phase": "5b-interpretation",
+  "summary": "Subjective-aesthetic-term coverage: 'beautiful' is purely aesthetic with no stable cross-cultural meaning. Strong subjective signal — if the model fails to surface this, the surfacing heuristic is broken at the easy end.",
+  "opening_prompt": "make a list of 10 famous paintings and use an LLM to rate which ones are the most beautiful",
+  "phase5b_assertions": {
+    "must_call_request_interpretation_review_with_user_term": "beautiful",
+    "must_call_request_interpretation_review_with_user_term_note": "Lexical variants accepted: 'beauty', 'beautifulness', 'aesthetic'.",
+    "must_not_call_request_interpretation_review_with_user_terms": ["10", "famous", "paintings"],
+    "must_not_call_request_interpretation_review_with_user_terms_note": "'famous' borderline — it's gradable but has objective referents (citation counts, museum collections). Skill should treat it as concrete unless the prompt invokes a clearly subjective frame. If the LLM does surface 'famous', record but do not RED — note as AMBER for review.",
+    "must_emit_placeholder_in_prompt_template": "{{interpretation:beautiful}}",
+    "must_emit_placeholder_in_prompt_template_same_turn": true
+  },
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["llm"]
+    ],
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  }
+}

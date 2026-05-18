@@ -80,6 +80,7 @@ Runbooks and production procedures.
 - [Database Maintenance](runbooks/database-maintenance.md)
 - [Backup and Recovery](runbooks/backup-and-recovery.md)
 - [Configure Key Vault Secrets](runbooks/configure-keyvault-secrets.md)
+- [Ansible Ubuntu Deployment](runbooks/ansible-ubuntu-deployment.md)
 
 ## Historical Snapshots
 

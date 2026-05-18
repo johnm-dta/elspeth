@@ -829,6 +829,83 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         operation="sqlalchemy_insert_call",
         purpose="schema test exercises run_event_type CHECK chain (line 274); composition_state setup row required",
     ),
+    # ------ tests/unit/web/sessions/test_interpretation_events_table.py — Phase 5b Task 2 schema tests (4 sites) ------
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="_seed_composition_state",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test helper: seeds a composition_states row "
+            "to satisfy the composite FK on interpretation_events. Schema-test "
+            "direct insert — no production lock required because the test owns "
+            "the in-memory SQLite engine and is exercising DDL/constraint "
+            "behaviour, not the production write path. Helper is intentionally "
+            "named _seed_composition_state (not _insert_composition_state) so "
+            "the lock-discipline scanner does not conflate it with the "
+            "production SessionServiceImpl._insert_composition_state."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestCompositionStatesProvenanceEnum.test_invalid_provenance_rejected",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test: drives the "
+            "ck_composition_states_provenance CHECK constraint by inserting an "
+            "invalid provenance value directly; bypassing the helper is the "
+            "point of the test (the helper would only ever pass valid values)."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestCompositionStatesProvenanceEnum.test_interpretation_resolve_provenance_accepted",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test: positive case for the new "
+            "'interpretation_resolve' provenance enum value; direct insert "
+            "asserts the CHECK constraint accepts the new value."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestTriggerInstalledByBootstrap.test_chat_messages_content_immutable",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test: seeds a chat_messages row to assert "
+            "that trg_chat_messages_immutable_content fires on UPDATE OF "
+            "content. Direct insert is required because the test exercises "
+            "trigger behaviour, not the production writer."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestTriggerInstalledByBootstrap.test_chat_messages_delete_raises_even_without_blob_reference",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "schema trigger test: seeds a chat_messages row to assert that "
+            "trg_chat_messages_no_delete blocks direct DELETE even when no "
+            "blob lineage FK exists. Direct insert is required because the "
+            "test is isolating trigger behaviour, not exercising the "
+            "production writer."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestTriggerInstalledByBootstrap.test_chat_messages_delete_allowed_only_through_session_cascade",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "schema trigger test: seeds a chat_messages row to assert that "
+            "whole-session archival may remove transcript rows only through "
+            "the sessions-table FK cascade. Direct insert keeps the test "
+            "focused on trigger/cascade semantics."
+        ),
+    ),
     # ------ tests/unit/web/sessions/test_fork.py — corruption fixture ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_fork.py",
@@ -979,6 +1056,72 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         table="composition_states",
         operation="raw_string_in_OperationalError",
         purpose="OperationalError canary (line 5590): tests runtime-preflight save-failure flag",
+    ),
+    # ------ tests/integration/web/composer/test_inline_source_provenance.py ------
+    #
+    # Phase 5a Task 2.5 integration test seeds a session + one user
+    # chat_messages row directly (no compose loop). These are
+    # fixture-only inserts that verify the new
+    # ``creation_modality`` / ``created_from_message_id`` /
+    # ``creating_*`` columns + composite FK on ``blobs_table``; routing
+    # them through ``SessionServiceImpl.add_message`` would require
+    # spinning up the full sessions service and offload worker just to
+    # land a single deterministic message id, which adds no audit-
+    # integrity coverage and obscures the schema-level assertions the
+    # test is actually pinning.
+    ReviewedWriter(
+        path="tests/integration/web/composer/test_inline_source_provenance.py",
+        enclosing_symbol="_session_with_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5a Task 2.5 inline-source provenance fixture: seeds one "
+            "session + one user chat message so the test can assert the new "
+            "blobs_table provenance columns (creation_modality, "
+            "created_from_message_id, creating_*) and the composite FK "
+            "fk_blobs_created_from_message_session. Direct insert keeps the "
+            "fixture deterministic (caller controls the message id) and "
+            "scope-narrow (no service-stack initialisation)."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/integration/web/composer/test_inline_source_provenance.py",
+        enclosing_symbol="test_cross_session_message_id_rejected",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5a Task 2.5 cross-session FK rejection test: seeds a "
+            "second session (B) with its own user message so the test can "
+            "drive a blob insert in session A that references session B's "
+            "message id. The composite FK fk_blobs_created_from_message_session "
+            "must raise IntegrityError; routing through add_message would "
+            "obscure the schema-level assertion."
+        ),
+    ),
+    # ------ tests/integration/web/composer/test_chat_messages_attributability.py ------
+    #
+    # Phase 5a Task 2.6 attributability test seeds a session + one user
+    # chat_messages row directly so the blob-provenance / immutable-content
+    # assertions have a stable anchor row to bind against. The production
+    # write path is still exercised in the same test via
+    # ``_prepare_blob_create`` + ``_persist_prepared_blob_create``; the
+    # direct insert is only the chat-row anchor, not the system-under-test.
+    ReviewedWriter(
+        path="tests/integration/web/composer/test_chat_messages_attributability.py",
+        enclosing_symbol="_session_with_user_message_and_blob",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5a Task 2.6 attributability fixture: seeds one session + "
+            "one user chat message so the test can persist a blob via the "
+            "real composer write path (_prepare_blob_create + "
+            "_persist_prepared_blob_create) and assert the composite FK "
+            "fk_blobs_created_from_message_session binds to a stable, "
+            "caller-controlled message id. Routing the anchor row through "
+            "SessionServiceImpl.add_message would obscure the schema-level "
+            "assertions (created_from_message_id immutability, trigger "
+            "trg_chat_messages_immutable_content) the test is pinning."
+        ),
     ),
 )
 

@@ -41,7 +41,7 @@ def _make_azure_config(**overrides: object) -> dict[str, object]:
         "deployment_name": "my-gpt4o-deployment",
         "endpoint": "https://my-resource.openai.azure.com",
         "api_key": "azure-api-key",
-        "template": "{{ row.text }}",
+        "prompt_template": "{{ row.text }}",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": [],
     }
@@ -60,7 +60,7 @@ class TestAzureOpenAIConfig:
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ row.text }}",
+                    "prompt_template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
                 }
@@ -74,7 +74,7 @@ class TestAzureOpenAIConfig:
                     "deployment_name": "my-gpt4o-deployment",
                     "api_key": "azure-api-key",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ row.text }}",
+                    "prompt_template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
                 }
@@ -88,7 +88,7 @@ class TestAzureOpenAIConfig:
                     "deployment_name": "my-gpt4o-deployment",
                     "endpoint": "https://my-resource.openai.azure.com",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ row.text }}",
+                    "prompt_template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
                 }
@@ -116,7 +116,7 @@ class TestAzureOpenAIConfig:
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
                     "model": "gpt-4",
-                    "template": "Analyze: {{ row.text }}",
+                    "prompt_template": "Analyze: {{ row.text }}",
                 }
             )  # Missing 'schema'
 
@@ -128,7 +128,7 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "Analyze: {{ row.text }}",
+                "prompt_template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
@@ -136,7 +136,7 @@ class TestAzureOpenAIConfig:
         assert config.deployment_name == "my-gpt4o-deployment"
         assert config.endpoint == "https://my-resource.openai.azure.com"
         assert config.api_key == "azure-api-key"
-        assert config.template == "Analyze: {{ row.text }}"
+        assert config.prompt_template == "Analyze: {{ row.text }}"
 
     def test_default_api_version(self) -> None:
         """Config has default api_version of 2024-10-21."""
@@ -146,7 +146,7 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
@@ -161,7 +161,7 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
                 "api_version": "2023-12-01-preview",
@@ -177,7 +177,7 @@ class TestAzureOpenAIConfig:
                 "endpoint": "https://my-resource.openai.azure.com",
                 "api_key": "azure-api-key",
                 "model": "gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
@@ -194,14 +194,14 @@ class TestLLMTransformAzureInit:
 
     def test_transform_name(self) -> None:
         """Transform has correct name."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         assert transform.name == "llm"
 
     def test_transform_stores_azure_config(self) -> None:
         """Transform stores Azure-specific config accessible via _config."""
         transform = LLMTransform(
             _make_azure_config(
-                template="{{ row.text }}",
+                prompt_template="{{ row.text }}",
                 api_version="2023-12-01-preview",
             )
         )
@@ -213,12 +213,12 @@ class TestLLMTransformAzureInit:
 
     def test_model_set_to_deployment_name(self) -> None:
         """Model is set to deployment_name for API calls."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         assert transform._model == "my-gpt4o-deployment"
 
     def test_determinism_is_non_deterministic(self) -> None:
         """Azure transforms are marked as non-deterministic."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         assert transform.determinism == Determinism.NON_DETERMINISTIC
 
     def test_config_validation_failure_deployment_name(self) -> None:
@@ -229,7 +229,7 @@ class TestLLMTransformAzureInit:
                     "provider": "azure",
                     "endpoint": "https://my-resource.openai.azure.com",
                     "api_key": "azure-api-key",
-                    "template": "{{ row.text }}",
+                    "prompt_template": "{{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],
                 }
@@ -237,7 +237,7 @@ class TestLLMTransformAzureInit:
 
     def test_process_raises_not_implemented(self) -> None:
         """process() raises NotImplementedError directing to accept()."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         factory = make_factory()
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
@@ -251,7 +251,7 @@ class TestLLMTransformAzureInit:
         collision check. This test verifies declared_output_fields is populated
         so TransformExecutor can enforce collision detection.
         """
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
 
         assert isinstance(transform.declared_output_fields, frozenset)
         assert len(transform.declared_output_fields) > 0
@@ -287,7 +287,7 @@ class TestLLMTransformAzurePipelining:
     @pytest.fixture
     def transform(self, collector: CollectorOutputPort, mock_factory: Mock) -> Generator[LLMTransform, None, None]:
         """Create and initialize LLMTransform with Azure provider and pipelining."""
-        t = LLMTransform(_make_azure_config(template="Analyze: {{ row.text }}"))
+        t = LLMTransform(_make_azure_config(prompt_template="Analyze: {{ row.text }}"))
         # Initialize with factory reference
         init_ctx = make_context(run_id="test", landscape=mock_factory)
         t.on_start(init_ctx)
@@ -477,7 +477,7 @@ class TestLLMTransformAzurePipelining:
         """System prompt is included when configured."""
         transform = LLMTransform(
             _make_azure_config(
-                template="{{ row.text }}",
+                prompt_template="{{ row.text }}",
                 system_prompt="You are a helpful assistant.",
             )
         )
@@ -512,7 +512,7 @@ class TestLLMTransformAzurePipelining:
         """Temperature and max_tokens are passed to Azure client."""
         transform = LLMTransform(
             _make_azure_config(
-                template="{{ row.text }}",
+                prompt_template="{{ row.text }}",
                 temperature=0.7,
                 max_tokens=500,
             )
@@ -545,7 +545,7 @@ class TestLLMTransformAzurePipelining:
         """Custom response_field name is used."""
         transform = LLMTransform(
             _make_azure_config(
-                template="{{ row.text }}",
+                prompt_template="{{ row.text }}",
                 response_field="analysis",
             )
         )
@@ -582,7 +582,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_connect_output_required_before_accept(self) -> None:
         """accept() raises RuntimeError if connect_output() not called."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
 
         token = make_token("row-1")
         factory = make_factory()
@@ -597,7 +597,7 @@ class TestLLMTransformAzurePipelining:
 
     def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_factory: Mock) -> None:
         """connect_output() raises if called more than once."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -657,7 +657,7 @@ class TestLLMTransformAzureIntegration:
 
     def test_azure_config_with_default_api_version(self) -> None:
         """LLMTransform with Azure provider uses default api_version when not specified."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         assert isinstance(transform._config, AzureOpenAIConfig)
         assert transform._config.api_version == "2024-10-21"
 
@@ -670,7 +670,7 @@ class TestLLMTransformAzureIntegration:
         """Complex template with multiple variables works correctly."""
         transform = LLMTransform(
             _make_azure_config(
-                template="""
+                prompt_template="""
                     Analyze the following data:
                     Name: {{ row.name }}
                     Score: {{ row.score }}
@@ -717,7 +717,7 @@ class TestLLMTransformAzureIntegration:
         chaosllm_server,
     ) -> None:
         """LLM calls are recorded via AuditedLLMClient."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -758,7 +758,7 @@ class TestLLMTransformAzureConcurrency:
         chaosllm_server,
     ) -> None:
         """Multiple rows are emitted in submission order (FIFO)."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -795,7 +795,7 @@ class TestLLMTransformAzureConcurrency:
 
     def test_on_start_captures_recorder(self, mock_factory: Mock) -> None:
         """on_start() captures factory reference for provider creation."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
 
         # Verify _recorder starts as None
         assert transform._recorder is None
@@ -808,7 +808,7 @@ class TestLLMTransformAzureConcurrency:
 
     def test_close_clears_recorder(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
         """close() clears factory reference."""
-        transform = LLMTransform(_make_azure_config(template="{{ row.text }}"))
+        transform = LLMTransform(_make_azure_config(prompt_template="{{ row.text }}"))
         init_ctx = make_context(run_id="test", landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)

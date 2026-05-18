@@ -129,6 +129,12 @@ class TestCallRecordingRoutesToExecution:
             12.5,
             request_ref="blob-request",
             response_ref="blob-response",
+            # Phase 5b Task 9: cross-DB hash anchor; None unless the caller
+            # is an LLM transform downstream of a resolved interpretation
+            # event. The PluginAuditWriter adapter unconditionally forwards
+            # the kwarg so the LLM transform plugin path can pass-through
+            # without per-call-site adapter changes.
+            resolved_prompt_template_hash=None,
         )
 
 
@@ -219,6 +225,9 @@ class TestOperationCallRoutesToExecution:
             3.25,
             request_ref="op-request-ref",
             response_ref=None,
+            # Phase 5b Task 9: cross-DB hash anchor; None unless the caller
+            # is an LLM operation downstream of a resolved interpretation.
+            resolved_prompt_template_hash=None,
         )
 
 

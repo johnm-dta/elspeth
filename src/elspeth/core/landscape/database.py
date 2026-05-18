@@ -86,6 +86,9 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
     ("token_outcomes", "completed"),
     ("token_outcomes", "path"),
+    # Phase 5b interpretation-review audit anchor — runtime LLM calls must
+    # carry the resolved prompt hash used to join back to session DB events.
+    ("calls", "resolved_prompt_template_hash"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
@@ -133,6 +136,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("run_attributions", "ix_run_attributions_user"),
     ("calls", "ix_calls_state_call_index_unique"),
     ("calls", "ix_calls_operation_call_index_unique"),
+    ("calls", "ix_calls_resolved_prompt_template_hash"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
     ("validation_errors", "ix_validation_errors_run_row"),
 )

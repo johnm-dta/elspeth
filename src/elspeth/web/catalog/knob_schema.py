@@ -230,9 +230,19 @@ def lower_model_to_knob_schema(
     plugin_name: str,
     composer_tier_default: str = "common",
 ) -> KnobSchema:
-    """Lower a single-model Pydantic config class to ``KnobSchema``."""
+    """Lower a single-model Pydantic config class to ``KnobSchema``.
+
+    Fields whose ``json_schema_extra`` carries ``{"composer_hidden": True}``
+    are skipped entirely. Use this for audit-anchor fields the runtime
+    writes (e.g. ``resolved_prompt_template_hash`` on ``LLMConfig``); they
+    are valid YAML inputs the composer service emits internally, but they
+    must not appear as user-editable knobs because a user-set value would
+    falsify the audit trail.
+    """
     fields: list[KnobField] = []
     for name, info in model_cls.model_fields.items():
+        if _is_composer_hidden(info):
+            continue
         fields.append(
             _lower_field(
                 name,
@@ -243,6 +253,24 @@ def lower_model_to_knob_schema(
             )
         )
     return {"fields": fields}
+
+
+def _is_composer_hidden(info: FieldInfo) -> bool:
+    """Return True when a field is marked ``composer_hidden=True``.
+
+    Hidden fields are still valid Pydantic inputs (the runtime writes them
+    via the resolve helper); they simply must not be surfaced as knobs in
+    the composer catalog UI. The membership-then-index pattern mirrors the
+    offensive idiom used elsewhere in this module — direct indexing
+    surfaces any non-bool value as a load-bearing crash rather than a
+    silently-false default.
+    """
+    extra = info.json_schema_extra
+    if type(extra) is not dict:
+        return False
+    if "composer_hidden" not in extra:
+        return False
+    return bool(extra["composer_hidden"])
 
 
 _SLOT_TYPE_TO_KIND: dict[str, FieldKind] = {
@@ -317,6 +345,8 @@ def lower_discriminated_to_knob_schema(
     for variant_value, variant_cls in variants.items():
         for fname, info in variant_cls.model_fields.items():
             if fname == discriminator:
+                continue
+            if _is_composer_hidden(info):
                 continue
             inner_field = _lower_field(
                 fname,

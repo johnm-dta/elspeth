@@ -257,6 +257,54 @@ class TestSchemaConfig:
         assert config.fields[1].name == "name"
         assert config.fields[1].field_type == "str"
 
+    def test_pydantic_schema_field_definition_shape_parses(self) -> None:
+        """Field specs advertised by plugin JSON Schema parse correctly.
+
+        ``get_plugin_schema`` exposes ``SchemaConfig.fields`` items through the
+        dataclass field names (``name`` + ``field_type``). The composer LLM
+        legitimately copies that advertised shape, so the config parser must
+        accept it instead of rejecting it as an arbitrary multi-key dict.
+        """
+        from elspeth.contracts.schema import SchemaConfig
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "fixed",
+                "fields": [{"name": "url", "field_type": "str"}],
+            }
+        )
+
+        assert config.fields is not None
+        assert len(config.fields) == 1
+        assert config.fields[0].name == "url"
+        assert config.fields[0].field_type == "str"
+        assert config.fields[0].required is True
+        assert config.fields[0].nullable is False
+
+    def test_pydantic_schema_field_definition_shape_preserves_booleans(self) -> None:
+        """The JSON-Schema authoring shape may carry explicit booleans."""
+        from elspeth.contracts.schema import SchemaConfig
+
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "fixed",
+                "fields": [
+                    {
+                        "name": "score",
+                        "field_type": "float",
+                        "required": False,
+                        "nullable": True,
+                    }
+                ],
+            }
+        )
+
+        assert config.fields is not None
+        assert config.fields[0].name == "score"
+        assert config.fields[0].field_type == "float"
+        assert config.fields[0].required is False
+        assert config.fields[0].nullable is True
+
     def test_dict_form_optional_field(self) -> None:
         """Dict-form optional field specs parse correctly.
 

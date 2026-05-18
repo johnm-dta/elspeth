@@ -8,13 +8,15 @@ Handles raw HTTP transport with full Tier 3 boundary validation:
 - HTTP status code → typed exception mapping
 
 Client caching is per-state_id with a threading lock. Uses AuditedHTTPClient
-for audit recording and telemetry.
+for transport-level HTTP audit recording and records a logical LLM call row for
+chat-completion semantics.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import time
 from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -22,7 +24,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from pydantic import Field, field_validator
 
+from elspeth.contracts import CallStatus, CallType
 from elspeth.contracts.audit_protocols import PluginAuditWriter
+from elspeth.contracts.call_data import LLMCallError, LLMCallRequest, LLMCallResponse
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.value_source import CatalogValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
@@ -165,11 +169,13 @@ class OpenRouterLLMProvider:
     3. Parse JSON response with NaN rejection
     4. Validate content, usage, finish_reason at Tier 3 boundary
     5. Map HTTP errors to typed exceptions
-    6. Let validated data flow as LLMQueryResult
+    6. Record a logical LLM audit row with the validated request/response
+    7. Let validated data flow as LLMQueryResult
 
-    Does NOT own:
-    - Audit recording (AuditedHTTPClient does this)
-    - Telemetry emission (AuditedHTTPClient does this)
+    The underlying OpenRouter transport is HTTP, so AuditedHTTPClient records
+    the raw transport row. The LLM semantic row is recorded here so
+    ``calls.resolved_prompt_template_hash`` remains attached only to
+    ``CallType.LLM`` rows.
     """
 
     def __init__(
@@ -182,6 +188,7 @@ class OpenRouterLLMProvider:
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         limiter: Any = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> None:
         # Pre-build auth headers — avoids storing the raw API key as a named attribute
         self._request_headers = {
@@ -194,6 +201,10 @@ class OpenRouterLLMProvider:
         self._run_id = run_id
         self._telemetry_emit = telemetry_emit
         self._limiter = limiter
+        # Phase 5b Task 9 — cross-DB hash anchor. Forwarded to every HTTP
+        # post() call so the Landscape ``calls`` row carries the matching
+        # SHA-256.
+        self._resolved_prompt_template_hash = resolved_prompt_template_hash
 
         # Client cache with reference counting for parallel multi-query safety.
         # Multiple parallel queries share the same state_id, so _get_http_client()
@@ -235,6 +246,14 @@ class OpenRouterLLMProvider:
             LLMClientError: Other failures (not retryable)
         """
         snapshot_state_id = state_id
+        llm_request_payload = self._build_llm_request_payload(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+        logical_start = time.perf_counter()
 
         http_client = self._get_http_client(snapshot_state_id, token_id=token_id)
         try:
@@ -361,14 +380,107 @@ class OpenRouterLLMProvider:
             else:
                 response_model = model
 
-            return LLMQueryResult(
+            result = LLMQueryResult(
                 content=content,
                 usage=usage,
                 model=response_model,
                 finish_reason=finish_reason,
             )
+            self._record_logical_llm_success(
+                state_id=snapshot_state_id,
+                started_at=logical_start,
+                request_payload=llm_request_payload,
+                content=content,
+                model=response_model,
+                usage=usage,
+                raw_response=data,
+            )
+            return result
+        except LLMClientError as exc:
+            self._record_logical_llm_error(
+                state_id=snapshot_state_id,
+                started_at=logical_start,
+                request_payload=llm_request_payload,
+                exc=exc,
+            )
+            raise
         finally:
             self._release_http_client(snapshot_state_id)
+
+    def _build_llm_request_payload(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float,
+        max_tokens: int | None,
+        response_format: dict[str, Any] | None,
+    ) -> LLMCallRequest:
+        extra_kwargs: dict[str, Any] = {}
+        if response_format is not None:
+            extra_kwargs["response_format"] = response_format
+        return LLMCallRequest(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            provider="openrouter",
+            max_tokens=max_tokens,
+            extra_kwargs=extra_kwargs,
+        )
+
+    def _record_logical_llm_success(
+        self,
+        *,
+        state_id: str,
+        started_at: float,
+        request_payload: LLMCallRequest,
+        content: str,
+        model: str,
+        usage: TokenUsage,
+        raw_response: dict[str, Any],
+    ) -> None:
+        """Record the semantic LLM call that the HTTP transport fulfilled."""
+        call_index = self._recorder.allocate_call_index(state_id)
+        self._recorder.record_call(
+            state_id=state_id,
+            call_index=call_index,
+            call_type=CallType.LLM,
+            status=CallStatus.SUCCESS,
+            request_data=request_payload,
+            response_data=LLMCallResponse(
+                content=content,
+                model=model,
+                usage=usage,
+                raw_response=raw_response,
+            ),
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+            resolved_prompt_template_hash=self._resolved_prompt_template_hash,
+        )
+
+    def _record_logical_llm_error(
+        self,
+        *,
+        state_id: str,
+        started_at: float,
+        request_payload: LLMCallRequest,
+        exc: LLMClientError,
+    ) -> None:
+        call_index = self._recorder.allocate_call_index(state_id)
+        message = str(exc) or type(exc).__name__
+        self._recorder.record_call(
+            state_id=state_id,
+            call_index=call_index,
+            call_type=CallType.LLM,
+            status=CallStatus.ERROR,
+            request_data=request_payload,
+            error=LLMCallError(
+                type=type(exc).__name__,
+                message=message,
+                retryable=bool(getattr(exc, "retryable", False)),
+            ),
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+            resolved_prompt_template_hash=self._resolved_prompt_template_hash,
+        )
 
     def runtime_preflight(self, *, operation_id: str, model: str) -> None:
         """Run a minimal audited OpenRouter call under an operation parent."""

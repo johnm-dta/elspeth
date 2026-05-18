@@ -100,6 +100,27 @@ def build_tool_proposal_summary(
             arguments_redacted_json=redacted_arguments,
         )
 
+    if tool_name == "request_interpretation_review":
+        # Phase 5b Task 5 — surface-for-user-review proposals. The action
+        # is structurally different from graph/validation/yaml-affecting
+        # tools: composition state version does NOT advance until the
+        # user resolves the event at /resolve time. The ``affects`` slot
+        # carries a new value, ``"interpretation"``, so any frontend
+        # surface listing affected subsystems can disambiguate this row.
+        # The frontend type ``affects: string[]`` (web/frontend/src/types/index.ts)
+        # is intentionally open — no closed literal to extend.
+        term = _string_argument(arguments, "user_term") or "term"
+        return ToolProposalSummary(
+            summary=f'Surface the interpretation of "{term}" for user review.',
+            rationale=(
+                "The term is subjective or underspecified; the user should "
+                "review the LLM's draft interpretation before the prompt "
+                "template is finalised."
+            ),
+            affects=("interpretation",),
+            arguments_redacted_json=redacted_arguments,
+        )
+
     return ToolProposalSummary(
         summary=f"Apply composer tool {tool_name}.",
         rationale=rationale,

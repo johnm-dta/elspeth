@@ -236,7 +236,7 @@ def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                     "provider": slots["provider"],
                     "model": slots["model"],
                     "api_key": {"secret_ref": slots["api_key_secret"]},
-                    "template": slots["classifier_template"],
+                    "prompt_template": slots["classifier_template"],
                     "response_field": slots["label_field"],
                     "schema": {"mode": "observed"},
                     "required_input_fields": required_input_fields,

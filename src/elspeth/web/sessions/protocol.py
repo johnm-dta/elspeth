@@ -19,6 +19,11 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_chec
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.composer_interpretation import (
+    InterpretationChoice,
+    InterpretationEventRecord,
+    InterpretationSource,
+)
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 
@@ -88,6 +93,7 @@ CompositionStateProvenance = Literal[
     "preflight_persist",
     "session_seed",
     "session_fork",
+    "interpretation_resolve",
 ]
 
 AUDIT_GRADE_VIEW_WRITER_PRINCIPAL = "audit_grade_view"
@@ -209,6 +215,7 @@ class CompositionProposalRecord:
     id: UUID
     session_id: UUID
     tool_call_id: str
+    user_message_id: UUID | None
     tool_name: str
     status: ProposalLifecycleStatus
     summary: str
@@ -668,6 +675,7 @@ class SessionServiceProtocol(Protocol):
         arguments_redacted_json: Mapping[str, Any],
         base_state_id: UUID | None,
         actor: str,
+        user_message_id: UUID | None = None,
     ) -> CompositionProposalRecord: ...
 
     async def list_composition_proposals(
@@ -698,6 +706,155 @@ class SessionServiceProtocol(Protocol):
         self,
         session_id: UUID,
     ) -> list[ProposalEventRecord]: ...
+
+    async def create_pending_interpretation_event(
+        self,
+        *,
+        session_id: UUID,
+        composition_state_id: UUID,
+        affected_node_id: str,
+        tool_call_id: str,
+        user_term: str,
+        llm_draft: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Insert a PENDING interpretation event.
+
+        Implementations MUST validate ``affected_node_id`` exists in
+        the parent composition state's ``nodes`` JSON before INSERT
+        (writer-boundary check per CLAUDE.md offensive programming).
+        Raises ``ValueError`` on a missing state or unknown node.
+        """
+        ...
+
+    async def resolve_interpretation_event(
+        self,
+        *,
+        session_id: UUID,
+        event_id: UUID,
+        choice: InterpretationChoice,
+        amended_value: str | None,
+        actor: str,
+        resolved_at: datetime | None = None,
+        runtime_model_identifier: str | None = None,
+        runtime_model_version: str | None = None,
+    ) -> tuple[InterpretationEventRecord, CompositionStateRecord]:
+        """Commit a resolution AND patch the affected LLM transform's prompt template.
+
+        F-14: ``accepted_value`` is computed internally — implementations
+        read ``llm_draft`` from the pending row when ``choice`` is
+        ``ACCEPTED_AS_DRAFTED``, and use ``amended_value`` when ``choice``
+        is ``AMENDED``.
+
+        Single transaction. Raises ``ValueError`` for no pending event
+        (TOCTOU / IDOR), missing composition state or affected node,
+        or any prompt-template patch failure.
+        """
+        ...
+
+    async def list_interpretation_events(
+        self,
+        session_id: UUID,
+        *,
+        status: Literal["pending", "all"] = "all",
+        composition_state_id: UUID | None = None,
+        sources: Sequence[InterpretationSource] | None = None,
+    ) -> list[InterpretationEventRecord]:
+        """Read-back of interpretation events for the session.
+
+        Returns rows ordered by ``created_at, id``. ``status='pending'``
+        filters to ``choice='pending'`` rows; ``status='all'`` returns
+        every row.
+
+        ``sources``: when set, filters to rows whose
+        ``interpretation_source`` is in the supplied sequence. Used by
+        the opt-out audit-summary surface
+        (``GET /interpretations/opt_out_summary``) to retrieve only
+        ``auto_interpreted_opt_out`` and ``auto_interpreted_no_surfaces``
+        rows. ``None`` (default) imposes no source filter.
+        """
+        ...
+
+    async def record_session_interpretation_opt_out(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        opted_out_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Mark the session as 'don't surface interpretations any more'.
+
+        F-29: idempotent. If an opted-out row already exists for this
+        session, returns the existing record without inserting a duplicate;
+        the sessions boolean stays true. Atomic single transaction
+        (interpretation_events INSERT + sessions UPDATE inside one
+        write lock).
+        """
+        ...
+
+    async def upsert_skill_markdown_history(
+        self,
+        *,
+        skill_hash: str,
+        filename: str,
+        content: str,
+        first_seen_at: datetime | None = None,
+    ) -> bool:
+        """Best-effort INSERT-OR-IGNORE into ``skill_markdown_history`` (F-5c).
+
+        Captures the exact composer-skill markdown text the LLM was
+        prompted with so a forensic auditor can reconstruct it from the
+        ``composer_skill_hash`` recorded on later interpretation event
+        rows. Hash is the primary key; subsequent calls with the same
+        hash are no-ops.
+
+        Returns ``True`` when a row was inserted, ``False`` when it
+        already existed. Best-effort only — NOT transactional with the
+        interpretation-event row write.
+        """
+        ...
+
+    async def record_auto_interpreted_no_surfaces_event(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Write an AUTO_INTERPRETED_NO_SURFACES row (Phase 5b Task 5, F-6).
+
+        Called by the compose loop when the per-term or per-day rate cap
+        is hit for ``request_interpretation_review``: the LLM is expected
+        to fall back to baking the interpretation directly into the prompt
+        template without surfacing it for review. This writer records the
+        fact in the audit trail so an auditor can distinguish "user opted
+        out" from "rate cap exhausted" via ``interpretation_source``.
+
+        Row shape (see ``ck_interpretation_events_no_surfaces_shape``):
+        * ``interpretation_source = 'auto_interpreted_no_surfaces'``
+        * ``choice = 'opted_out'`` (semantics: resolved-at-write — there
+          is no pending surface to acknowledge)
+        * Interpretation-surface fields are NULL: ``composition_state_id``,
+          ``affected_node_id``, ``tool_call_id``, ``user_term``,
+          ``llm_draft`` (the rejected request never produced a surface).
+        * LLM provenance fields MUST be populated — the composer LLM
+          that triggered the rate cap is fully identifiable from the
+          compose-loop snapshot.
+        * ``arguments_hash`` is NULL because the
+          ``INTERPRETATION_HASH_DOMAIN_V1`` set requires
+          surface fields that don't exist for this row shape.
+        * ``resolved_at`` equals ``created_at`` (the rate-cap event is
+          itself a resolution).
+        """
+        ...
 
     async def add_message(
         self,

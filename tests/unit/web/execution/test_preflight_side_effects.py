@@ -144,7 +144,7 @@ transforms:
       provider: openrouter
       api_key: probe-key
       model: openai/gpt-4o
-      template: "{{{{ row.llm_probe_text }}}}"
+      prompt_template: "{{{{ row.llm_probe_text }}}}"
       schema:
         mode: observed
       required_input_fields: []

@@ -200,6 +200,10 @@ def _make_harness(tmp_path: Path, *, session_state: SessionState = "empty") -> _
         sessions_service=sessions_service,
     )
     service._telemetry = telemetry  # type: ignore[attr-defined]
+    # The property harness injects DB failures around compose-turn audit
+    # persistence. Skip the service-instance bootstrap upsert so the
+    # one-time skill-history write does not consume those fault injections.
+    service._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
     if session_state == "has_prior_state":
         with engine.begin() as conn:
             conn.execute(

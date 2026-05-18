@@ -32,7 +32,7 @@ def _make_azure_config(**overrides: Any) -> dict[str, Any]:
         "deployment_name": "gpt-4",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Hello {{ row.name }}",
+        "prompt_template": "Hello {{ row.name }}",
         "schema": {"mode": "observed"},
         "required_input_fields": [],
     }
@@ -46,7 +46,7 @@ def _make_openrouter_config(**overrides: Any) -> dict[str, Any]:
         "provider": "openrouter",
         "model": "anthropic/claude-3-opus",
         "api_key": "test-key",
-        "template": "Hello {{ row.name }}",
+        "prompt_template": "Hello {{ row.name }}",
         "schema": {"mode": "observed"},
         "required_input_fields": [],
     }
@@ -60,7 +60,7 @@ def _make_multi_query_config(**overrides: Any) -> dict[str, Any]:
         "provider": "openrouter",
         "model": "anthropic/claude-3-opus",
         "api_key": "test-key",
-        "template": "Case: {{ row.field1 }} Criterion: {{ row.criterion_name }}",
+        "prompt_template": "Case: {{ row.field1 }} Criterion: {{ row.criterion_name }}",
         "schema": {"mode": "observed"},
         "required_input_fields": [],
         "queries": {

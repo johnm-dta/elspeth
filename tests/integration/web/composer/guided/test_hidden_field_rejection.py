@@ -33,7 +33,7 @@ def test_hidden_field_submission_returns_400(
                     "deployment_name": "gpt-4",
                     "endpoint": "https://example.openai.azure.com/",
                     "api_key": "test-key",
-                    "template": "Summarize {{ row.text }}",
+                    "prompt_template": "Summarize {{ row.text }}",
                     "base_url": "https://openrouter.ai/api/v1",
                 },
                 "observed_columns": [],
@@ -160,7 +160,7 @@ def _fake_llm_response_for_transform(plugin: str) -> SimpleNamespace:
                                                         "deployment_name": "gpt-4",
                                                         "endpoint": "https://example.openai.azure.com/",
                                                         "api_key": "test-key",
-                                                        "template": "Summarize {{ row.text }}",
+                                                        "prompt_template": "Summarize {{ row.text }}",
                                                     },
                                                     "rationale": "exercise variant visibility",
                                                 }

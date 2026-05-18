@@ -11,13 +11,47 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, NoReturn, cast
 
-from sqlalchemy import Engine, inspect
+from sqlalchemy import Engine, inspect, text
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, Table, UniqueConstraint
 
-from elspeth.web.sessions.models import metadata
+from elspeth.web.sessions.models import (
+    SESSION_DB_APPLICATION_ID,
+    SESSION_SCHEMA_EPOCH,
+    metadata,
+)
 
 _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
+
+# Required SQLite triggers. These triggers enforce audit invariants
+# that cannot be expressed as table CHECK constraints:
+#
+# * ``trg_interpretation_events_immutable_resolved`` — resolved
+#   ``interpretation_events`` rows cannot be retroactively edited.
+# * ``trg_interpretation_events_no_delete_resolved`` — resolved
+#   ``interpretation_events`` rows cannot be deleted, while unresolved
+#   PENDING rows remain deletable for orphan recovery.
+# * ``trg_chat_messages_immutable_content`` — ``chat_messages.content`` is
+#   append-only once written.
+# * ``trg_chat_messages_no_delete`` — ``chat_messages`` rows cannot be
+#   deleted directly because they anchor the ``blobs.created_from_message_id``
+#   lineage walk. Whole-session archival remains the bounded lifecycle
+#   purge path and is implemented by deleting the owning ``sessions`` row,
+#   allowing schema-owned cascades to remove session-scoped children.
+#
+# The validator catches the case where schema bootstrap succeeded but the
+# trigger DDL failed silently (e.g., if the DDL event listener was removed
+# or reordered). Live validation against ``sqlite_master`` so a dropped
+# trigger on an existing DB is caught at startup, not at the first attempt
+# to mutate the protected rows.
+_REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
+    {
+        "trg_interpretation_events_immutable_resolved",
+        "trg_interpretation_events_no_delete_resolved",
+        "trg_chat_messages_immutable_content",
+        "trg_chat_messages_no_delete",
+    }
+)
 
 
 class SessionSchemaError(RuntimeError):
@@ -36,11 +70,88 @@ def initialize_session_schema(engine: Engine) -> None:
     inspector = inspect(engine)
     existing_tables = _user_tables(inspector)
     if not existing_tables:
+        # Fresh DB: build the tables, THEN stamp the schema-version
+        # sentinels. Stamping before ``create_all`` would let a partial
+        # failure (e.g. SQL syntax error in a model) leave a DB on disk
+        # that claims the current epoch but has no tables. Stamping after
+        # ``create_all`` succeeds binds the sentinel to "schema actually
+        # present at this epoch."
         metadata.create_all(engine)
+        _stamp_schema_sentinels(engine)
         _validate_current_schema(engine)
         return
 
+    # Existing DB: enforce the schema-version guard BEFORE the deeper
+    # column/FK/constraint validation. A stale DB with the wrong
+    # ``user_version`` is the high-frequency operator failure mode
+    # (forgot to delete the DB across a schema bump); surfacing that
+    # specific cause with the actionable "Delete the session DB file
+    # and restart" message is materially more useful than the column-
+    # mismatch error the validator would otherwise produce downstream.
+    _assert_schema_sentinels(engine)
     _validate_current_schema(engine)
+
+
+def _stamp_schema_sentinels(engine: Engine) -> None:
+    """Write SESSION_DB_APPLICATION_ID and SESSION_SCHEMA_EPOCH onto a
+    freshly-created session DB.
+
+    Both PRAGMAs are persistent attributes of the SQLite file (stored in
+    the header), not per-connection settings, so they only need to be
+    written once at create time. The startup validator reads them back
+    on every subsequent open.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.connect() as conn:
+        conn.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
+        conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
+        conn.commit()
+
+
+def _assert_schema_sentinels(engine: Engine) -> None:
+    """Crash with an actionable message if the session DB schema-version
+    sentinels do not match the values this build expects.
+
+    Mechanical enforcement of the operator-delete-DB policy: without
+    this guard, a stale DB silently fails in obscure SQLAlchemy errors
+    the first time a new code path touches a column/table that does not
+    exist. With it, the operator gets a precise instruction to delete
+    the DB file and restart.
+
+    Two failure modes are distinguished:
+
+    - Wrong ``application_id`` (non-zero, non-ELSP): the configured DB
+      file belongs to some other application entirely. We refuse to
+      touch it.
+    - Wrong ``user_version`` (non-zero, not the current epoch): the
+      file is ours but predates this release's schema. The operator
+      must delete it (pre-release ELSPETH has no migration pathway).
+
+    The zero values are accepted in both cases because a brand-new
+    SQLite file starts with ``application_id=0`` and ``user_version=0``;
+    that state is indistinguishable from "empty DB about to be
+    initialised" and is handled by the fresh-DB branch upstream.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.connect() as conn:
+        app_id = conn.execute(text("PRAGMA application_id")).scalar_one()
+        user_ver = conn.execute(text("PRAGMA user_version")).scalar_one()
+    if app_id != 0 and app_id != SESSION_DB_APPLICATION_ID:
+        raise SessionSchemaError(
+            f"Session DB has unexpected application_id={app_id:#010x}. "
+            f"Expected {SESSION_DB_APPLICATION_ID:#010x} (ELSP) or 0 (new database). "
+            f"This SQLite file does not belong to ELSPETH. "
+            f"Delete the session DB file and restart."
+        )
+    if user_ver != 0 and user_ver != SESSION_SCHEMA_EPOCH:
+        raise SessionSchemaError(
+            f"Session DB schema version {user_ver} does not match "
+            f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
+            f"does not migrate session databases. "
+            f"Delete the session DB file and restart."
+        )
 
 
 def _user_tables(inspector: Inspector) -> frozenset[str]:
@@ -75,6 +186,32 @@ def _validate_current_schema(engine: Engine) -> None:
         _validate_named_checks(inspector, table_name, table)
         _validate_named_unique_constraints(inspector, table_name, table)
         _validate_named_indexes(inspector, table_name, table)
+
+    _validate_required_triggers(engine)
+
+
+def _validate_required_triggers(engine: Engine) -> None:
+    """Confirm the required SQLite triggers are present in the live DB.
+
+    Catches the case where ``metadata.create_all`` succeeded but a trigger
+    listener was bypassed or removed, OR where a trigger on an existing DB
+    was dropped (manually or by a faulty migration). Without this check, a
+    silently-missing trigger means the audit invariants it enforces are not
+    actually being enforced — a Tier-1 audit integrity failure that would
+    otherwise only surface the next time someone tried to mutate a
+    protected row (which may be never on a quiescent DB).
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.connect() as conn:
+        present = {str(row[0]) for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
+    missing = _REQUIRED_SQLITE_TRIGGERS - present
+    if missing:
+        _schema_error(
+            "missing SQLite trigger(s)",
+            expected=sorted(_REQUIRED_SQLITE_TRIGGERS),
+            actual=sorted(present),
+        )
 
 
 def _validate_columns(inspector: Inspector, table_name: str, table: Table) -> None:

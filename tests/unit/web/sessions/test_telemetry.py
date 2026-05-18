@@ -18,6 +18,13 @@ EXPECTED_METRIC_NAMES = {
     "composer.tool_call_cap_exceeded_total",
     "composer.audit.audit_grade_view_total",
     "composer.audit.audit_access_log_write_failed_total",
+    # Phase 5b Task 5 follow-on (F-15): operational telemetry for
+    # ``request_interpretation_review`` rate-cap breaches.
+    "composer.interpretation_rate_cap_exceeded_total",
+    # Phase 5b Task 5 follow-on (F-17 / F-21): operational telemetry
+    # for /execute attempts that hit an unresolved
+    # ``{{interpretation:<term>}}`` placeholder at runtime.
+    "composer.interpretation_placeholder_unresolved_at_runtime_total",
 }
 
 
@@ -35,6 +42,10 @@ def test_telemetry_field_names_match_spec_exactly():
         "tool_call_cap_exceeded_total",
         "audit_grade_view_total",
         "audit_access_log_write_failed_total",
+        # Phase 5b Task 5 follow-on (F-15).
+        "interpretation_rate_cap_exceeded_total",
+        # Phase 5b Task 5 follow-on (F-17 / F-21).
+        "interpretation_placeholder_unresolved_at_runtime_total",
     }
     actual = set(telem.__dataclass_fields__)
     assert actual == expected_fields, f"field-name mismatch — added: {actual - expected_fields}; removed: {expected_fields - actual}"

@@ -1,0 +1,29 @@
+{
+  "scenario_id": "phase5a_task8_p2_three_urls",
+  "phase": "5a-task8",
+  "summary": "Phase 5a Task 8 validation prompt #2 (plan 17 §Task 8 Step 4 lines 2329-2336). Three URLs typed into chat. Expected: EITHER a set_pipeline call with source.inline_blob containing exactly 3 rows (one URL per row), OR a narration explicitly stating 'I read these as 3 rows' before any tool call. A generic 'I'll create a source from those URLs' without the row-count confirmation does NOT pass.",
+  "opening_prompt": "check these URLs: a.com, b.com, c.com",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["web_scrape"]
+    ],
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  }
+}

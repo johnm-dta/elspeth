@@ -472,6 +472,12 @@ async def test_cl_pp_10a_commit_failure_without_plugin_crash_raises_audit_integr
     telemetry = build_sessions_telemetry()
     service._telemetry = telemetry  # type: ignore[attr-defined]
     sessions_service._telemetry = telemetry
+    # Phase 5b Task 5 follow-on: prime the F-5c per-instance gate so the
+    # first compose-loop entry doesn't issue the skill_markdown_history
+    # upsert (its commit would be caught by ``_force_commit_failure``
+    # below, displacing the persist_compose_turn commit this test
+    # actually targets).
+    service._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
     llm = _ReplayLLM(
         (
             _make_llm_response(
@@ -514,6 +520,8 @@ async def test_cl_pp_10b_commit_failure_during_plugin_crash_preserves_plugin_err
     service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
     telemetry = build_sessions_telemetry()
     sessions_service._telemetry = telemetry
+    # See CL-PP-10a above for the F-5c gate-priming rationale.
+    service._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
     original_execute_tool = composer_service_module.execute_tool
     calls = 0
 

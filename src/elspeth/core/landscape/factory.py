@@ -94,6 +94,7 @@ class _PluginAuditWriterAdapter:
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         return self._execution.record_call(
             state_id,
@@ -106,6 +107,7 @@ class _PluginAuditWriterAdapter:
             latency_ms,
             request_ref=request_ref,
             response_ref=response_ref,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def record_operation_call(
@@ -121,6 +123,7 @@ class _PluginAuditWriterAdapter:
         call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         if call_index is not None:
             return self._execution.record_operation_call(
@@ -134,6 +137,7 @@ class _PluginAuditWriterAdapter:
                 call_index=call_index,
                 request_ref=request_ref,
                 response_ref=response_ref,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
         return self._execution.record_operation_call(
             operation_id,
@@ -145,6 +149,7 @@ class _PluginAuditWriterAdapter:
             latency_ms,
             request_ref=request_ref,
             response_ref=response_ref,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def get_node_state(self, state_id: str) -> NodeState | None:

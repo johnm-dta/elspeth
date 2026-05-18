@@ -824,6 +824,32 @@ export interface SystemStatus {
 
 // ── Blob Manager ────────────────────────────────────────────────────────────
 
+/**
+ * Wire form of the closed `creation_modality` enum (Phase 5a Task 2.5).
+ * Snake_case mirrors the SQL CHECK constraint exactly. The frontend
+ * `InlineSourceSummary.provenance` discriminant uses hyphenated forms;
+ * the single translation point is the `fetchBlob` response adapter in
+ * `api/client.ts` (`toInlineSourceProvenance`).
+ */
+export type BlobCreationModalityWire =
+  | "verbatim"
+  | "llm_generated"
+  | "disambiguated"
+  | "llm_generated_then_amended";
+
+/**
+ * Display form of the creation modality used by
+ * `InlineSourceSummary.provenance`. Hyphenated form; see
+ * `BlobCreationModalityWire` for the snake_case wire form. The adapter
+ * `toInlineSourceProvenance` in `api/client.ts` is the only place wire
+ * → display translation is performed.
+ */
+export type InlineSourceProvenance =
+  | "verbatim"
+  | "llm-generated"
+  | "disambiguated"
+  | "llm-generated-then-amended";
+
 /** Blob metadata returned by all blob endpoints. */
 export interface BlobMetadata {
   id: string;
@@ -836,6 +862,16 @@ export interface BlobMetadata {
   created_by: "user" | "assistant" | "pipeline";
   source_description: string | null;
   status: "ready" | "pending" | "error";
+  // Inline-blob provenance. The wire form is snake_case; the frontend's
+  // `InlineSourceSummary.provenance` field is hyphenated. Translation
+  // lives in `api/client.ts` only.
+  creation_modality: BlobCreationModalityWire;
+  created_from_message_id: string | null;
+  creating_model_identifier: string | null;
+  creating_model_version: string | null;
+  creating_provider: string | null;
+  creating_composer_skill_hash: string | null;
+  creating_arguments_hash: string | null;
 }
 
 /**
@@ -905,4 +941,50 @@ export interface AuditReadinessExplain {
   session_id: string;
   composition_version: number;
   narrative: string;
+}
+
+/**
+ * Frontend-derived projection of an inline-blob source attached to the
+ * current composition state. Computed from compositionState.source +
+ * blob metadata. Never persisted; recomputed on each composition mutation.
+ */
+export interface InlineSourceSummary {
+  blobId: string;
+  filename: string;
+  mimeType: string;
+  /** Truncated content excerpt for display; never the full payload. */
+  contentPreview: string;
+  /** Best-effort row count from the parsed source; null if unparseable. */
+  rowCount: number | null;
+  /**
+   * SHA-256 of the raw inline content (from session blob metadata).
+   *
+   * NON-NULLABLE BY CONTRACT. Every persisted blob carries a hash — that's
+   * a Tier-1 audit-trail invariant on our data (CLAUDE.md "Auditability
+   * Standard": hashes survive payload deletion, integrity is always
+   * verifiable). The inline-source projection MUST throw, not
+   * coerce, when the wire returns a null or empty hash: silently
+   * substituting an empty string into the rendered audit-info pane
+   * gives an auditor a value the system never asserted, which is exactly
+   * the fabrication CLAUDE.md forbids. The throw lives in
+   * `projectInlineSourceSummary` — keep it there.
+   */
+  contentHash: string;
+  /**
+   * How this inline source's content was produced. Projected from the
+   * server-recorded `creation_modality` column via the `fetchBlob`
+   * response adapter in `client.ts`.
+   *
+   * - "verbatim"                   — user typed the content directly.
+   * - "llm-generated"              — LLM generated rows; user confirmed.
+   * - "disambiguated"              — LLM interpreted ambiguous input; user confirmed.
+   * - "llm-generated-then-amended" — LLM generated rows, user amended via
+   *                                  "Edit the list" (F-4). Drives the Edit
+   *                                  button visibility alongside "llm-generated".
+   *
+   * The frontend uses hyphenated forms; the server uses snake_case
+   * (`llm_generated`, `llm_generated_then_amended`). The adapter in
+   * `client.ts` is the single translation point.
+   */
+  provenance: InlineSourceProvenance;
 }

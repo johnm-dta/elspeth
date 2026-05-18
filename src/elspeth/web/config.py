@@ -85,6 +85,35 @@ class WebSettings(BaseModel):
     composer_advisor_max_prompt_tokens: int = Field(default=4000, ge=1)
     composer_advisor_max_completion_tokens: int = Field(default=1500, ge=1)
     composer_advisor_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Phase 5b Task 5 — interpretation-event rate limits (F-30/F-31).
+    #
+    # Both limits are read at compose-loop initialisation and passed to
+    # ``_check_interpretation_rate_limits`` as keyword arguments; changing
+    # them requires a service restart (not a per-request reload). The
+    # per-day window is UTC midnight, not a sliding 24-hour window —
+    # simpler for operators to reason about and produces predictable
+    # reset behaviour. See ``web/composer/tools.py`` for the helper that
+    # consumes these values.
+    composer_interpretation_rate_limit_per_term: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Max times the composer LLM may surface the same (session, user_term, "
+            "composition_state_id) tuple for user review. Exceeding this cap "
+            "raises ToolArgumentError; the compose loop falls back to "
+            "AUTO_INTERPRETED_NO_SURFACES."
+        ),
+    )
+    composer_interpretation_rate_limit_per_session_day: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Max request_interpretation_review invocations per session per UTC day. "
+            "Window resets at UTC midnight (not a sliding 24-hour window). "
+            "Exceeding this cap raises ToolArgumentError; the compose loop falls "
+            "back to AUTO_INTERPRETED_NO_SURFACES."
+        ),
+    )
     auth_rate_limit_per_minute: int = Field(default=20, ge=1)
     secret_key: str = (
         "change-me-in-production"  # Security rule S3 (seam-contracts.md): Sub-2 startup guard enforces non-default in production

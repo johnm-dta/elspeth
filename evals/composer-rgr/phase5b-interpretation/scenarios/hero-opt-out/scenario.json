@@ -1,0 +1,45 @@
+{
+  "scenario_id": "phase5b_hero_opt_out",
+  "phase": "5b-interpretation",
+  "summary": "The Task 12 fourth-threshold scenario: replicate the hero prompt with interpretation_review_disabled=true on the session, and verify the LLM skips request_interpretation_review entirely and instead writes an auto-interpreted row with interpretation_source='auto_interpreted_opt_out'. The placeholder may still be present in prompt_template but the resolve route is bypassed; the row is written by the opt-out service method (Task 4 record_session_interpretation_opt_out). Spec 18a Task 12 row 4: ≥9/10 runs.",
+  "opening_prompt": "create a list of 5 government web pages and use an LLM to rate how cool they are",
+  "session_setup": {
+    "interpretation_review_disabled": true,
+    "session_setup_note": "Before sending the opening prompt, call POST /api/sessions/{id}/interpretations/opt_out (empty body; idempotent per F-29) to set interpretation_review_disabled=true on the session. The composer skill MUST consult this flag and skip the request_interpretation_review tool path entirely. The harness must apply this before the first POST /messages. Default run_scenario.sh does NOT do this — see ../README.md §Opt-out-scenarios for the operator's pre-step."
+  },
+  "phase5b_assertions": {
+    "must_not_call_request_interpretation_review": true,
+    "must_not_call_request_interpretation_review_note": "With interpretation_review_disabled=true, the tool MUST NOT be called for ANY user term — the auto-interpreted path replaces it. Inspect chat_messages.tool_calls and confirm zero entries with tool_name='request_interpretation_review' across the entire session.",
+    "must_write_interpretation_event_with_source": "auto_interpreted_opt_out",
+    "must_write_interpretation_event_with_source_note": "Query: SELECT user_term, interpretation_source FROM interpretation_events WHERE session_id=? AND interpretation_source='auto_interpreted_opt_out'. At least one row must exist for the 'cool' term. Spec 18a Task 12 row 4: ≥9/10 runs.",
+    "must_still_emit_placeholder_or_substitute_resolved_value": true,
+    "must_still_emit_placeholder_or_substitute_resolved_value_note": "Either {{interpretation:cool}} is present in the staged LLM transform's prompt_template (and resolved at runtime via the opt-out row), OR the LLM substituted the auto-interpreted draft text directly into prompt_template. Both shapes are GREEN — the discriminator is purely the audit row."
+  },
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["llm"]
+    ],
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  },
+  "operator_notes": [
+    "Replicate 10x to populate row 4 of the 18a Task 12 threshold table.",
+    "If the opt-out endpoint is not yet wired at run time, this scenario is BLOCKED — surface to the operator rather than skipping silently."
+  ]
+}

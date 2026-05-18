@@ -12,19 +12,28 @@ import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import structlog
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.composer_interpretation import (
+    INTERPRETATION_HASH_DOMAIN_V1,
+    InterpretationChoice,
+    InterpretationEventRecord,
+    InterpretationSource,
+)
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
@@ -32,9 +41,11 @@ from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_proposals_table,
     composition_states_table,
+    interpretation_events_table,
     proposal_events_table,
     runs_table,
     sessions_table,
+    skill_markdown_history_table,
 )
 from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
@@ -66,6 +77,7 @@ from elspeth.web.sessions.protocol import (
     ToolCallIDMismatchError,
 )
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
+from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE, _validate_accepted_value_content
 
 # Process-wide SQLite session-write lock registry.
 #
@@ -329,6 +341,7 @@ def _proposal_record_from_row(row: Any) -> CompositionProposalRecord:
         id=UUID(row.id),
         session_id=UUID(row.session_id),
         tool_call_id=row.tool_call_id,
+        user_message_id=UUID(row.user_message_id) if row.user_message_id is not None else None,
         tool_name=row.tool_name,
         status=row.status,
         summary=row.summary,
@@ -354,6 +367,249 @@ def _proposal_event_record_from_row(row: Any) -> ProposalEventRecord:
         payload=row.payload,
         created_at=SessionServiceImpl._ensure_utc(row.created_at),
     )
+
+
+def _interpretation_event_record_from_row(row: Any) -> InterpretationEventRecord:
+    """Convert a SQLAlchemy row to an InterpretationEventRecord.
+
+    Per the Tier-1 audit-trust contract (CLAUDE.md), this conversion crashes
+    loudly on any anomaly — the enum constructors raise ValueError on an
+    unrecognised string, and the UUID/datetime constructors raise on
+    malformed values. The schema CHECK constraints guarantee the closed-
+    enum values and source-conditional nullability invariants; this helper
+    relies on that guarantee.
+    """
+    return InterpretationEventRecord(
+        id=UUID(row.id),
+        session_id=UUID(row.session_id),
+        composition_state_id=UUID(row.composition_state_id) if row.composition_state_id is not None else None,
+        affected_node_id=row.affected_node_id,
+        tool_call_id=row.tool_call_id,
+        user_term=row.user_term,
+        llm_draft=row.llm_draft,
+        accepted_value=row.accepted_value,
+        choice=InterpretationChoice(row.choice),
+        created_at=SessionServiceImpl._ensure_utc(row.created_at),
+        resolved_at=SessionServiceImpl._ensure_utc(row.resolved_at) if row.resolved_at is not None else None,
+        actor=row.actor,
+        model_identifier=row.model_identifier,
+        model_version=row.model_version,
+        provider=row.provider,
+        composer_skill_hash=row.composer_skill_hash,
+        arguments_hash=row.arguments_hash,
+        hash_domain_version=row.hash_domain_version,
+        interpretation_source=InterpretationSource(row.interpretation_source),
+        runtime_model_identifier_at_resolve=row.runtime_model_identifier_at_resolve,
+        runtime_model_version_at_resolve=row.runtime_model_version_at_resolve,
+        resolved_prompt_template_hash=row.resolved_prompt_template_hash,
+    )
+
+
+# Sentinel for the trigger ``trg_interpretation_events_immutable_resolved``
+# RAISE(ABORT, ...) message. The exact string lives in models.py at the
+# CREATE TRIGGER DDL — keep these in sync. F-28: the service-layer error
+# classifier MUST match this specific substring so an immutability violation
+# is mapped to a 409/400 by the route, NOT conflated with a generic
+# constraint violation (which would emit a spurious security telemetry
+# signal upstream).
+_INTERPRETATION_IMMUTABLE_TRIGGER_MSG: str = "interpretation_events: resolved rows are immutable"
+
+
+class InterpretationResolveError(ValueError):
+    """Base class for expected interpretation-resolution failures."""
+
+
+class InterpretationEventNotFoundError(InterpretationResolveError):
+    """No event exists for the requested ``(session_id, event_id)`` pair."""
+
+
+class InterpretationEventAlreadyResolvedError(InterpretationResolveError):
+    """The event exists but is no longer pending."""
+
+
+class InterpretationNodeMissingError(InterpretationResolveError):
+    """The affected node disappeared from the live composition state."""
+
+
+class InterpretationNodePluginMutatedError(InterpretationResolveError):
+    """The affected node still exists but is no longer an LLM transform."""
+
+
+class InterpretationPlaceholderConsumedError(InterpretationResolveError):
+    """The affected LLM node no longer carries the expected placeholder."""
+
+
+# Prefixes (case-insensitive) that, when they appear immediately before the
+# placeholder, indicate the LLM placed the placeholder inside a structural
+# directive rather than in the prompt body. Substituting the user's
+# accepted_value into a structural-directive position would produce a
+# broken prompt at runtime — fail closed.
+#
+# CLOSED LIST — extending this set is a governance action for the
+# prompt-template patch helper. Any new prefix must be paired with a
+# direct-helper unit test and a writer-path audit.
+_STRUCTURAL_DIRECTIVE_PREFIXES: tuple[str, ...] = (
+    "system:",
+    "role:",
+    "instructions:",
+)
+
+
+def _patch_llm_transform_prompt(
+    state: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    user_term: str,
+    accepted_value: str,
+) -> Sequence[Mapping[str, Any]]:
+    """Return a new ``nodes`` JSON sequence with the LLM transform's prompt
+    template patched to embed ``accepted_value`` for ``user_term``.
+
+    The prompt-template patch convention: the LLM transform's
+    ``options.prompt_template`` field contains exactly one
+    ``{{interpretation:<term>}}`` placeholder that the LLM writes when it
+    first stages the LLM transform. This helper substitutes the placeholder
+    with the user's ``accepted_value`` and writes the result back into
+    ``options.prompt_template``.
+
+    The ``prompt_template`` field lives **inside the node's ``options``
+    mapping** because that is the shape ``CompositionState.NodeSpec``
+    consumes (``node.options["prompt_template"]``) and the shape
+    ``yaml_generator.generate_pipeline_dict`` emits to the runtime engine.
+    The LLM discriminator is the production ``CompositionState.to_dict()``
+    shape: ``node_type == "transform"`` and ``plugin == "llm"``.
+
+    Raises typed :class:`InterpretationResolveError` subclasses when:
+
+    * the affected node is not present in ``state.nodes``;
+    * the affected node is not a transform node with ``plugin == 'llm'``;
+    * the affected node has no ``options`` mapping;
+    * ``options.prompt_template`` is missing or not a string;
+    * the prompt template does not contain the expected placeholder;
+    * the placeholder appears more than once in the template;
+    * the prefix immediately before the placeholder matches (case-insensitive)
+      any of :data:`_STRUCTURAL_DIRECTIVE_PREFIXES`.
+
+    The helper is pure (no DB IO). It is called from
+    :meth:`SessionServiceImpl.resolve_interpretation_event` BEFORE the
+    composition-state UPDATE so any raise short-circuits the resolve
+    transaction cleanly.
+    """
+    if state.nodes is None:
+        raise InterpretationNodeMissingError(
+            f"_patch_llm_transform_prompt: composition state has no nodes; node {affected_node_id!r} is not present"
+        )
+
+    patched_nodes: list[Mapping[str, Any]] = []
+    found = False
+    for node in state.nodes:
+        if node["id"] != affected_node_id:
+            patched_nodes.append(node)
+            continue
+
+        found = True
+
+        if node.get("node_type") != "transform" or "plugin" not in node:
+            raise InterpretationNodePluginMutatedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} has no LLM discriminator; "
+                "expected node_type='transform' with plugin='llm'"
+            )
+
+        node_plugin = node["plugin"]
+        if node_plugin != "llm":
+            raise InterpretationNodePluginMutatedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} has plugin "
+                f"{node_plugin!r}; only llm nodes carry interpretation placeholders"
+            )
+
+        # ``composition_states.nodes`` is Tier-1 (our own audit data) but
+        # stored as schemaless JSON. Membership checks here are an
+        # offensive pattern: assert the invariant, raise a structured
+        # ValueError with a precise message. Direct indexing on the
+        # ``Mapping[str, Any]`` annotation lets a wrong type surface as a
+        # KeyError/TypeError at the operation site — informative crash
+        # rather than fabricated default, per CLAUDE.md offensive
+        # programming rules.
+        if "options" not in node:
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} has no options "
+                f"mapping; expected options.prompt_template carrying the placeholder"
+            )
+        options_value = node["options"]
+        if not isinstance(options_value, Mapping):
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} options is not a mapping; "
+                "expected options.prompt_template carrying the placeholder"
+            )
+        options: Mapping[str, Any] = options_value
+
+        if "prompt_template" not in options:
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} has no options.prompt_template field"
+            )
+
+        template_value = options["prompt_template"]
+        if not isinstance(template_value, str):
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template is not a string"
+            )
+        template = template_value
+        placeholder_matches = [match for match in INTERPRETATION_PLACEHOLDER_RE.finditer(template) if match.group(1).strip() == user_term]
+        placeholder = f"{{{{interpretation:{user_term}}}}}"
+        if not placeholder_matches:
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template does not contain placeholder {placeholder!r}"
+            )
+
+        # Count occurrences. Exactly one is required; more is a structural
+        # error (the LLM emitted an ambiguous template; we cannot know which
+        # site the user resolution should bind to).
+        if len(placeholder_matches) != 1:
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: placeholder {placeholder!r} appears "
+                f"{len(placeholder_matches)} times in node {affected_node_id!r}'s options.prompt_template; "
+                f"the placeholder must appear exactly once"
+            )
+        placeholder_match = placeholder_matches[0]
+
+        # Structural-directive guard: the substring ending at the placeholder
+        # is the "prefix immediately before". We strip trailing whitespace
+        # (so "System: {{...}}" is caught even though there's a space before
+        # the placeholder) and compare case-insensitively against the closed
+        # prefix list.
+        prefix = template[: placeholder_match.start()].rstrip()
+        prefix_lower = prefix.lower()
+        for directive in _STRUCTURAL_DIRECTIVE_PREFIXES:
+            if prefix_lower.endswith(directive):
+                raise InterpretationPlaceholderConsumedError(
+                    f"_patch_llm_transform_prompt: placeholder {placeholder!r} in node "
+                    f"{affected_node_id!r} is immediately preceded by structural "
+                    f"directive {directive!r}; substituting into a directive position "
+                    f"would produce a broken prompt"
+                )
+
+        # Patch is a single span replacement; we already verified exactly one
+        # matching placeholder so this is unambiguous. The resolved string is written
+        # back into ``options.prompt_template`` so it lands on
+        # ``NodeSpec.options`` after ``state_from_record`` and flows into the
+        # runtime YAML emitted by ``generate_pipeline_dict``. The same helper
+        # also writes the resolved-prompt-template hash into
+        # ``options.resolved_prompt_template_hash`` (the cross-DB anchor
+        # the LLM transform plugin reads at execution time to populate the
+        # Landscape ``calls.resolved_prompt_template_hash`` column).
+        new_template = f"{template[: placeholder_match.start()]}{accepted_value}{template[placeholder_match.end() :]}"
+        patched_node = dict(node)
+        patched_options = dict(options)
+        patched_options["prompt_template"] = new_template
+        patched_node["options"] = patched_options
+        patched_nodes.append(patched_node)
+
+    if not found:
+        raise InterpretationNodeMissingError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} is not present in the composition state's nodes"
+        )
+
+    return patched_nodes
 
 
 class SessionServiceImpl:
@@ -406,7 +662,7 @@ class SessionServiceImpl:
 
         PostgreSQL: pg_advisory_xact_lock(ELSPETH_SESSIONS_LOCK_CLASSID,
         hashtext(session_id)) -- the **two-argument** form
-        (B3 from the Phase 1 plan-review synthesis). The classid namespace
+        (B3 from the advisory-lock review synthesis). The classid namespace
         is reserved in src/elspeth/contracts/advisory_locks.py and is
         on-the-wire ABI under change control; do not open-code the literal
         here, always import the constant.
@@ -654,7 +910,7 @@ class SessionServiceImpl:
         """Single-row insert into composition_states with per-session
         version allocation under _session_write_lock.
 
-        Phase 1B refactor: takes a single :class:`StatePayload` carrying
+        Takes a single :class:`StatePayload` carrying
         ``data`` (a :class:`CompositionStateData`) and
         ``derived_from_state_id`` rather than two separate keyword
         arguments. Bundling the two coheres with B1 — the payload object
@@ -681,13 +937,13 @@ class SessionServiceImpl:
         session write lock makes the SELECT-MAX-then-INSERT sequence
         atomic against every other writer for this ``session_id`` on
         both PostgreSQL and SQLite, so the fabrication path is
-        structurally unreachable. Closes B1/B3 from the Phase 1
-        plan-review synthesis. Also mirrors the precondition contract on
+        structurally unreachable. Closes B1/B3 from the state-persistence
+        review synthesis. Also mirrors the precondition contract on
         ``_reserve_sequence_range``.
 
         Version allocation is per-session: the COALESCE query filters by
         ``session_id`` because ``uq_composition_state_version`` is a
-        per-session constraint (see Task 1's CREATE TABLE). A global MAX
+        per-session constraint. A global MAX
         would silently break the per-session monotonic-version contract
         every read path assumes.
 
@@ -701,8 +957,8 @@ class SessionServiceImpl:
         the existing inline inserts use today.
 
         The ``provenance`` argument must satisfy the
-        ``ck_composition_states_provenance`` CHECK constraint added in
-        Task 3; passing an unknown value raises ``IntegrityError``.
+        ``ck_composition_states_provenance`` CHECK constraint; passing an
+        unknown value raises ``IntegrityError``.
 
         The ``created_at`` argument is optional. When ``None`` (the
         default), the helper stamps ``datetime.now(UTC)`` at insert
@@ -813,8 +1069,8 @@ class SessionServiceImpl:
         messages whose visible ``content`` was rewritten by runtime
         preflight redaction. Routes already pass
         ``raw_content=result.raw_assistant_content`` to ``add_message``;
-        Phase 3 migrates those call sites to ``persist_compose_turn``,
-        so the primitive must accept and persist the column today (B2).
+        compose-loop call sites use ``persist_compose_turn``, so the
+        primitive must accept and persist the column today (B2).
         """
         import asyncio
 
@@ -840,7 +1096,7 @@ class SessionServiceImpl:
         )
 
         now = self._now()
-        # IntegrityError disposition (Task 12 / spec §4.5): the catch is
+        # IntegrityError disposition (spec §4.5): the catch is
         # OUTSIDE ``with self._engine.begin()`` deliberately. Order is
         # load-bearing — the ``with`` context's ``__exit__`` runs first
         # (rolling back the transaction so no partial audit row survives),
@@ -857,7 +1113,7 @@ class SessionServiceImpl:
         try:
             with self._engine.begin() as conn:
                 with self._session_write_lock(conn, session_id):
-                    # B5 (Phase 1 plan-review synthesis): if a parent
+                    # B5: if a parent
                     # composition state is supplied, it MUST belong to this
                     # session.
                     if parent_composition_state_id is not None:
@@ -939,7 +1195,7 @@ class SessionServiceImpl:
             self._telemetry.tool_row_integrity_violation_total.add(1)
             raise
         except OperationalError as audit_exc:
-            # OperationalError disposition (Task 13 / spec §5.2.2 / §5.5
+            # OperationalError disposition (spec §5.2.2 / §5.5
             # rows 9-10): the audit insert itself failed (commit-time
             # disk full, fsync failure, network partition, etc.). The
             # ``with self._engine.begin()`` context has already rolled
@@ -1061,7 +1317,7 @@ class SessionServiceImpl:
            ``engine.begin()`` block to roll back. No rows persisted.
            Retry-on-CancelledError still forbidden.
 
-        The Phase 3 compose loop is the only caller of this method.
+        The compose loop is the only caller of this method.
 
         Pinned by ``test_persist_compose_turn_async_caller_cancellation_commits_anyway``.
         """
@@ -1233,10 +1489,10 @@ class SessionServiceImpl:
 
             try:
                 with self._engine.begin() as conn:
-                    # Delete in dependency order (children first for non-CASCADE DBs)
-                    conn.execute(delete(runs_table).where(runs_table.c.session_id == sid))
-                    conn.execute(delete(chat_messages_table).where(chat_messages_table.c.session_id == sid))
-                    conn.execute(delete(composition_states_table).where(composition_states_table.c.session_id == sid))
+                    # Session archival is the only supported transcript purge:
+                    # delete the parent row and let the schema-owned cascades
+                    # remove session-scoped children. Direct chat-message
+                    # deletes are blocked by trg_chat_messages_no_delete.
                     conn.execute(delete(sessions_table).where(sessions_table.c.id == sid))
             except Exception as primary_exc:
                 if blob_dir is not None and staged_blob_dir is not None and staged_blob_dir.exists():
@@ -1343,10 +1599,12 @@ class SessionServiceImpl:
         arguments_redacted_json: Mapping[str, Any],
         base_state_id: UUID | None,
         actor: str,
+        user_message_id: UUID | None = None,
     ) -> CompositionProposalRecord:
         """Create a pending composer proposal and its forward audit event."""
         now = self._now()
         sid = str(session_id)
+        umid = str(user_message_id) if user_message_id is not None else None
         proposal_id = str(uuid.uuid4())
         event_id = str(uuid.uuid4())
 
@@ -1372,6 +1630,7 @@ class SessionServiceImpl:
                         id=proposal_id,
                         session_id=sid,
                         tool_call_id=tool_call_id,
+                        user_message_id=umid,
                         tool_name=tool_name,
                         status="pending",
                         summary=summary,
@@ -1531,6 +1790,724 @@ class SessionServiceImpl:
                 return [_proposal_event_record_from_row(row) for row in rows]
 
         return cast(list[ProposalEventRecord], await self._run_sync(_sync))
+
+    # ----------------------------------------------------------------- #
+    # Interpretation-event writer/reader methods.
+    #
+    # Telemetry: NONE — composition-time user decisions are audit-primary;
+    # the Landscape ``interpretation_events_table`` is the source of truth
+    # and there is no ephemeral operational signal worth emitting. Do not
+    # add slog or telemetry hooks here without a primacy-order review.
+    # ----------------------------------------------------------------- #
+
+    async def create_pending_interpretation_event(
+        self,
+        *,
+        session_id: UUID,
+        composition_state_id: UUID,
+        affected_node_id: str,
+        tool_call_id: str,
+        user_term: str,
+        llm_draft: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Insert a PENDING interpretation event.
+
+        Called from the compose-loop tool handler for
+        ``request_interpretation_review``. Acquires the session write lock
+        for the duration of the insert. Validates ``affected_node_id``
+        exists in ``composition_states.nodes`` BEFORE committing the row
+        (raises :class:`ValueError` otherwise; the tool handler converts to
+        ARG_ERROR).
+
+        Per CLAUDE.md offensive-programming rules, the writer-boundary
+        validation reads the parent composition_states row inside the
+        locked transaction and inspects its ``nodes`` JSON before INSERT —
+        a malformed reference is a Tier-1 audit anomaly we crash on rather
+        than fabricating a binding.
+
+        The ``actor`` column on the pending row is set to the sentinel
+        ``"composer-llm"`` — the row was created by the composer LLM, not
+        a user. ``resolve_interpretation_event`` overwrites this with the
+        user identity passed by the route at resolution time, which is
+        what :data:`InterpretationEventRecord` ``actor`` documents as
+        "user identity at resolution". The closed CHECK on choice and the
+        immutability trigger together prevent any other writer from
+        appearing on a resolved row.
+
+        Telemetry: NONE — composition-time user decisions are audit-primary;
+        no ephemeral operational signal required.
+        """
+        now = self._ensure_utc(created_at) if created_at is not None else self._now()
+        sid = str(session_id)
+        state_id_str = str(composition_state_id)
+        event_id = str(uuid.uuid4())
+
+        def _sync() -> InterpretationEventRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                session_row = conn.execute(
+                    select(sessions_table.c.interpretation_review_disabled).where(sessions_table.c.id == sid)
+                ).one_or_none()
+                if session_row is not None and bool(session_row.interpretation_review_disabled):
+                    opt_out_row = conn.execute(
+                        select(interpretation_events_table)
+                        .where(interpretation_events_table.c.session_id == sid)
+                        .where(interpretation_events_table.c.interpretation_source == InterpretationSource.AUTO_INTERPRETED_OPT_OUT.value)
+                        .order_by(desc(interpretation_events_table.c.created_at))
+                    ).first()
+                    if opt_out_row is None:
+                        conn.execute(
+                            insert(interpretation_events_table).values(
+                                id=event_id,
+                                session_id=sid,
+                                composition_state_id=None,
+                                affected_node_id=None,
+                                tool_call_id=None,
+                                user_term=None,
+                                llm_draft=None,
+                                accepted_value=None,
+                                choice=InterpretationChoice.OPTED_OUT.value,
+                                created_at=now,
+                                resolved_at=now,
+                                actor="composer-llm",
+                                model_identifier=None,
+                                model_version=None,
+                                provider=None,
+                                composer_skill_hash=None,
+                                arguments_hash=None,
+                                hash_domain_version=None,
+                                interpretation_source=InterpretationSource.AUTO_INTERPRETED_OPT_OUT.value,
+                                runtime_model_identifier_at_resolve=None,
+                                runtime_model_version_at_resolve=None,
+                                resolved_prompt_template_hash=None,
+                            )
+                        )
+                        opt_out_row = conn.execute(
+                            select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)
+                        ).one()
+                    return _interpretation_event_record_from_row(opt_out_row)
+
+                # Writer-boundary validation: the affected_node_id must
+                # exist in the parent composition state's nodes JSON. This
+                # is the L1-style invariant ``InterpretationEvent.affected_node_id``
+                # exists in composition_states[id=composition_state_id].nodes —
+                # not a schema CHECK because nodes lives in a JSON column.
+                # Read state, raise BEFORE any INSERT so the table is empty
+                # on rollback.
+                state_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.id == state_id_str)
+                    .where(composition_states_table.c.session_id == sid)
+                ).one_or_none()
+                if state_row is None:
+                    raise ValueError(
+                        f"create_pending_interpretation_event: composition state {state_id_str!r} not found in session {sid!r}"
+                    )
+                nodes = self._unwrap_envelope(state_row.nodes)
+                if nodes is None:
+                    raise ValueError(
+                        f"create_pending_interpretation_event: composition state "
+                        f"{state_id_str!r} has no nodes; affected_node_id "
+                        f"{affected_node_id!r} is not present"
+                    )
+                node_ids = {n["id"] for n in nodes}
+                if affected_node_id not in node_ids:
+                    raise ValueError(
+                        f"create_pending_interpretation_event: affected_node_id "
+                        f"{affected_node_id!r} is not present in composition state "
+                        f"{state_id_str!r} (known node ids: {sorted(node_ids)!r})"
+                    )
+
+                conn.execute(
+                    insert(interpretation_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        composition_state_id=state_id_str,
+                        affected_node_id=affected_node_id,
+                        tool_call_id=tool_call_id,
+                        user_term=user_term,
+                        llm_draft=llm_draft,
+                        accepted_value=None,
+                        choice=InterpretationChoice.PENDING.value,
+                        created_at=now,
+                        resolved_at=None,
+                        actor="composer-llm",
+                        model_identifier=model_identifier,
+                        model_version=model_version,
+                        provider=provider,
+                        composer_skill_hash=composer_skill_hash,
+                        arguments_hash=None,
+                        hash_domain_version=None,
+                        interpretation_source=InterpretationSource.USER_APPROVED.value,
+                        runtime_model_identifier_at_resolve=None,
+                        runtime_model_version_at_resolve=None,
+                        resolved_prompt_template_hash=None,
+                    )
+                )
+                row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
+                return _interpretation_event_record_from_row(row)
+
+        return cast(InterpretationEventRecord, await self._run_sync(_sync))
+
+    async def resolve_interpretation_event(
+        self,
+        *,
+        session_id: UUID,
+        event_id: UUID,
+        choice: InterpretationChoice,
+        amended_value: str | None,
+        actor: str,
+        resolved_at: datetime | None = None,
+        runtime_model_identifier: str | None = None,
+        runtime_model_version: str | None = None,
+    ) -> tuple[InterpretationEventRecord, CompositionStateRecord]:
+        """Commit a resolution AND patch the affected LLM transform's prompt template.
+
+        F-14 (business-rule split): ``accepted_value`` is computed
+        internally. When ``choice == ACCEPTED_AS_DRAFTED``, the service
+        reads the pending event's ``llm_draft`` from the DB and uses that
+        as ``accepted_value``. When ``choice == AMENDED``,
+        ``amended_value`` is used directly. The route passes only
+        ``choice`` and ``amended_value`` — the computation lives here to
+        avoid duplicating the branch across callers.
+
+        Single transaction (F-25: ``_session_write_lock`` acquires the
+        per-session write lock; the SQLAlchemy ``begin()`` is implicitly
+        BEGIN IMMEDIATE on SQLite when a write occurs inside, but the
+        process-wide RLock is the actual serialiser):
+
+            1. SELECT the pending event by id AND session_id AND choice='pending'
+               (F-7: session_id in WHERE prevents cross-session IDOR;
+               choice='pending' is the TOCTOU guard against double-resolve).
+               Raise ValueError if no matching row.
+            2. Compute ``accepted_value`` per F-14.
+            3. Validate ``accepted_value`` via ``_validate_accepted_value_content``
+               (defence-in-depth against future callers that bypass the route).
+            4. Call :func:`_patch_llm_transform_prompt` to produce the
+               resolved prompt-template string. Keep a local reference; do
+               NOT call again in step 5a.
+            4a. Compute ``resolved_prompt_template_hash`` via
+                :func:`stable_hash` over the resolved prompt string.
+                ``CANONICAL_VERSION = "sha256-rfc8785-v1"``. NOT part of
+                ``INTERPRETATION_HASH_DOMAIN_V1`` — covers a different
+                input.
+            5. UPDATE interpretation_events with the settled fields.
+            5a. Write the new composition_states row with provenance =
+                'interpretation_resolve', version += 1, carrying the
+                patched ``prompt_template`` and ``resolved_prompt_template_hash``
+                on the affected node JSON.
+            6. Return the resolved event + the new state.
+
+        Trigger error note (F-28): if the immutability trigger
+        ``trg_interpretation_events_immutable_resolved`` fires, SQLAlchemy
+        raises :class:`IntegrityError` carrying the trigger's RAISE(ABORT,
+        ...) message. We match that specific substring explicitly so it is
+        mapped to a 409/400 by the route, NOT conflated with a generic
+        integrity violation. Normal use never reaches the trigger because
+        the SELECT-then-UPDATE pattern with ``WHERE choice='pending'``
+        short-circuits to a ValueError first.
+
+        Telemetry: NONE — composition-time user decisions are audit-primary;
+        no ephemeral operational signal required.
+        """
+        now = self._ensure_utc(resolved_at) if resolved_at is not None else self._now()
+        sid = str(session_id)
+        eid = str(event_id)
+
+        def _sync() -> tuple[InterpretationEventRecord, CompositionStateRecord]:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                # Step 1: SELECT pending event, scoped to session.
+                event_row = conn.execute(
+                    select(interpretation_events_table)
+                    .where(interpretation_events_table.c.id == eid)
+                    .where(interpretation_events_table.c.session_id == sid)
+                    .where(interpretation_events_table.c.choice == InterpretationChoice.PENDING.value)
+                ).one_or_none()
+                if event_row is None:
+                    existing_event_row = conn.execute(
+                        select(interpretation_events_table)
+                        .where(interpretation_events_table.c.id == eid)
+                        .where(interpretation_events_table.c.session_id == sid)
+                    ).one_or_none()
+                    if existing_event_row is not None:
+                        raise InterpretationEventAlreadyResolvedError(
+                            f"resolve_interpretation_event: interpretation event {eid!r} in session {sid!r} is already resolved"
+                        )
+                    raise InterpretationEventNotFoundError(
+                        f"resolve_interpretation_event: interpretation event {eid!r} not found in session {sid!r}"
+                    )
+
+                # Step 2: compute accepted_value per F-14.
+                if choice is InterpretationChoice.ACCEPTED_AS_DRAFTED:
+                    accepted_value = event_row.llm_draft
+                    if accepted_value is None:
+                        raise AuditIntegrityError(
+                            f"resolve_interpretation_event: event {eid!r} has no llm_draft to accept; row shape is malformed"
+                        )
+                elif choice is InterpretationChoice.AMENDED:
+                    if amended_value is None:
+                        raise ValueError("resolve_interpretation_event: choice=AMENDED requires amended_value to be set")
+                    accepted_value = amended_value
+                else:
+                    raise ValueError(
+                        f"resolve_interpretation_event: choice {choice!r} is not "
+                        f"a resolution choice; only ACCEPTED_AS_DRAFTED and AMENDED "
+                        f"are valid here"
+                    )
+
+                # Step 3: defence-in-depth validation of the user/LLM-supplied
+                # content. The HTTP route also validates at the schema layer
+                # (F-2); this is the writer-side mirror.
+                _validate_accepted_value_content(accepted_value)
+
+                # Step 4: produce the patched nodes sequence. The helper
+                # raises ValueError on any structural anomaly; the raise
+                # short-circuits the transaction before any UPDATE/INSERT.
+                #
+                # The patch lands on the CURRENT composition state (highest
+                # version for the session), not on the state row recorded on
+                # the pending interpretation event. Rationale: between
+                # surfacing and resolution, the LLM may have advanced the
+                # state for other reasons; the resolved-prompt-template must
+                # land on the live state so the runtime executes the
+                # patched node. If the affected node has disappeared from
+                # the live state since surfacing, the helper raises ValueError
+                # — the resolution cannot land and must be surfaced to the
+                # user. The pending row's composition_state_id remains the
+                # surfacing anchor for audit; the new state row's
+                # derived_from_state_id is the live state we patched.
+                live_state_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).one_or_none()
+                if live_state_row is None:
+                    raise AuditIntegrityError(f"resolve_interpretation_event: session {sid!r} has no composition state to patch")
+                state_record = self._row_to_state_record(live_state_row)
+                patched_nodes = _patch_llm_transform_prompt(
+                    state_record,
+                    affected_node_id=event_row.affected_node_id,
+                    user_term=event_row.user_term,
+                    accepted_value=accepted_value,
+                )
+
+                # Step 4a: compute resolved_prompt_template_hash. Hash over
+                # the resolved prompt-template string only (not the node).
+                # ``_patch_llm_transform_prompt`` writes the resolved template
+                # into ``options.prompt_template`` (the NodeSpec-compatible
+                # shape that survives ``state_from_record`` and lands in the
+                # runtime YAML); read it back from the same field.
+                patched_node = next(n for n in patched_nodes if n["id"] == event_row.affected_node_id)
+                resolved_template: str = patched_node["options"]["prompt_template"]
+                resolved_prompt_template_hash = stable_hash(resolved_template)
+
+                # Attach the hash inside the node's options mapping so the
+                # runtime plugin can read it via ``NodeSpec.options`` (the
+                # same path that surfaces the resolved prompt template). The
+                # hash is the cross-DB anchor written into the L1 Landscape
+                # ``calls.resolved_prompt_template_hash`` column at execution
+                # time. ``patched_node["options"]`` is
+                # a fresh dict produced by the patch helper; mutate locally.
+                final_nodes: list[Mapping[str, Any]] = []
+                for n in patched_nodes:
+                    if n["id"] == event_row.affected_node_id:
+                        node_with_hash = dict(n)
+                        options_with_hash = dict(n["options"])
+                        options_with_hash["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+                        node_with_hash["options"] = options_with_hash
+                        final_nodes.append(node_with_hash)
+                    else:
+                        final_nodes.append(n)
+
+                # The live state can be invalid solely because an earlier
+                # finalisation/runtime-preflight pass saw the unresolved
+                # ``{{interpretation:<term>}}`` placeholder. Resolving the
+                # event consumes that placeholder, so the new state row must
+                # carry validation for the patched state, not stale failure
+                # metadata copied from the pre-resolve live row.
+                from elspeth.web.sessions.converters import state_from_record
+
+                patched_state_record = replace(
+                    state_record,
+                    nodes=final_nodes,
+                    is_valid=False,
+                    validation_errors=None,
+                )
+                patched_validation = state_from_record(patched_state_record).validate()
+                patched_validation_errors = [error.message for error in patched_validation.errors] or None
+
+                # Compute arguments_hash over the INTERPRETATION_HASH_DOMAIN_V1
+                # field set. The closed domain is the source of truth — read
+                # from the constant, do not duplicate the field list inline.
+                # The composition_state_id in the hash domain is the surfacing
+                # anchor (the pending row's composition_state_id), not the
+                # live state we patched — the hash identifies the discrete
+                # surface-and-decide event, not the state mutation it
+                # produced.
+                surfacing_state_id_str = event_row.composition_state_id
+                domain_dict = {
+                    "session_id": sid,
+                    "composition_state_id": surfacing_state_id_str,
+                    "affected_node_id": event_row.affected_node_id,
+                    "tool_call_id": event_row.tool_call_id,
+                    "user_term": event_row.user_term,
+                    "llm_draft": event_row.llm_draft,
+                    "accepted_value": accepted_value,
+                    "actor": actor,
+                    "model_identifier": event_row.model_identifier,
+                    "model_version": event_row.model_version,
+                    "provider": event_row.provider,
+                    "composer_skill_hash": event_row.composer_skill_hash,
+                }
+                # Mechanical guard: if a field is added to the contract dataclass
+                # but not to this domain dict, the hash silently drifts. Crash
+                # rather than fabricate.
+                if set(domain_dict.keys()) != INTERPRETATION_HASH_DOMAIN_V1:
+                    raise AssertionError(
+                        f"resolve_interpretation_event: domain dict keys "
+                        f"{set(domain_dict.keys())!r} drifted from "
+                        f"INTERPRETATION_HASH_DOMAIN_V1 {INTERPRETATION_HASH_DOMAIN_V1!r}"
+                    )
+                arguments_hash = stable_hash(domain_dict)
+
+                # Step 5: UPDATE the interpretation event. The trigger
+                # short-circuit (F-28) is unreachable on this branch because
+                # the SELECT already filtered to choice='pending'; we catch
+                # IntegrityError defensively in case a future refactor
+                # reorders the writes.
+                try:
+                    conn.execute(
+                        update(interpretation_events_table)
+                        .where(interpretation_events_table.c.id == eid)
+                        .where(interpretation_events_table.c.session_id == sid)
+                        .where(interpretation_events_table.c.choice == InterpretationChoice.PENDING.value)
+                        .values(
+                            choice=choice.value,
+                            accepted_value=accepted_value,
+                            resolved_at=now,
+                            actor=actor,
+                            arguments_hash=arguments_hash,
+                            hash_domain_version="v1",
+                            runtime_model_identifier_at_resolve=runtime_model_identifier,
+                            runtime_model_version_at_resolve=runtime_model_version,
+                            resolved_prompt_template_hash=resolved_prompt_template_hash,
+                        )
+                    )
+                except IntegrityError as exc:
+                    # F-28: classify the trigger immutability message
+                    # specifically. Any other IntegrityError reraises as-is.
+                    if _INTERPRETATION_IMMUTABLE_TRIGGER_MSG in str(exc):
+                        raise InterpretationEventAlreadyResolvedError(
+                            f"resolve_interpretation_event: event {eid!r} is already resolved (immutability trigger fired)"
+                        ) from exc
+                    raise
+
+                # Step 5a: write the new composition state row carrying the
+                # patched prompt template + hash sibling. The
+                # ``interpretation_resolve`` provenance is the load-bearing
+                # discriminator that lets backward-direction audit walks
+                # identify this row as resulting from an interpretation
+                # decision.
+                new_state_id_str = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(
+                        data=CompositionStateData(
+                            source=state_record.source,
+                            nodes=final_nodes,
+                            edges=state_record.edges,
+                            outputs=state_record.outputs,
+                            metadata_=state_record.metadata_,
+                            is_valid=patched_validation.is_valid,
+                            validation_errors=patched_validation_errors,
+                            composer_meta=state_record.composer_meta,
+                        ),
+                        derived_from_state_id=str(state_record.id),
+                    ),
+                    provenance="interpretation_resolve",
+                    created_at=now,
+                )
+
+                resolved_event_row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == eid)).one()
+                new_state_row = conn.execute(
+                    select(composition_states_table).where(composition_states_table.c.id == new_state_id_str)
+                ).one()
+                return (
+                    _interpretation_event_record_from_row(resolved_event_row),
+                    self._row_to_state_record(new_state_row),
+                )
+
+        return cast(
+            tuple[InterpretationEventRecord, CompositionStateRecord],
+            await self._run_sync(_sync),
+        )
+
+    async def list_interpretation_events(
+        self,
+        session_id: UUID,
+        *,
+        status: Literal["pending", "all"] = "all",
+        composition_state_id: UUID | None = None,
+        sources: Sequence[InterpretationSource] | None = None,
+    ) -> list[InterpretationEventRecord]:
+        """Read-back of interpretation events for the session.
+
+        Used by the audit-readiness panel (counts), by the frontend on
+        reload (rehydrate pending review affordances), and by the
+        opt-out audit-summary surface (``sources`` filter — F-22).
+
+        Telemetry: NONE — composition-time user decisions are audit-primary;
+        no ephemeral operational signal required.
+        """
+        sid = str(session_id)
+        cs_id = str(composition_state_id) if composition_state_id is not None else None
+        # Materialise the source-value list once so the inner _sync closure
+        # uses primitive string values, not enum instances captured by
+        # closure (cheap; defensive against the iterable being a generator).
+        source_values: list[str] | None = [s.value for s in sources] if sources is not None else None
+
+        def _sync() -> list[InterpretationEventRecord]:
+            stmt = select(interpretation_events_table).where(interpretation_events_table.c.session_id == sid)
+            if status == "pending":
+                stmt = stmt.where(interpretation_events_table.c.choice == InterpretationChoice.PENDING.value)
+            if cs_id is not None:
+                stmt = stmt.where(interpretation_events_table.c.composition_state_id == cs_id)
+            if source_values is not None:
+                stmt = stmt.where(interpretation_events_table.c.interpretation_source.in_(source_values))
+            stmt = stmt.order_by(
+                interpretation_events_table.c.created_at,
+                interpretation_events_table.c.id,
+            )
+            with self._engine.begin() as conn:
+                rows = conn.execute(stmt).fetchall()
+                return [_interpretation_event_record_from_row(row) for row in rows]
+
+        return cast(list[InterpretationEventRecord], await self._run_sync(_sync))
+
+    async def record_session_interpretation_opt_out(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        opted_out_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Mark the session as 'don't surface interpretations any more'.
+
+        F-27 (write-lock annotation): acquires the session write lock for
+        the ENTIRE duration of the transaction — both the
+        interpretation_events INSERT and the sessions boolean UPDATE are
+        inside one ``_session_write_lock`` block to ensure atomicity.
+
+        Idempotency (F-29): if an opted_out row already exists for this
+        session, return the existing record without inserting a duplicate.
+        The sessions boolean remains true. First opt-out timestamp is
+        authoritative.
+
+        Writes a row to ``interpretation_events_table`` with
+        ``choice='opted_out'``, ``interpretation_source='auto_interpreted_opt_out'``,
+        all nullable interpretation fields NULL, and ``resolved_at`` set
+        to ``opted_out_at``. Also sets
+        ``sessions.interpretation_review_disabled = true``. Single
+        transaction.
+
+        Does NOT write to ``proposal_events_table``. The
+        ``interpretation_events`` table is the single source of truth for
+        all interpretation-related decisions.
+
+        Telemetry: NONE — composition-time user decisions are audit-primary;
+        no ephemeral operational signal required.
+        """
+        now = self._ensure_utc(opted_out_at) if opted_out_at is not None else self._now()
+        sid = str(session_id)
+
+        def _sync() -> InterpretationEventRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                # F-29: idempotency. SELECT inside the lock so the
+                # SELECT-then-INSERT sequence is atomic against concurrent
+                # writers. If a prior opt-out exists, return it; do not
+                # insert a duplicate (the closed enum on choice plus the
+                # source-keyed nullability CHECK would not prevent
+                # duplicates, only structurally-bad rows).
+                existing = conn.execute(
+                    select(interpretation_events_table)
+                    .where(interpretation_events_table.c.session_id == sid)
+                    .where(interpretation_events_table.c.interpretation_source == InterpretationSource.AUTO_INTERPRETED_OPT_OUT.value)
+                    .order_by(interpretation_events_table.c.created_at)
+                    .limit(1)
+                ).one_or_none()
+                if existing is not None:
+                    return _interpretation_event_record_from_row(existing)
+
+                event_id = str(uuid.uuid4())
+                conn.execute(
+                    insert(interpretation_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        composition_state_id=None,
+                        affected_node_id=None,
+                        tool_call_id=None,
+                        user_term=None,
+                        llm_draft=None,
+                        accepted_value=None,
+                        choice=InterpretationChoice.OPTED_OUT.value,
+                        created_at=now,
+                        resolved_at=now,
+                        actor=actor,
+                        model_identifier=None,
+                        model_version=None,
+                        provider=None,
+                        composer_skill_hash=None,
+                        arguments_hash=None,
+                        hash_domain_version=None,
+                        interpretation_source=InterpretationSource.AUTO_INTERPRETED_OPT_OUT.value,
+                        runtime_model_identifier_at_resolve=None,
+                        runtime_model_version_at_resolve=None,
+                        resolved_prompt_template_hash=None,
+                    )
+                )
+                conn.execute(
+                    update(sessions_table).where(sessions_table.c.id == sid).values(interpretation_review_disabled=True, updated_at=now)
+                )
+                row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
+                return _interpretation_event_record_from_row(row)
+
+        return cast(InterpretationEventRecord, await self._run_sync(_sync))
+
+    async def upsert_skill_markdown_history(
+        self,
+        *,
+        skill_hash: str,
+        filename: str,
+        content: str,
+        first_seen_at: datetime | None = None,
+    ) -> bool:
+        """Best-effort INSERT-OR-IGNORE into ``skill_markdown_history`` (F-5c).
+
+        Called once per ``(skill_hash, compose_loop_init)`` so a forensic
+        auditor can reconstruct the exact composer skill text that was in
+        memory when any ``interpretation_events.composer_skill_hash``
+        column was populated. The hash is the primary key, so subsequent
+        upserts with the same hash collapse via ``INSERT OR IGNORE`` —
+        no row is duplicated.
+
+        **Best-effort, not transactional.** This writer is intentionally
+        decoupled from the interpretation-event row write (per the spec
+        at docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md
+        §"skill_markdown_history upsert (F-5c)"). Storage cost is
+        bounded — one row per distinct deploy of the skill markdown.
+
+        Returns ``True`` when a row was inserted, ``False`` when the row
+        already existed (the upsert was a no-op). Callers MAY use the
+        return value for telemetry, but they MUST NOT branch on it for
+        correctness: the table's contents are an audit-archive, not a
+        coordination surface.
+
+        Trust tier: the ``skill_hash`` / ``filename`` / ``content`` triple
+        is operator-supplied (drawn from the on-disk skill file the
+        operator deployed). It is Tier-1 data on insert — we crash on any
+        DB-side anomaly. The caller's discipline (passing values from
+        ``load_skill_with_hash``) ensures atomic consistency.
+        """
+        now = self._ensure_utc(first_seen_at) if first_seen_at is not None else self._now()
+
+        def _sync() -> bool:
+            stmt = (
+                sqlite_insert(skill_markdown_history_table)
+                .values(
+                    hash=skill_hash,
+                    filename=filename,
+                    content=content,
+                    first_seen_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=[skill_markdown_history_table.c.hash])
+            )
+            with self._engine.begin() as conn:
+                result = conn.execute(stmt)
+                # ``rowcount`` is 1 on INSERT, 0 on conflict-ignored. The
+                # SQLite driver returns the actual statement rowcount here
+                # — no synthetic value substitution, so this is a
+                # truthful insert-vs-ignored signal.
+                return int(result.rowcount) == 1
+
+        return cast(bool, await self._run_sync(_sync))
+
+    async def record_auto_interpreted_no_surfaces_event(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Write an AUTO_INTERPRETED_NO_SURFACES row (F-6).
+
+        Triggered by the compose loop when the per-term or per-day
+        ``request_interpretation_review`` rate cap is hit and the LLM
+        is expected to bake the interpretation directly into the prompt
+        template without surfacing it for review. The row records that
+        the LLM *was* consulted (provenance fields populated) but no
+        surface was produced (interpretation surface fields NULL).
+
+        Validates against ``ck_interpretation_events_no_surfaces_shape``:
+        the five interpretation-surface fields (composition_state_id,
+        affected_node_id, tool_call_id, user_term, llm_draft) MUST be
+        NULL; the four LLM provenance fields (model_identifier,
+        model_version, provider, composer_skill_hash) MUST be NOT NULL.
+
+        ``choice`` is set to ``OPTED_OUT`` because the resolve semantics
+        are "no further user action required" — the rate cap is the
+        resolution. ``resolved_at`` equals ``created_at`` because the
+        row is born resolved. ``arguments_hash`` is NULL because the
+        ``INTERPRETATION_HASH_DOMAIN_V1`` field set has no values for
+        this row shape (the surface fields it hashes over are all NULL).
+
+        Telemetry: NONE — composition-time user decisions are
+        audit-primary; no ephemeral operational signal required.
+        """
+        now = self._ensure_utc(created_at) if created_at is not None else self._now()
+        sid = str(session_id)
+        event_id = str(uuid.uuid4())
+
+        def _sync() -> InterpretationEventRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                conn.execute(
+                    insert(interpretation_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        composition_state_id=None,
+                        affected_node_id=None,
+                        tool_call_id=None,
+                        user_term=None,
+                        llm_draft=None,
+                        accepted_value=None,
+                        choice=InterpretationChoice.OPTED_OUT.value,
+                        created_at=now,
+                        resolved_at=now,
+                        actor=actor,
+                        model_identifier=model_identifier,
+                        model_version=model_version,
+                        provider=provider,
+                        composer_skill_hash=composer_skill_hash,
+                        arguments_hash=None,
+                        hash_domain_version=None,
+                        interpretation_source=InterpretationSource.AUTO_INTERPRETED_NO_SURFACES.value,
+                        runtime_model_identifier_at_resolve=None,
+                        runtime_model_version_at_resolve=None,
+                        resolved_prompt_template_hash=None,
+                    )
+                )
+                row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
+                return _interpretation_event_record_from_row(row)
+
+        return cast(InterpretationEventRecord, await self._run_sync(_sync))
 
     async def add_message(
         self,
@@ -2595,7 +3572,7 @@ class SessionServiceImpl:
             if msg.role == "tool":
                 # CHECK constraint biconditional: tool rows must carry both
                 # ``tool_call_id`` and ``parent_assistant_id``. The source row
-                # already had them (Task 1's biconditional applies there too);
+                # already had them (the biconditional applies there too);
                 # an absent value here means the source row predates the
                 # cutover — that's a Tier-1 audit anomaly, crash with a named
                 # error rather than letting the FK fire generically.
@@ -2709,9 +3686,9 @@ class SessionServiceImpl:
                             # 1`` below is correct because of the freshness
                             # invariant, not because the helper is hard-coded.
                             #
-                            # Phase 1B: state + lineage are bundled into a
-                            # single ``StatePayload`` rather than passed as
-                            # two separate kwargs (see ``_insert_composition_state``
+                            # State + lineage are bundled into a single
+                            # ``StatePayload`` rather than passed as two
+                            # separate kwargs (see ``_insert_composition_state``
                             # docstring for rationale).
                             payload=StatePayload(
                                 data=CompositionStateData(

@@ -68,7 +68,7 @@ def _make_config(*, provider: str = "azure", **overrides: Any) -> dict[str, Any]
     """Build minimal valid LLMTransform config."""
     base: dict[str, Any] = {
         "provider": provider,
-        "template": "Classify: {{ row.text }}",
+        "prompt_template": "Classify: {{ row.text }}",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": ["text"],
     }
@@ -313,7 +313,7 @@ class TestSingleQuerySuccess:
         # input_fields maps {"text_content": "text"}, meaning row["text"] is accessed
         # as row.text_content in the template (PromptTemplate.render wraps context under "row").
         config = _make_config(
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
             queries={
                 "quality": {"input_fields": {"text_content": "text"}},
                 "relevance": {"input_fields": {"text_content": "text"}},
@@ -344,7 +344,7 @@ class TestSingleQuerySuccess:
 
         config = _make_multi_query_config(
             provider="azure",
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
         )
         transform = LLMTransform(config)
         mock_provider = Mock(spec=LLMProvider)
@@ -494,7 +494,7 @@ class TestTruncationDetection:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -652,7 +652,7 @@ class TestTemplateTierPolicy:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Default: {{ row.text_content }}",
+            prompt_template="Default: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -681,7 +681,7 @@ class TestTemplateTierPolicy:
         """A render-time UndefinedError must produce TransformResult.error,
         not propagate as an exception (operational = per-row quarantine)."""
         config = _make_config(
-            template="{{ row.nonexistent_field }}",
+            prompt_template="{{ row.nonexistent_field }}",
             required_input_fields=[],
         )
         transform, _mock_provider = _make_transform_with_mock_provider(config)
@@ -700,7 +700,7 @@ class TestMultiQueryPartialFailure:
         """4 queries, query 3 fails → ALL results discarded, error has details."""
         from elspeth.plugins.transforms.llm.transform import LLMTransform, MultiQueryStrategy
 
-        config = _make_config(template="Classify: {{ row.text_content }}")
+        config = _make_config(prompt_template="Classify: {{ row.text_content }}")
         config["queries"] = {
             "q1": {"input_fields": {"text_content": "text"}},
             "q2": {"input_fields": {"text_content": "text"}},
@@ -747,7 +747,7 @@ class TestMultiQueryPartialFailure:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -800,7 +800,7 @@ class TestMultiQueryJSONExtraction:
 
         lookup = {"labels": {"base": "BASE", "q1": "OVERRIDE"}}
         config = _make_config(
-            template="Base {{ lookup.labels.base }}: {{ row.text_content }}",
+            prompt_template="Base {{ lookup.labels.base }}: {{ row.text_content }}",
             lookup=lookup,
             queries={
                 "q1": {
@@ -831,7 +831,7 @@ class TestMultiQueryJSONExtraction:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Base {{ lookup.labels.base }}: {{ row.text_content }}",
+            prompt_template="Base {{ lookup.labels.base }}: {{ row.text_content }}",
             lookup={"labels": {"base": "BASE", "q1": "OVERRIDE"}},
             lookup_source="prompts/lookups.yaml",
             queries={
@@ -865,7 +865,7 @@ class TestMultiQueryJSONExtraction:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "quality": {
                     "input_fields": {"text_content": "text"},
@@ -901,7 +901,7 @@ class TestMultiQueryJSONExtraction:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -934,7 +934,7 @@ class TestMultiQueryJSONExtraction:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -963,7 +963,7 @@ class TestMultiQueryJSONExtraction:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -993,7 +993,7 @@ class TestMultiQueryJSONExtraction:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
             },
@@ -1026,7 +1026,7 @@ class TestMultiQueryContextLength:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -1102,7 +1102,7 @@ class TestMultiQueryNonFiniteRejection:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -1254,7 +1254,7 @@ class TestMultiQueryDeclaredOutputFields:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
             queries={
                 "quality": {"input_fields": {"text_content": "text"}},
                 "relevance": {"input_fields": {"text_content": "text"}},
@@ -1271,7 +1271,7 @@ class TestMultiQueryDeclaredOutputFields:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
             queries={
                 "quality": {"input_fields": {"text_content": "text"}},
             },
@@ -1289,7 +1289,7 @@ class TestMultiQueryDeclaredOutputFields:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "quality": {
                     "input_fields": {"text_content": "text"},
@@ -1311,7 +1311,7 @@ class TestMultiQueryDeclaredOutputFields:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
             queries={
                 "quality": {"input_fields": {"text_content": "text"}},
             },
@@ -1344,7 +1344,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(
             _make_config(
-                template="Classify: {{ row.text_content }}",
+                prompt_template="Classify: {{ row.text_content }}",
                 queries={
                     "quality": {"input_fields": {"text_content": "text"}},
                     "relevance": {"input_fields": {"text_content": "text"}},
@@ -1371,7 +1371,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(
             _make_config(
-                template="Classify: {{ row.text_content }}",
+                prompt_template="Classify: {{ row.text_content }}",
                 queries={
                     "quality": {"input_fields": {"text_content": "text"}},
                 },
@@ -1393,7 +1393,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(
             _make_config(
-                template="Classify: {{ row.text_content }}",
+                prompt_template="Classify: {{ row.text_content }}",
                 queries={
                     "quality": {"input_fields": {"text_content": "text"}},
                 },
@@ -1416,7 +1416,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(
             _make_config(
-                template="Classify: {{ row.text_content }}",
+                prompt_template="Classify: {{ row.text_content }}",
                 schema={"mode": "flexible", "fields": ["text: str"]},
                 queries={
                     "quality": {"input_fields": {"text_content": "text"}},
@@ -1449,7 +1449,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(
             _make_config(
-                template="Classify: {{ row.text_content }}",
+                prompt_template="Classify: {{ row.text_content }}",
                 queries={
                     "quality": {"input_fields": {"text_content": "text"}},
                     "relevance": {"input_fields": {"text_content": "text"}},
@@ -1473,7 +1473,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(
             _make_config(
-                template="Evaluate: {{ row.text_content }}",
+                prompt_template="Evaluate: {{ row.text_content }}",
                 queries={
                     "quality": {
                         "input_fields": {"text_content": "text"},
@@ -1504,7 +1504,7 @@ class TestMultiQueryOutputSchemaConfig:
 
         transform = LLMTransform(
             _make_config(
-                template="Evaluate: {{ row.text_content }}",
+                prompt_template="Evaluate: {{ row.text_content }}",
                 schema={"mode": "flexible", "fields": ["text: str"]},
                 queries={
                     "quality": {
@@ -1551,7 +1551,7 @@ class TestResponseFormatPassthrough:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -1584,7 +1584,7 @@ class TestResponseFormatPassthrough:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -1616,7 +1616,7 @@ class TestResponseFormatPassthrough:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
             },
@@ -1656,7 +1656,7 @@ class TestMultiQueryFieldTypeValidation:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -1796,7 +1796,7 @@ class TestMultiQueryFieldTypeValidation:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "first": {
                     "input_fields": {"text_content": "text"},
@@ -1853,7 +1853,7 @@ class TestMultiQueryExecutionMode:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={"q1": {"input_fields": {"text_content": "text"}}},
             pool_size=1,
         )
@@ -1866,7 +1866,7 @@ class TestMultiQueryExecutionMode:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={"q1": {"input_fields": {"text_content": "text"}}},
             pool_size=4,
         )
@@ -1901,7 +1901,7 @@ class TestMultiQuerySequentialRetryBehavior:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -1940,7 +1940,7 @@ class TestMultiQuerySequentialRetryBehavior:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={"q1": {"input_fields": {"text_content": "text"}}},
             pool_size=1,
         )
@@ -1979,7 +1979,7 @@ class TestMultiQuerySequentialReasonImmutability:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Classify: {{ row.text_content }}",
+            prompt_template="Classify: {{ row.text_content }}",
             queries={
                 "q1": {
                     "input_fields": {"text_content": "text"},
@@ -2055,7 +2055,7 @@ class TestMultiQueryParallelExecution:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -2091,7 +2091,7 @@ class TestMultiQueryParallelExecution:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -2129,7 +2129,7 @@ class TestMultiQueryParallelExecution:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "quality": {
                     "input_fields": {"text_content": "text"},
@@ -2187,7 +2187,7 @@ class TestMultiQueryParallelExecution:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -2237,7 +2237,7 @@ class TestMultiQueryParallelExecution:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={
                 "q1": {"input_fields": {"text_content": "text"}},
                 "q2": {"input_fields": {"text_content": "text"}},
@@ -2284,7 +2284,7 @@ class TestMultiQueryParallelExecution:
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_config(
-            template="Evaluate: {{ row.text_content }}",
+            prompt_template="Evaluate: {{ row.text_content }}",
             queries={"q1": {"input_fields": {"text_content": "text"}}},
             pool_size=4,
         )

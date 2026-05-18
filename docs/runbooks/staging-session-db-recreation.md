@@ -1,6 +1,6 @@
 # Session DB Reset Runbook
 
-Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. The session database is separate from the Landscape audit database; resetting the session database must not touch Landscape, payload storage, blobs, or Filigree tracker data.
+Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From Phase 5b (commit `2e390fc0b`) onward this is no longer true for the session/Landscape pair:** the session DB and the Landscape audit DB now share a cross-DB invariant (`interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`) and must be reset *together*. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
 ## Deployment Scope (Schedule 1A)
 
@@ -111,11 +111,126 @@ Never print secret values from `deploy/elspeth-web.env`. It is acceptable to pri
 5. Start the web process. `initialize_session_schema()` recreates the DB with current metadata.
 6. Create a new session through the web API or UI. A startup `SessionSchemaError` means a stale session DB is still being used.
 
+## Phase 5b: Two-DB Reset
+
+From the Phase 5b deploy onward, the session DB **and** the Landscape audit DB must be deleted as a pair on any schema-changing cutover that crosses the Phase 5b boundary. Skipping the Landscape delete after a Phase 5b deploy leaves stale `calls_table` rows whose `resolved_prompt_template_hash` is absent or stale; the first composer run after deploy will diverge from the session DB's `interpretation_events.resolved_prompt_template_hash` and the cross-DB byte-equality invariant (asserted by `tests/integration/web/composer/test_interpretation_runtime_handoff.py`) will fire.
+
+Authority: `docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md` §"Migration runner ownership", lines 160–177.
+
+### Phase 5b preconditions
+
+1. The Stop/Go Gates above have been run for the session DB.
+2. The deploy includes commit `2e390fc0b` or later (Phase 5b session/Landscape schema changes).
+3. The operator has resolved the active Landscape DB path per "Resolve Database Paths" above:
+   - If `ELSPETH_WEB__LANDSCAPE_URL` is set, that is the Landscape URL.
+   - Otherwise the default is `${ELSPETH_WEB__DATA_DIR}/runs/audit.db`, or `data/runs/audit.db` if `ELSPETH_WEB__DATA_DIR` is unset.
+4. The operator has explicitly signed off on losing the Landscape audit history in staging. The Phase 5b reset destroys staging audit data alongside session data; this is acceptable for staging only.
+
+### Phase 5b procedure (in addition to the staging session-DB reset below)
+
+Run after `sudo systemctl stop "$SERVICE"` and before `sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset under the same service-stop window.
+
+```bash
+# Continuing from the staging procedure: $PROJECT_ROOT, $ENV_FILE, $SERVICE,
+# $PROJECT_ROOT_CANON already resolved; $SERVICE is stopped.
+
+LANDSCAPE_URL="$(grep -E '^ELSPETH_WEB__LANDSCAPE_URL=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+DATA_DIR="$(grep -E '^ELSPETH_WEB__DATA_DIR=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+
+if [ -n "$LANDSCAPE_URL" ]; then
+    case "$LANDSCAPE_URL" in
+        sqlite:///*) LANDSCAPE_PATH="${LANDSCAPE_URL#sqlite:///}" ;;
+        sqlite:////*) LANDSCAPE_PATH="/${LANDSCAPE_URL#sqlite:////}" ;;
+        *) echo "REFUSING: non-sqlite Landscape URL requires a migration plan." >&2; exit 1 ;;
+    esac
+elif [ -n "$DATA_DIR" ]; then
+    LANDSCAPE_PATH="$DATA_DIR/runs/audit.db"
+else
+    LANDSCAPE_PATH="$PROJECT_ROOT/data/runs/audit.db"
+fi
+
+case "$LANDSCAPE_PATH" in
+    /*) ;;
+    *) LANDSCAPE_PATH="$PROJECT_ROOT/$LANDSCAPE_PATH" ;;
+esac
+LANDSCAPE_PATH="$(realpath -m "$LANDSCAPE_PATH")"
+
+case "$LANDSCAPE_PATH" in
+    "$PROJECT_ROOT_CANON"/*) ;;
+    *) echo "REFUSING: LANDSCAPE_PATH is outside $PROJECT_ROOT_CANON: $LANDSCAPE_PATH" >&2; exit 1 ;;
+esac
+
+LANDSCAPE_ARTIFACTS=(
+    "$LANDSCAPE_PATH"
+    "$LANDSCAPE_PATH-wal"
+    "$LANDSCAPE_PATH-shm"
+    "$LANDSCAPE_PATH-journal"
+)
+
+if command -v fuser >/dev/null 2>&1; then
+    for artifact in "${LANDSCAPE_ARTIFACTS[@]}"; do
+        if [ -e "$artifact" ] && sudo fuser "$artifact" >/dev/null 2>&1; then
+            echo "REFUSING: $artifact is still open after $SERVICE stopped." >&2
+            sudo fuser -v "$artifact" >&2 || true
+            exit 1
+        fi
+    done
+fi
+
+FOUND_LANDSCAPE_ARTIFACT=0
+for artifact in "${LANDSCAPE_ARTIFACTS[@]}"; do
+    if [ -e "$artifact" ]; then
+        FOUND_LANDSCAPE_ARTIFACT=1
+    fi
+done
+
+if [ "$FOUND_LANDSCAPE_ARTIFACT" -eq 1 ]; then
+    LANDSCAPE_SNAPSHOT_DIR="$LANDSCAPE_PATH.pre-phase5b.$(date -u +%Y%m%dT%H%M%SZ)"
+    sudo mkdir -p "$LANDSCAPE_SNAPSHOT_DIR"
+    for artifact in "${LANDSCAPE_ARTIFACTS[@]}"; do
+        if [ -e "$artifact" ]; then
+            sudo cp -a "$artifact" "$LANDSCAPE_SNAPSHOT_DIR/$(basename "$artifact")"
+        fi
+    done
+    echo "Archived existing Landscape DB artifact set to $LANDSCAPE_SNAPSHOT_DIR"
+fi
+
+for artifact in "${LANDSCAPE_ARTIFACTS[@]}"; do
+    sudo rm -f "$artifact"
+done
+```
+
+`LandscapeDB.from_url(...)` recreates the audit DB on the first pipeline execution after restart.
+
+### Phase 5b verification
+
+After both DBs are reset, both health checks pass, and a new session is created through the UI:
+
+1. Run the canonical composer test case end-to-end (`create a list of 5 government web pages and use an LLM to rate how cool they are`) so a composer pipeline executes at least one LLM call.
+2. Confirm the service journal contains no `AssertionError` or invariant-violation traceback referencing `resolved_prompt_template_hash` or `test_interpretation_runtime_handoff`.
+3. Confirm both `sessions.db` and `audit.db` were recreated by the service (file mtime is later than the service start time).
+
+If the invariant fires, do not retry. Stop the service, preserve both DB snapshots, and inspect the diverging hashes against the deployed commit.
+
+## Skill Changes Require Service Restart, Not Reload
+
+The composer LLM system prompt is loaded from `src/elspeth/web/composer/skills/pipeline_composer.md` (and the guided variants under `src/elspeth/web/composer/guided/prompts.py`) through module-level `@lru_cache` decorators (`functools.lru_cache` on `build_system_prompt` and the guided prompt loaders). Cache entries live for the process lifetime and are not invalidated by file mtime, `SIGHUP`, or `systemctl reload`.
+
+When deploying skill-content changes such as Phase 5a.8 (`34d272360` — inline_blob preference for chat-typed source data) and Phase 5b.8 (`d6219faa2` — teaching the LLM when to call `request_interpretation_review`), or any future edit to `pipeline_composer.md` / guided prompt fragments:
+
+```bash
+sudo systemctl restart elspeth-web.service
+```
+
+`systemctl reload` is not sufficient and will silently serve the previous skill text.
+
+After restart, verify by composing a new session and confirming the new guidance is reflected in the assistant's behaviour (for Phase 5b.8: the LLM offers `request_interpretation_review` when the composition includes a non-trivial interpretive choice; for Phase 5a.8: simple chat-typed source data prefers `inline_blob` over CSV upload).
+
 ## Staging Reset For `elspeth.foundryside.dev`
 
 The staging site is a source-checkout systemd/Caddy deployment from `/home/john/elspeth`, not the generic VM/Docker flow. When a pre-release plan changes the session DB schema (e.g. composer-progress-persistence Phase 1A and later schema-changing phases), the schema validator at startup will refuse a stale DB; the only accepted cutover path is archive + delete + recreate. Row-level `DELETE FROM chat_messages` / `DELETE FROM composition_states` is incorrect: it leaves the old table shape behind and startup rejects the stale DB.
 
-This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, Landscape audit data, payload storage, Filigree state, or source files. **Do not run it outside staging.**
+This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **For pre-Phase-5b deploys it also does not touch the Landscape audit DB; for Phase 5b and later deploys, run the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure inside the same service-stop window — the cross-DB hash invariant will fire on the first run otherwise.** **Do not run any of this outside staging.**
 
 For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and rollback.
 

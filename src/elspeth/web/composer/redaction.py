@@ -87,7 +87,7 @@ class TraversalNode:
       rely on the type signature alone, which `tuple[Any, ...]` does not
       constrain.
 
-    ``substitute_provider`` (Task 8): when ``with_values=True``, a sibling
+    ``substitute_provider``: when ``with_values=True``, a sibling
     closure to ``value_provider`` that performs in-place substitution at
     every reachable leaf for this node's path. Signature:
     ``(root: dict, transform: Callable[[Any], Any]) -> None``. The closure
@@ -172,9 +172,9 @@ def _build_value_provider(
     ``Optional[Model] = None`` as ``None``); the inner path is unreachable
     in that example.  This closure skips such frontier entries — mirroring
     the sibling ``_build_substitute_provider``'s None-skip pattern (lines
-    250-271) which has been correct since Task 8.  The earlier docstring
+    250-271). The earlier docstring
     rule ("KeyError/TypeError on non-conforming root is correct
-    behaviour") predates Task 8's Optional sub-model coverage and is no
+    behaviour") predates Optional sub-model coverage and is no
     longer load-bearing — a None intermediate is conforming-to-schema by
     Pydantic's definition.
 
@@ -241,7 +241,7 @@ def _build_value_provider(
 def _build_substitute_provider(
     steps: tuple[_PathStep, ...],
 ) -> Callable[[dict[str, Any], Callable[[Any], Any]], None]:
-    """Compile a path-step list into an in-place substitute closure (Task 8).
+    """Compile a path-step list into an in-place substitute closure.
 
     Sibling to ``_build_value_provider``: walks the root dict by the same
     container-aware path and replaces every reachable leaf with
@@ -656,7 +656,7 @@ class ToolRedactionPolicy:
     (``test_declarative_manifest_runtime_smoke.py``) verifies this by
     exercising each declarative entry through a real
     ``redact_tool_call_response`` call.  Adequacy-guard assertion 5
-    (Task 10) additionally checks that ``sensitive_response_keys ⊆
+    and additionally checks that ``sensitive_response_keys ⊆
     known_response_keys`` at import time so a misspelled sensitive key
     is caught before any payload reaches the walker.
 
@@ -822,9 +822,36 @@ class SetSourceArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _summarize_interpretation_term(text: str) -> str:
+    """Summarizer for ``request_interpretation_review.user_term`` and
+    ``request_interpretation_review.llm_draft`` (F-34).
+
+    Returns the input collapsed to a fixed-form ``<interpretation-term:N-chars>``
+    or ``<interpretation-term:N-chars:truncated>`` shape where ``N`` is the
+    code-point length of the original string. The fixed-form scalar is
+    structurally distinguishable from the raw value at every reachable
+    input (including the empty string) so the redaction-completeness
+    property test can assert ``redacted_value != raw_value`` uniformly.
+
+    The 64-character truncation guard documented in the spec is preserved
+    via the ``:truncated`` suffix when the original exceeded the cap —
+    auditors can distinguish "long value redacted" from "short value
+    redacted" without seeing either. The authoritative value of the term
+    still lives in the ``interpretation_events`` row (``user_term`` /
+    ``llm_draft`` columns); the audit-side row in
+    ``chat_messages.tool_calls`` carries only this fixed-form scalar.
+
+    Naming follows ``_summarize_inline_blob_content`` (American
+    spelling). Contract: MUST NOT raise on any reachable input; MUST
+    return ``str``.
+    """
+    truncated = ":truncated" if len(text) > 64 else ""
+    return f"<interpretation-term:{len(text)}-chars{truncated}>"
+
+
 def _summarize_inline_blob_content(content: str) -> str:
     """Summarizer for blob-content fields (``create_blob.content``,
-    ``update_blob.content``) — spec §4.2.6, plan Task 13 / rev-2 M.10.
+    ``update_blob.content``) — spec §4.2.6 / rev-2 M.10.
 
     The blob ``content`` field is the LLM-supplied raw bytes of a session
     blob: URLs, JSON snippets, CSV seed data, or arbitrary text that may
@@ -871,7 +898,7 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
     must not enter the audit-side ``chat_messages.tool_calls`` row
     verbatim.  Treating the caller-supplied ``options`` slot as
     Sensitive at the argument boundary maintains uniformity with
-    ``set_source.options`` (Task 4) so an LLM that happens to include a
+    ``set_source.options`` so an LLM that happens to include a
     path-like field receives the same redaction discipline regardless
     of which source-binding tool it invoked.
 
@@ -948,6 +975,37 @@ class UpdateBlobArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _RequestInterpretationReviewRedactionModel(BaseModel):
+    """Redaction-bearing argument model for ``request_interpretation_review``
+    (F-34).
+
+    The tool is a session-aware async handler; this model is the persistence-
+    boundary redaction declaration registered in :data:`MANIFEST` so the
+    audit-side ``chat_messages.tool_calls`` row carries summarised content
+    rather than the LLM-supplied raw text.
+
+    ``user_term`` is not strictly a secret — it's a word the user typed —
+    but it could carry PII if the user typed something like ``"rate how
+    cool this transaction involving Jane Doe is"``. ``llm_draft`` is the
+    model's draft and may quote or paraphrase user content. Both fields
+    carry :class:`Sensitive` with :func:`_summarize_interpretation_term`
+    so the truncated form lands in the tool-call column (the full value
+    is still in ``interpretation_events_table.user_term`` /
+    ``interpretation_events_table.llm_draft`` — the authoritative row).
+
+    ``affected_node_id`` is structural metadata (a short identifier) and
+    is not marked :class:`Sensitive`. ``extra="forbid"`` ensures a
+    misrouted argument shape fails fast at the persistence boundary
+    rather than silently accepting an unknown key.
+    """
+
+    affected_node_id: str
+    user_term: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+    llm_draft: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class CreateBlobArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``create_blob`` tool.
 
@@ -978,7 +1036,7 @@ class CreateBlobArgumentsModel(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# set_pipeline / apply_pipeline_recipe argument models (Task 14 / Wave 3).
+# set_pipeline / apply_pipeline_recipe argument models.
 #
 # set_pipeline is the atomic full-state mutation; apply_pipeline_recipe is the
 # recipe-scaffolded variant that delegates to set_pipeline after composing the
@@ -991,11 +1049,11 @@ class CreateBlobArgumentsModel(BaseModel):
 #   * ``source.options`` IS ``Sensitive[dict]`` with the same summarizer
 #     :func:`_summarize_set_source_options` already used by ``set_source`` /
 #     ``set_source_from_blob`` (uniformity-across-source-binding-tools
-#     contract from Task 4 / Task 13).
+#     contract).
 #   * ``source.inline_blob.content`` IS ``Sensitive[str]`` with the same
 #     summarizer :func:`_summarize_inline_blob_content` already used by
 #     ``create_blob`` / ``update_blob`` (uniformity-across-blob-payload-tools
-#     contract from Task 13).
+#     contract).
 #   * ``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``, and
 #     ``outputs[*].options`` ARE ``Sensitive[dict]`` with
 #     :func:`_summarize_set_source_options` — the adequacy guard (§4.4.2)
@@ -1005,12 +1063,11 @@ class CreateBlobArgumentsModel(BaseModel):
 #     payloads.  Reusing the source-side summarizer is structurally safe
 #     because :func:`redact_source_storage_path` is content-agnostic (it
 #     applies path-blob_ref redaction when present and leaves every other
-#     key verbatim); a future Task 16 may introduce a node-shape-aware
-#     summarizer that also redacts the LLM template field.
+#     key verbatim); a future node-shape-aware summarizer may also redact
+#     the LLM template field.
 #
 # Walker coverage at the persistence boundary:
-# ``walk_model_schema`` descends into ``list[NestedModel]`` (Task 1 / Task 8
-# walker generalisation) so the Sensitive markers on the nested option
+# ``walk_model_schema`` descends into ``list[NestedModel]`` so the Sensitive markers on the nested option
 # dicts are discoverable from the outer :class:`SetPipelineArgumentsModel`.
 # This produces five Sensitive paths in the model walk:
 # ``source.options``, ``source.inline_blob.content``, ``nodes[*].options``,
@@ -1042,7 +1099,16 @@ class _InlineBlobModel(BaseModel):
 
     filename: str
     mime_type: str
-    content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
+    # max_length=262_144 (256 KiB) is the inline-blob payload cap (Phase
+    # Inline-blob content policy. The composer is intended for prose-sized inline data
+    # — a single CSV with up to a few thousand rows — not for binary
+    # transfers.  Pydantic rejects oversize content at the boundary so
+    # ``_prepare_blob_create`` and the storage-write layer never see it;
+    # ToolArgumentError surfaces through the compose loop's ARG_ERROR
+    # routing (CEC1).  The siblings ``CreateBlobArgumentsModel.content``
+    # / ``UpdateBlobArgumentsModel.content`` do not yet carry this cap;
+    # alignment is deferred to the same task that introduces a shared
+    content: Annotated[str, Field(max_length=262_144), Sensitive(summarizer=_summarize_inline_blob_content)]
     description: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -1063,8 +1129,8 @@ class _SetPipelineSourceModel(BaseModel):
     ``options`` carries :class:`Sensitive` with
     :func:`_summarize_set_source_options` — the SAME summarizer used by
     :class:`SetSourceArgumentsModel.options` and
-    :class:`SetSourceFromBlobArgumentsModel.options` (Task 4 / Task 13
-    uniformity contract).  An LLM that includes a path-like field in
+    :class:`SetSourceFromBlobArgumentsModel.options` (uniformity contract).
+    An LLM that includes a path-like field in
     ``set_pipeline.source.options`` receives the same redaction discipline
     it would receive via ``set_source`` or ``set_source_from_blob``.
 
@@ -1168,7 +1234,7 @@ class _PipelineNodeModel(BaseModel):
     is present, and leaves every other key verbatim.  That behaviour is
     correct for ``nodes[*].options`` too — if a node's options happen to
     carry a ``path`` + ``blob_ref`` pair (e.g., a future blob-aware
-    transform), the redaction applies.  Future work (Task 16) may
+    transform), the redaction applies. Future work may
     introduce a node-shape-aware summarizer that also redacts the LLM
     prompt template field.
 
@@ -1308,7 +1374,7 @@ class ApplyPipelineRecipeArgumentsModel(BaseModel):
     structural reasons as :class:`_PipelineNodeModel.options` —
     :func:`redact_source_storage_path` is content-agnostic and applies
     when the relevant keys are present, leaving everything else verbatim.
-    A future Task 16 may introduce a recipe-shape-aware summarizer that
+    A future recipe-shape-aware summarizer may
     also redacts the template-string slot.
 
     Empty-string semantic check on ``recipe_name``
@@ -1389,7 +1455,7 @@ class SetPipelineArgumentsModel(BaseModel):
 
 # ---------------------------------------------------------------------------
 # patch_source_options / patch_node_options / patch_output_options
-# argument models (Task 15 / Wave 4).
+# argument models.
 #
 # All three tools accept a ``patch`` argument — a merge-patch dict that is
 # applied to the current plugin-options dict via :func:`_apply_merge_patch`.
@@ -1456,8 +1522,8 @@ class PatchNodeOptionsArgumentsModel(BaseModel):
     ``patch`` carries :class:`Sensitive` with
     :func:`_summarize_set_source_options` — node plugin-option dicts carry
     the same content surface as ``set_pipeline.nodes[*].options``
-    (:class:`_PipelineNodeModel.options` is already marked Sensitive here
-    in Task 14).  Reusing :func:`_summarize_set_source_options` maintains
+    (:class:`_PipelineNodeModel.options` is already marked Sensitive here).
+    Reusing :func:`_summarize_set_source_options` maintains
     uniformity-across-node-options-tools.
 
     Post-validation semantic check: the routing-key guard
@@ -1492,8 +1558,8 @@ class PatchOutputOptionsArgumentsModel(BaseModel):
     ``patch`` carries :class:`Sensitive` with
     :func:`_summarize_set_source_options` — sink option dicts carry the same
     content surface as ``set_pipeline.outputs[*].options``
-    (:class:`_PipelineOutputModel.options` is already marked Sensitive here
-    in Task 14).  Reusing :func:`_summarize_set_source_options` maintains
+    (:class:`_PipelineOutputModel.options` is already marked Sensitive here).
+    Reusing :func:`_summarize_set_source_options` maintains
     uniformity-across-output-options-tools.
 
     ``extra="forbid"`` is required (rev-2 M.1).  Fields belonging to
@@ -1524,7 +1590,7 @@ def _redact_via_schema(
     Summarizer failures fire ``telemetry.summarizer_error(tool_name=...)``
     BEFORE raising ``AuditIntegrityError`` (rev-2 M.8 discipline).
 
-    Path coverage (Task 8 generalisation): top-level, nested-BaseModel,
+    Path coverage: top-level, nested-BaseModel,
     list-element, dict-element, and tuple-element paths are all supported
     via the per-node ``substitute_provider`` closure built alongside
     ``value_provider`` in ``walk_model_schema(with_values=True)``.
@@ -1599,7 +1665,7 @@ def _redact_via_policy(
     *,
     telemetry: RedactionTelemetry,
 ) -> dict[str, Any]:
-    """Walk ``arguments`` against a declarative policy (Task 8).
+    """Walk ``arguments`` against a declarative policy.
 
     Spec §4.2.6 disposition table:
       * Argument summarizer key declared but argument key absent in input →
@@ -1728,7 +1794,7 @@ def redact_tool_call_arguments(
 
 
 # ---------------------------------------------------------------------------
-# Wave 5 declarative manifest entries (Task 16a — _DISCOVERY_TOOLS, 12 tools).
+# Declarative manifest entries — _DISCOVERY_TOOLS, 12 tools.
 #
 # Every tool in ``_DISCOVERY_TOOLS`` (tools.py:5500-5513) is read-only over the
 # composer state and returns only cached/derived plugin-registry metadata,
@@ -1738,7 +1804,7 @@ def redact_tool_call_arguments(
 # distinct ``HandlesNoSensitiveDataReason`` that an auditor can read to
 # understand WHY this specific tool's argument/response surface cannot carry
 # sensitive material — copy-paste justification is rejected at CI by the
-# mass-copy uniqueness assertion (§4.4.4, Task 11).
+# mass-copy uniqueness assertion (§4.4.4).
 #
 # The §4.4.2 ``dict[str, Any]`` fail-closed rule applies only to type-driven
 # entries (Pydantic models walked via ``walk_model_schema``).  Declarative
@@ -1953,10 +2019,10 @@ _DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
 
 
 # ---------------------------------------------------------------------------
-# Wave 5 declarative manifest entries (Task 16b — _MUTATION_TOOLS remaining,
+# Declarative manifest entries — _MUTATION_TOOLS remaining,
 # 8 tools).
 #
-# Excluding set_source / set_pipeline / patch_*_options (Tasks 4/14/15) the
+# Excluding set_source / set_pipeline / patch_*_options, the
 # remaining ``_MUTATION_TOOLS`` are graph-shape editors that take node-ids,
 # edge-ids, sink names, edge kinds, route slots, and (for upsert_node and
 # set_output) an option dict.  The option-dict-bearing tools declare
@@ -1976,7 +2042,7 @@ _DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
 
 
 def _summarize_set_metadata_patch(patch: dict[str, Any]) -> str:
-    """Summarizer for ``set_metadata.patch`` (Task 16b).
+    """Summarizer for ``set_metadata.patch``.
 
     The patch carries only ``name`` and ``description`` fields per the JSON
     schema at tools.py:826-838 — both operator-facing labels with no plugin
@@ -2070,14 +2136,14 @@ _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
 
 
 # ---------------------------------------------------------------------------
-# Wave 5 declarative manifest entries (Task 16c — _BLOB_DISCOVERY_TOOLS, 4 tools).
+# Declarative manifest entries — _BLOB_DISCOVERY_TOOLS, 4 tools.
 #
 # ``list_blobs``, ``get_blob_metadata``, and ``inspect_source`` return only
 # structural blob facts (id, filename, mime_type, size, observed headers,
 # inferred types) and never return raw blob content.  ``get_blob_content`` IS
 # the content-returning tool and is the singular type-driven entry in this
-# wave with a response_model: declarative entries have no response_summarizers
-# field (Task 7 review finding) so the per-key byte-count summary required by
+# group with a response_model: declarative entries have no response_summarizers
+# field, so the per-key byte-count summary required by
 # the spec §4.7 disposition can only be applied via the schema walker on a
 # response_model with ``Annotated[str, Sensitive(summarizer=...)]``.
 # ---------------------------------------------------------------------------
@@ -2114,7 +2180,7 @@ _GET_BLOB_METADATA_REASON = HandlesNoSensitiveDataReason(
 
 
 def _summarize_blob_content(content: str) -> str:
-    """Summarizer for ``get_blob_content.content`` (Task 16c).
+    """Summarizer for ``get_blob_content.content``.
 
     Discloses only the byte-length of the UTF-8 encoded content, never the
     bytes themselves.  Mirrors :func:`_summarize_inline_blob_content` in form
@@ -2140,7 +2206,7 @@ class GetBlobContentArgumentsModel(BaseModel):
     response surface IS sensitive: ``content`` carries the operator's
     uploaded blob payload and must be summarized to a length-only scalar
     before reaching ``chat_messages.tool_calls``.  Declarative entries have
-    no ``response_summarizers`` field (Task 7 review finding); the only way
+    no ``response_summarizers`` field; the only way
     to attach a per-key summarizer is via a ``Annotated[T, Sensitive(...)]``
     on a response model walked by ``walk_model_schema``.
 
@@ -2211,11 +2277,11 @@ _INSPECT_SOURCE_REASON = HandlesNoSensitiveDataReason(
 
 
 # ---------------------------------------------------------------------------
-# Wave 5 declarative manifest entries (Task 16d — _BLOB_MUTATION_TOOLS
+# Declarative manifest entries — _BLOB_MUTATION_TOOLS
 # remaining, 1 tool).
 #
-# Excluding create_blob / update_blob / set_source_from_blob / apply_pipeline_recipe
-# (Tasks 13/14), only ``delete_blob`` remains in ``_BLOB_MUTATION_TOOLS``.  It
+# Excluding create_blob / update_blob / set_source_from_blob / apply_pipeline_recipe,
+# only ``delete_blob`` remains in ``_BLOB_MUTATION_TOOLS``. It
 # takes a single blob_id scalar and returns the structural ToolResult.
 # ---------------------------------------------------------------------------
 
@@ -2236,7 +2302,7 @@ _DELETE_BLOB_REASON = HandlesNoSensitiveDataReason(
 
 
 # ---------------------------------------------------------------------------
-# Wave 5 declarative manifest entries (Task 16e — _SECRET_DISCOVERY_TOOLS,
+# Declarative manifest entries — _SECRET_DISCOVERY_TOOLS,
 # 2 tools).
 #
 # Secret values are resolved server-side at execution time by the secret
@@ -2286,7 +2352,7 @@ _VALIDATE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
 
 
 # ---------------------------------------------------------------------------
-# Wave 5 declarative manifest entries (Task 16f — _SECRET_MUTATION_TOOLS,
+# Declarative manifest entries — _SECRET_MUTATION_TOOLS,
 # 1 tool).
 # ---------------------------------------------------------------------------
 
@@ -2310,7 +2376,7 @@ _WIRE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
 
 
 # ---------------------------------------------------------------------------
-# Wave 5 declarative manifest entries (Task 16g — request_advisor_hint, 1 tool).
+# Declarative manifest entry — request_advisor_hint, 1 tool.
 #
 # ``request_advisor_hint`` is the advisor escape hatch intercepted at
 # service.py:2103 BEFORE the dispatcher; the result_payload shapes are
@@ -2333,7 +2399,7 @@ _WIRE_SECRET_REF_REASON = HandlesNoSensitiveDataReason(
 
 
 def _summarize_advisor_problem_summary(value: str) -> str:
-    """Summarizer for ``request_advisor_hint.problem_summary`` (Task 16g).
+    """Summarizer for ``request_advisor_hint.problem_summary``.
 
     Records only the character length of the LLM's problem statement; the
     composer's own slog of advisor calls retains the full text under separate
@@ -2346,7 +2412,7 @@ def _summarize_advisor_problem_summary(value: str) -> str:
 
 
 def _summarize_advisor_recent_errors(value: list[str]) -> str:
-    """Summarizer for ``request_advisor_hint.recent_errors`` (Task 16g).
+    """Summarizer for ``request_advisor_hint.recent_errors``.
 
     Records only the number of error strings.  The full error texts are
     preserved in the separate validator-output audit records; recording them
@@ -2357,36 +2423,36 @@ def _summarize_advisor_recent_errors(value: list[str]) -> str:
 
 
 def _summarize_advisor_attempted_actions(value: list[str]) -> str:
-    """Summarizer for ``request_advisor_hint.attempted_actions`` (Task 16g)."""
+    """Summarizer for ``request_advisor_hint.attempted_actions``."""
     return f"<advisor-attempted-actions:{len(value)}-entries>"
 
 
 def _summarize_advisor_schema_excerpt(value: str) -> str:
-    """Summarizer for ``request_advisor_hint.schema_excerpt`` (Task 16g)."""
+    """Summarizer for ``request_advisor_hint.schema_excerpt``."""
     return f"<advisor-schema-excerpt:{len(value)}-chars>"
 
 
-# Manifest entries are added in waves (Tasks 4, 13, 14, 15, 16).  The
-# binding is rebuilt as a new ``MappingProxyType`` per the spec §4.2.1
+# Manifest entries are grouped by tool family. The binding is rebuilt as a
+# new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
 # dict, then replacing the module-level binding — never by mutating
 # the proxy view".
 MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
     {
-        # Wave 1 (Task 4) — set_source.
+        # set_source.
         "set_source": ToolRedaction(argument_model=SetSourceArgumentsModel),
-        # Wave 2 (Task 13) — blob-write tools.
+        # blob-write tools.
         "create_blob": ToolRedaction(argument_model=CreateBlobArgumentsModel),
         "update_blob": ToolRedaction(argument_model=UpdateBlobArgumentsModel),
         "set_source_from_blob": ToolRedaction(argument_model=SetSourceFromBlobArgumentsModel),
-        # Wave 3 (Task 14) — full-pipeline mutations.
+        # full-pipeline mutations.
         "set_pipeline": ToolRedaction(argument_model=SetPipelineArgumentsModel),
         "apply_pipeline_recipe": ToolRedaction(argument_model=ApplyPipelineRecipeArgumentsModel),
-        # Wave 4 (Task 15) — option-patch tools.
+        # option-patch tools.
         "patch_source_options": ToolRedaction(argument_model=PatchSourceOptionsArgumentsModel),
         "patch_node_options": ToolRedaction(argument_model=PatchNodeOptionsArgumentsModel),
         "patch_output_options": ToolRedaction(argument_model=PatchOutputOptionsArgumentsModel),
-        # Wave 5 (Task 16a) — _DISCOVERY_TOOLS, 12 declarative entries.
+        # _DISCOVERY_TOOLS, 12 declarative entries.
         "list_sources": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
@@ -2465,7 +2531,7 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 handles_no_sensitive_data_reason_struct=_DIFF_PIPELINE_REASON,
             )
         ),
-        # Wave 5 (Task 16b) — _MUTATION_TOOLS remaining, 8 declarative entries.
+        # _MUTATION_TOOLS remaining, 8 declarative entries.
         "upsert_node": ToolRedaction(
             policy=ToolRedactionPolicy(
                 sensitive_argument_keys=("options", "routes", "trigger"),
@@ -2559,7 +2625,7 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 ),
             )
         ),
-        # Wave 5 (Task 16c) — _BLOB_DISCOVERY_TOOLS, 4 entries (3 declarative + 1 type-driven).
+        # _BLOB_DISCOVERY_TOOLS, 4 entries (3 declarative + 1 type-driven).
         "list_blobs": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
@@ -2582,14 +2648,14 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 handles_no_sensitive_data_reason_struct=_INSPECT_SOURCE_REASON,
             )
         ),
-        # Wave 5 (Task 16d) — _BLOB_MUTATION_TOOLS remaining, 1 entry.
+        # _BLOB_MUTATION_TOOLS remaining, 1 entry.
         "delete_blob": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_DELETE_BLOB_REASON,
             )
         ),
-        # Wave 5 (Task 16e) — _SECRET_DISCOVERY_TOOLS, 2 entries.
+        # _SECRET_DISCOVERY_TOOLS, 2 entries.
         "list_secret_refs": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
@@ -2602,14 +2668,19 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 handles_no_sensitive_data_reason_struct=_VALIDATE_SECRET_REF_REASON,
             )
         ),
-        # Wave 5 (Task 16f) — _SECRET_MUTATION_TOOLS, 1 entry.
+        # _SECRET_MUTATION_TOOLS, 1 entry.
         "wire_secret_ref": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_SECRET_REF_REASON,
             )
         ),
-        # Wave 5 (Task 16g) — request_advisor_hint (intercepted at service.py:2103).
+        # request_interpretation_review (session-aware async tool).
+        # Type-driven entry; both LLM-supplied content fields carry a 64-char
+        # truncation summariser so the persistence-boundary row in
+        # chat_messages.tool_calls cannot leak unbounded user/LLM text.
+        "request_interpretation_review": ToolRedaction(argument_model=_RequestInterpretationReviewRedactionModel),
+        # request_advisor_hint (intercepted at service.py:2103).
         "request_advisor_hint": ToolRedaction(
             policy=ToolRedactionPolicy(
                 sensitive_argument_keys=(
@@ -2673,9 +2744,9 @@ def redact_tool_call_response(
     **Type-driven entry with response_model:**
       Walk via ``walk_model_schema``; ``Sensitive[T]`` fields are substituted
       with the summarizer output, or ``REDACTED_SENSITIVE_NO_SUMMARIZER`` when
-      no summarizer is declared.  Nested-path substitution is delegated to
-      Task 8 (raises ``NotImplementedError`` for paths containing ``.``,
-      ``[``, or ``{``).
+      no summarizer is declared. Nested-path substitution delegates to the
+      fail-closed walker path, which raises ``NotImplementedError`` for paths
+      containing ``.``, ``[``, or ``{``.
 
     **Type-driven entry without response_model:**
       No response-surface declared; return a shallow copy (passthrough).

@@ -1,0 +1,37 @@
+{
+  "scenario_id": "phase5b_subjective_risky",
+  "phase": "5b-interpretation",
+  "summary": "Subjective-term coverage: 'risky' is operationally consequential — risk to whom, of what, on what time horizon? Failing to surface this builds a black-box classifier into the audit trail. The LLM must call request_interpretation_review with user_term='risky' and stage {{interpretation:risky}}.",
+  "opening_prompt": "load the transactions.csv file at /data/transactions.csv and use an LLM to flag which ones look risky, then save the flagged transactions to a JSON file",
+  "phase5b_assertions": {
+    "must_call_request_interpretation_review_with_user_term": "risky",
+    "must_call_request_interpretation_review_with_user_term_note": "tool_calls must contain request_interpretation_review with arguments.user_term='risky'. Lexical variants accepted: 'risk', 'riskiness'.",
+    "must_not_call_request_interpretation_review_with_user_terms": ["transactions", "csv", "json", "flagged"],
+    "must_not_call_request_interpretation_review_with_user_terms_note": "All concrete nouns / file formats / boolean states. Not subjective.",
+    "must_emit_placeholder_in_prompt_template": "{{interpretation:risky}}",
+    "must_emit_placeholder_in_prompt_template_same_turn": true
+  },
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["llm"]
+    ],
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  }
+}

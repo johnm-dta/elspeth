@@ -4,10 +4,9 @@ Walks the wizard from new-session through Step 1 (CSV source) + Step 2
 (JSON sink, no recipe match by virtue of non-classifier ``required_fields``)
 + Step 3 (LLM-proposed chain, accepted) to a COMPLETED terminal with
 rendered YAML.  The LLM is stubbed by patching ``_litellm_acompletion`` on
-the chain_solver module the same way Task 4.3 stubs it in
-``test_chain_solver.py``.
+the chain_solver module the same way the dedicated chain-solver tests do.
 
-Reject and clarifying-question paths are deferred to Phase 5; for the MVP
+Reject and clarifying-question paths are not implemented in this endpoint;
 they raise ``HTTPException`` 501, which the second test exercises.
 """
 
@@ -201,9 +200,9 @@ class TestStep3ChainAccept:
         assert gs["terminal"]["kind"] == "completed"
 
 
-class TestStep3RejectIsPhase5:
+class TestStep3RejectNotImplemented:
     def test_csv_to_json_step_3_reject_returns_501(self, composer_test_client: TestClient) -> None:
-        """Rejecting the chain proposal returns 501 (Phase 5 scope)."""
+        """Rejecting the chain proposal returns 501 with the freeform escape hatch."""
         session_id = _create_session(composer_test_client)
 
         with patch(
@@ -219,5 +218,6 @@ class TestStep3RejectIsPhase5:
             )
 
         assert resp.status_code == 501
-        # Phase-5 punt is explicit and mentions exit_to_freeform as the workaround.
-        assert "Phase 5" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "not yet implemented" in detail
+        assert "exit-to-freeform" in detail

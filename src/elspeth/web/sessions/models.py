@@ -14,6 +14,7 @@ Landscape audit database.
 from __future__ import annotations
 
 from sqlalchemy import (
+    DDL,
     Boolean,
     CheckConstraint,
     Column,
@@ -28,8 +29,42 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    event,
+    text,
 )
 from sqlalchemy.types import JSON
+
+# ``SESSION_SCHEMA_EPOCH`` — schema version sentinel. Bump this constant
+# whenever a table is added, removed, or otherwise altered in a way that
+# requires the operator to delete the existing session DB. The startup
+# validator (``schema._assert_schema_version``) reads ``PRAGMA user_version``
+# and crashes if it does not match, producing an actionable
+# "Delete the session DB file and restart" message rather than a cryptic
+# SQLAlchemy error the first time a new code path touches the stale DB.
+#
+# Pattern mirrors ``SQLITE_SCHEMA_EPOCH`` in ``core/landscape/schema.py``
+# but is independent: the Landscape and session DBs are separate files
+# with separate lifecycles and separate epochs.
+#
+# Epoch history (pre-1.0 policy — bumps require DB recreation):
+#   1 → initial schema.
+#   2 → interpretation_events_table added; operators upgrading across
+#        this boundary MUST delete their session DB.
+#   3 → composition_proposals gains user_message_id so explicit-approval
+#        replay can preserve inline-blob chat-message provenance when
+#        accepting a deferred proposal.
+SESSION_SCHEMA_EPOCH = 3
+
+# ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
+# Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
+# given SQLite file is in fact an ELSPETH session DB rather than some
+# other SQLite file that happens to live at the configured path.
+#
+# Hex 0x454C5350 spells "ELSP" (E=0x45, L=0x4C, S=0x53, P=0x50). Magic
+# numbers in SQLite's ``application_id`` slot are conventionally chosen
+# so a hexdump of the first 100 bytes of the file makes the project
+# identifiable to a human auditor.
+SESSION_DB_APPLICATION_ID = 0x454C5350
 
 metadata = MetaData()
 
@@ -85,6 +120,32 @@ sessions_table = Table(
         nullable=True,
     ),
     Column("forked_from_message_id", String, nullable=True),
+    # ``interpretation_review_disabled`` — per-session "stop asking" toggle for
+    # LLM-surfaced interpretation review. Fast-path read by the compose loop;
+    # the authoritative audit record is the ``opted_out``
+    # row in ``interpretation_events_table``.
+    #
+    # Two-source-of-truth tension (F-35): the opted-out state is represented
+    # both by this boolean column (fast-path read by the compose loop) and by
+    # the existence of a row in ``interpretation_events`` with
+    # ``choice='opted_out'`` (authoritative audit record). They MUST remain
+    # consistent. The service's write path sets both atomically within a
+    # single transaction (``_session_write_lock`` held throughout).
+    #
+    # If a future audit finds the boolean ``true`` but no ``opted_out`` row
+    # exists, that is a bug in the service's write path — crash on read
+    # (offensive programming). The boolean is a read-cache; the
+    # ``interpretation_events`` row is the source of truth.
+    #
+    # F-35 follow-up: consider enforcing this constraint with a trigger or
+    # computed column in a future schema revision. Deferred because SQLite
+    # does not support CHECK constraints that cross tables.
+    Column(
+        "interpretation_review_disabled",
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    ),
     CheckConstraint(
         "trust_mode IN ('explicit_approve', 'auto_commit')",
         name="ck_sessions_trust_mode",
@@ -131,7 +192,7 @@ chat_messages_table = Table(
     # removes child tool rows when the assistant is deleted, preventing
     # orphan tool rows from accumulating in the audit DB. The schema
     # cannot mechanically enforce that the referenced row has
-    # role='assistant'; Task 9's _assert_parent_assistant_message guard
+    # role='assistant'; _assert_parent_assistant_message guard
     # adds that check at the helper-call boundary.
     ForeignKeyConstraint(
         ["parent_assistant_id", "session_id"],
@@ -242,15 +303,15 @@ composition_states_table = Table(
     # accept (id, session_id) as an FK reference.
     UniqueConstraint("id", "session_id", name="uq_composition_state_id_session"),
     # Closed enum: every value corresponds to a documented writer path
-    # in spec §4.1.2 (as amended by the Phase 1 plan supersession
-    # marker — ``session_fork`` is the cross-session fork-copy value).
+    # in spec §4.1.2 (``session_fork`` is the cross-session fork-copy
+    # value).
     # Adding a value here without amending the spec creates an
     # untraceable writer category in the audit DB.
     #
-    # All six values are actively written as of elspeth-obs-f217c634aa
-    # (closed by the same commit that retired the dormant-value friction
-    # block here). The previous block warned that three values
-    # (``convergence_persist``, ``plugin_crash_persist``,
+    # All six original values are actively written as of
+    # elspeth-obs-f217c634aa (closed by the same commit that retired the
+    # dormant-value friction block here). The previous block warned that
+    # three values (``convergence_persist``, ``plugin_crash_persist``,
     # ``preflight_persist``) had no writer; verification revealed the
     # call sites already existed in ``web/sessions/routes.py`` but were
     # passing through ``save_composition_state``'s hardcoded
@@ -258,32 +319,38 @@ composition_states_table = Table(
     # the public API as a required keyword argument so all four writer
     # categories (session_seed, convergence_persist,
     # plugin_crash_persist, preflight_persist) are distinguishable in
-    # the audit DB. Active writer map (post-fix):
+    # the audit DB. Active writer map:
     #
-    #   - ``tool_call``            — service.py compose-loop atomic write
-    #   - ``convergence_persist``  — routes.py _handle_convergence_error
-    #   - ``plugin_crash_persist`` — routes.py _handle_plugin_crash
-    #   - ``preflight_persist``    — routes.py _handle_runtime_preflight_failure
-    #   - ``session_seed``         — service.py create_session + set_active_state
-    #                                 (also: routes.py post-compose state advance
-    #                                  + fork source-storage rewrite — these two
-    #                                  are pre-existing mis-attributions, see the
-    #                                  comments at those call sites)
-    #   - ``session_fork``         — service.py fork_session_at_message
+    #   - ``tool_call``               — service.py compose-loop atomic write
+    #   - ``convergence_persist``     — routes.py _handle_convergence_error
+    #   - ``plugin_crash_persist``    — routes.py _handle_plugin_crash
+    #   - ``preflight_persist``       — routes.py _handle_runtime_preflight_failure
+    #   - ``session_seed``            — service.py create_session + set_active_state
+    #                                    (also: routes.py post-compose state advance
+    #                                     + fork source-storage rewrite — these two
+    #                                     are pre-existing mis-attributions, see the
+    #                                     comments at those call sites)
+    #   - ``session_fork``            — service.py fork_session_at_message
+    #   - ``interpretation_resolve``  — routes.py /resolve handler:
+    #                                    a composition-state row written when the
+    #                                    user resolves an LLM-surfaced interpretation
+    #                                    (accept_as_drafted / amend) so the patched
+    #                                    prompt template is committed alongside the
+    #                                    ``interpretation_events`` row.
     #
-    # NO SILENT EXTENSION. Adding a seventh value MUST include all three
-    # of: (a) a spec §4.1.2 amendment documenting the writer path and
-    # the audit semantics that distinguish it from neighbouring values;
-    # (b) an integration test that drives the writer and asserts the
-    # row was committed with the new ``provenance`` value; (c) a
-    # Filigree ticket linking the change back to this enum so the audit
-    # history shows the addition as a deliberate governance step rather
-    # than a drive-by edit. Mirror also goes into
-    # ``CompositionStateProvenance`` at ``protocol.py``. See the
-    # parallel ``audit_access_log_table`` "INERT IN PHASE 1A" block
-    # below for the same closed-list-of-permitted-writers posture.
+    # NO SILENT EXTENSION. Adding an eighth value MUST include all three
+    # of: (a) a spec amendment documenting the writer path and the audit
+    # semantics that distinguish it from neighbouring values; (b) an
+    # integration test that drives the writer and asserts the row was
+    # committed with the new ``provenance`` value; (c) a Filigree ticket
+    # linking the change back to this enum so the audit history shows the
+    # addition as a deliberate governance step rather than a drive-by
+    # edit. Mirror also goes into ``CompositionStateProvenance`` at
+    # ``protocol.py``. See the parallel ``audit_access_log_table`` "INERT
+    # IN PHASE 1A" block below for the same closed-list-of-permitted-
+    # writers posture.
     CheckConstraint(
-        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'session_seed', 'session_fork')",
+        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'session_seed', 'session_fork', 'interpretation_resolve')",
         name="ck_composition_states_provenance",
     ),
 )
@@ -300,6 +367,12 @@ composition_proposals_table = Table(
         index=True,
     ),
     Column("tool_call_id", String, nullable=False),
+    # Originating user chat message for proposals created by the composer
+    # in explicit_approve mode. Nullable for legacy/imported proposals and
+    # future non-chat proposal sources. When present, the composite FK forces
+    # same-session ownership so accept/replay cannot bind blobs to another
+    # session's message.
+    Column("user_message_id", String, nullable=True),
     Column("tool_name", String, nullable=False),
     Column("status", String, nullable=False),
     Column("summary", Text, nullable=False),
@@ -323,6 +396,12 @@ composition_proposals_table = Table(
         ["committed_state_id", "session_id"],
         ["composition_states.id", "composition_states.session_id"],
         name="fk_composition_proposals_committed_state_session",
+    ),
+    ForeignKeyConstraint(
+        ["user_message_id", "session_id"],
+        ["chat_messages.id", "chat_messages.session_id"],
+        name="fk_composition_proposals_user_message_session",
+        ondelete="RESTRICT",
     ),
     UniqueConstraint(
         "session_id",
@@ -376,6 +455,306 @@ Index(
     proposal_events_table.c.created_at,
 )
 
+interpretation_events_table = Table(
+    "interpretation_events",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    # Composite FK forces same-session ownership: an interpretation event in
+    # session B cannot reference a composition state owned by session A.
+    # Mirrors the pattern at composition_proposals.
+    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows (no
+    # composition state was involved); NOT NULL for user_approved rows.
+    Column("composition_state_id", String, nullable=True),
+    # The LLM transform's node_id within composition_states.nodes that this
+    # interpretation binds into. Validated at the writer boundary to exist;
+    # NOT a foreign key because nodes live inside a JSON column, not a
+    # separate table.
+    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows.
+    Column("affected_node_id", String, nullable=True),
+    # The provider tool_call_id from the LLM call that surfaced this
+    # interpretation. NOT a foreign key to chat_messages because the tool
+    # call may still be in flight when this row is inserted.
+    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows.
+    Column("tool_call_id", String, nullable=True),
+    # Audit-mandatory fields (source-conditional: see CHECKs below):
+    # NULL for auto_interpreted_opt_out rows (no LLM surfacing occurred);
+    # NOT NULL for user_approved rows; NULL for auto_interpreted_no_surfaces
+    # rows.
+    # F-1: all nullable=True — the CHECKs below enforce source-conditional
+    # presence.
+    Column("user_term", Text, nullable=True),
+    Column("llm_draft", Text, nullable=True),
+    Column("accepted_value", Text, nullable=True),  # None until resolved
+    Column("choice", String, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("resolved_at", DateTime(timezone=True), nullable=True),
+    Column("actor", String, nullable=False),
+    # Audit provenance: snapshot of the composer LLM context at surfacing time.
+    # F-1: nullable=True for model_identifier, model_version, provider,
+    # composer_skill_hash — NULL for auto_interpreted_opt_out rows (no LLM was
+    # consulted).
+    Column("model_identifier", String, nullable=True),
+    Column("model_version", String, nullable=True),
+    Column("provider", String, nullable=True),
+    Column("composer_skill_hash", String, nullable=True),
+    # NULL until resolved. For auto_interpreted_opt_out rows, arguments_hash is
+    # NULL because there is no LLM-supplied content to hash.
+    # F-12 (hash domain versioning): hash_domain_version records the field set
+    # used to compute arguments_hash. The v1 field set is defined in
+    # contracts/composer_interpretation.py:INTERPRETATION_HASH_DOMAIN_V1.
+    # NULL for rows without a hash (opt-out, pending). NOT NULL once resolved.
+    Column("arguments_hash", String, nullable=True),
+    Column("hash_domain_version", String, nullable=True),
+    # Structural source of this row. Closed enum — see governance block
+    # on ``composition_states.provenance`` above for the same posture.
+    Column("interpretation_source", String, nullable=False),
+    # F-19 (runtime model snapshot at resolve time): nullable columns
+    # populated when the user resolves the event, capturing what model the
+    # affected LLM transform will use at runtime (for audit drift detection).
+    Column("runtime_model_identifier_at_resolve", String, nullable=True),
+    Column("runtime_model_version_at_resolve", String, nullable=True),
+    # Cross-DB hash anchor (Option A — see §"Hash-anchored cross-DB linkage"
+    # in 18-phase-5b-surface-llm-interpretation.md). Populated by
+    # resolve_interpretation_event at the same time as accepted_value is
+    # committed. NULL until resolved; NULL for auto_interpreted_opt_out rows
+    # (no prompt template is patched for opt-out rows). For user_approved
+    # and auto_interpreted_no_surfaces rows that have a resolved prompt
+    # template, this is SHA-256 over the rfc8785 canonical JSON of the
+    # resolved prompt-template string, using
+    # ``CANONICAL_VERSION = "sha256-rfc8785-v1"`` (contracts/hashing.py).
+    # NOT part of INTERPRETATION_HASH_DOMAIN_V1 — it covers a different
+    # input (the resolved prompt string) and serves as a cross-DB anchor
+    # only. Pair to ``calls.resolved_prompt_template_hash`` in the L1
+    # Landscape audit DB; equality across both DBs is the audit-tooling
+    # cross-anchor invariant.
+    Column("resolved_prompt_template_hash", String(64), nullable=True),
+    ForeignKeyConstraint(
+        ["composition_state_id", "session_id"],
+        ["composition_states.id", "composition_states.session_id"],
+        name="fk_interpretation_events_state_session",
+    ),
+    UniqueConstraint(
+        "id",
+        "session_id",
+        name="uq_interpretation_events_id_session",
+    ),
+    # Closed enum on choice. Adding a value requires (a) amending this plan,
+    # (b) extending InterpretationChoice in contracts/composer_interpretation.py,
+    # (c) updating the closed-enum tests, and (d) a writer-path audit.
+    # NO SILENT EXTENSION. See composition_states governance block above.
+    CheckConstraint(
+        "choice IN ('pending', 'accepted_as_drafted', 'amended', 'opted_out', 'abandoned')",
+        name="ck_interpretation_events_choice",
+    ),
+    # Closed enum on interpretation_source. Adding a value requires the same
+    # four-step ceremony as choice. NO SILENT EXTENSION.
+    CheckConstraint(
+        "interpretation_source IN ('user_approved', 'auto_interpreted_opt_out', 'auto_interpreted_no_surfaces')",
+        name="ck_interpretation_events_source",
+    ),
+    # F-1 (source-keyed nullability CHECK): rows with
+    # interpretation_source = 'auto_interpreted_opt_out' have no LLM context;
+    # all nine interpretation fields must be NULL. Rows with
+    # interpretation_source = 'user_approved' have LLM context; all nine
+    # must be NOT NULL. Rows with interpretation_source =
+    # 'auto_interpreted_no_surfaces' had the LLM consulted (rate-cap
+    # fallback) but no surfacing; they carry LLM provenance fields but NULL
+    # for composition_state_id / affected_node_id / tool_call_id / user_term
+    # / llm_draft.
+    CheckConstraint(
+        "(interpretation_source = 'auto_interpreted_opt_out') = "
+        "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
+        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        " model_identifier IS NULL AND model_version IS NULL AND "
+        " provider IS NULL AND composer_skill_hash IS NULL)",
+        name="ck_interpretation_events_source_nullability",
+    ),
+    # user_approved rows must have all nine fields populated.
+    CheckConstraint(
+        "(interpretation_source != 'user_approved') OR "
+        "(composition_state_id IS NOT NULL AND affected_node_id IS NOT NULL AND "
+        " tool_call_id IS NOT NULL AND user_term IS NOT NULL AND llm_draft IS NOT NULL AND "
+        " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
+        " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
+        name="ck_interpretation_events_user_approved_required",
+    ),
+    # auto_interpreted_no_surfaces rows: the five surface fields
+    # (composition_state_id, affected_node_id, tool_call_id, user_term,
+    # llm_draft) must be NULL (no surfacing occurred); the four LLM
+    # provenance fields must be NOT NULL (the LLM was consulted for the
+    # rate-cap fallback auto-interpretation). This is the middle shape
+    # between opted_out (all nine NULL) and user_approved (all nine NOT
+    # NULL).
+    CheckConstraint(
+        "(interpretation_source != 'auto_interpreted_no_surfaces') OR "
+        "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
+        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
+        " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
+        name="ck_interpretation_events_no_surfaces_shape",
+    ),
+    # If choice is anything other than 'pending', resolved_at MUST be
+    # populated. For opted_out rows resolved_at records the opt-out
+    # timestamp.
+    CheckConstraint(
+        "(choice = 'pending') = (resolved_at IS NULL)",
+        name="ck_interpretation_events_resolved_at_status",
+    ),
+    # accepted_value is populated only for accepted_as_drafted and amended.
+    CheckConstraint(
+        "(choice IN ('accepted_as_drafted', 'amended')) = (accepted_value IS NOT NULL)",
+        name="ck_interpretation_events_accepted_value_status",
+    ),
+)
+
+# Partial unique index: only one pending interpretation per
+# (session_id, tool_call_id). After resolution (choice != 'pending'), the
+# same tool_call_id is allowed to recur (which it won't in practice, but
+# the index does not need to over-constrain).
+# F-26: See web/sessions/schema.py:_validate_partial_index_dialect_symmetry
+# for the schema-validator gate that enforces both sqlite_where and
+# postgresql_where are set consistently.
+Index(
+    "uq_interpretation_events_pending_tool_call",
+    interpretation_events_table.c.session_id,
+    interpretation_events_table.c.tool_call_id,
+    unique=True,
+    sqlite_where=interpretation_events_table.c.choice == "pending",
+    postgresql_where=interpretation_events_table.c.choice == "pending",
+)
+
+Index(
+    "ix_interpretation_events_session_created",
+    interpretation_events_table.c.session_id,
+    interpretation_events_table.c.created_at,
+)
+
+# F-11: index on composition_state_id for the common lookup pattern
+# "all interpretation events for this composition state". Verify with
+# EXPLAIN QUERY PLAN; the test in
+# tests/unit/web/sessions/test_interpretation_events_table.py asserts
+# SEARCH USING INDEX.
+Index(
+    "ix_interpretation_events_composition_state",
+    interpretation_events_table.c.composition_state_id,
+)
+
+# ``skill_markdown_history`` (F-5c) — content-addressed archive of every
+# distinct ``pipeline_composer.md`` version seen at runtime.
+#
+# One row per (SHA-256 hash, filename) pair. The compose loop upserts
+# (INSERT OR IGNORE) on first use of a hash, capturing the exact text that
+# was in memory when the LLM was prompted. This makes every
+# ``composer_skill_hash`` on ``interpretation_events`` rows forensically
+# traceable: an auditor can retrieve the exact skill prompt from this
+# table.
+#
+# Storage cost is negligible — one row per distinct deploy of the skill
+# markdown. Content is TEXT (not BLOB) because the skill file is UTF-8
+# Markdown.
+skill_markdown_history_table = Table(
+    "skill_markdown_history",
+    metadata,
+    Column("hash", String, primary_key=True),  # SHA-256 hex, 64 chars
+    Column("filename", String, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+)
+
+# F-4 / F-23 — append-only triggers.
+#
+# ``trg_interpretation_events_immutable_resolved`` protects the audit
+# integrity of resolved rows: once ``resolved_at`` is non-NULL, the four
+# settled fields (``accepted_value``, ``resolved_at``, ``actor``,
+# ``choice``) cannot change. Updates to non-settled columns on resolved
+# rows are still permitted (e.g. backfilling provenance), but flipping the
+# decision is not.
+#
+# ``trg_interpretation_events_no_delete_resolved`` extends that resolved-row
+# protection to DELETE while deliberately leaving unresolved PENDING rows
+# deletable for orphan recovery.
+#
+# ``trg_chat_messages_immutable_content`` enforces append-only semantics
+# for ``chat_messages.content`` — once a message is written, its body
+# cannot be edited. ``chat_messages`` is an audit anchor via
+# ``blobs.created_from_message_id``; without this trigger, post-hoc
+# editing would invalidate the lineage audit.
+#
+# ``trg_chat_messages_no_delete`` protects the same anchor against row
+# deletion. A missing chat row makes blob lineage unverifiable even if the
+# blob FK never existed, so the trigger is unconditional.
+#
+# ``IF NOT EXISTS`` makes the DDL idempotent across repeated
+# ``metadata.create_all`` calls. ``event.listen`` is **table-scoped**, not
+# metadata-scoped, so the trigger DDL fires only when this specific table
+# is created (not on every metadata.create_all() call for tables that
+# already exist).
+event.listen(
+    interpretation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_interpretation_events_immutable_resolved "
+        "BEFORE UPDATE ON interpretation_events "
+        "FOR EACH ROW BEGIN "
+        "  SELECT CASE "
+        "    WHEN OLD.resolved_at IS NOT NULL AND ("
+        "      NEW.accepted_value IS NOT OLD.accepted_value OR "
+        "      NEW.resolved_at IS NOT OLD.resolved_at OR "
+        "      NEW.actor IS NOT OLD.actor OR "
+        "      NEW.choice IS NOT OLD.choice"
+        "    ) THEN RAISE(ABORT, 'interpretation_events: resolved rows are immutable') "
+        "  END; "
+        "END;"
+    ),
+)
+
+event.listen(
+    interpretation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_interpretation_events_no_delete_resolved "
+        "BEFORE DELETE ON interpretation_events "
+        "FOR EACH ROW "
+        "WHEN OLD.resolved_at IS NOT NULL "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'interpretation_events: resolved rows are append-only'); "
+        "END;"
+    ),
+)
+
+event.listen(
+    chat_messages_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_chat_messages_immutable_content "
+        "BEFORE UPDATE OF content ON chat_messages "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'chat_messages.content is append-only'); "
+        "END;"
+    ),
+)
+
+event.listen(
+    chat_messages_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_chat_messages_no_delete "
+        "BEFORE DELETE ON chat_messages "
+        "FOR EACH ROW "
+        "WHEN EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'chat_messages rows are append-only'); "
+        "END;"
+    ),
+)
+
 runs_table = Table(
     "runs",
     metadata,
@@ -408,7 +787,7 @@ runs_table = Table(
         ["composition_states.id", "composition_states.session_id"],
         name="fk_runs_state_session",
     ),
-    # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
+    # elspeth-0de989c56d: four-value terminal taxonomy.
     # The constraint mirrors SessionRunStatus in web/sessions/protocol.py;
     # adding a value to the Literal without updating this CheckConstraint
     # would let the dataclass validator pass while the DB rejects the row,
@@ -464,6 +843,80 @@ blobs_table = Table(
     Column("created_by", String, nullable=False),
     Column("source_description", String, nullable=True),
     Column("status", String, nullable=False, server_default="ready"),
+    # --- Inline-blob provenance ---
+    # creation_modality: closed enum — how this blob's content was produced.
+    # Non-nullable with default "verbatim" so blobs created before these
+    # columns existed retain a valid value when the DB is rebuilt (we have no
+    # users yet; the operator deletes-and-recreates per
+    # project_db_migration_policy).
+    #
+    # Tier 1 crash-on-anomaly applies to reads: the read path
+    # (_row_to_blob_record / _blob_row_to_tool_dict) asserts the value is a
+    # valid CreationModality member; the SQL CHECK below mirrors the
+    # closed enum at the DB layer.
+    #
+    # CLOSED LIST — do not extend without design review.  Three locations
+    # must change together: the CreationModality StrEnum at
+    # contracts/enums.py, this column's CHECK, and the catalog-side
+    # tier-3 plumbing on the read/write paths (tools.py).  No fourth
+    # location.
+    Column("creation_modality", Text, nullable=False, server_default="verbatim"),
+    # created_from_message_id: FK to chat_messages.id of the user message
+    # that triggered the set_pipeline / create_blob call.  The composite
+    # FK (created_from_message_id, session_id) → (chat_messages.id,
+    # chat_messages.session_id) closes the cross-session lineage hole the
+    # same way fk_chat_messages_parent_assistant_session does for tool
+    # rows.  Nullable to admit (a) the migration-window default insert
+    # path before the route layer is wired, and (b) future programmatic
+    # blob creation paths that have no originating user message
+    # (e.g. pipeline-emitted blobs whose audit anchor is the run record).
+    Column("created_from_message_id", Text, nullable=True),
+    # LLM-provenance columns: populated for the three LLM-authored
+    # modalities (llm_generated, disambiguated,
+    # llm_generated_then_amended); NULL for verbatim.  Required together —
+    # a blob cannot claim LLM authorship without naming the model,
+    # version, provider, the composer-skill prompt hash, and the
+    # tool-call arguments hash.  The all-or-nothing invariant is enforced
+    # by the ck_blobs_creating_llm_provenance_nullability CHECK below;
+    # the L0 _LLM_AUTHORED_CREATION_MODALITIES frozenset is the Python
+    # mirror used by the write path's pre-insert guard.
+    Column("creating_model_identifier", String, nullable=True),
+    Column("creating_model_version", String, nullable=True),
+    Column("creating_provider", String, nullable=True),
+    Column("creating_composer_skill_hash", String, nullable=True),
+    Column("creating_arguments_hash", String, nullable=True),
+    # Composite FK: (created_from_message_id, session_id) must reference an
+    # existing (chat_messages.id, chat_messages.session_id) pair.  Mirrors
+    # fk_chat_messages_parent_assistant_session above.  ON DELETE RESTRICT
+    # (NOT CASCADE) because the blob is the audit anchor — deleting its
+    # originating message would silently truncate the lineage walk and
+    # leave the audit trail confidently asserting "this blob came from
+    # message X" while X no longer exists.  An operator who genuinely
+    # wants to delete a message must first delete or re-anchor every blob
+    # bound to it; the RESTRICT failure surfaces that explicitly.
+    ForeignKeyConstraint(
+        ["created_from_message_id", "session_id"],
+        ["chat_messages.id", "chat_messages.session_id"],
+        name="fk_blobs_created_from_message_session",
+        ondelete="RESTRICT",
+    ),
+    CheckConstraint(
+        "creation_modality IN ('verbatim', 'llm_generated', 'disambiguated', 'llm_generated_then_amended')",
+        name="ck_blobs_creation_modality",
+    ),
+    # LLM-provenance nullability invariant: the three LLM-authored
+    # modalities MUST carry all five creating_* fields; verbatim MUST NOT
+    # carry any.  Expressed as ``LHS = RHS`` where LHS is the modality
+    # membership predicate and RHS is the "all five fields populated"
+    # predicate — the biconditional rejects both "claimed LLM but missing
+    # provenance" and "verbatim but somehow has LLM fields".
+    CheckConstraint(
+        "(creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) = "
+        "(creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
+        "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
+        "creating_arguments_hash IS NOT NULL)",
+        name="ck_blobs_creating_llm_provenance_nullability",
+    ),
     CheckConstraint(
         "created_by IN ('user', 'assistant', 'pipeline')",
         name="ck_blobs_created_by",
@@ -516,6 +969,16 @@ blobs_table = Table(
         "status != 'ready' OR (content_hash IS NOT NULL AND length(content_hash) = 64 AND content_hash ~ '^[a-f0-9]+$')",
         name="ck_blobs_ready_hash",
     ).ddl_if(dialect="postgresql"),
+)
+
+# Index for the reverse-lookup path: "given a chat message, which inline
+# blobs were created from it?"  Backs the inline-blob lineage walk —
+# chat_messages.id → blobs.created_from_message_id → blobs.id — without
+# triggering a full table scan when an auditor opens the lineage drawer
+# on a session with thousands of blobs.
+Index(
+    "ix_blobs_created_from_message_id",
+    blobs_table.c.created_from_message_id,
 )
 
 blob_run_links_table = Table(
@@ -630,7 +1093,7 @@ user_preferences_table = Table(
 # This table records who viewed audit-grade message data (the eventual
 # ``include_tool_rows=true`` route surface). 1A lands the table SCHEMA
 # ONLY: no route writes it, no service method writes it, no fixture
-# writes it. Phase 1A is the destructive session-DB schema reset
+# writes it. The destructive session-DB schema reset
 # boundary, so deferring this table to a later phase would force a
 # second staging DB recreation for a table whose ownership, FK shape,
 # and writer_principal enum are already known.

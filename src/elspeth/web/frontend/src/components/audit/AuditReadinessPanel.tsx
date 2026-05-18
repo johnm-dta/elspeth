@@ -16,9 +16,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
 import { useExecutionStore } from "../../stores/executionStore";
+import { useInlineSourceStore } from "../../stores/inlineSourceStore";
+import { useInterpretationEventsStore } from "../../stores/interpretationEventsStore";
 import { relativeTime } from "../../utils/time";
 import type {
   AuditReadinessSnapshot,
+  CompositionState,
   ReadinessRow,
   ReadinessRowId,
   ReadinessStatus,
@@ -74,6 +77,133 @@ function isActionable(status: ReadinessStatus): boolean {
   return status === "warning" || status === "error";
 }
 
+/**
+ * Phase 5b.18b.7 — LLM-interpretations row text format.
+ *
+ * The backend returns one of three statuses (`not_applicable`, `warning`,
+ * `ok`) for the `llm_interpretations` row. The frontend re-formats the
+ * summary to a stylised form (spec lines 657-674 of
+ * `docs/composer/ux-redesign-2026-05/18b-phase-5b-frontend.md`):
+ *
+ *   | Backend status   | Frontend summary text                                     |
+ *   |------------------|-----------------------------------------------------------|
+ *   | `not_applicable` | (row hidden) OR "not yet surfaced" when LLM transform     |
+ *   |                  | exists but no events yet (frontend-derived F-14 state)    |
+ *   | `warning`        | "{P} pending review ({R} resolved)"                       |
+ *   | `ok`             | "all {N} resolved"                                        |
+ *
+ * Opt-out override (separate from backend status):
+ *
+ *   When `optedOutBySession[sessionId]` is true, the summary becomes
+ *   "opted out for this session ({N} drafted, not reviewed)" regardless
+ *   of backend status.
+ *
+ * Counts are sourced from `interpretationEventsStore`:
+ *   - P = `Object.keys(pendingBySession[sid]).length`
+ *   - R = sum of `resolvedCountBySession[sid]` fields
+ *   - N = P + R (total drafted)
+ *
+ * CLOSED switch over `ReadinessStatus`; the `never` arm prevents silent
+ * fallthrough if a future backend extension adds a new status value.
+ *
+ * @returns null when the row should be HIDDEN (not_applicable with no
+ *   LLM-context to surface). The caller must skip rendering the row
+ *   entirely on null.
+ */
+interface LlmInterpretationsRenderInputs {
+  status: ReadinessStatus;
+  pendingCount: number;
+  resolvedCount: number;
+  optedOut: boolean;
+  hasLlmTransform: boolean;
+}
+
+interface LlmInterpretationsRenderOutput {
+  /** Visible summary text (replaces backend row.summary). */
+  summaryText: string;
+  /** Visible glyph (replaces backend status glyph). */
+  glyph: string;
+  /** Accessible status label (read by SRs before the heading). */
+  ariaStatusLabel: string;
+}
+
+function formatLlmInterpretationsRow(
+  inputs: LlmInterpretationsRenderInputs,
+): LlmInterpretationsRenderOutput | null {
+  const { status, pendingCount, resolvedCount, optedOut, hasLlmTransform } =
+    inputs;
+  const total = pendingCount + resolvedCount;
+
+  // Opt-out override is unconditional — it suppresses the status mapping
+  // entirely. Per spec lines 665-669, the opt-out summary surfaces even
+  // when the backend status is `not_applicable` as long as the session
+  // has at least one event in the store. When opt-out is true and there
+  // are no events at all, we still show the opt-out line because the
+  // user has explicitly chosen to silence the surface — hiding it would
+  // create the impression the opt-out preference didn't land.
+  if (optedOut) {
+    return {
+      summaryText: `Opted out for this session (${total} drafted, not reviewed)`,
+      glyph: "◎", // ◎ — neutral "circled dot" per spec table row
+      ariaStatusLabel: "Opted out",
+    };
+  }
+
+  switch (status) {
+    case "warning":
+      return {
+        summaryText: `${pendingCount} pending review (${resolvedCount} resolved)`,
+        glyph: "⚠", // ⚠
+        ariaStatusLabel: "Warning",
+      };
+    case "ok":
+      return {
+        summaryText: `all ${total} resolved`,
+        glyph: "✓", // ✓
+        ariaStatusLabel: "OK",
+      };
+    case "not_applicable":
+      // F-14 frontend-derived state: an LLM transform is present but no
+      // events have been surfaced yet. The backend returns
+      // `not_applicable` in this case (its summary string says
+      // "No interpretation events yet for this composition"); the
+      // frontend re-words to match the spec table.
+      if (hasLlmTransform && total === 0) {
+        return {
+          summaryText: "Not yet surfaced",
+          glyph: "—", // — (em-dash)
+          ariaStatusLabel: "Not yet surfaced",
+        };
+      }
+      // No LLM transform AND no events: hide the row entirely (return
+      // null). The caller skips rendering.
+      return null;
+    case "error":
+      // The backend never emits `error` for this row today. Render with a
+      // generic error frame so a future backend extension that adds it
+      // produces visible output rather than silent emptiness.
+      return {
+        summaryText: "Interpretation review error",
+        glyph: "✗", // ✗
+        ariaStatusLabel: "Error",
+      };
+    default: {
+      const _exhaustive: never = status;
+      throw new Error(
+        `unknown readiness status for llm_interpretations: ${String(_exhaustive)}`,
+      );
+    }
+  }
+}
+
+/** True when the composition contains at least one `llm`-plugin transform. */
+function compositionHasLlmTransform(state: CompositionState | null): boolean {
+  if (state === null) return false;
+  return state.nodes.some(
+    (n) => n.node_type === "transform" && n.plugin === "llm",
+  );
+}
+
 function validationResultFromSnapshot(snapshot: AuditReadinessSnapshot): ValidationResult {
   return snapshot.validation_result;
 }
@@ -116,6 +246,33 @@ export function AuditReadinessPanel() {
   );
   const loadSnapshot = useAuditReadinessStore((s) => s.loadSnapshot);
   const setValidationResult = useExecutionStore((s) => s.setValidationResult);
+
+  // Phase 5a Task 7: when an inline_blob source is bound to the active
+  // composition, the Provenance row's summary text is replaced with an
+  // "Inline content hashed (SHA-256: <prefix>…)" line. The `provenance`
+  // discriminant is a PROJECTION of the server-recorded `creation_modality`
+  // (Task 2.5), not a frontend computation — the override here only
+  // changes the displayed text. Status/heading/clickability still come
+  // from the backend-supplied row.
+  const inlineSummary = useInlineSourceStore((s) =>
+    activeSessionId ? s.getSummary(activeSessionId) : null,
+  );
+
+  // Phase 5b.18b.7 — interpretation-event counts feed the `llm_interpretations`
+  // row's frontend-stylised summary. We subscribe to the per-session
+  // sub-maps (rather than reading via store.getState()) so a resolve / opt-out
+  // mutation triggers a re-render of this panel. The selector returns the
+  // whole Record so the equality check fires on identity change; the
+  // derived counts are computed inside the render below.
+  const pendingInterpretationsBySession = useInterpretationEventsStore(
+    (s) => s.pendingBySession,
+  );
+  const resolvedInterpretationCountsBySession = useInterpretationEventsStore(
+    (s) => s.resolvedCountBySession,
+  );
+  const optedOutInterpretationsBySession = useInterpretationEventsStore(
+    (s) => s.optedOutBySession,
+  );
 
   const hasCompositionContent =
     !!compositionState &&
@@ -315,9 +472,108 @@ export function AuditReadinessPanel() {
           aria-atomic="false"
         >
           {snapshot.rows.map((row: ReadinessRow) => {
+            // Phase 5b.18b.7 — llm_interpretations row uses a
+            // frontend-stylised renderer driven by interpretationEventsStore
+            // counts (pending / resolved) and the opt-out flag. The
+            // formatter returns null when the row should be HIDDEN (no LLM
+            // transform + no events); we skip rendering entirely in that
+            // case so the row is removed from the list (parallel to the
+            // backend's "not_applicable" semantics but with the
+            // frontend-derived F-14 "not yet surfaced" override layered on).
+            if (row.id === "llm_interpretations") {
+              const pendingCount = activeSessionId
+                ? Object.keys(
+                    pendingInterpretationsBySession[activeSessionId] ?? {},
+                  ).length
+                : 0;
+              const counts = activeSessionId
+                ? resolvedInterpretationCountsBySession[activeSessionId]
+                : undefined;
+              const resolvedCount = counts
+                ? counts.accepted_as_drafted + counts.amended + counts.opted_out
+                : 0;
+              const optedOut = activeSessionId
+                ? (optedOutInterpretationsBySession[activeSessionId] ?? false)
+                : false;
+              const formatted = formatLlmInterpretationsRow({
+                status: row.status,
+                pendingCount,
+                resolvedCount,
+                optedOut,
+                hasLlmTransform: compositionHasLlmTransform(compositionState),
+              });
+              if (formatted === null) {
+                // Row hidden — no LLM transform AND no events AND not
+                // opted out. Skip rendering so the row does not appear.
+                return null;
+              }
+              const heading = row.label || rowHeading(row.id);
+              // Clickability mirrors the generic `isActionable` semantics
+              // — only warning/error open the detail drawer. The opt-out
+              // and "not yet surfaced" overrides land on `not_applicable`
+              // statuses, which are not clickable. Users access the
+              // session-level opt-out via the chat widget, not via the
+              // audit panel.
+              const clickable = isActionable(row.status);
+              return (
+                <li
+                  key={row.id}
+                  className={`audit-readiness-row audit-readiness-row--${row.status} audit-readiness-row--llm-interpretations`}
+                  data-testid="audit-readiness-row-llm-interpretations"
+                >
+                  {clickable ? (
+                    <button
+                      type="button"
+                      className="audit-readiness-row-btn"
+                      onClick={() => setSelectedRowId(row.id)}
+                    >
+                      <span
+                        className="audit-readiness-glyph"
+                        aria-hidden="true"
+                      >
+                        {formatted.glyph}
+                      </span>
+                      <span className="sr-only">{formatted.ariaStatusLabel}.</span>
+                      <span className="audit-readiness-row-label">{heading}</span>
+                      <span className="audit-readiness-row-summary">
+                        {formatted.summaryText}
+                      </span>
+                    </button>
+                  ) : (
+                    <div
+                      className="audit-readiness-row-static"
+                      role="group"
+                      aria-label={heading}
+                    >
+                      <span
+                        className="audit-readiness-glyph"
+                        aria-hidden="true"
+                      >
+                        {formatted.glyph}
+                      </span>
+                      <span className="sr-only">{formatted.ariaStatusLabel}.</span>
+                      <span className="audit-readiness-row-label">{heading}</span>
+                      <span className="audit-readiness-row-summary">
+                        {formatted.summaryText}
+                      </span>
+                    </div>
+                  )}
+                </li>
+              );
+            }
             const { glyph, aria } = statusGlyph(row.status);
             const heading = row.label || rowHeading(row.id);
             const clickable = isActionable(row.status);
+            // Phase 5a Task 7: inline-source provenance override. The
+            // backend `summary` is replaced (not appended to) with a
+            // hash-prefix line when an inline_blob source is bound. The
+            // 12-char prefix is a display convenience; the full hash
+            // stays in the Tier-1 audit trail (Landscape) — this row is
+            // a UI affordance, not the legal record.
+            const summaryText =
+              row.id === "provenance" && inlineSummary !== null
+                ? `Inline content hashed (SHA-256: ${inlineSummary.contentHash.slice(0, 12)}…)`
+                : row.summary;
             return (
               <li
                 key={row.id}
@@ -337,7 +593,7 @@ export function AuditReadinessPanel() {
                     </span>
                     <span className="sr-only">{aria}.</span>
                     <span className="audit-readiness-row-label">{heading}</span>
-                    <span className="audit-readiness-row-summary">{row.summary}</span>
+                    <span className="audit-readiness-row-summary">{summaryText}</span>
                   </button>
                 ) : (
                   <div
@@ -353,7 +609,7 @@ export function AuditReadinessPanel() {
                     </span>
                     <span className="sr-only">{aria}.</span>
                     <span className="audit-readiness-row-label">{heading}</span>
-                    <span className="audit-readiness-row-summary">{row.summary}</span>
+                    <span className="audit-readiness-row-summary">{summaryText}</span>
                   </div>
                 )}
               </li>

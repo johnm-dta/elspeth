@@ -4,12 +4,17 @@ No new validation logic. Layer: L3 (application).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
+from elspeth.contracts.composer_interpretation import (
+    InterpretationChoice,
+    InterpretationEventRecord,
+    InterpretationSource,
+)
 from elspeth.contracts.enums import Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.secrets import SecretInventoryItem
@@ -138,6 +143,19 @@ class _SessionServiceLike(Protocol):
     # session_id is UUID to match SessionServiceImpl.get_current_state (web/sessions/service.py:1884).
     async def get_current_state(self, session_id: UUID) -> Any: ...
 
+    # Mirror of SessionServiceProtocol.list_interpretation_events
+    # (web/sessions/protocol.py:757). Used by the llm_interpretations
+    # row to count pending/resolved events and to detect a session-wide
+    # opt-out (via the AUTO_INTERPRETED_OPT_OUT source filter).
+    async def list_interpretation_events(
+        self,
+        session_id: UUID,
+        *,
+        status: Literal["pending", "all"] = "all",
+        composition_state_id: UUID | None = None,
+        sources: Sequence[InterpretationSource] | None = None,
+    ) -> list[InterpretationEventRecord]: ...
+
 
 class _SecretServiceLike(Protocol):
     # Matches ScopedSecretResolver.list_refs (service.py:312) — no auth_provider_type.
@@ -187,18 +205,60 @@ class ReadinessService:
         record = await self._session_service.get_current_state(session_id)
         if record is None:
             raise CompositionStateNotFoundError(session_id)
+        # Tier-1 read: record.id is UUID per CompositionStateRecord
+        # (web/sessions/protocol.py:369). It is the composition-state-id
+        # that the llm_interpretations row scopes its event lookup to.
+        composition_state_id: UUID = record.id
         state: CompositionState = self._state_from_record(record)
         validation = await self._execution_service.validate_state(state, user_id=user_id)
         inventory = await run_sync_in_worker(
             self._scoped_secret_resolver.list_refs,
             user_id,  # scoped_secret_resolver.list_refs takes user_id only
         )
+        # Pre-fetch interpretation-event signal for the llm_interpretations
+        # row. Two separate reads because:
+        #
+        #   (a) The opt-out indicator is an AUTO_INTERPRETED_OPT_OUT row
+        #       written with composition_state_id=NULL
+        #       (web/sessions/service.py:2188). A WHERE clause filtering
+        #       by composition_state_id would never match it.
+        #
+        #   (b) The pending/resolved counts are scoped to the CURRENT
+        #       composition-state so a stale resolved event from a prior
+        #       state cannot flip the row from "no events yet" to "ok".
+        #
+        # Both reads are skipped when the composition has no LLM
+        # transforms — the row short-circuits to not_applicable and
+        # nothing further is queried.
+        has_llm = _composition_has_llm_transform(state)
+        interpretation_events: tuple[InterpretationEventRecord, ...] = ()
+        opted_out = False
+        if has_llm:
+            opt_out_rows = await self._session_service.list_interpretation_events(
+                session_id,
+                status="all",
+                composition_state_id=None,
+                sources=(InterpretationSource.AUTO_INTERPRETED_OPT_OUT,),
+            )
+            opted_out = bool(opt_out_rows)
+            if not opted_out:
+                interpretation_events = tuple(
+                    await self._session_service.list_interpretation_events(
+                        session_id,
+                        status="all",
+                        composition_state_id=composition_state_id,
+                    )
+                )
         rows: tuple[ReadinessRow, ...] = (
             _build_validation_row(validation),
             _build_plugin_trust_row(state),
             _build_provenance_row(validation),
             _build_retention_row(self._settings.payload_store_retention_days),
-            _build_llm_interpretations_row(state),
+            _build_llm_interpretations_row(
+                has_llm=has_llm,
+                opted_out=opted_out,
+                events=interpretation_events,
+            ),
             _build_secrets_row(validation, inventory),
         )
         # ``session_id`` is rendered as ``str`` in the JSON envelope; the
@@ -483,17 +543,115 @@ def _build_retention_row(retention_days: int) -> ReadinessRow:
     )
 
 
-def _build_llm_interpretations_row(state: CompositionState) -> ReadinessRow:
-    """Always not_applicable in Phase 2A; Phase 5b implements the real signal."""
-    has_llm = any(n.node_type == "transform" and n.plugin == "llm" for n in state.nodes)
-    summary = "Interpretation surface not yet available" if has_llm else "No LLM transforms in this composition"
+def _composition_has_llm_transform(state: CompositionState) -> bool:
+    """Predicate: does this composition contain at least one ``llm`` transform?
+
+    Drives the short-circuit in ``compute_snapshot`` that skips the
+    interpretation-event reads when no LLM transforms are present —
+    a composition without LLM transforms cannot have interpretation
+    events bound to its nodes.
+    """
+    return any(n.node_type == "transform" and n.plugin == "llm" for n in state.nodes)
+
+
+def _build_llm_interpretations_row(
+    *,
+    has_llm: bool,
+    opted_out: bool,
+    events: Sequence[InterpretationEventRecord],
+) -> ReadinessRow:
+    """Project interpretation-event state into the panel row.
+
+    Phase 5b Task 10 (18a-phase-5b-backend.md §Task 10). Status mapping:
+
+      - No LLM transforms in composition → not_applicable
+      - LLM transforms present, session opted out → not_applicable
+        (with an opt-out note in the summary)
+      - LLM transforms present, no interpretation events for the
+        current composition state → not_applicable (the surfacing has
+        simply not been triggered yet; the row flips to ``warning`` on
+        the first ``request_interpretation_review`` call)
+      - Any PENDING event for the current composition state → warning
+      - All events resolved, at least one present → ok
+
+    Auto-interpreted-no-surfaces rows (rate-cap-baked-in interpretation,
+    structurally distinct from session-wide opt-out per
+    ``contracts/composer_interpretation.py``) count as resolved
+    contributors — they are not session-wide opt-outs and they are
+    not PENDING.
+
+    The ``component_ids`` projection lists the LLM-transform node ids
+    referenced by events with that node populated, deduplicated and
+    sorted; opt-out rows have ``affected_node_id=None`` and contribute
+    nothing.
+    """
+    if not has_llm:
+        return ReadinessRow(
+            id="llm_interpretations",
+            label="LLM interpretations",
+            status="not_applicable",
+            summary="No LLM transforms in this composition",
+            detail=None,
+            component_ids=(),
+        )
+    if opted_out:
+        return ReadinessRow(
+            id="llm_interpretations",
+            label="LLM interpretations",
+            status="not_applicable",
+            summary="Session opted out of interpretation review",
+            detail=(
+                "The user has clicked 'stop asking' for this session. "
+                "No further interpretation surfacings will occur and "
+                "this row is informational only."
+            ),
+            component_ids=(),
+        )
+    if not events:
+        return ReadinessRow(
+            id="llm_interpretations",
+            label="LLM interpretations",
+            status="not_applicable",
+            summary="No interpretation events yet for this composition",
+            detail=None,
+            component_ids=(),
+        )
+    pending = [e for e in events if e.choice == InterpretationChoice.PENDING]
+    component_ids = tuple(sorted({e.affected_node_id for e in events if e.affected_node_id is not None}))
+    if pending:
+        return ReadinessRow(
+            id="llm_interpretations",
+            label="LLM interpretations",
+            status="warning",
+            summary=(f"{len(pending)} pending interpretation review(s)" if len(pending) != 1 else "1 pending interpretation review"),
+            detail="\n".join(
+                f"- {e.user_term} (node {e.affected_node_id})"
+                for e in pending
+                # affected_node_id and user_term are NOT NULL for
+                # PENDING rows (interpretation_source=USER_APPROVED is
+                # the only source that produces a PENDING row, and the
+                # source-conditional CHECK constraint requires both
+                # fields to be populated). Guard anyway so a future
+                # source that emits PENDING rows with NULL fields would
+                # be filtered out rather than rendered as "None".
+                if e.affected_node_id is not None and e.user_term is not None
+            )
+            or None,
+            component_ids=component_ids,
+        )
+    # ``model_identifier`` is the composer model that drafted the
+    # interpretation surface; ``runtime_model_identifier_at_resolve`` is the
+    # pipeline model that will execute the resolved prompt. They are different
+    # roles, so comparing them would produce false "rotated model" warnings.
+    # A future same-role drift signal must capture the runtime model at both
+    # surfacing and resolve time before warning here.
     return ReadinessRow(
         id="llm_interpretations",
         label="LLM interpretations",
-        status="not_applicable",
-        summary=summary,
+        status="ok",
+        summary=(f"{len(events)} interpretation(s) resolved" if len(events) != 1 else "1 interpretation resolved"),
         detail=None,
-        component_ids=(),
+        component_ids=component_ids,
     )
 
 

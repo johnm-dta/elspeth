@@ -54,6 +54,67 @@ class MalformedBlobRefError(ExecuteRequestValidationError):
     """Raised when caller-supplied blob_ref is not a UUID."""
 
 
+class UnresolvedInterpretationPlaceholderError(Exception):
+    """Raised when /execute encounters an LLM transform whose prompt_template
+    still carries one or more unresolved ``{{interpretation:<term>}}``
+    placeholders (F-17 / F-21 — Phase 5b Task 5 follow-on).
+
+    The compose-loop is expected to call ``request_interpretation_review``
+    for each such placeholder during composition; the placeholder is then
+    replaced with the user-accepted concrete value, and the audit-primary
+    record is the ``interpretation_events`` row.  If a placeholder survives
+    to /execute, the LLM under-fired the review tool — typically after a
+    model upgrade where the skill's prompt no longer reliably triggers the
+    review path.  We refuse to run the pipeline with the literal
+    ``{{interpretation:…}}`` string flowing into the LLM transform (which
+    would produce a useless or surprising response) and surface a
+    user-actionable error.
+
+    NOT a subclass of ``ExecuteRequestValidationError``: that base maps to
+    400 in the route catch order, but this site maps to 422 (Unprocessable
+    Entity) to mirror the ``SemanticContractViolationError`` precedent —
+    the request was syntactically valid but the composition state is not
+    yet executable until the operator resolves the surfaced placeholders.
+
+    The ``placeholders`` field carries ``(node_id, term)`` tuples — NOT
+    the ``prompt_template`` value (which may include user-supplied
+    content; PII risk).  The route handler renders the same shape into the
+    HTTP 422 payload so the frontend banner can list every unresolved
+    site without parsing the message string.
+    """
+
+    def __init__(
+        self,
+        *,
+        placeholders: tuple[tuple[str, str], ...],
+    ) -> None:
+        if not placeholders:
+            # Offensive guard: callers must not raise this exception with
+            # an empty placeholders tuple.  An empty list means the gate
+            # passed and execution should proceed; constructing the
+            # exception in that case is a control-flow bug worth crashing
+            # for rather than silently producing an actionable error with
+            # an empty body.
+            raise ValueError(
+                "UnresolvedInterpretationPlaceholderError requires at "
+                "least one (node_id, term) tuple — caller must check the "
+                "detector's return value before raising."
+            )
+        self.placeholders = placeholders
+        # User-actionable message: list every unresolved (node, term) so
+        # the operator sees all sites at once.  Single-site messages read
+        # naturally; multi-site messages join with "; " to stay on one
+        # line for the frontend banner.
+        rendered_sites = "; ".join(f"{{{{interpretation:{term}}}}} in LLM transform '{node_id}'" for node_id, term in placeholders)
+        message = (
+            f"Unresolved interpretation placeholder(s) — {rendered_sites}. "
+            f"Resolve via request_interpretation_review (compose loop) and "
+            f"the /interpretations/<event_id>/resolve endpoint before "
+            f"running the pipeline."
+        )
+        super().__init__(message)
+
+
 class BlobSourcePathMismatchError(Exception):
     """Tier 1 audit-integrity violation — composer-stored blob source path
     diverges from the referenced blob's canonical ``storage_path``.

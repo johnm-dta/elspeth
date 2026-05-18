@@ -54,7 +54,7 @@ class TestAzureStateIdSnapshot:
             "deployment_name": "test-deploy",
             "endpoint": "https://test.openai.azure.com",
             "api_key": "test-key",
-            "template": "hello",
+            "prompt_template": "hello",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
         }
@@ -109,7 +109,7 @@ class TestLLMOutputSchemaDivergence:
                     "deployment_name": "test",
                     "endpoint": "https://test.azure.com",
                     "api_key": "key",
-                    "template": "hello",
+                    "prompt_template": "hello",
                     "schema": {"mode": "flexible", "fields": ["text: str"]},
                     "required_input_fields": [],
                 }

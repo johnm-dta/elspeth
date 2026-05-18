@@ -225,9 +225,9 @@ class TestGetSchema:
             "deployment_name",
             "endpoint",
             "api_key",
-            "template",
+            "prompt_template",
         }
-        assert set(defs["OpenRouterConfig"]["required"]) >= {"model", "api_key", "template"}
+        assert set(defs["OpenRouterConfig"]["required"]) >= {"model", "api_key", "prompt_template"}
 
     def test_llm_transform_summary_includes_provider_fields(self, catalog: CatalogServiceImpl) -> None:
         """Regression: bug elspeth-dcf12c061b.
@@ -253,7 +253,7 @@ class TestGetSchema:
         field_names = {f.name for f in llm.config_fields}
         assert field_names >= {
             "provider",
-            "template",
+            "prompt_template",
             "api_key",
             "deployment_name",
             "endpoint",
@@ -264,7 +264,7 @@ class TestGetSchema:
         required = {f.name for f in llm.config_fields if f.required}
         # Fields that are required in EVERY provider variant — honest intersection.
         assert "api_key" in required
-        assert "template" in required
+        assert "prompt_template" in required
         # Fields required only for some providers must not claim universal requiredness.
         assert "deployment_name" not in required
         assert "endpoint" not in required

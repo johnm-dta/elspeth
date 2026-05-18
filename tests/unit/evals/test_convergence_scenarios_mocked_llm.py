@@ -318,7 +318,7 @@ class TestCsvClassifierScenario:
                                     "provider": "openrouter",
                                     "model": "anthropic/claude-3.5-sonnet",
                                     "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
-                                    "template": "Classify {{ row['subject'] }}",
+                                    "prompt_template": "Classify {{ row['subject'] }}",
                                     "response_field": "urgency",
                                     "schema": {"mode": "observed"},
                                     "required_input_fields": ["subject"],

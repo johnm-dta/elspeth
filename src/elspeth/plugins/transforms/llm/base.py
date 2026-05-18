@@ -1,16 +1,18 @@
 """LLM configuration model.
 
 Provides LLMConfig extending TransformDataConfig with LLM-specific fields:
-model, template, system_prompt, temperature, max_tokens, response_field,
+model, prompt_template, system_prompt, temperature, max_tokens, response_field,
 and pool configuration (flat fields assembled into PoolConfig).
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts.hashing import stable_hash
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.pooling import PoolConfig
 from elspeth.plugins.infrastructure.templates import TemplateError
@@ -44,7 +46,7 @@ class LLMConfig(TransformDataConfig):
     LLM-specific fields:
     - provider: LLM provider ("azure" or "openrouter")
     - model: Model identifier (optional — Azure uses deployment_name instead)
-    - template: Jinja2 prompt template (required)
+    - prompt_template: Jinja2 prompt template (required)
     - system_prompt: Optional system message
     - temperature: Sampling temperature (default 0.0 for determinism)
     - max_tokens: Maximum response tokens
@@ -65,7 +67,7 @@ class LLMConfig(TransformDataConfig):
     queries: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = Field(
         None, description="Multi-query specs (None = single-query mode)"
     )
-    template: str = Field(..., description="Jinja2 prompt template")
+    prompt_template: str = Field(..., description="Jinja2 prompt template")
     system_prompt: str | None = Field(None, description="Optional system prompt")
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(None, gt=0, description="Maximum tokens in response")
@@ -73,9 +75,26 @@ class LLMConfig(TransformDataConfig):
 
     # File-based content with source paths for audit trail
     lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
-    template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
+    prompt_template_source: str | None = Field(None, description="Prompt template file path for audit (None if inline)")
     lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
     system_prompt_source: str | None = Field(None, description="System prompt file path for audit (None if inline)")
+
+    # Phase 5b Task 9 — cross-DB hash anchor for interpretation events.
+    # When this LLM transform is downstream of a resolved interpretation
+    # event, the session service writes ``stable_hash(resolved prompt
+    # template)`` here (via ``resolve_interpretation_event`` →
+    # ``_patch_llm_transform_prompt`` → ``composition_states.nodes[i].options``).
+    # The runtime reads this field and forwards it to every LLM call so the
+    # Landscape ``calls.resolved_prompt_template_hash`` column is populated
+    # — the cross-DB anchor an auditor uses to join a Landscape call back to
+    # the session-DB interpretation_events row. ``None`` is the legitimate
+    # value for non-interpretation LLM transforms (most LLM nodes never go
+    # through an interpretation surface).
+    resolved_prompt_template_hash: str | None = Field(
+        None,
+        description="Cross-DB hash anchor for interpretation events (Phase 5b Task 9)",
+        json_schema_extra={"composer_hidden": True},
+    )
 
     # Pool configuration fields (flat - assembled into PoolConfig by pool_config property)
     pool_size: int = Field(1, ge=1, description="Number of concurrent requests (1 = sequential)")
@@ -116,18 +135,32 @@ class LLMConfig(TransformDataConfig):
             raise ValueError(f"response_field must be a valid Python identifier, got {v!r}")
         return v
 
-    @field_validator("template")
+    @field_validator("prompt_template")
     @classmethod
-    def validate_template(cls, v: str) -> str:
-        """Validate template is non-empty and syntactically valid."""
+    def validate_prompt_template(cls, v: str) -> str:
+        """Validate prompt_template is non-empty and syntactically valid."""
         if not v or not v.strip():
-            raise ValueError("template cannot be empty")
+            raise ValueError("prompt_template cannot be empty")
         # Validate template syntax at config time
         try:
             PromptTemplate(v)
         except TemplateError as e:
             raise ValueError(f"Invalid Jinja2 template: {e}") from e
         return v
+
+    @model_validator(mode="after")
+    def _validate_resolved_prompt_template_hash_matches_template(self) -> LLMConfig:
+        """Refuse runtime configs whose interpretation hash anchor drifted."""
+        if self.resolved_prompt_template_hash is None:
+            return self
+
+        expected_hash = stable_hash(self.prompt_template)
+        if self.resolved_prompt_template_hash != expected_hash:
+            raise ValueError(
+                "resolved_prompt_template_hash must equal stable_hash(prompt_template); "
+                f"expected {expected_hash!r}, got {self.resolved_prompt_template_hash!r}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_required_input_fields_declared(self) -> LLMConfig:
@@ -173,19 +206,24 @@ class LLMConfig(TransformDataConfig):
                             if "template" in item and item["template"]:
                                 extracted.update(extract_jinja2_fields(item["template"]))
                 # Also check the top-level template for row references
-                extracted.update(extract_jinja2_fields(self.template))
+                extracted.update(extract_jinja2_fields(self.prompt_template))
             else:
                 # Single-query mode: detect row references in the template
-                extracted = set(extract_jinja2_fields(self.template))
+                extracted = set(extract_jinja2_fields(self.prompt_template))
 
             if extracted:
+                required_fields = sorted(extracted)
+                required_fields_json = json.dumps(required_fields)
                 raise ValueError(
-                    f"LLM template references row fields {sorted(extracted)} but "
-                    f"required_input_fields is not declared.\n\n"
-                    f"You must explicitly declare field requirements:\n"
-                    f"  required_input_fields: {sorted(extracted)}  # Require these fields\n"
-                    f"  required_input_fields: []                    # Accept runtime risk (opt-out)\n\n"
-                    f"Use extract_jinja2_fields() from elspeth.core.templates to discover fields.\n"
-                    f"This explicit declaration enables DAG validation to catch missing fields at config time."
+                    f"LLM prompt_template references row fields {required_fields} but "
+                    f"options.required_input_fields is not declared.\n\n"
+                    "You must explicitly declare field requirements inside the LLM node options:\n"
+                    f"  options.required_input_fields: {required_fields_json}  # Require these fields\n"
+                    "  options.required_input_fields: []                    # Accept runtime risk (opt-out)\n\n"
+                    "Composer repair examples:\n"
+                    f'  patch_node_options({{"node_id": "<node_id>", "patch": {{"required_input_fields": {required_fields_json}}}}})\n'
+                    f"  set_pipeline/upsert_node: include options.required_input_fields={required_fields_json} on the llm node.\n\n"
+                    "Use extract_jinja2_fields() from elspeth.core.templates to discover fields. "
+                    "This explicit declaration enables DAG validation to catch missing fields at config time."
                 )
         return self

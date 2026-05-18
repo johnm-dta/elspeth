@@ -49,7 +49,7 @@ def make_config(**overrides: Any) -> dict[str, Any]:
         "provider": "openrouter",
         "model": "anthropic/claude-3-opus",
         "api_key": "test-key",
-        "template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
+        "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": [],  # Explicit opt-out for this test
@@ -178,7 +178,7 @@ class TestSingleQueryProcessing:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
+            "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
             "system_prompt": "You are an assessment AI. Respond in JSON.",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
@@ -360,7 +360,7 @@ class TestSingleQueryProcessing:
         the frozen MultiQueryStrategy dataclass.
         """
         # Template references a variable not mapped by input_fields — triggers TemplateError
-        config = self._make_single_query_config(template="Input: {{ row.text_content }}\nMissing: {{ row.missing_field }}")
+        config = self._make_single_query_config(prompt_template="Input: {{ row.text_content }}\nMissing: {{ row.missing_field }}")
         transform, _mock_provider = _make_transform_with_mock_provider(config)
 
         row = make_pipeline_row({"cs1_bg": "data", "cs1_sym": "data", "cs1_hist": "data"})
@@ -577,7 +577,7 @@ class TestRowProcessingWithPipelining:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Input: {{ row.text_content }}",
+            "prompt_template": "Input: {{ row.text_content }}",
             "system_prompt": "You are an assessment AI. Respond in JSON.",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
@@ -1130,7 +1130,7 @@ class TestNanInJsonParsing:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Input: {{ row.text_content }}",
+            "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
             "queries": {
@@ -1162,7 +1162,7 @@ class TestNanInJsonParsing:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Input: {{ row.text_content }}",
+            "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
             "queries": {
@@ -1202,7 +1202,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Input: {{ row.text_content }}",
+            "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
             "queries": {
@@ -1238,7 +1238,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Input: {{ row.text_content }}",
+            "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
             "queries": {
@@ -1277,7 +1277,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Input: {{ row.text_content }}",
+            "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
             "required_input_fields": [],
             "queries": {

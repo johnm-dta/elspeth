@@ -2128,7 +2128,7 @@ class CompositionState:
         _plugins_requiring_config: dict[str, tuple[str, str]] = {
             "value_transform": ("operations", "no operations defined — nothing will be computed"),
             "type_coerce": ("conversions", "no conversions defined — no types will be changed"),
-            "llm": ("template", "no template defined — nothing will be sent to the model"),
+            "llm": ("prompt_template", "no prompt_template defined — nothing will be sent to the model"),
             "field_mapper": ("mapping", "no mapping defined — no fields will be renamed"),
             "truncate": ("fields", "no fields specified — nothing will be truncated"),
             "keyword_filter": ("keywords", "no keywords defined — all rows will pass through"),

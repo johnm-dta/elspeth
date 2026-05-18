@@ -13,6 +13,8 @@ Two layers:
 
 from __future__ import annotations
 
+import hashlib
+from functools import lru_cache
 from pathlib import Path
 
 _SKILLS_DIR = Path(__file__).parent
@@ -32,6 +34,56 @@ def load_skill(name: str) -> str:
     """
     path = _SKILLS_DIR / f"{name}.md"
     return path.read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=8)
+def load_skill_with_hash(name: str) -> tuple[str, str]:
+    """Load a core skill pack and its SHA-256 hex digest atomically (F-5a).
+
+    Returns ``(text, sha256_hex)``. Both values are derived from the same
+    in-memory read; the hash and text are atomically consistent — the hash
+    is computed over exactly the text the LLM sees, not over a fresh re-read
+    of disk that could have changed between reads.
+
+    The result is ``@lru_cache``'d: production wiring resolves both the
+    composer prompt and the audit-row ``composer_skill_hash`` from the same
+    cached tuple. To detect mid-process hot-reload of the on-disk file (a
+    partial-state hazard that would cause the audit row to disagree with the
+    prompt actually sent to the LLM), the compose loop re-asserts at startup
+    that the on-disk SHA-256 still equals the cached hash; mismatch raises
+    an operator-actionable error rather than silently shipping stale text.
+
+    Spec reference: docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md
+    "Skill hash atomicity (F-5a)" (~lines 2374-2395).
+    """
+    path = _SKILLS_DIR / f"{name}.md"
+    text = path.read_text(encoding="utf-8")
+    sha256_hex = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return text, sha256_hex
+
+
+def assert_skill_hash_unchanged_on_disk(name: str, expected_sha256: str) -> None:
+    """Re-read the skill file from disk and assert its SHA-256 still matches.
+
+    F-5a partial-state guard: detects the case where the in-memory cached
+    text was loaded before a hot-reload changed the on-disk file. If a
+    mismatch is found, raise ``RuntimeError`` with an operator-actionable
+    message — the audit row's ``composer_skill_hash`` would no longer
+    correspond to the file currently on disk, breaking the cross-version
+    diff path. Callers (the compose loop init) should crash; the operator
+    restarts the service to reload the LRU cache.
+    """
+    path = _SKILLS_DIR / f"{name}.md"
+    on_disk_text = path.read_text(encoding="utf-8")
+    on_disk_hash = hashlib.sha256(on_disk_text.encode("utf-8")).hexdigest()
+    if on_disk_hash != expected_sha256:
+        raise RuntimeError(
+            f"Composer skill hash mismatch for {name!r}: in-memory cached hash "
+            f"({expected_sha256}) differs from on-disk file hash ({on_disk_hash}). "
+            f"The on-disk skill markdown was modified after the LRU cache populated; "
+            f"the LLM is being prompted with the cached (older) text. Restart "
+            f"elspeth-web.service to reload the skill cache."
+        )
 
 
 # Deployment skills beyond this size are rejected to prevent context

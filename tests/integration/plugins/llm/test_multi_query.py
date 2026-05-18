@@ -44,7 +44,7 @@ def make_full_config() -> dict[str, Any]:
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
         "system_prompt": 'You are an assessment AI. Respond in JSON: {"score": <0-100>, "rationale": "<text>"}',
-        "template": """
+        "prompt_template": """
 Case Study:
 Background: {{ row.background }}
 Symptoms: {{ row.symptoms }}
@@ -424,7 +424,7 @@ class TestMultiQueryIntegration:
             "endpoint": "https://test.openai.azure.com",
             "api_key": "test-key",
             "system_prompt": "Respond in JSON",
-            "template": "Assess: {{ row.background }} against {{ row.criterion_name }}",
+            "prompt_template": "Assess: {{ row.background }} against {{ row.criterion_name }}",
             "queries": {
                 "case_quality": {
                     "input_fields": {

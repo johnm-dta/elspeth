@@ -76,7 +76,7 @@ class TestMultiQueryLLMSpecific:
                 "deployment_name": "gpt-4o",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "{{ row.text_content }}",
+                "prompt_template": "{{ row.text_content }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
                 "queries": {
@@ -128,7 +128,7 @@ class TestMultiQueryLLMSpecific:
                 "deployment_name": "gpt-4o",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "{{ row.text_content }}",
+                "prompt_template": "{{ row.text_content }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
                 "queries": {
@@ -163,7 +163,7 @@ class TestMultiQueryBatchContract(BatchTransformContractTestBase):
                 "deployment_name": "gpt-4o",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "{{ row.text_content }} {{ row.criterion_name }}",
+                "prompt_template": "{{ row.text_content }} {{ row.criterion_name }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
                 "queries": {

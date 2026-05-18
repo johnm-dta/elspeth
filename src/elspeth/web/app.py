@@ -20,6 +20,9 @@ from fastapi.responses import JSONResponse
 from opentelemetry import metrics
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response as StarletteResponse
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.secrets import (
@@ -230,6 +233,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
         session_service=session_service,
         yaml_generator=yaml_generator_module,
+        telemetry=app.state.sessions_telemetry,
         blob_service=app.state.blob_service,
         secret_service=app.state.scoped_secret_resolver,
     )
@@ -312,6 +316,45 @@ def _settings_from_env() -> WebSettings:
     return WebSettings(**kwargs)
 
 
+class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject request bodies declaring Content-Length > 10 MB with HTTP 413.
+
+    Phase 5b.0.5 (F-3): defense-in-depth body-size guard.  The Pydantic
+    per-field caps (``SendMessageRequest.content`` at 64 KiB,
+    ``_InlineBlobModel.content`` at 256 KiB) are the actual guarantees;
+    this middleware short-circuits requests that declare an oversized
+    body before the framework parses anything.  Mirrors the
+    ``settings.max_upload_bytes`` post-decode guard at
+    ``web/blobs/routes.py:171,208``, but at the ASGI layer so it covers
+    every route uniformly.
+
+    Threat model: an attacker submitting a multi-gigabyte JSON body
+    forces FastAPI to buffer the entire payload before the per-field
+    validator can reject it — even though the validator would ultimately
+    reject it.  10 MB is the global ceiling chosen to comfortably exceed
+    the 256 KiB inline-blob cap while remaining well below any
+    pathological memory pressure threshold.
+
+    The check is Content-Length-only by design: clients may omit or
+    falsify the header.  Per CLAUDE.md (defensive programming forbidden),
+    the ``int(content_length)`` conversion is *not* wrapped — a malformed
+    header is a client bug and should propagate to Starlette's standard
+    400 handling.  The Pydantic caps remain the contract.
+    """
+
+    _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
+
+    async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
+        content_length = request.headers.get("content-length")
+        if content_length is not None and int(content_length) > self._MAX_BODY_BYTES:
+            return StarletteResponse(
+                content='{"error": "Request body too large (max 10 MB)"}',
+                status_code=413,
+                media_type="application/json",
+            )
+        return await call_next(request)
+
+
 def create_app(settings: WebSettings | None = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -390,6 +433,15 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # header for client-side log correlation.
     app.add_middleware(RequestIdMiddleware)
 
+    # Body-size guard registered LAST so it runs OUTERMOST (Starlette
+    # add_middleware is LIFO).  Phase 5b.0.5 (F-3): reject oversized
+    # Content-Length declarations before any other middleware or handler
+    # touches the body.  The 413 response is emitted without a request
+    # id — by design the check fires before RequestIdMiddleware — which
+    # is acceptable: the response carries the standard 413 semantics and
+    # a body-too-large rejection has no useful pairing to a slog event.
+    app.add_middleware(_BodySizeLimitMiddleware)
+
     app.state.settings = settings
 
     # Ensure data directory and subdirectories exist before any DB access.
@@ -458,10 +510,18 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     session_engine = create_session_engine(session_db_url)
     initialize_session_schema(session_engine)
 
+    # Build the sessions-telemetry container ONCE per process and share it
+    # across every consumer (SessionServiceImpl, ExecutionServiceImpl, and
+    # any future surface). The counters are intentionally process-scoped —
+    # one Counter per metric, not one per consumer — so OTel aggregates by
+    # attribute set instead of by injection site.
+    sessions_telemetry = build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer"))
+    app.state.sessions_telemetry = sessions_telemetry
+
     session_service = SessionServiceImpl(
         session_engine,
         data_dir=settings.data_dir,
-        telemetry=build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer")),
+        telemetry=sessions_telemetry,
         log=structlog.get_logger("sessions"),
     )
     app.state.session_service = session_service

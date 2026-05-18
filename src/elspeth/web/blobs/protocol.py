@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import freeze_fields
 
 # Lifecycle literal aliases.
@@ -76,6 +77,19 @@ class BlobRecord:
     """Represents a row from the blobs table.
 
     All fields are scalars or None — no freeze guard needed.
+
+    Inline-blob provenance (Phase 5a Task 2.5)
+    ------------------------------------------
+    ``creation_modality`` is the closed enum describing how the content
+    was produced; ``created_from_message_id`` binds the blob to the
+    triggering chat message (composite FK enforced by the schema).  The
+    five ``creating_*`` fields are populated only for the three LLM-
+    authored modalities (``llm_generated``, ``disambiguated``,
+    ``llm_generated_then_amended``); for ``verbatim`` they are all None.
+    The all-or-nothing invariant is enforced by the
+    ``ck_blobs_creating_llm_provenance_nullability`` DB CHECK; the
+    read-path Tier 1 guard at ``_guard_blob_row_literals`` mirrors the
+    enum-membership check.
     """
 
     id: UUID
@@ -89,6 +103,13 @@ class BlobRecord:
     created_by: BlobCreator
     source_description: str | None
     status: BlobStatus
+    creation_modality: CreationModality
+    created_from_message_id: str | None
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
 
 
 @dataclass(frozen=True, slots=True)

@@ -130,6 +130,28 @@ class _SessionsTelemetry:
     tool_call_cap_exceeded_total: _Counter
     audit_grade_view_total: _Counter
     audit_access_log_write_failed_total: _Counter
+    # Phase 5b Task 5 follow-on (F-15). Counts ``request_interpretation_review``
+    # invocations rejected by the per-term or per-session-day rate cap. Carries
+    # attributes ``{"cap_type": "per_term" | "per_session_day", "session_id":
+    # str}`` (NO ``user_term`` — Tier-3 / PII risk). Operational telemetry,
+    # not audit-primary: the AUTO_INTERPRETED_NO_SURFACES interpretation_events
+    # row written alongside is the legal record. Telemetry exists so the
+    # operator notices unusual cap-breach rates without trawling the audit DB.
+    interpretation_rate_cap_exceeded_total: _Counter
+    # Phase 5b Task 5 follow-on (F-17 / F-21). Counts /execute attempts that
+    # fail the runtime placeholder gate — the LLM transform's prompt_template
+    # still carries one or more ``{{interpretation:<term>}}`` placeholders at
+    # execute time, meaning the compose-loop never called
+    # ``request_interpretation_review`` to resolve them. Carries attributes
+    # ``{"node_id": str, "term": str}`` — explicitly NOT the prompt_template
+    # value (may carry user-supplied content). Operational telemetry, not
+    # audit-primary: the user-actionable RuntimeError surfaced to the
+    # frontend is the primary record (an audit-primary
+    # ``interpretation_events`` row WOULD have been the primary record had
+    # the LLM fired ``request_interpretation_review`` — its absence is what
+    # this counter catches). Purpose: catches LLM under-firing after a model
+    # upgrade without waiting for offline eval refresh.
+    interpretation_placeholder_unresolved_at_runtime_total: _Counter
 
 
 def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemetry:
@@ -151,6 +173,8 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             tool_call_cap_exceeded_total=_FakeCounter(),
             audit_grade_view_total=_FakeCounter(),
             audit_access_log_write_failed_total=_FakeCounter(),
+            interpretation_rate_cap_exceeded_total=_FakeCounter(),
+            interpretation_placeholder_unresolved_at_runtime_total=_FakeCounter(),
         )
 
     # Production wiring against the real OTel meter. The ``_Meter``
@@ -165,4 +189,8 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         tool_call_cap_exceeded_total=meter.create_counter("composer.tool_call_cap_exceeded_total"),
         audit_grade_view_total=meter.create_counter("composer.audit.audit_grade_view_total"),
         audit_access_log_write_failed_total=meter.create_counter("composer.audit.audit_access_log_write_failed_total"),
+        interpretation_rate_cap_exceeded_total=meter.create_counter("composer.interpretation_rate_cap_exceeded_total"),
+        interpretation_placeholder_unresolved_at_runtime_total=meter.create_counter(
+            "composer.interpretation_placeholder_unresolved_at_runtime_total"
+        ),
     )

@@ -24,7 +24,7 @@ only to be rejected pre-token at /execute.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import yaml
@@ -49,6 +49,7 @@ from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import (
     CompositionState,
+    NodeSpec,
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _batch_distribution_profile_value_field_entries,
@@ -78,6 +79,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
+from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
 # ── Check names (ordered) ─────────────────────────────────────────────
 _CHECK_PATH_ALLOWLIST = "path_allowlist"
@@ -529,6 +531,46 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
     return refs
 
 
+def _mask_pending_interpretation_placeholders_for_authoring_preflight(
+    state: CompositionState,
+) -> CompositionState:
+    """Return a validation-only state where pending interpretation tokens are inert text.
+
+    ``{{interpretation:<term>}}`` is a composer authoring token consumed by
+    ``resolve_interpretation_event``. Composer runtime preflight needs to
+    exercise the engine path without treating that token as runtime Jinja, but
+    execution remains strict and rejects unresolved placeholders before this
+    validator is reached.
+    """
+
+    masked_nodes: list[NodeSpec] = []
+    changed = False
+    for node in state.nodes:
+        if node.plugin != "llm":
+            masked_nodes.append(node)
+            continue
+        options = node.options
+        if "resolved_prompt_template_hash" in options:
+            masked_nodes.append(node)
+            continue
+        prompt_template = options.get("prompt_template")
+        if not isinstance(prompt_template, str):
+            masked_nodes.append(node)
+            continue
+        masked_prompt = INTERPRETATION_PLACEHOLDER_RE.sub("pending interpretation", prompt_template)
+        if masked_prompt == prompt_template:
+            masked_nodes.append(node)
+            continue
+        masked_options = dict(options)
+        masked_options["prompt_template"] = masked_prompt
+        masked_nodes.append(replace(node, options=masked_options))
+        changed = True
+
+    if not changed:
+        return state
+    return replace(state, nodes=tuple(masked_nodes))
+
+
 def validate_pipeline(
     state: CompositionState,
     settings: ValidationSettings,
@@ -536,6 +578,7 @@ def validate_pipeline(
     *,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
+    allow_pending_interpretation_placeholders: bool = False,
 ) -> ValidationResult:
     """Dry-run validation through the real engine code path.
 
@@ -565,6 +608,9 @@ def validate_pipeline(
         yaml_generator: YamlGenerator module/object with generate_yaml() method.
         secret_service: Optional secret resolver for validating secret refs.
         user_id: User ID for scoped secret resolution (required if secret_service is set).
+        allow_pending_interpretation_placeholders: When true, composer
+            authoring preflight masks unresolved ``{{interpretation:<term>}}``
+            tokens before YAML generation. Runtime execution leaves this false.
     """
     checks: list[ValidationCheck] = []
     errors: list[ValidationError] = []
@@ -906,7 +952,10 @@ def validate_pipeline(
     )
 
     # Step 2: Generate YAML
-    pipeline_yaml = yaml_generator.generate_yaml(state)
+    runtime_state = (
+        _mask_pending_interpretation_placeholders_for_authoring_preflight(state) if allow_pending_interpretation_placeholders else state
+    )
+    pipeline_yaml = yaml_generator.generate_yaml(runtime_state)
     pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir))
 
     # Step 3: Settings loading

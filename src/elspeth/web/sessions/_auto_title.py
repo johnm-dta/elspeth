@@ -19,8 +19,12 @@ noise; production deployments should add a per-user-per-day cap.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID
+
+from litellm.exceptions import APIError as LiteLLMAPIError
+from opentelemetry import metrics
 
 from elspeth.web.composer.service import _composer_llm_seed_for_model, _litellm_acompletion
 
@@ -37,6 +41,7 @@ _AUTO_TITLE_SYSTEM_PROMPT = (
 _AUTO_TITLE_MAX_LEN = 60
 _AUTO_TITLE_MAX_TOKENS = 20
 _AUTO_TITLE_TEMPERATURE = 0.0
+_AUTO_TITLE_FAILED_COUNTER = metrics.get_meter(__name__).create_counter("composer.auto_title.failed")
 _SURROUNDING_TITLE_QUOTES = (
     '"',
     "'",
@@ -45,6 +50,23 @@ _SURROUNDING_TITLE_QUOTES = (
     chr(0x2018),
     chr(0x2019),
 )
+
+
+def _auto_title_exception_class(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "TimeoutError"
+    if isinstance(exc, asyncio.CancelledError):
+        return "CancelledError"
+    if isinstance(exc, LiteLLMAPIError):
+        return "LiteLLMAPIError"
+    return "other"
+
+
+def _record_auto_title_failure(exc: BaseException) -> None:
+    _AUTO_TITLE_FAILED_COUNTER.add(
+        1,
+        {"exception_class": _auto_title_exception_class(exc)},
+    )
 
 
 def _sanitize_title(raw: str) -> str:
@@ -75,10 +97,10 @@ async def maybe_auto_title_session(
     """Generate and persist an auto-title for ``session_id``.
 
     One-shot LLM completion (no tools, deterministic temperature). On
-    any failure — provider error, empty/garbage response, DB write
-    failure — the function returns silently. Auto-titling is a UX
-    nicety; surfacing its failures as user-visible errors would punish
-    every send_message for an optional feature.
+    Provider errors, timeouts, and cancellation are recorded on
+    operational telemetry and return without poisoning the chat response.
+    Programmer bugs and DB write failures propagate to the caller awaiting
+    the task; swallowing those would hide regressions in the auto-title path.
     """
     if not user_message.strip():
         return
@@ -103,7 +125,10 @@ async def maybe_auto_title_session(
         if not title:
             return
         await service.update_session_title(session_id, title)
-    except Exception:
-        # Auto-titling is best-effort UI metadata; never poison the
-        # send_message response with title-generation failures.
+    except (LiteLLMAPIError, TimeoutError, asyncio.CancelledError) as exc:
+        # Auto-titling is best-effort UI metadata for expected provider/
+        # scheduling failures, but those failures still need an operational
+        # signal so "provider declined" does not look identical to "feature
+        # silently broke."
+        _record_auto_title_failure(exc)
         return

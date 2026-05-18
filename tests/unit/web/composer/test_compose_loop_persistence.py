@@ -236,10 +236,23 @@ async def test_step2_dispatches_one_persist_compose_turn_async_per_turn(
     sqlalchemy_event_listener: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One tool-call turn is committed by one persist_compose_turn_async call."""
+    """One tool-call turn is committed by one persist_compose_turn_async call.
+
+    Phase 5b Task 5 follow-on adds a one-shot ``skill_markdown_history``
+    upsert (F-5c) that fires on the first compose-loop entry of a
+    service instance. That upsert opens one additional transaction (its
+    own BEGIN/COMMIT pair). To keep this test asserting the
+    "one-persist-call-per-turn" invariant, we prime the flag here so
+    the upsert is skipped — equivalent to running this test on a
+    service whose F-5c init has already executed in a prior compose
+    call.
+    """
 
     sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
     _patch_auto_commit_preferences(monkeypatch, sessions_service)
+    # Mark the per-instance F-5c gate as already-satisfied so the
+    # transaction count reflects only the per-turn persist call.
+    composer_service_with_real_sessions._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
     counts = sqlalchemy_event_listener(sessions_service._engine)  # type: ignore[attr-defined]
 
     await _run_one_turn(
@@ -304,6 +317,11 @@ async def test_step2_audit_integrity_error_carries_failed_turn_metadata(
 
     sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
     _patch_auto_commit_preferences(monkeypatch, sessions_service)
+    # Phase 5b Task 5 follow-on: skip the F-5c skill_markdown_history
+    # upsert so the next-commit-OperationalError listener catches the
+    # persist_compose_turn_async commit (the test's actual target), not
+    # the audit-archive upsert that fires once per service instance.
+    composer_service_with_real_sessions._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
     inject_commit_OperationalError(sessions_service._engine)  # type: ignore[attr-defined]
 
     with pytest.raises(AuditIntegrityError) as excinfo:

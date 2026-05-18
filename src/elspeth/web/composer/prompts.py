@@ -20,14 +20,23 @@ from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
 from elspeth.web.composer.guided.state_machine import TerminalKind
 from elspeth.web.composer.redaction import redact_source_storage_path
-from elspeth.web.composer.skills import load_deployment_skill, load_skill
+from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_hash
 from elspeth.web.composer.state import CompositionState
 
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
 
-# Load the pipeline composer skill once at module level (static content).
-_PIPELINE_SKILL = load_skill("pipeline_composer")
+# Load the pipeline composer skill once at module level (static content) AND
+# capture its SHA-256 atomically from the same read — Phase 5b F-5a. The
+# audit-row ``composer_skill_hash`` on every ``interpretation_events`` row
+# (and any future audit row that carries the skill version) MUST match the
+# hash of exactly the text the LLM was prompted with. By taking both values
+# from a single in-memory read, the hash and the text cannot disagree, and
+# the LRU cache that backs ``load_skill_with_hash`` guarantees subsequent
+# callers receive the same atomic pair without re-reading disk.
+_PIPELINE_SKILL, PIPELINE_COMPOSER_SKILL_HASH = load_skill_with_hash("pipeline_composer")
+PIPELINE_COMPOSER_SKILL_NAME: str = "pipeline_composer"
+PIPELINE_COMPOSER_SKILL_FILENAME: str = f"{PIPELINE_COMPOSER_SKILL_NAME}.md"
 
 # SYSTEM_PROMPT is bound below, once the strip helpers are defined — it is the
 # advisor-enabled, no-deployment-layer projection of the loaded skill (i.e.,

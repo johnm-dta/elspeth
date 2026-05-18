@@ -577,7 +577,7 @@ class ToolArgumentError(Exception):
     audit, without leaking into the LLM echo.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"argument", "expected", "actual_type"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"argument", "expected", "actual_type", "code"})
 
     def __init__(
         self,
@@ -585,6 +585,7 @@ class ToolArgumentError(Exception):
         argument: str,
         expected: str,
         actual_type: str,
+        code: str | None = None,
     ) -> None:
         # Reject empty strings at construction time: a blank field
         # would produce a nonsensical LLM echo ("'' must be , got ")
@@ -601,6 +602,17 @@ class ToolArgumentError(Exception):
         self.argument = argument
         self.expected = expected
         self.actual_type = actual_type
+        # Optional internal discriminant for compose-loop dispatch logic. The
+        # ``code`` field is operator-controlled (a fixed string constant chosen
+        # by the handler raising the exception, e.g.
+        # ``"RATE_CAP_PER_TERM"``) — it is NEVER an LLM- or user-supplied
+        # value and is NOT included in ``args[0]`` / the LLM echo. The
+        # compose loop reads it to distinguish branches that need extra
+        # bookkeeping (write an AUTO_INTERPRETED_NO_SURFACES row, emit
+        # operational telemetry) from generic ARG_ERROR. ``None`` means
+        # "no specific dispatch hook" — the default for all existing
+        # raise sites pre Phase 5b Task 5 follow-on.
+        self.code = code
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the three declared attributes; exception-chain
@@ -661,6 +673,12 @@ class ComposerSettings(Protocol):
     def composer_advisor_timeout_seconds(self) -> float: ...
 
     @property
+    def composer_interpretation_rate_limit_per_term(self) -> int: ...
+
+    @property
+    def composer_interpretation_rate_limit_per_session_day(self) -> int: ...
+
+    @property
     def max_blob_storage_per_session_bytes(self) -> int: ...
 
     @property
@@ -687,6 +705,7 @@ class ComposerService(Protocol):
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
         guided_terminal: TerminalState | None = None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop.
 
@@ -706,6 +725,16 @@ class ComposerService(Protocol):
             guided_terminal: When set, the resolved TerminalState from the
                 completed guided session; triggers the layered mode-transition
                 prompt for this first freeform turn (spec §8.2).
+            user_message_id: Database id of the just-persisted user
+                ``chat_messages`` row that triggered this compose call
+                (Phase 5a Task 2.5). Threaded through the compose loop into
+                inline-blob writers so any blob materialised by a tool call
+                this turn records ``created_from_message_id`` pointing back
+                at this id. Defaults to ``None`` for test paths and
+                non-route callers; the composite FK on
+                ``(created_from_message_id, session_id)`` in ``blobs_table``
+                rejects cross-session lineage, so a wrong id surfaces as
+                IntegrityError rather than silent provenance corruption.
 
         Returns:
             ComposerResult with assistant message and updated state.

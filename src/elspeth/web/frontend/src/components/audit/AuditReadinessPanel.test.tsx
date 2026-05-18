@@ -6,8 +6,12 @@ import { AuditReadinessPanel } from "./AuditReadinessPanel";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
 import { useExecutionStore } from "../../stores/executionStore";
+import { useInlineSourceStore } from "@/stores/inlineSourceStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
+import { resetStore } from "@/test/store-helpers";
 import * as api from "../../api/auditReadiness";
 import type { AuditReadinessSnapshot, ValidationResult } from "../../types/api";
+import type { InterpretationEvent } from "@/types/interpretation";
 import { makeComposition, makeAbortablePromise } from "@/test/composerFixtures";
 
 vi.mock("../../api/auditReadiness");
@@ -129,6 +133,8 @@ describe("AuditReadinessPanel", () => {
     // extensions automatically.
     useAuditReadinessStore.setState(getInitialState());
     useExecutionStore.setState({ validationResult: null } as never);
+    resetStore(useInlineSourceStore);
+    resetStore(useInterpretationEventsStore);
     vi.clearAllMocks();
   });
 
@@ -675,6 +681,58 @@ describe("AuditReadinessPanel", () => {
     expect(screen.queryByRole("button", { name: /Audit ready/i })).not.toBeInTheDocument();
   });
 
+  it("renders inline-content-hashed provenance row when the source is inline_blob-backed (Phase 5a.7)", async () => {
+    // Seed an inline-source summary so the panel's projection branch fires.
+    useInlineSourceStore.getState().setSummary(SESSION_ID, {
+      blobId: "blob-uuid",
+      filename: "chat.csv",
+      mimeType: "text/csv",
+      contentPreview: "url\nhttps://finance.gov.au",
+      rowCount: 1,
+      contentHash: "abc123def456789",
+      provenance: "verbatim",
+    });
+    // Snapshot must be actionable so the panel auto-expands and the
+    // provenance row is in the DOM (collapsed mode hides the row list).
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    // The override replaces the backend-supplied summary text on the
+    // provenance row with "Inline content hashed (SHA-256: <prefix>…)".
+    expect(
+      await screen.findByText(/inline content hashed/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/abc123def456/)).toBeInTheDocument();
+    // And the backend summary string for that row is NOT shown — we
+    // replaced it, not appended to it.
+    expect(
+      screen.queryByText(/identity passthrough detected/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the default backend-supplied provenance summary when no inline source is bound (Phase 5a.7)", async () => {
+    // No inline source seeded — store returns null for getSummary(SESSION_ID).
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    // Default backend-supplied summary IS rendered; the inline override
+    // is NOT applied.
+    expect(
+      await screen.findByText(/identity passthrough detected/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/inline content hashed/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("auto-collapses when a subsequent refetch returns all-green (no sticky expansion)", async () => {
     // Arrange: render with an actionable snapshot at version 1; the panel
     // auto-expands because anyActionable is true.
@@ -703,5 +761,277 @@ describe("AuditReadinessPanel", () => {
       expect(screen.queryByText(/Provenance/)).not.toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /Audit ready/i })).toBeInTheDocument();
+  });
+
+  // ── Phase 5b.18b.7 — LLM-interpretations row ───────────────────────────────
+  //
+  // Five tests pin the spec's render matrix (spec lines 657-674,
+  // 730-741): hidden / all resolved / pending review / opted out /
+  // not yet surfaced. The interpretation counts come from
+  // interpretationEventsStore; the backend snapshot supplies the
+  // `llm_interpretations` row status, and the renderer composes the
+  // two into the stylised summary text.
+  //
+  // The seed helper builds an InterpretationEvent fixture; we only
+  // touch the fields the renderer reads (pending count comes from
+  // pendingBySession map size; resolved counts come from
+  // resolvedCountBySession; the row itself reads neither directly).
+
+  function makeInterpretationEvent(
+    overrides: Partial<InterpretationEvent> = {},
+  ): InterpretationEvent {
+    return {
+      id: "evt-1",
+      session_id: SESSION_ID,
+      composition_state_id: "state-1",
+      affected_node_id: "llm_classify",
+      tool_call_id: "tc-1",
+      user_term: "cool",
+      llm_draft: "engaging",
+      accepted_value: null,
+      choice: "pending",
+      created_at: "2026-05-18T10:00:00Z",
+      resolved_at: null,
+      actor: "user:owner:u-1",
+      interpretation_source: "user_approved",
+      model_identifier: "anthropic/claude-opus-4-7",
+      model_version: "20260518",
+      provider: "anthropic",
+      composer_skill_hash: "deadbeef",
+      arguments_hash: null,
+      hash_domain_version: null,
+      runtime_model_identifier_at_resolve: null,
+      runtime_model_version_at_resolve: null,
+      resolved_prompt_template_hash: null,
+      ...overrides,
+    };
+  }
+
+  function snapshotWithLlmRow(
+    version: number,
+    rowOverride: Partial<AuditReadinessSnapshot["rows"][number]>,
+  ): AuditReadinessSnapshot {
+    const base = allGreenSnapshot(version);
+    return {
+      ...base,
+      rows: base.rows.map((r) =>
+        r.id === "llm_interpretations" ? { ...r, ...rowOverride } : r,
+      ),
+    };
+  }
+
+  it("hides the LLM-interpretations row when no LLM transform and no events (Phase 5b.18b.7 §1)", async () => {
+    // Backend returns `not_applicable` because there's no LLM transform.
+    // Composition has no llm nodes (makeComposition default has only
+    // select_columns). Store has no events. The row must be omitted from
+    // the rendered list entirely (not present in any form).
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(
+          snapshotWithLlmRow(1, {
+            status: "not_applicable",
+            summary: "No LLM transforms in this composition",
+          }),
+          { signal },
+        ),
+    );
+
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+
+    // All-green → collapsed. Expand to expose the row list, then assert
+    // the LLM row is absent.
+    await user.click(await screen.findByRole("button", { name: /Audit ready/i }));
+    expect(
+      screen.queryByTestId("audit-readiness-row-llm-interpretations"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders 'all N resolved' when status=ok and only resolved events exist (Phase 5b.18b.7 §2)", async () => {
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(1, {
+        nodes: [
+          {
+            id: "llm_classify",
+            node_type: "transform",
+            plugin: "llm",
+            input: "source",
+            on_success: null,
+            on_error: null,
+            options: {},
+          },
+        ],
+      }),
+    });
+    // Seed two resolved events in the store (no pending). Backend status=ok.
+    useInterpretationEventsStore.setState({
+      pendingBySession: { [SESSION_ID]: {} },
+      resolvedCountBySession: {
+        [SESSION_ID]: { accepted_as_drafted: 1, amended: 1, opted_out: 0 },
+      },
+      optedOutBySession: {},
+    });
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(
+          snapshotWithLlmRow(1, {
+            status: "ok",
+            summary: "2 interpretations resolved",
+          }),
+          { signal },
+        ),
+    );
+
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    await user.click(await screen.findByRole("button", { name: /Audit ready/i }));
+
+    const row = await screen.findByTestId(
+      "audit-readiness-row-llm-interpretations",
+    );
+    expect(row.textContent).toMatch(/all 2 resolved/i);
+  });
+
+  it("renders '{P} pending review ({R} resolved)' when status=warning (Phase 5b.18b.7 §3)", async () => {
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(1, {
+        nodes: [
+          {
+            id: "llm_classify",
+            node_type: "transform",
+            plugin: "llm",
+            input: "source",
+            on_success: null,
+            on_error: null,
+            options: {},
+          },
+        ],
+      }),
+    });
+    // 1 pending event, 1 resolved event → "1 pending review (1 resolved)".
+    useInterpretationEventsStore.setState({
+      pendingBySession: {
+        [SESSION_ID]: { "evt-1": makeInterpretationEvent() },
+      },
+      resolvedCountBySession: {
+        [SESSION_ID]: { accepted_as_drafted: 1, amended: 0, opted_out: 0 },
+      },
+      optedOutBySession: {},
+    });
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(
+          snapshotWithLlmRow(1, {
+            status: "warning",
+            summary: "1 pending interpretation review",
+          }),
+          { signal },
+        ),
+    );
+
+    render(<AuditReadinessPanel />);
+    // Warning auto-expands the panel — no click required.
+    const row = await screen.findByTestId(
+      "audit-readiness-row-llm-interpretations",
+    );
+    expect(row.textContent).toMatch(/1 pending review \(1 resolved\)/i);
+  });
+
+  it("renders 'opted out for this session ({N} drafted, not reviewed)' when opt-out flag is set (Phase 5b.18b.7 §4)", async () => {
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(1, {
+        nodes: [
+          {
+            id: "llm_classify",
+            node_type: "transform",
+            plugin: "llm",
+            input: "source",
+            on_success: null,
+            on_error: null,
+            options: {},
+          },
+        ],
+      }),
+    });
+    // 0 pending (opt-out clears pending locally), 2 drafted auto-interpreted.
+    useInterpretationEventsStore.setState({
+      pendingBySession: { [SESSION_ID]: {} },
+      resolvedCountBySession: {
+        [SESSION_ID]: { accepted_as_drafted: 0, amended: 0, opted_out: 2 },
+      },
+      optedOutBySession: { [SESSION_ID]: true },
+    });
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(
+          snapshotWithLlmRow(1, {
+            status: "not_applicable",
+            summary: "Session opted out of interpretation review",
+          }),
+          { signal },
+        ),
+    );
+
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    await user.click(await screen.findByRole("button", { name: /Audit ready/i }));
+
+    const row = await screen.findByTestId(
+      "audit-readiness-row-llm-interpretations",
+    );
+    expect(row.textContent).toMatch(
+      /opted out for this session \(2 drafted, not reviewed\)/i,
+    );
+  });
+
+  it("renders 'not yet surfaced' when an LLM transform exists but no events yet (Phase 5b.18b.7 §5)", async () => {
+    // Frontend-derived F-14 state: backend returns `not_applicable` (because
+    // no events exist yet) but the composition has an LLM transform. The
+    // renderer overrides the row text to "Not yet surfaced" so the user
+    // sees the affordance is present-but-dormant.
+    useSessionStore.setState({
+      activeSessionId: SESSION_ID,
+      compositionState: makeComposition(1, {
+        nodes: [
+          {
+            id: "llm_classify",
+            node_type: "transform",
+            plugin: "llm",
+            input: "source",
+            on_success: null,
+            on_error: null,
+            options: {},
+          },
+        ],
+      }),
+    });
+    // No events at all in the store.
+    useInterpretationEventsStore.setState({
+      pendingBySession: {},
+      resolvedCountBySession: {},
+      optedOutBySession: {},
+    });
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(
+          snapshotWithLlmRow(1, {
+            status: "not_applicable",
+            summary: "No interpretation events yet for this composition",
+          }),
+          { signal },
+        ),
+    );
+
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    await user.click(await screen.findByRole("button", { name: /Audit ready/i }));
+
+    const row = await screen.findByTestId(
+      "audit-readiness-row-llm-interpretations",
+    );
+    expect(row.textContent).toMatch(/not yet surfaced/i);
   });
 });

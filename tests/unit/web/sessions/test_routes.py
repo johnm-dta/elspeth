@@ -194,8 +194,9 @@ class _BlockingRecordingComposer:
         user_id: str | None = None,
         progress=None,
         guided_terminal=None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
-        del state, session_id, current_state_id, user_id, progress, guided_terminal
+        del state, session_id, current_state_id, user_id, progress, guided_terminal, user_message_id
 
         self.calls.append(
             {
@@ -233,8 +234,9 @@ class _ProgressAwareComposer:
         user_id: str | None = None,
         progress=None,
         guided_terminal=None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
-        del message, chat_messages, session_id, current_state_id, user_id, guided_terminal
+        del message, chat_messages, session_id, current_state_id, user_id, guided_terminal, user_message_id
         assert progress is not None, "session routes must pass a composer progress sink"
         self.progress_sink_seen = True
         await progress(
@@ -660,6 +662,77 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
             select(composition_states_table.c.provenance).where(composition_states_table.c.id == str(persisted.id))
         ).scalar_one()
     assert provenance == "tool_call"
+
+
+def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select
+
+    from elspeth.web.catalog.schemas import PluginSchemaInfo
+    from elspeth.web.sessions.models import blobs_table
+
+    app, service = _make_app(tmp_path)
+    app.state.session_engine = service._engine
+    catalog = MagicMock()
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="csv",
+        plugin_type="source",
+        description="CSV source",
+        json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
+    )
+    app.state.catalog_service = catalog
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Accept inline blob"}).json()
+    session_id = uuid.UUID(session["id"])
+    user_message = asyncio.run(
+        service.add_message(
+            session_id,
+            "user",
+            "Build a CSV pipeline from: name,score\\nada,42\\n",
+            writer_principal="route_user_message",
+        )
+    )
+    proposal = asyncio.run(
+        service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline_inline_blob",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline with inline CSV.",
+            rationale="Requested by the current composer turn.",
+            affects=("graph", "blob"),
+            arguments_json={
+                "source": {
+                    "plugin": "csv",
+                    "on_success": "rows",
+                    "options": {"schema": {"mode": "observed"}},
+                    "inline_blob": {
+                        "filename": "ada.csv",
+                        "mime_type": "text/csv",
+                        "content": "name,score\nada,42\n",
+                    },
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [],
+                "metadata": {"name": "accepted-inline-blob-proposal"},
+            },
+            arguments_redacted_json={"summary": "redacted"},
+            base_state_id=None,
+            actor="composer-web:user:alice",
+            user_message_id=user_message.id,
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session['id']}/proposals/{proposal.id}/accept")
+
+    assert response.status_code == 200
+    with service._engine.begin() as conn:
+        row = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session["id"])).one()
+    assert row.created_from_message_id == str(user_message.id)
 
 
 def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
@@ -1356,6 +1429,16 @@ class TestIDORCoverageDrift:
             "post_guided_reenter",
             "post_guided_respond",
             "post_guided_chat",
+            # Phase 5b Task 6 / Task 7: interpretation event HTTP surface
+            # (resolve / list) and opt-out endpoints, added in
+            # ``sessions/routes.py`` and gated through
+            # ``verify_session_ownership`` like every other session-scoped
+            # route. Inventory updated alongside this drift-guard so the
+            # IDOR audit reflects the production handler set.
+            "resolve_interpretation",
+            "list_interpretations",
+            "opt_out_of_interpretations",
+            "opt_out_summary",
         }
     )
 
@@ -4229,8 +4312,9 @@ class TestComposerProgressRoutes:
                 user_id: str | None = None,
                 progress=None,
                 guided_terminal=None,
+                user_message_id: str | None = None,
             ) -> ComposerResult:
-                del message, chat_messages, session_id, current_state_id, user_id, progress
+                del message, chat_messages, session_id, current_state_id, user_id, progress, user_message_id
                 assert guided_terminal == guided.terminal
                 return ComposerResult(message="Freeform response", state=state)
 

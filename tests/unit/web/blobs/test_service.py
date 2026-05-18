@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.blobs import service as blob_service_module
 from elspeth.web.blobs.protocol import (
     BlobActiveRunError,
     BlobNotFoundError,
@@ -32,6 +33,7 @@ from elspeth.web.blobs.service import (
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.telemetry import _FakeCounter
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1172,6 +1174,7 @@ class TestCopyBlobsForForkRollback:
         blob_service: BlobServiceImpl,
         session_id: UUID,
         target_session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Rollback delete_blob failures must surface as notes on the primary exception.
 
@@ -1203,9 +1206,13 @@ class TestCopyBlobsForForkRollback:
             created_by="user",
         )
 
+        orphan_counter = _FakeCounter()
+        monkeypatch.setattr(blob_service_module, "_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER", orphan_counter)
+
         original_create = blob_service.create_blob
         original_delete = blob_service.delete_blob
         create_calls = 0
+        orphan_ids: list[UUID] = []
 
         async def _failing_create(*args, **kwargs):
             nonlocal create_calls
@@ -1218,7 +1225,8 @@ class TestCopyBlobsForForkRollback:
         # narrowly-caught recovery faults; programmer bugs would propagate.
         delete_failure = OSError(5, "I/O error during cleanup")
 
-        async def _failing_delete(*_args, **_kwargs):
+        async def _failing_delete(blob_id: UUID, *_args, **_kwargs):
+            orphan_ids.append(blob_id)
             raise delete_failure
 
         blob_service.create_blob = _failing_create  # type: ignore[method-assign]
@@ -1245,6 +1253,15 @@ class TestCopyBlobsForForkRollback:
         # Note must identify the orphaned blob_id and target session for triage
         assert any("manual cleanup" in n.lower() for n in recovery_notes), "Note must direct operator to manual cleanup"
         assert any(str(target_session_id) in n for n in recovery_notes), "Note must identify the target session containing the orphan row"
+        assert len(orphan_counter.calls) == 1
+        amount, attrs, context = orphan_counter.calls[0]
+        assert amount == 1
+        assert attrs == {
+            "orphan_blob_id": str(orphan_ids[0]),
+            "target_session_id": str(target_session_id),
+            "exc_type": "OSError",
+        }
+        assert context is None
 
 
 # ---------------------------------------------------------------------------
@@ -2418,6 +2435,17 @@ class TestRowToRecordTierOneGuards:
             "created_by": "user",
             "source_description": None,
             "status": "ready",
+            # Inline-blob provenance defaults (Phase 5a Task 2.5): the
+            # synthetic row mirrors a verbatim row produced by the
+            # user-upload write path (creation_modality='verbatim',
+            # everything else NULL).
+            "creation_modality": "verbatim",
+            "created_from_message_id": None,
+            "creating_model_identifier": None,
+            "creating_model_version": None,
+            "creating_provider": None,
+            "creating_composer_skill_hash": None,
+            "creating_arguments_hash": None,
         }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

@@ -251,17 +251,17 @@ def test_session_sequence_no_unique(engine):
             )
 
 
-def test_delete_assistant_row_cascades_to_tool_rows(engine):
-    """Spec §8.1: ``Assert ON DELETE CASCADE from session removes all rows;
-    from assistant row removes child tool rows (orphan prevention).``
+def test_direct_delete_assistant_row_is_blocked_and_session_cascade_purges_tools(engine):
+    """Direct transcript-row deletes are blocked; session archival cascades.
 
     This is a Tier-1 referential-integrity invariant on the audit DB. The
     column-existence and CHECK-constraint tests above only inspect schema
-    metadata; a future migration that drops ``ondelete='CASCADE'`` from
-    the ``parent_assistant_id`` FK would pass those tests silently and
-    leave orphaned tool rows referencing a deleted assistant. This test
-    binds the invariant to behaviour: insert one assistant + two child
-    tool rows, DELETE the assistant, and assert the children are gone.
+    metadata; a future migration that drops the session-scoped cascade
+    path would pass those tests silently and leave transcript rows behind
+    after archival. This test binds the invariant to behaviour: insert
+    one assistant + two child tool rows, prove direct assistant deletion
+    is rejected, then delete the owning session and assert all rows are
+    gone.
 
     FK enforcement on SQLite requires ``PRAGMA foreign_keys=ON`` for
     every connection in the pool. The ``engine`` fixture builds the
@@ -324,16 +324,25 @@ def test_delete_assistant_row_cascades_to_tool_rows(engine):
         )
         assert sorted(pre_rows) == ["a1", "t1", "t2"]
 
-        # Delete the assistant row. ON DELETE CASCADE on
-        # parent_assistant_id MUST remove t1 and t2 in the same statement.
-        conn.execute(delete(models.chat_messages_table).where(models.chat_messages_table.c.id == "a1"))
+        # Direct transcript-row deletion is not a supported cleanup path.
+        with pytest.raises(IntegrityError, match="append-only"):
+            conn.execute(delete(models.chat_messages_table).where(models.chat_messages_table.c.id == "a1"))
+
+        blocked_rows = (
+            conn.execute(select(models.chat_messages_table.c.id).where(models.chat_messages_table.c.session_id == "s1")).scalars().all()
+        )
+        assert sorted(blocked_rows) == ["a1", "t1", "t2"]
+
+        # Whole-session deletion is the bounded lifecycle purge path; it
+        # must still cascade through the self-referential assistant/tool FK.
+        conn.execute(delete(models.sessions_table).where(models.sessions_table.c.id == "s1"))
 
         post_rows = (
             conn.execute(select(models.chat_messages_table.c.id).where(models.chat_messages_table.c.session_id == "s1")).scalars().all()
         )
         assert post_rows == [], (
-            "Expected ON DELETE CASCADE on parent_assistant_id to remove "
-            "child tool rows when the assistant row is deleted; found "
+            "Expected ON DELETE CASCADE from sessions to remove assistant "
+            "and child tool rows during archival; found "
             f"orphaned rows: {post_rows!r}. If this test fails the audit "
             "DB has lost orphan-prevention — investigate the FK definition "
             "in models.chat_messages_table and the engine's foreign_keys "

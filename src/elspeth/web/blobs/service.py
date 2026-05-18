@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
+from opentelemetry import metrics
 from sqlalchemy import Engine, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.blobs.protocol import (
@@ -48,6 +50,8 @@ from elspeth.web.sessions.models import (
 from elspeth.web.sessions.protocol import CompositionStateRecord
 
 _T = TypeVar("_T")
+
+_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER = metrics.get_meter(__name__).create_counter("blob_copy_fork.orphan_rows_left_behind")
 
 _ACTIVE_RUN_COMPOSITION_COLUMNS = (
     runs_table.c.id.label("run_id"),
@@ -255,6 +259,16 @@ def _guard_blob_row_literals(row: Any) -> None:
         raise AuditIntegrityError(f"Tier 1: blobs.created_by is {row.created_by!r}, expected one of {sorted(BLOB_CREATORS)}")
     if row.mime_type not in ALLOWED_MIME_TYPES:
         raise AuditIntegrityError(f"Tier 1: blobs.mime_type is {row.mime_type!r}, not in the allowed MIME set")
+    # Tier 1 guard for the closed CreationModality enum (Phase 5a Task 2.5).
+    # Mirrors the ck_blobs_creation_modality DB CHECK; this Python guard
+    # catches tampered or migration-bug-introduced rows that bypassed the
+    # DB layer (e.g. a manual SQLite UPDATE).  AuditIntegrityError keeps
+    # the audit-trail correctness invariant — the read path never silently
+    # returns a record whose static type is a lie.
+    if row.creation_modality not in {m.value for m in CreationModality}:
+        raise AuditIntegrityError(
+            f"Tier 1: blobs.creation_modality is {row.creation_modality!r}, expected one of {sorted(m.value for m in CreationModality)}"
+        )
 
 
 def _row_to_blob_record(row: Any) -> BlobRecord:
@@ -272,6 +286,17 @@ def _row_to_blob_record(row: Any) -> BlobRecord:
         created_by=row.created_by,
         source_description=row.source_description,
         status=row.status,
+        # Tier 1 read: ``creation_modality`` has already been checked
+        # against the closed CreationModality enum in
+        # ``_guard_blob_row_literals``; coerce to the enum so consumers
+        # get the typed value rather than the bare wire-format string.
+        creation_modality=CreationModality(row.creation_modality),
+        created_from_message_id=row.created_from_message_id,
+        creating_model_identifier=row.creating_model_identifier,
+        creating_model_version=row.creating_model_version,
+        creating_provider=row.creating_provider,
+        creating_composer_skill_hash=row.creating_composer_skill_hash,
+        creating_arguments_hash=row.creating_arguments_hash,
     )
 
 
@@ -410,6 +435,19 @@ class BlobServiceImpl:
                             created_by=created_by,
                             source_description=source_description,
                             status="ready",
+                            # User-uploaded blobs (REST POST /blobs, drag-
+                            # and-drop): content was provided verbatim by
+                            # the operator outside the chat surface, so
+                            # ``created_from_message_id`` is NULL and all
+                            # ``creating_*`` fields are NULL (Phase 5a
+                            # Task 2.5).
+                            creation_modality=CreationModality.VERBATIM.value,
+                            created_from_message_id=None,
+                            creating_model_identifier=None,
+                            creating_model_version=None,
+                            creating_provider=None,
+                            creating_composer_skill_hash=None,
+                            creating_arguments_hash=None,
                         )
                     )
             except Exception:
@@ -430,6 +468,13 @@ class BlobServiceImpl:
                 created_by=created_by,
                 source_description=source_description,
                 status="ready",
+                creation_modality=CreationModality.VERBATIM,
+                created_from_message_id=None,
+                creating_model_identifier=None,
+                creating_model_version=None,
+                creating_provider=None,
+                creating_composer_skill_hash=None,
+                creating_arguments_hash=None,
             )
 
         return await self._run_sync(_sync)
@@ -473,6 +518,20 @@ class BlobServiceImpl:
                         created_by=created_by,
                         source_description=source_description,
                         status="pending",
+                        # Pending output blobs (pipeline-produced): the
+                        # content is filled in later by the sink writer;
+                        # provenance for these is the pipeline run, not
+                        # a chat message, so the chat-message FK is NULL
+                        # and the modality is VERBATIM (the run wrote
+                        # exactly the bytes the sink emitted; no LLM
+                        # authored them).  Phase 5a Task 2.5.
+                        creation_modality=CreationModality.VERBATIM.value,
+                        created_from_message_id=None,
+                        creating_model_identifier=None,
+                        creating_model_version=None,
+                        creating_provider=None,
+                        creating_composer_skill_hash=None,
+                        creating_arguments_hash=None,
                     )
                 )
 
@@ -488,6 +547,13 @@ class BlobServiceImpl:
                 created_by=created_by,
                 source_description=source_description,
                 status="pending",
+                creation_modality=CreationModality.VERBATIM,
+                created_from_message_id=None,
+                creating_model_identifier=None,
+                creating_model_version=None,
+                creating_provider=None,
+                creating_composer_skill_hash=None,
+                creating_arguments_hash=None,
             )
 
         return await self._run_sync(_sync)
@@ -968,6 +1034,14 @@ class BlobServiceImpl:
                     f"Storage file was unlinked, but the DB row remains and "
                     f"will appear as a 'ready' blob in the target session — "
                     f"manual cleanup of blobs.id={orphan_id} required."
+                )
+                _BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER.add(
+                    1,
+                    {
+                        "orphan_blob_id": str(orphan_id),
+                        "target_session_id": target_session_id_str,
+                        "exc_type": type(recorded_exc).__name__,
+                    },
                 )
             raise
 

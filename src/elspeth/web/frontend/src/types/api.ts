@@ -42,6 +42,7 @@ export type {
   ReadinessRow,
   AuditReadinessSnapshot,
   AuditReadinessExplain,
+  InlineSourceSummary,
 } from "./index";
 export type {
   ComposerRecoveryErrorFields,

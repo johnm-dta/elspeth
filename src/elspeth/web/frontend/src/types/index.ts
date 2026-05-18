@@ -906,3 +906,41 @@ export interface AuditReadinessExplain {
   composition_version: number;
   narrative: string;
 }
+
+/**
+ * Frontend-derived projection of an inline-blob source attached to the
+ * current composition state. Computed from compositionState.source +
+ * blob metadata. Never persisted; recomputed on each composition mutation.
+ */
+export interface InlineSourceSummary {
+  blobId: string;
+  filename: string;
+  mimeType: string;
+  /** Truncated content excerpt for display; never the full payload. */
+  contentPreview: string;
+  /** Best-effort row count from the parsed source; null if unparseable. */
+  rowCount: number | null;
+  /** SHA-256 of the raw inline content (from session blob metadata). */
+  contentHash: string;
+  /**
+   * How this inline source's content was produced. Projected from the
+   * server-recorded `creation_modality` column (Task 2.5) via the
+   * `fetchBlob` response adapter in `client.ts`.
+   *
+   * - "verbatim"                   — user typed the content directly.
+   * - "llm-generated"              — LLM generated rows; user confirmed.
+   * - "disambiguated"              — LLM interpreted ambiguous input; user confirmed.
+   * - "llm-generated-then-amended" — LLM generated rows, user amended via
+   *                                  "Edit the list" (F-4). Drives the Edit
+   *                                  button visibility alongside "llm-generated".
+   *
+   * The frontend uses hyphenated forms; the server uses snake_case
+   * (`llm_generated`, `llm_generated_then_amended`). The adapter in
+   * `client.ts` is the single translation point.
+   */
+  provenance:
+    | "verbatim"
+    | "llm-generated"
+    | "disambiguated"
+    | "llm-generated-then-amended";
+}

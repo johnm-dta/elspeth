@@ -743,6 +743,71 @@ All 12 frontend tasks implemented in 10 commits on branch
 End-of-6B gate: full vitest run = **1040 tests pass** (was 976 baseline;
 +64 new). Typecheck clean. No regressions in any existing test file.
 
+**Post-spec-review remediation (Task 8 substantive gap, FIX-C, 2026-05-19):**
+The Task 8 SharedInspectView shipped here used an inline 3-column
+`<table>` for the readiness panel and a raw `<pre><code>` block for the
+YAML — both inline in `SharedInspectView.tsx`. The spec-compliance
+reviewer flagged this as NON-COMPLIANT vs. the plan's `InspectorPanel`
+/ "reused YamlView" / `AuditReadinessRow` / `SharedAuditReadinessPanel`
+/ `ReadOnlyContext` / jest-axe / sessionStorage-round-trip targets.
+
+The FIX-C remediation pass discovered that the plan's literal text
+referenced infrastructure that doesn't exist in this codebase:
+`InspectorPanel` was never built, and `YamlView` / `GraphMiniView` are
+both session-store-coupled so neither can be reused with frozen-blob
+data without a substantial refactor. The honest delivery shape: extract
+the actual reusable primitives, then compose the read-only inspect view
+from them.
+
+Files added or modified by FIX-C (commit on top of the original Task 8):
+
+* `components/audit/AuditReadinessRow.tsx` + test — extracted from
+  `AuditReadinessPanel` as a pure row renderer taking a
+  `RowPresentation` and an optional `onSelect`; honours the
+  `useReadOnly()` signal by forcing the static variant under
+  read-only.
+* `contexts/ReadOnlyContext.tsx` + test — provides the
+  `ReadOnlyProvider` + `useReadOnly()` hook. Default value `false` so
+  composer-side components mounted outside the provider are unchanged.
+* `components/shared/SharedAuditReadinessPanel.tsx` + test — renders
+  six `AuditReadinessRow`s from a frozen `AuditReadinessSnapshot`
+  inside `<ReadOnlyProvider value={true}>`. No live overlays (no
+  inline-blob provenance override, no Phase 5b LLM stylising — those
+  belong on the live composer's `AuditReadinessPanel` only).
+* `components/inspector/YamlDisplay.tsx` + test — extracted the
+  Copy + Download + syntax-highlight chrome from `YamlView` as a pure
+  primitive (`yaml: string`, `filename?: string`). `YamlView` retains
+  its fetch effect, empty/loading/error states, and proposal panel; it
+  now delegates display to `<YamlDisplay>`. SharedInspectView mounts
+  `YamlDisplay` directly with the wire YAML.
+* `components/sidebar/GraphMiniView.tsx` — gained an optional
+  `compositionStateOverride` prop. When supplied, used in place of the
+  session-store read. SharedInspectView passes the frozen
+  `composition_snapshot` (narrowed at the boundary via an offensive
+  shape guard — `nodes` and `outputs` must be arrays or the boundary
+  crashes).
+* `components/common/AuthGuard.tsx` + test — sessionStorage round-trip
+  for the shared-route hash. While unauthenticated on a `#/shared/`
+  hash, the save effect persists the hash to
+  `sessionStorage.elspeth_post_login_redirect`. On unauth→auth
+  transition, the restore effect writes the saved hash back to
+  `window.location.hash` and removes the key (self-disarming).
+* `components/shared/SharedInspectView.tsx` — rewritten to compose
+  the new primitives inside `<ReadOnlyProvider value={true}>`. The
+  inline 3-column table and raw `<pre>` are deleted. A jest-axe
+  accessibility assertion is added on the loaded state (plan line
+  470).
+
+Test deltas: 1048 → 1079 (+31 across the new test files plus extension
+of the existing SharedInspectView / GraphMiniView tests). Typecheck
+clean. All existing AuditReadinessPanel / YamlView / GraphMiniView /
+App / AuthGuard tests pass unchanged.
+
+The plan's literal-text references to `InspectorPanel` and "reused
+YamlView" were aspirational — the post-spec-review fix produces the
+spec'd user-visible behaviour through smaller primitives the codebase
+can actually support.
+
 The shared-route hash format (`#/shared/{token}`) required extending
 the hash router which previously only knew `#/{sessionId}` /
 `#/{sessionId}/{verb}`. The extension is two guards (in `parseHash`

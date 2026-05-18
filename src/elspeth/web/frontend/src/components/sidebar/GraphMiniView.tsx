@@ -7,8 +7,36 @@ interface MiniLane {
   colorVar: string;
 }
 
-export function GraphMiniView(): JSX.Element {
-  const compositionState = useSessionStore((s) => s.compositionState);
+interface GraphMiniViewProps {
+  /**
+   * Phase 6B FIX-C — optional composition override for read-only
+   * surfaces (e.g. SharedInspectView) that render a frozen snapshot
+   * rather than the live store state. When supplied, this value is
+   * used instead of `useSessionStore.compositionState`. The store is
+   * still subscribed-to in the render to keep behaviour identical for
+   * the regular composer path; the subscription is cheap and only
+   * matters for the shared route, which mounts once per token.
+   *
+   * IMPORTANT: when override is supplied, the click affordance
+   * dispatches `OPEN_GRAPH_MODAL_EVENT` as usual; the receiving
+   * GraphModal is store-coupled and will render the LIVE composition
+   * rather than the frozen one. The SharedInspectView callsite must
+   * either suppress the modal mount or pass a corresponding override
+   * downstream — for FIX-C scope, the mini view is read-only display
+   * and the click is unwired in the shared surface (the SharedInspect
+   * subtree does not mount a GraphModal).
+   */
+  compositionStateOverride?: CompositionState | null;
+}
+
+export function GraphMiniView({
+  compositionStateOverride,
+}: GraphMiniViewProps = {}): JSX.Element {
+  const storeCompositionState = useSessionStore((s) => s.compositionState);
+  const compositionState =
+    compositionStateOverride !== undefined
+      ? compositionStateOverride
+      : storeCompositionState;
 
   if (
     !compositionState ||

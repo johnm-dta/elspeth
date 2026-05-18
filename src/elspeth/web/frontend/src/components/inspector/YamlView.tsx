@@ -1,25 +1,29 @@
 // ============================================================================
 // YamlView
 //
-// Read-only syntax-highlighted YAML display using prism-react-renderer.
-// The YAML is fetched from GET /api/sessions/{id}/state/yaml on version change.
+// Session-store-coupled YAML view for the composer surface.
 //
-// Features:
-// - Syntax highlighting with line numbers
-// - Copy-to-clipboard button
-// - Download button for YAML export
-// - Theme-aware (light/dark)
-// - Explicit blocked/error state when YAML export fails
+// The YAML is fetched from GET /api/sessions/{id}/state/yaml on version
+// change. Once loaded, display is delegated to `YamlDisplay`, which
+// owns the syntax-highlight + Copy + Download chrome (Phase 6B FIX-C
+// extracted that pure primitive so the SharedInspectView can render a
+// frozen YAML blob without the fetch/proposal machinery here).
 //
-// Empty state when no composition state exists.
+// YamlView retains:
+// - the fetch effect (on composition-version change)
+// - the empty/loading/error states
+// - the pending-YAML-proposal panel (with Accept/Reject buttons)
+// - the 409 validation-blocked alert
+//
+// SharedInspectView mounts `<YamlDisplay yaml={...} />` directly with
+// the wire YAML, bypassing all of the above.
 // ============================================================================
 
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { Highlight, themes } from "prism-react-renderer";
+import { useState, useEffect, useMemo } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
-import { useTheme } from "@/hooks/useTheme";
 import * as api from "@/api/client";
 import type { ApiError } from "@/types/index";
+import { YamlDisplay } from "./YamlDisplay";
 
 interface YamlFetchError {
   title: string;
@@ -67,8 +71,6 @@ export function YamlView() {
   const [yaml, setYaml] = useState<string | null>(null);
   const [yamlError, setYamlError] = useState<YamlFetchError | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const { resolvedTheme } = useTheme();
 
   // Fetch YAML from the backend whenever composition state version changes
   const version = compositionState?.version ?? null;
@@ -106,30 +108,6 @@ export function YamlView() {
       cancelled = true;
     };
   }, [activeSessionId, version]);
-
-  const handleCopy = useCallback(async () => {
-    if (!yaml) return;
-    try {
-      await navigator.clipboard.writeText(yaml);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API may fail in some contexts (e.g. insecure origin)
-    }
-  }, [yaml]);
-
-  const handleDownload = useCallback(() => {
-    if (!yaml) return;
-    const blob = new Blob([yaml], { type: "text/yaml" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `pipeline-v${compositionState?.version ?? 1}.yaml`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, [yaml, compositionState?.version]);
 
   const pendingYamlProposal = pendingYamlProposals[0] ?? null;
   const pendingYamlProposalIsBusy =
@@ -218,50 +196,13 @@ export function YamlView() {
     );
   }
 
-  const highlightTheme = resolvedTheme === "dark" ? themes.vsDark : themes.vsLight;
-
   return (
     <div className="yaml-view">
       {pendingYamlProposalPanel}
-
-      {/* Toolbar: Copy + Download buttons */}
-      <div className="yaml-view-toolbar">
-        <button
-          onClick={handleCopy}
-          aria-label={copied ? "Copied to clipboard" : "Copy YAML to clipboard"}
-          className="btn yaml-toolbar-btn"
-          data-copied={copied ? "true" : "false"}
-        >
-          {copied ? "Copied!" : "Copy"}
-        </button>
-        <button
-          onClick={handleDownload}
-          aria-label="Download YAML file"
-          className="btn yaml-toolbar-btn"
-        >
-          Download
-        </button>
-      </div>
-
-      {/* Syntax-highlighted YAML */}
-      <div className="yaml-view-content">
-        <Highlight theme={highlightTheme} code={yaml} language="yaml">
-          {({ tokens, getLineProps, getTokenProps }) => (
-            <pre className="yaml-view-pre">
-              {tokens.map((line, i) => (
-                <div key={i} {...getLineProps({ line })} className="yaml-view-line">
-                  <span className="yaml-view-line-number" aria-hidden="true">{i + 1}</span>
-                  <span className="yaml-view-line-content">
-                    {line.map((token, key) => (
-                      <span key={key} {...getTokenProps({ token })} />
-                    ))}
-                  </span>
-                </div>
-              ))}
-            </pre>
-          )}
-        </Highlight>
-      </div>
+      <YamlDisplay
+        yaml={yaml}
+        filename={`pipeline-v${compositionState?.version ?? 1}.yaml`}
+      />
     </div>
   );
 }

@@ -33,11 +33,11 @@ export function SideRail({
       <div data-testid="siderail-slot-graph-mini" className="side-rail-slot">
         {graphMiniSlot}
       </div>
-      <div data-testid="siderail-slot-catalog" className="side-rail-slot">
-        {catalogSlot}
-      </div>
       <div data-testid="siderail-slot-completion-bar" className="side-rail-slot">
         {completionBarSlot}
+      </div>
+      <div data-testid="siderail-slot-catalog" className="side-rail-slot">
+        {catalogSlot}
       </div>
     </aside>
   );

@@ -47,6 +47,38 @@ describe("SideRail", () => {
     ).toBeInTheDocument();
   });
 
+  it("positions the completion-bar slot below audit-readiness and above the catalog slot (plan 19b:602)", () => {
+    // Plan 19b:602 mandates: "<CompletionBar /> is present in the expected
+    // position (below audit-readiness, above Catalog)." This test pins the
+    // DOM order so a regression that re-shuffles the slots is caught here
+    // rather than at staging.
+    const { container } = render(
+      <SideRail
+        auditReadinessSlot={<div>Audit readiness</div>}
+        validationBannerSlot={<div>Validation banner</div>}
+        graphMiniSlot={<div>Graph mini</div>}
+        catalogSlot={<div>Catalog</div>}
+        completionBarSlot={<div>Completion bar</div>}
+      />,
+    );
+
+    const slots = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-testid^="siderail-slot-"]'),
+    );
+    const indexOf = (testid: string): number =>
+      slots.findIndex((node) => node.dataset.testid === testid);
+
+    const auditIdx = indexOf("siderail-slot-audit-readiness");
+    const completionIdx = indexOf("siderail-slot-completion-bar");
+    const catalogIdx = indexOf("siderail-slot-catalog");
+
+    expect(auditIdx).toBeGreaterThanOrEqual(0);
+    expect(completionIdx).toBeGreaterThanOrEqual(0);
+    expect(catalogIdx).toBeGreaterThanOrEqual(0);
+    expect(auditIdx).toBeLessThan(completionIdx);
+    expect(completionIdx).toBeLessThan(catalogIdx);
+  });
+
   it("renders content passed via the completionBar slot prop", () => {
     render(
       <SideRail

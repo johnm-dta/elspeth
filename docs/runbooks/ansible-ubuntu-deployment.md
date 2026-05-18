@@ -107,11 +107,28 @@ The web deployment is a source-checkout service:
 - Uvicorn transport: Unix domain socket at `/run/elspeth/uvicorn.sock`
 - Static frontend build command: `npm run build` from `src/elspeth/web/frontend`
 - Frontend build dependency: Node.js 20.19+ or a newer compatible LTS release
-- Required non-local setting: `ELSPETH_WEB__SECRET_KEY`
+- Required non-local settings (web service refuses to start without these —
+  no Python default):
+  - `ELSPETH_WEB__SECRET_KEY` (non-loopback hosts; reject default)
+  - `ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY` (HMAC for Phase 6A capability tokens)
+  - `ELSPETH_WEB__COMPOSER_MAX_COMPOSITION_TURNS`
+  - `ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS`
+  - `ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS`
+  - `ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE`
 - Default web state under `ELSPETH_WEB__DATA_DIR`, with overrides:
   - `ELSPETH_WEB__SESSION_DB_URL`
   - `ELSPETH_WEB__LANDSCAPE_URL`
   - `ELSPETH_WEB__PAYLOAD_STORE_PATH`
+
+**Two SQLite DBs, distinct trust tiers.** `sessions.db` and `audit.db` are
+both SQLite, but they are NOT interchangeable. `audit.db` (Landscape) is
+the project's legal record — back up before every deploy, never delete.
+`sessions.db` was historically "in-flight composer scratch" but Phase 5b
+(`interpretation_events`) and Phase 6A (`composer_completion_events`)
+moved part of the composer audit surface into it. The "delete on schema
+change" policy applies to `sessions.db` only and discards the composer-
+side audit rows it carries; see **Database Lifecycle → Composer Audit-Table
+Inventory In sessions.db** for the export-before-delete pattern.
 
 Keep `WEB_CONCURRENCY` unset or set to `1` when using SQLite session state.
 The web app has a startup guard for unsafe multi-worker SQLite deployments.
@@ -368,6 +385,103 @@ elspeth_auth_provider: local
 elspeth_cors_origins:
   - https://elspeth.example.com
 
+# Required WebSettings fields with NO Python default (Field(...)). The
+# service refuses to start if any is unset; pick values appropriate to
+# the deployment tier. Surfaced in the runbook (rather than left to env-
+# var-discovery) because forgetting any one of them produces a
+# pydantic.ValidationError at uvicorn bootstrap with no audit trail.
+elspeth_composer_max_composition_turns: 25
+elspeth_composer_max_discovery_turns: 6
+elspeth_composer_timeout_seconds: 240
+elspeth_composer_rate_limit_per_minute: 30
+
+# ---- Composer LLM identity -------------------------------------------
+# Model the composer-loop LLM runs against. Default in code is "gpt-5.5";
+# staging or dev environments may want a cheaper model. See the Composer
+# Runtime Tuning section below for the model-selection considerations.
+elspeth_composer_model: gpt-5.5
+
+# ---- Composer transport timing (browser/proxy abort racing) ----------
+# These TWO knobs are the operator's lever against composer wall-clock
+# failures racing browser/proxy idle aborts. The model validator
+# enforces composer_timeout_seconds <= idle_ceiling - headroom; bumping
+# composer_timeout_seconds without raising the ceiling FAILS BOOTSTRAP
+# with a precise error message. See the "Composer Runtime Tuning"
+# section for the full invariant and how to size against Caddy / Azure
+# Front Door idle timeouts.
+elspeth_composer_transport_idle_ceiling_seconds: 300.0
+elspeth_composer_transport_headroom_seconds: 30.0
+elspeth_composer_runtime_preflight_timeout_seconds: 5.0
+elspeth_composer_max_tool_calls_per_turn: 16
+
+# ---- Composer-LLM error surface --------------------------------------
+# DEFAULTS TO FALSE. Set true only in dev/staging where exposing
+# upstream provider error detail to the composer UI is acceptable.
+# Production deployments MUST leave this false — surfacing provider
+# errors leaks vendor-specific implementation details and may include
+# request fingerprints in error bodies.
+elspeth_composer_expose_provider_errors: false
+
+# ---- Composer interpretation-event rate limits (F-30 / F-31) ---------
+# Per-(session, user_term, composition_state_id) and per-session-per-UTC-
+# day caps on request_interpretation_review tool calls. Exceeding either
+# cap raises ToolArgumentError and the compose loop falls back to
+# AUTO_INTERPRETED_NO_SURFACES. UTC-midnight window (not sliding 24h)
+# for predictable reset behaviour.
+elspeth_composer_interpretation_rate_limit_per_term: 3
+elspeth_composer_interpretation_rate_limit_per_session_day: 10
+
+# ---- Shareable-review token lifetime ---------------------------------
+# Wall-clock validity stamped on freshly minted tokens. Default 30 days;
+# compliance regimes may want shorter (e.g. 86400 = 24h). Tokens past
+# this point fail signer.verify() with InvalidToken before any payload-
+# store lookup runs.
+elspeth_shareable_link_lifetime_seconds: 2592000     # 30 * 24 * 3600
+
+# ---- Auth + JWKS tuning ----------------------------------------------
+# auth_rate_limit_per_minute: per-IP auth-attempt rate limit.
+# jwks_cache_ttl_seconds: how long a fetched JWKS document is reused.
+# jwks_failure_retry_seconds: floor 10. Sized to prevent cold-start DoS
+# during an IdP outage — the first caller pays the httpx timeout (~15s
+# worst case) and subsequent callers short-circuit through this window.
+# Do NOT lower below 10 even in test fixtures (the validator rejects it).
+elspeth_auth_rate_limit_per_minute: 20
+elspeth_jwks_cache_ttl_seconds: 3600
+elspeth_jwks_failure_retry_seconds: 300
+
+# ---- Upload + blob limits --------------------------------------------
+# max_upload_bytes: per-request body cap on POST /api/blobs upload path.
+# max_blob_storage_per_session_bytes: total blob storage one composer
+# session may hold. Defaults are 100MB / 500MB; tune for tier.
+elspeth_max_upload_bytes: 104857600                  # 100 * 1024 * 1024
+elspeth_max_blob_storage_per_session_bytes: 524288000  # 500 * 1024 * 1024
+
+# ---- Composer secret allowlist ---------------------------------------
+# The closed list of env-var-named secrets the composer LLM may reference
+# in pipeline configs via the {{ secrets.NAME }} substitution path.
+# DefaultS to the four widely-used model-provider keys. Add an entry here
+# (and provision the env var in the same deploy) before the LLM can wire
+# a plugin that needs that key. Reserved-prefix names are rejected.
+elspeth_server_secret_allowlist:
+  - OPENROUTER_API_KEY
+  - OPENAI_API_KEY
+  - ANTHROPIC_API_KEY
+  - AZURE_API_KEY
+
+# ---- Payload-store retention -----------------------------------------
+# Mirrors core/config.py:PayloadStoreSettings.retention_days. Surfaced
+# on the audit-readiness panel as informational; the live retention
+# enforcement lives in `elspeth purge`. Tune for the deployment's
+# legal/compliance retention requirement.
+elspeth_payload_store_retention_days: 90
+
+# ---- Orphan-run cleanup ----------------------------------------------
+# Background sweeper that marks abandoned runs `failed` after max_age.
+# check_interval is the sweeper cadence; raise both for low-traffic
+# deployments where premature reaping risks aborting a slow run.
+elspeth_orphan_run_max_age_seconds: 3600
+elspeth_orphan_run_check_interval_seconds: 300
+
 # HSTS rollout. Every one of these levers is a one-way decision per
 # browser session — once a client caches the policy, you cannot make
 # it shorter or weaker for that client until the cached max-age
@@ -413,6 +527,14 @@ vault_openrouter_api_key: ""
 vault_azure_openai_api_key: ""
 vault_azure_openai_endpoint: ""
 vault_fingerprint_key: "replace-with-stable-hmac-key"
+# Phase 6A — shareable-review HMAC-SHA256 signing key. The web service
+# refuses to start without this key (Field(...) with no default). MUST
+# be ≥32 raw bytes; the documented generation recipe produces exactly
+# 32 bytes of entropy as 44 base64 characters. Rotating this key
+# invalidates EVERY outstanding shareable link, in-flight or not — there
+# is no dual-key acceptance window in v1. Treat rotation as a deliberate
+# operational event, not a routine secret refresh.
+vault_elspeth_web_shareable_link_signing_key: "replace-with-generated-token"
 # Only required when elspeth_install_nodesource_repo=true. Obtain
 # from a trusted workstation:
 #   curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sha256sum
@@ -424,6 +546,231 @@ Generate the web secret key on a trusted workstation:
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
+
+Generate the shareable-review signing key on a trusted workstation:
+
+```bash
+openssl rand -base64 32
+```
+
+The output is 44 base64 characters that decode to exactly 32 raw bytes —
+HMAC-SHA256's digest size, which is the natural entropy floor for a tag
+produced by this hash. The web settings validator decodes the base64
+form, rejects shorter keys with a `ValueError`, and refuses to start on
+non-loopback hosts when the decoded key is a uniform-byte placeholder
+(e.g. `b"\x00" * 32`, `b"0" * 32`) — those are operationally
+indistinguishable from "operator forgot to generate a real key."
+
+## Composer Runtime Tuning
+
+This section explains the composer-facing `WebSettings` knobs the
+runbook surfaces as Ansible variables. Every variable named below has
+a corresponding `elspeth_<name>` in **Common Variables** above and a
+matching `ELSPETH_WEB__<NAME>` line in the env-file / Container Apps
+template. The knobs are grouped by purpose; the operational
+invariants (especially the transport-timing one) are load-bearing.
+
+### Transport Timing — Browser/Proxy Idle-Abort Racing (CRITICAL)
+
+The composer-loop POST is long-running by design — a single
+compose request can take tens of seconds to a few minutes against
+slower models. That puts it in the death zone for two concurrent
+idle-abort budgets:
+
+* **Browser fetch abort.** Browsers do not impose a fixed body-read
+  timeout, but transparent proxies (CDN, Front Door, Caddy upstream)
+  do. If the proxy aborts the request before the composer finishes,
+  the client sees a generic 5xx with no audit trail and the LLM call
+  may continue running on the backend.
+* **Backend wall-clock.** The composer enforces its own
+  `composer_timeout_seconds` budget so a stuck call doesn't waste an
+  unbounded number of worker requests.
+
+The runbook surfaces three knobs to keep these in correct ordering.
+The invariant the `WebSettings` model-validator enforces is:
+
+```text
+composer_timeout_seconds <= composer_transport_idle_ceiling_seconds
+                          - composer_transport_headroom_seconds
+```
+
+Violating it makes the service refuse to start with a precise error
+message naming the three values. The intent of the invariant is that
+**the backend gives up before the proxy gives up**, so the composer
+emits an audit-trail-complete failure rather than a torn-mid-response
+generic 5xx that the proxy attributes to the upstream.
+
+**Sizing recipe for a typical reverse-proxy deployment:**
+
+| Layer | Knob | Suggested value | Why |
+|-------|------|-----------------|-----|
+| Caddy / Front Door | upstream `idle_timeout` | 360s | Concrete budget on the proxy side; longer than the backend so the backend wins the race. |
+| WebSettings | `composer_transport_idle_ceiling_seconds` | 300.0 | Backend's belief about the proxy ceiling; MUST stay strictly below the proxy's actual idle_timeout to leave network jitter slack. |
+| WebSettings | `composer_transport_headroom_seconds` | 30.0 | Slack between the backend's all-stop and the ceiling — the period during which the backend writes the audit row, emits the failure event, and returns the response. |
+| WebSettings | `composer_timeout_seconds` | 240 | Per-compose wall-clock budget. Must be `<= ceiling - headroom = 270`; 240 gives an additional 30s comfort margin. |
+
+**Why these specific defaults are conservative.** The 30s headroom is
+sized for the longest plausible single audit-emit-and-respond path
+even under pressure: `INSERT` into the audit DB, optional payload-
+store write, fingerprint sign, JSON serialise, gzip, network flush.
+Shrinking headroom below 15s starts to risk the audit row landing
+*after* the proxy decides the connection is dead — the backend's
+response gets discarded and the client sees the proxy's 504. The
+audit row is still durable, but the operator-side debugging story
+breaks.
+
+**Recipe for tightening or loosening:**
+
+* **Loosen for slow models or large composition payloads.** Raise the
+  proxy's idle_timeout first, then the backend's
+  `composer_transport_idle_ceiling_seconds` (keep ~60s below the
+  proxy), then `composer_timeout_seconds` (keep `<= ceiling - 30`).
+* **Tighten for fast models and stricter SLOs.** Lower
+  `composer_timeout_seconds` first; the ceiling/headroom can stay.
+  Watch for compose loops that legitimately take longer than the new
+  budget — they will fail-fast with `ComposerTimeoutError` audit
+  events.
+
+### Composer LLM Identity and Caps
+
+`elspeth_composer_model` selects the model the composer loop runs
+against. The shipped default (`gpt-5.5`) targets production tier;
+staging / dev are best served with a smaller model (e.g.
+`gpt-5.5-mini` or `o4-mini`) to keep iteration cost down. The model
+identifier passes through to the LLM provider via the OpenRouter
+abstraction; the composer does not validate the model exists at
+config-load time — typos surface as 404s from the provider on first
+compose POST.
+
+Caps that bound a single compose request:
+
+| Knob | Purpose | Notes |
+|------|---------|-------|
+| `composer_max_composition_turns` | LLM iteration budget per compose POST. Hitting it aborts with an audit-trail `ComposerBudgetExceeded` event. | Sized at 25 for production; staging may run higher for debugging. |
+| `composer_max_discovery_turns` | Sub-budget for the discovery loop that fires before composition. | Smaller than the composition budget; 6 is a balanced starting point. |
+| `composer_max_tool_calls_per_turn` | Per-turn cap on tool invocations. DoS-relevant: a runaway LLM cannot exhaust the audit DB by issuing thousands of tool calls in one turn. | Default 16. Lowering reduces noise on a particularly chatty model; raising can stall convergence on models that prefer many small calls. |
+| `composer_runtime_preflight_timeout_seconds` | Validation timeout fired before run-execute. Catches malformed pipelines without running them. | 5s default. Raise only if your validation is unusually slow (rare). |
+
+### Composer-LLM Error Surface
+
+`composer_expose_provider_errors` controls whether upstream provider
+error detail flows through to the composer UI. **Production must
+leave this `false`.** Setting it `true` in production leaks
+vendor-specific implementation details and may include
+provider-side request fingerprints in error bodies, which surface to
+non-operator users with composer access.
+
+Dev / staging can set `true` while debugging an upstream issue —
+revert before any production deploy. The runbook explicitly surfaces
+this knob so an "expose for debug, forget to revert" leak is visible
+in the diff of `group_vars/elspeth_web.yml`.
+
+### Composer Interpretation-Event Rate Limits (F-30 / F-31)
+
+The interpretation-event surface (Phase 5b) lets the composer LLM
+flag ambiguous user terms for human review. Two caps prevent abuse:
+
+| Knob | Cap | Window |
+|------|-----|--------|
+| `composer_interpretation_rate_limit_per_term` | Max times the LLM can surface the same `(session, user_term, composition_state_id)` tuple. | Lifetime of the composition state. |
+| `composer_interpretation_rate_limit_per_session_day` | Max `request_interpretation_review` invocations per session per UTC day. | UTC midnight (NOT a sliding 24h). |
+
+Either cap exceeded raises `ToolArgumentError`; the compose loop
+falls back to `AUTO_INTERPRETED_NO_SURFACES` and the LLM is told to
+make its best guess. Defaults (3 per term, 10 per session per day)
+are sized for typical operator workloads — heavy multi-plugin
+sessions may legitimately need a higher per-day cap.
+
+The UTC-midnight reset (rather than sliding 24h) is deliberate:
+operators reading the audit trail get a clean daily boundary, and a
+session that exhausts its budget recovers predictably at the same
+wall-clock time each day.
+
+### Shareable-Review Token Lifetime
+
+`shareable_link_lifetime_seconds` stamps `expires_at` on every
+freshly-minted token. The signer rejects tokens past this point at
+`ShareTokenSigner.verify()` before any payload-store lookup. Default
+is 30 days (2 592 000s); compliance regimes may want shorter (24h =
+86 400s).
+
+There is no per-token revocation in v1 — the only emergency response
+to a leaked link is to rotate `shareable_link_signing_key`, which
+invalidates every outstanding link. See **Secret-Rotation Playbooks**
+under Database Lifecycle for the rotation procedure.
+
+### Auth Rate-Limit and JWKS Cache
+
+| Knob | Purpose | Notes |
+|------|---------|-------|
+| `auth_rate_limit_per_minute` | Per-IP auth-attempt cap. | Default 20. Behind Front Door / Caddy this fires after the CDN cap; in direct-bind deployments it is the only auth-throttle. |
+| `jwks_cache_ttl_seconds` | How long a fetched JWKS document is reused before re-fetch from the IdP. | 3600s default. Lowering accelerates key-rotation pickup at the cost of more IdP load. |
+| `jwks_failure_retry_seconds` | Cool-down between JWKS re-fetch attempts when the IdP is unreachable. | Floor of 10 enforced. The first caller pays the httpx timeout (~15s); subsequent callers short-circuit to the stale JWKS via this window. Raising it makes the stale-serve window longer (safer during brief outages); lowering it shrinks the partial-DoS blast radius during a sustained outage. Do NOT lower the floor in test fixtures — the validator rejects values below 10. |
+
+### Upload and Blob Limits
+
+| Knob | Default | Cap on |
+|------|---------|--------|
+| `max_upload_bytes` | 100 MB | Per-request body on `POST /api/blobs`. |
+| `max_blob_storage_per_session_bytes` | 500 MB | Total blob storage one composer session may hold across all uploads. |
+
+Both apply to user-driven file uploads (CSV / parquet / JSON sources
+plugged into the composer). Tune for the deployment's typical
+payload size — for image-heavy or large-CSV workflows, raise both.
+
+### Composer Secret Allowlist
+
+`server_secret_allowlist` is the closed list of env-var-named secrets
+the composer LLM may reference in pipeline configs via
+`{{ secrets.NAME }}` substitution. The default four entries
+(`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`AZURE_API_KEY`) cover the widely-used model-provider keys. Adding
+an entry requires both (a) appending to this list, and (b)
+provisioning the env var in the same deploy — the allowlist tracks
+*permitted names*, not *available values*. Names matching the
+reserved prefix (per `validation.SERVER_SECRET_RESERVED_PREFIX`) are
+rejected at config-validation time.
+
+### Payload-Store Retention
+
+`payload_store_retention_days` mirrors the core
+`PayloadStoreSettings.retention_days` default. The audit-readiness
+panel surfaces this value as informational so operators see what
+retention the composer believes is in effect.
+
+The **live retention enforcement** is `elspeth purge`, not the web
+service. Configure a periodic systemd timer or cron entry to run
+`elspeth purge --retention-days $(retention_days)` against the
+deployment's payload store. Setting the WebSettings value without
+running `elspeth purge` produces an audit-readiness panel that
+misrepresents the actual retention horizon.
+
+### Orphan-Run Cleanup
+
+| Knob | Default | Purpose |
+|------|---------|---------|
+| `orphan_run_max_age_seconds` | 3600 | Runs without progress updates for this long get marked `failed` by the sweeper. |
+| `orphan_run_check_interval_seconds` | 300 | Sweeper cadence. |
+
+For low-traffic deployments where a slow legitimate run could exceed
+`max_age`, raise both values. For high-traffic deployments where
+abandoned runs accumulate fast, the defaults are appropriate.
+
+### Composer-Advisor Escape Hatch — Future-Release
+
+The `composer_advisor_*` settings (enabled, model, budgets,
+timeouts) wire an escape hatch that lets the composer LLM consult a
+frontier model when stuck on a particular composition. This feature
+is **disabled by default** and is queued behind further hardening —
+do NOT enable it in production today. The settings exist in
+`WebSettings` so the wiring is in place, but the operator-runbook
+posture for v1 is "leave disabled."
+
+When the feature is approved for general availability, this section
+will document the budget knobs (`max_calls_per_compose`,
+`max_prompt_tokens`, `max_completion_tokens`, `timeout_seconds`) and
+the operational implications of enabling it (cost exposure,
+auditability of escalations, model-provider dependency).
 
 ## Ubuntu 24.04 And 22.04 Package Handling
 
@@ -846,6 +1193,44 @@ ELSPETH_WEB__SESSION_DB_URL={{ elspeth_session_db_url }}
 ELSPETH_WEB__LANDSCAPE_URL={{ elspeth_landscape_url }}
 ELSPETH_WEB__PAYLOAD_STORE_PATH={{ elspeth_payload_store_path }}
 ELSPETH_WEB__CORS_ORIGINS={{ elspeth_cors_origins | to_json }}
+# Required no-default Field(...) values — uvicorn refuses to start if any
+# is missing. See the matching variables under "Common Variables".
+ELSPETH_WEB__COMPOSER_MAX_COMPOSITION_TURNS={{ elspeth_composer_max_composition_turns }}
+ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS={{ elspeth_composer_max_discovery_turns }}
+ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS={{ elspeth_composer_timeout_seconds }}
+ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE={{ elspeth_composer_rate_limit_per_minute }}
+# Phase 6A — shareable-review HMAC signing key (Field(...), no default).
+# Service refuses to start without this; rotating invalidates ALL
+# outstanding shareable links.
+ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY={{ vault_elspeth_web_shareable_link_signing_key }}
+# Composer LLM identity
+ELSPETH_WEB__COMPOSER_MODEL={{ elspeth_composer_model }}
+# Composer transport timing — protects against browser/proxy idle abort
+ELSPETH_WEB__COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS={{ elspeth_composer_transport_idle_ceiling_seconds }}
+ELSPETH_WEB__COMPOSER_TRANSPORT_HEADROOM_SECONDS={{ elspeth_composer_transport_headroom_seconds }}
+ELSPETH_WEB__COMPOSER_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS={{ elspeth_composer_runtime_preflight_timeout_seconds }}
+ELSPETH_WEB__COMPOSER_MAX_TOOL_CALLS_PER_TURN={{ elspeth_composer_max_tool_calls_per_turn }}
+# Composer error surface (false in production)
+ELSPETH_WEB__COMPOSER_EXPOSE_PROVIDER_ERRORS={{ elspeth_composer_expose_provider_errors | string | lower }}
+# Composer interpretation rate limits (F-30/F-31)
+ELSPETH_WEB__COMPOSER_INTERPRETATION_RATE_LIMIT_PER_TERM={{ elspeth_composer_interpretation_rate_limit_per_term }}
+ELSPETH_WEB__COMPOSER_INTERPRETATION_RATE_LIMIT_PER_SESSION_DAY={{ elspeth_composer_interpretation_rate_limit_per_session_day }}
+# Shareable-review token lifetime
+ELSPETH_WEB__SHAREABLE_LINK_LIFETIME_SECONDS={{ elspeth_shareable_link_lifetime_seconds }}
+# Auth + JWKS
+ELSPETH_WEB__AUTH_RATE_LIMIT_PER_MINUTE={{ elspeth_auth_rate_limit_per_minute }}
+ELSPETH_WEB__JWKS_CACHE_TTL_SECONDS={{ elspeth_jwks_cache_ttl_seconds }}
+ELSPETH_WEB__JWKS_FAILURE_RETRY_SECONDS={{ elspeth_jwks_failure_retry_seconds }}
+# Upload + blob limits
+ELSPETH_WEB__MAX_UPLOAD_BYTES={{ elspeth_max_upload_bytes }}
+ELSPETH_WEB__MAX_BLOB_STORAGE_PER_SESSION_BYTES={{ elspeth_max_blob_storage_per_session_bytes }}
+# Composer secret allowlist (JSON-encoded list)
+ELSPETH_WEB__SERVER_SECRET_ALLOWLIST={{ elspeth_server_secret_allowlist | to_json }}
+# Payload-store retention (informational; live enforcement via `elspeth purge`)
+ELSPETH_WEB__PAYLOAD_STORE_RETENTION_DAYS={{ elspeth_payload_store_retention_days }}
+# Orphan-run cleanup loop
+ELSPETH_WEB__ORPHAN_RUN_MAX_AGE_SECONDS={{ elspeth_orphan_run_max_age_seconds }}
+ELSPETH_WEB__ORPHAN_RUN_CHECK_INTERVAL_SECONDS={{ elspeth_orphan_run_check_interval_seconds }}
 ELSPETH_FINGERPRINT_KEY={{ vault_fingerprint_key }}
 OPENROUTER_API_KEY={{ vault_openrouter_api_key }}
 AZURE_OPENAI_API_KEY={{ vault_azure_openai_api_key }}
@@ -1580,6 +1965,12 @@ azure_container_pull_identity_id: "/subscriptions/.../userAssignedIdentities/id-
 azure_container_runtime_identity_id: "/subscriptions/.../userAssignedIdentities/id-elspeth-runtime"
 azure_keyvault_elspeth_web_secret_key_url: "https://kv-elspeth.vault.azure.net/secrets/elspeth-web-secret-key/<version>"
 azure_keyvault_fingerprint_key_url: "https://kv-elspeth.vault.azure.net/secrets/elspeth-fingerprint-key/<version>"
+# Phase 6A — shareable-review HMAC signing key (Field(...), no default).
+# The web service refuses to start without it; the field is `strict=True`
+# so the env var MUST decode cleanly as base64 (the runtime decodes the
+# str to bytes at config-load time). Rotating invalidates ALL outstanding
+# shareable links.
+azure_keyvault_elspeth_web_shareable_link_signing_key_url: "https://kv-elspeth.vault.azure.net/secrets/elspeth-web-shareable-link-signing-key/<version>"
 elspeth_image_tag: sha-542f34874
 
 # Traffic-shifting flow. Set elspeth_previous_image_tag to the SHA
@@ -1811,6 +2202,14 @@ operations gate on it:
             - name: elspeth-fingerprint-key
               keyVaultUrl: "{{ azure_keyvault_fingerprint_key_url }}"
               identity: "{{ azure_container_runtime_identity_id }}"
+            # Phase 6A — shareable-review HMAC signing key. Field(...)
+            # on WebSettings means the service refuses to start without
+            # this secret. The Key Vault entry MUST contain the
+            # operator-generated 32-byte key as base64 (output of
+            # `openssl rand -base64 32`).
+            - name: elspeth-web-shareable-link-signing-key
+              keyVaultUrl: "{{ azure_keyvault_elspeth_web_shareable_link_signing_key_url }}"
+              identity: "{{ azure_container_runtime_identity_id }}"
         # `template:` is consumed from the shared
         # `elspeth_container_template` fact loaded above. Do NOT inline
         # a container spec here — the traffic-shift PATCH task below
@@ -1859,6 +2258,12 @@ template:
           secretRef: elspeth-web-secret-key
         - name: ELSPETH_FINGERPRINT_KEY
           secretRef: elspeth-fingerprint-key
+        # Phase 6A — shareable-review HMAC signing key. Field(...) on
+        # WebSettings means uvicorn refuses to start without this; the
+        # Key Vault entry MUST be the operator-generated 32-byte key
+        # (`openssl rand -base64 32` output).
+        - name: ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY
+          secretRef: elspeth-web-shareable-link-signing-key
         - name: ELSPETH_WEB__AUTH_PROVIDER
           value: "{{ elspeth_auth_provider }}"
         - name: ELSPETH_WEB__REGISTRATION_MODE
@@ -1869,6 +2274,56 @@ template:
           value: "{{ elspeth_landscape_url }}"
         - name: ELSPETH_WEB__PAYLOAD_STORE_PATH
           value: "{{ elspeth_payload_store_path }}"
+        # Required Field(...) composer values — uvicorn refuses to start
+        # if any is missing. Plain values (not secrets) but still
+        # required because there is no Python default.
+        - name: ELSPETH_WEB__COMPOSER_MAX_COMPOSITION_TURNS
+          value: "{{ elspeth_composer_max_composition_turns }}"
+        - name: ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS
+          value: "{{ elspeth_composer_max_discovery_turns }}"
+        - name: ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS
+          value: "{{ elspeth_composer_timeout_seconds }}"
+        - name: ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE
+          value: "{{ elspeth_composer_rate_limit_per_minute }}"
+        # Composer-aware tunables (defaults exist in Python but are
+        # surfaced here so the Front Door / Container Apps deploy can
+        # tune them without source edits).
+        - name: ELSPETH_WEB__COMPOSER_MODEL
+          value: "{{ elspeth_composer_model }}"
+        - name: ELSPETH_WEB__COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS
+          value: "{{ elspeth_composer_transport_idle_ceiling_seconds }}"
+        - name: ELSPETH_WEB__COMPOSER_TRANSPORT_HEADROOM_SECONDS
+          value: "{{ elspeth_composer_transport_headroom_seconds }}"
+        - name: ELSPETH_WEB__COMPOSER_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS
+          value: "{{ elspeth_composer_runtime_preflight_timeout_seconds }}"
+        - name: ELSPETH_WEB__COMPOSER_MAX_TOOL_CALLS_PER_TURN
+          value: "{{ elspeth_composer_max_tool_calls_per_turn }}"
+        - name: ELSPETH_WEB__COMPOSER_EXPOSE_PROVIDER_ERRORS
+          value: "{{ elspeth_composer_expose_provider_errors | string | lower }}"
+        - name: ELSPETH_WEB__COMPOSER_INTERPRETATION_RATE_LIMIT_PER_TERM
+          value: "{{ elspeth_composer_interpretation_rate_limit_per_term }}"
+        - name: ELSPETH_WEB__COMPOSER_INTERPRETATION_RATE_LIMIT_PER_SESSION_DAY
+          value: "{{ elspeth_composer_interpretation_rate_limit_per_session_day }}"
+        - name: ELSPETH_WEB__SHAREABLE_LINK_LIFETIME_SECONDS
+          value: "{{ elspeth_shareable_link_lifetime_seconds }}"
+        - name: ELSPETH_WEB__AUTH_RATE_LIMIT_PER_MINUTE
+          value: "{{ elspeth_auth_rate_limit_per_minute }}"
+        - name: ELSPETH_WEB__JWKS_CACHE_TTL_SECONDS
+          value: "{{ elspeth_jwks_cache_ttl_seconds }}"
+        - name: ELSPETH_WEB__JWKS_FAILURE_RETRY_SECONDS
+          value: "{{ elspeth_jwks_failure_retry_seconds }}"
+        - name: ELSPETH_WEB__MAX_UPLOAD_BYTES
+          value: "{{ elspeth_max_upload_bytes }}"
+        - name: ELSPETH_WEB__MAX_BLOB_STORAGE_PER_SESSION_BYTES
+          value: "{{ elspeth_max_blob_storage_per_session_bytes }}"
+        - name: ELSPETH_WEB__SERVER_SECRET_ALLOWLIST
+          value: "{{ elspeth_server_secret_allowlist | to_json }}"
+        - name: ELSPETH_WEB__PAYLOAD_STORE_RETENTION_DAYS
+          value: "{{ elspeth_payload_store_retention_days }}"
+        - name: ELSPETH_WEB__ORPHAN_RUN_MAX_AGE_SECONDS
+          value: "{{ elspeth_orphan_run_max_age_seconds }}"
+        - name: ELSPETH_WEB__ORPHAN_RUN_CHECK_INTERVAL_SECONDS
+          value: "{{ elspeth_orphan_run_check_interval_seconds }}"
       probes:
         - type: Liveness
           httpGet:
@@ -2387,7 +2842,7 @@ upgrade semantics and you must handle them differently across deploys.
 
 | Store | URL variable | Default path | Upgrade policy |
 |-------|--------------|--------------|----------------|
-| Web session DB | `ELSPETH_WEB__SESSION_DB_URL` | `/var/lib/elspeth/sessions.db` | **Operator-deletes on schema change.** No Alembic migrations. Deleting drops in-flight composer sessions. |
+| Web session DB | `ELSPETH_WEB__SESSION_DB_URL` | `/var/lib/elspeth/sessions.db` | **Operator-deletes on schema change.** No Alembic migrations. Deleting drops in-flight composer sessions AND a partial slice of composer audit history (interpretation events, completion-gesture events, YAML-export events — see the composer audit-table inventory below). |
 | Landscape (audit trail) | `ELSPETH_WEB__LANDSCAPE_URL` | `/var/lib/elspeth/runs/audit.db` | **Back up before every deploy.** This is the legal record of every prior decision. Loss is not recoverable. |
 | Payload store | `ELSPETH_WEB__PAYLOAD_STORE_PATH` | `/var/lib/elspeth/payloads` | Survives across deploys. Purge via `elspeth purge --retention-days N`, never delete-on-deploy. |
 
@@ -2438,6 +2893,182 @@ migration runner. For now, the deploy procedure is:
 For container deployments, mount the audit DB on durable storage external
 to the container. Container-local SQLite for audit data is unsafe regardless
 of whether the schema is stable.
+
+### SESSION_SCHEMA_EPOCH — Mechanical Schema-Change Detection
+
+`sessions.db` does NOT carry a migration runner. The compatibility
+contract is mechanical: the model layer declares
+`SESSION_SCHEMA_EPOCH` (an integer in `src/elspeth/web/sessions/models.py`)
+and the bootstrap stamps it into `PRAGMA user_version` on fresh databases.
+On every subsequent startup, `_assert_schema_sentinels`
+(`src/elspeth/web/sessions/schema.py`) reads `PRAGMA user_version` back
+and crashes the service with an actionable error if it diverges from the
+constant the running code expects:
+
+```text
+SessionSchemaError: Session DB schema version 4 does not match
+SESSION_SCHEMA_EPOCH=5. Pre-release ELSPETH does not migrate session
+databases. Delete the session DB file and restart.
+```
+
+A second sentinel, `PRAGMA application_id = 0x454C5350` (which spells
+"ELSP" in ASCII), is also enforced so the bootstrap refuses to touch a
+SQLite file that happens to live at the configured path but belongs to
+some other application entirely.
+
+**Operator detection cadence.**
+The "schema-incompatible upgrade" decision is *not* a judgement call —
+the running code asserts it on startup. The deploy procedure should:
+
+1. Snapshot `sessions.db` (per the standard snapshot task above).
+2. Restart the service (the role's standard restart-and-verify gate
+   already covers this).
+3. If the restart fails with `SessionSchemaError`, the error message
+   itself is the actionable instruction: delete the file, restart again.
+   The snapshot is the rollback aid; the live DB is disposable.
+
+**What happens if you skip the delete.**
+The service refuses to start at all. There is no partial-functionality
+mode; `_assert_schema_sentinels` runs before any other initialisation.
+A staging deploy that bumps the epoch without operator-side `rm`
+becomes a crash-restart loop until systemd's `StartLimitBurst`
+exhausts and the unit goes into `failed` state.
+
+**Recent epoch history** (current code under `models.py:SESSION_SCHEMA_EPOCH`):
+
+| Epoch | Rationale |
+|-------|-----------|
+| 1 | Initial schema. |
+| 2 | `interpretation_events_table` added (Phase 5b). |
+| 3 | `composition_proposals.user_message_id` added (chat-message provenance). |
+| 4 | `composer_completion_events_table` added (Phase 6A — `mark_ready_for_review`, `export_yaml`). |
+| 5 | Per-event-type partial CHECK constraints on `composer_completion_events` (Phase 6A post-merge hardening). |
+
+The constant should be the authoritative reference; this table is a
+durability aid for operators reading the runbook in isolation.
+
+### Append-Only Trigger Set — Required At Startup
+
+`sessions.db` carries six SQLite triggers that enforce audit invariants
+the column-level NOT NULL / CHECK surface cannot express on its own.
+`_validate_required_triggers` enumerates the required set and refuses
+service startup if any trigger is missing:
+
+| Trigger | Purpose |
+|---------|---------|
+| `trg_interpretation_events_immutable_resolved` | Resolved interpretation-event rows are immutable. |
+| `trg_interpretation_events_no_delete_resolved` | Resolved interpretation-event rows cannot be deleted (PENDING rows remain deletable for orphan recovery). |
+| `trg_composer_completion_events_no_update` | Completion events (`mark_ready_for_review`, `export_yaml`) are unconditionally append-only — UPDATE is forbidden. |
+| `trg_composer_completion_events_no_delete` | Completion events are unconditionally append-only — DELETE is forbidden. |
+| `trg_chat_messages_immutable_content` | `chat_messages.content` is append-only once written (chat is an audit anchor via `blobs.created_from_message_id`). |
+| `trg_chat_messages_no_delete` | `chat_messages` rows cannot be deleted directly; whole-session archival is the bounded lifecycle purge path via `sessions` cascade. |
+
+**Operator implication.**
+Direct DDL manipulation on `sessions.db` (e.g. attaching with the
+`sqlite3` CLI and running `DROP TRIGGER ...` to "unblock" a workflow)
+makes the service refuse to start. The fix is the standard fix:
+delete the DB and let bootstrap recreate it. Do NOT recreate the
+trigger by hand — the `event.listen(after_create)` registration is
+table-scoped and the trigger DDL is in code; the hand-recreated SQL
+will drift from the model definition the next time it changes.
+
+### Composer Audit-Table Inventory In sessions.db
+
+The "delete sessions.db on schema change" framing is correct for
+recovery, but it understates the audit surface that lives in
+`sessions.db` alongside the in-flight composer state. The following
+tables carry composer-side audit data — they are NOT ephemeral session
+chrome, even though they reset on epoch bump:
+
+| Table | Phase | Append-only triggers | Carries |
+|-------|-------|----------------------|---------|
+| `composition_states` | 1 | (no — CHECK on `provenance` closed enum) | Every committed composition state. `provenance` enum names which writer produced it. |
+| `composition_proposals` | 1A | (no) | Explicit-approval proposals awaiting accept/reject. `user_message_id` ties them to chat-message provenance. |
+| `chat_messages` | 1 | content-immutable + no-delete | The composer-session transcript. Audit anchor for the blob lineage walk. |
+| `interpretation_events` | 5b | resolved-row immutable + resolved-row no-delete | LLM-interpretation surface events (one per surfaced term). PENDING rows remain deletable for orphan recovery. |
+| `composer_completion_events` | 6A | unconditional no-update + no-delete | `mark_ready_for_review` and `export_yaml` audit events. Per-event-type partial CHECKs enforce `payload_digest`/`expires_at`/`composition_state_id` invariants. |
+| `runs` | 1 | (CHECK on `status` closed enum) | Pipeline runs initiated from the composer. |
+
+**Operational consequence.**
+When the runbook says "deleting `sessions.db` drops in-flight composer
+sessions," that is true but incomplete. It also discards every
+composer-side audit row enumerated above. For deployments where the
+composer audit trail must be preserved across schema bumps, the
+operator playbook is: snapshot `sessions.db` per the standard task,
+*export* the audit-relevant rows from the snapshot (e.g.
+`sqlite3 sessions.db.bak-... .dump composer_completion_events > evidence.sql`),
+archive the export, then proceed with the delete. There is no
+out-of-the-box migration to carry these rows forward — only export +
+archive.
+
+### Closed-CHECK Enum Reference (sessions.db)
+
+Several `sessions.db` columns are governance-locked closed enums
+enforced by SQLite CHECK constraints. An operator opening
+`sqlite3 sessions.db ".schema"` will see these constraints, but
+they are NOT stylistic — they are paired contracts with corresponding
+Python `Literal` type aliases in the source. Extending one without
+the other lets the dataclass validator pass while the DB rejects the
+row, or vice versa. **Adding a value requires a spec amendment and a
+schema-change cohort with epoch bump.**
+
+| Table | Column | Allowed values | Paired Python type |
+|-------|--------|----------------|--------------------|
+| `composition_states` | `provenance` | `tool_call`, `convergence_persist`, `plugin_crash_persist`, `preflight_persist`, `session_seed`, `session_fork`, `interpretation_resolve` | `web/sessions/protocol.py::CompositionStateProvenance` |
+| `composer_completion_events` | `event_type` | `mark_ready_for_review`, `export_yaml` | Inline check, see `web/sessions/models.py` |
+| `runs` | `status` | `pending`, `running`, `completed`, `completed_with_failures`, `failed`, `empty`, `cancelled` | `web/sessions/protocol.py::SessionRunStatus` |
+| `interpretation_events` | `event_type` | (Phase 5b — see `web/sessions/models.py` for current set) | `web/sessions/protocol.py` |
+| `proposal_events` | `event_type` | `proposal.created`, `proposal.accepted`, `proposal.rejected`, `trust_mode.changed` | Governance-locked; see `composer_completion_events` for the rationale (split into a separate table to avoid conflating decision families). |
+| `audit_access_log` | `writer_principal` | (closed set; see `web/sessions/models.py`) | Governance-locked. |
+
+`composer_completion_events` additionally carries the per-event-type
+partial CHECK constraints landed in Phase 6A:
+
+* `ck_composer_completion_events_digest_iff_mark_ready` —
+  `payload_digest IS NOT NULL` iff `event_type = 'mark_ready_for_review'`.
+* `ck_composer_completion_events_expires_iff_mark_ready` —
+  `expires_at IS NOT NULL` iff `event_type = 'mark_ready_for_review'`.
+* `ck_composer_completion_events_composition_state_id_required` —
+  `composition_state_id IS NOT NULL` for both event types.
+
+An operator hand-inserting a row that violates any of these CHECKs
+will see an `IntegrityError` from SQLite. The error message is the
+constraint name, which is named-for-purpose — the operator can map
+back to this table without source-diving.
+
+### Secret-Rotation Playbooks
+
+The web service carries multiple HMAC-style keys with different
+rotation semantics. Each row below names a key, the variable that
+holds it, and the operational consequence of rotating it. **No
+operator should rotate one of these keys without first understanding
+the consequence column** — there is no rotation-aware migration for
+any of them.
+
+| Key | Vault var | Where it signs | Rotation consequence |
+|-----|-----------|----------------|----------------------|
+| `secret_key` | `vault_elspeth_web_secret_key` | Session/cookie signing | Existing sessions are invalidated; users must re-authenticate. Safe to rotate. |
+| `fingerprint_key` | `vault_fingerprint_key` | Audit-record fingerprints in the Landscape DB | **DO NOT ROTATE without migrating audit DB.** Existing fingerprints become unverifiable; the audit trail's integrity claim breaks for every pre-rotation row. The env-file comment that ships with this variable explicitly forbids rotation. |
+| `shareable_link_signing_key` | `vault_elspeth_web_shareable_link_signing_key` | Shareable-review capability tokens (`GET /api/sessions/shared/{token}`) | **Invalidates EVERY outstanding shareable link.** There is no dual-key acceptance window in v1; recipients with active links receive 401 on next use. Acceptable as an emergency leak-response action. Otherwise treat as a deliberate operational event with stakeholder communication. |
+| `landscape_passphrase` | `vault_landscape_passphrase` (if encrypting) | SQLCipher passphrase for the Landscape DB at rest | Re-keying the live DB requires `PRAGMA rekey` against the running file. There is no playbook for this in-runbook today; if you need this, build the playbook before rotation, not after. |
+
+For the `shareable_link_signing_key` specifically, the rotation
+procedure is:
+
+1. Generate the replacement key on a trusted workstation:
+   `openssl rand -base64 32`.
+2. Update the vault file (`vault_elspeth_web_shareable_link_signing_key`)
+   or push the new value to Key Vault and bump the version reference in
+   `azure_keyvault_elspeth_web_shareable_link_signing_key_url`.
+3. Notify any stakeholders with outstanding shareable links that their
+   links will return 401 after the next deploy.
+4. Run the standard deploy.
+5. Recipients of broken links request fresh ones via the composer UI.
+
+There is intentionally NO "soft rotation" mode — the threat model for
+this key (HMAC of a capability that travels in a URL) does not permit
+dual-key verify without expanding the wire format. A v2 envelope
+shape supporting dual-key verify is a future-release item.
 
 ### What Rollback Does To The Audit Trail
 

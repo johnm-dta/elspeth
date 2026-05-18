@@ -7,7 +7,7 @@
 // content, exposes an "Edit the list" affordance that lets the user amend the
 // generated rows.
 //
-// Test coverage mirrors the seven concerns from Phase 5a Task 3:
+// Test coverage mirrors the six concerns from Phase 5a Task 3:
 //   1. Visible filename, MIME type, and row-count for a verbatim source.
 //   2. Edit affordance HIDDEN for verbatim provenance (no user authorship to
 //      amend).
@@ -28,13 +28,17 @@ import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
 import type { InlineSourceSummary } from "@/types/api";
 
 describe("InlineSourceCreatedTurn", () => {
+  // Realistic SHA-256 prefix.  We use a longer, hex-shaped string (instead
+  // of the earlier "h1" placeholder) so the regex used in the audit-info
+  // disclosure test (`/abc123def456789/`) can't false-positive on
+  // unrelated DOM text.
   const verbatim: InlineSourceSummary = {
     blobId: "b1",
     filename: "chat.csv",
     mimeType: "text/csv",
     contentPreview: "url\nhttps://finance.gov.au",
     rowCount: 1,
-    contentHash: "h1",
+    contentHash: "abc123def456789",
     provenance: "verbatim",
   };
 
@@ -72,9 +76,9 @@ describe("InlineSourceCreatedTurn", () => {
     render(<InlineSourceCreatedTurn summary={verbatim} onEdit={vi.fn()} />);
     const disclosure = screen.getByText(/show audit info/i);
     expect(disclosure).toBeInTheDocument();
-    expect(screen.queryByText(/h1/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/abc123def456789/)).not.toBeInTheDocument();
     fireEvent.click(disclosure);
-    expect(screen.getByText(/h1/)).toBeInTheDocument();
+    expect(screen.getByText(/abc123def456789/)).toBeInTheDocument();
   });
 
   it("renders the content preview clipped (no full-payload leak in DOM)", () => {

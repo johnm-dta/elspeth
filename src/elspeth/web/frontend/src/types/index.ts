@@ -956,7 +956,19 @@ export interface InlineSourceSummary {
   contentPreview: string;
   /** Best-effort row count from the parsed source; null if unparseable. */
   rowCount: number | null;
-  /** SHA-256 of the raw inline content (from session blob metadata). */
+  /**
+   * SHA-256 of the raw inline content (from session blob metadata).
+   *
+   * NON-NULLABLE BY CONTRACT. Every persisted blob carries a hash — that's
+   * a Tier-1 audit-trail invariant on our data (CLAUDE.md "Auditability
+   * Standard": hashes survive payload deletion, integrity is always
+   * verifiable). The projection layer in ChatPanel MUST throw, not
+   * coerce, when the wire returns a null or empty hash: silently
+   * substituting an empty string into the rendered audit-info pane
+   * gives an auditor a value the system never asserted, which is exactly
+   * the fabrication CLAUDE.md forbids. The throw lives in the
+   * `getBlobMetadata` projection in ChatPanel.tsx — keep it there.
+   */
   contentHash: string;
   /**
    * How this inline source's content was produced. Projected from the

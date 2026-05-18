@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatPanel } from "./ChatPanel";
+import { ChatPanel, deriveRowCount } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
 import { resetStore } from "@/test/store-helpers";
@@ -1070,5 +1070,97 @@ describe("ChatPanel inline-source projection", () => {
     expect(
       screen.queryByRole("region", { name: /source created/i }),
     ).toBeNull();
+  });
+
+  // Tier-1 audit-trail invariant (see InlineSourceSummary.contentHash type
+  // doc): a blob with a null content_hash is a wire-contract violation.
+  // The projection effect throws on this case; the throw is caught and
+  // logged; the inlineSourceStore is NEVER populated; the widget does
+  // NOT render.  Substituting an empty string into the rendered audit
+  // pane would assert a value the system never recorded — exactly the
+  // fabrication CLAUDE.md forbids.
+  it("does NOT render the widget when the blob's content_hash is null (audit-trail invariant)", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...makeBlobMetadata(),
+      content_hash: null,
+    });
+    (
+      apiClient.previewBlobContent as ReturnType<typeof vi.fn>
+    ).mockResolvedValue("url\nhttps://a.gov.au");
+
+    // Suppress the expected console.error from the projection's catch
+    // arm so the test output is clean.  The assertion below confirms
+    // that the error WAS logged with the expected prefix — that's how
+    // we know the invariant fired rather than the test silently
+    // matching the negative case for an unrelated reason.
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const composition = makeComposition(1, {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: "blob-inline-1" },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    // Wait for the projection effect to resolve and throw.
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\[inline-source\] projection failed:/),
+        expect.any(Error),
+      );
+    });
+
+    expect(
+      screen.queryByRole("region", { name: /source created/i }),
+    ).toBeNull();
+
+    errorSpy.mockRestore();
+  });
+});
+
+// ── deriveRowCount unit tests (MIME parameter parsing) ────────────────────────
+//
+// Lives outside the rendering-test describe block because it's a pure
+// helper with no React surface.  Imported from ChatPanel.tsx via the
+// named export at the top of the file.
+describe("deriveRowCount", () => {
+  it("returns row count for vanilla 'text/csv'", () => {
+    expect(deriveRowCount("text/csv", "url\nhttps://a\nhttps://b")).toBe(2);
+  });
+
+  it("returns row count for parameterised 'text/csv; charset=utf-8'", () => {
+    // Real CSV uploads from a browser commonly carry a charset parameter.
+    // A strict `===` comparison silently classified these as "unknown row
+    // count"; the MIME-base normalisation in deriveRowCount fixes this.
+    expect(
+      deriveRowCount("text/csv; charset=utf-8", "url\nhttps://a\nhttps://b"),
+    ).toBe(2);
+  });
+
+  it("is case-insensitive on the base MIME type", () => {
+    expect(deriveRowCount("TEXT/CSV", "url\nhttps://a")).toBe(1);
+  });
+
+  it("returns null for non-CSV MIME types", () => {
+    expect(deriveRowCount("application/json", "[1,2,3]")).toBeNull();
+  });
+
+  it("returns 0 for a header-only CSV (no data rows)", () => {
+    expect(deriveRowCount("text/csv", "url")).toBe(0);
+  });
+
+  it("returns 0 for empty content", () => {
+    expect(deriveRowCount("text/csv", "")).toBe(0);
   });
 });

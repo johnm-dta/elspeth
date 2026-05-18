@@ -37,8 +37,13 @@ import type { GuidedStep } from "@/types/guided";
  * for the visible preview, but we slice early so we do not stash the full
  * blob payload in the zustand store — F-22 (no full-payload leak into
  * client memory beyond what the widget needs).
+ *
+ * Named `_CHARS` (not `_BYTES`) because `String.prototype.slice` operates on
+ * UTF-16 code units; a 1024-char slice of multi-byte content is more bytes
+ * than 1024 in UTF-8.  The exact byte budget does not matter for this
+ * projection — the constant is "small enough to keep memory bounded".
  */
-const INLINE_SOURCE_PREVIEW_BYTES = 1024;
+const INLINE_SOURCE_PREVIEW_CHARS = 1024;
 
 /**
  * Best-effort row-count from CSV-like text content.
@@ -48,6 +53,14 @@ const INLINE_SOURCE_PREVIEW_BYTES = 1024;
  * decision test"). For text/csv we count newline-separated rows after
  * trimming, subtracting one for the header row when there is content.
  *
+ * MIME normalisation: the input may be parameterised (e.g.
+ * "text/csv; charset=utf-8" — a perfectly valid value the server may
+ * record verbatim from the upload's Content-Type header).  We split on
+ * `;` and lowercase before the comparison so parameterised CSVs are not
+ * silently classified as "unknown row count".  RFC 7231 §3.1.1.1 reserves
+ * `;` as the parameter separator; a literal `;` cannot appear inside the
+ * type/subtype tokens.
+ *
  * Exported for the ChatPanel test seam — the integration tests stub the blob
  * fetchers and feed text directly into this projector.
  */
@@ -55,7 +68,8 @@ export function deriveRowCount(
   mimeType: string,
   text: string,
 ): number | null {
-  if (mimeType !== "text/csv") return null;
+  const baseMimeType = mimeType.split(";")[0].trim().toLowerCase();
+  if (baseMimeType !== "text/csv") return null;
   const trimmed = text.trim();
   if (trimmed === "") return 0;
   const lines = trimmed.split("\n").length;
@@ -235,27 +249,58 @@ export function ChatPanel({
       try {
         const meta = await getBlobMetadata(sessionId, targetBlobId);
         if (cancelled) return;
+        // Tier-1 audit-trail invariant: every persisted blob has a
+        // SHA-256 hash (CLAUDE.md "Auditability Standard": hashes survive
+        // payload deletion).  A null/empty hash from our own backend is
+        // an audit-trail bug we want to SURFACE, not mask with a
+        // fabricated empty string.  The caller-side catch arm below
+        // logs the throw via console.error so the failure is
+        // debuggable in the browser console.  The widget remains
+        // un-mounted on hash absence — that's the correct outcome
+        // (rendering a blank-hash audit pane would assert a value the
+        // system never recorded; see CLAUDE.md "fabrication decision
+        // test").
+        if (meta.content_hash === null || meta.content_hash === "") {
+          throw new Error(
+            `inline blob ${targetBlobId} has no content_hash — ` +
+              "audit-trail invariant violated (Tier-1)",
+          );
+        }
         const text = await previewBlobContent(sessionId, targetBlobId);
         if (cancelled) return;
-        const truncatedPreview = text.slice(0, INLINE_SOURCE_PREVIEW_BYTES);
+        const truncatedPreview = text.slice(0, INLINE_SOURCE_PREVIEW_CHARS);
         const summary: InlineSourceSummary = {
           blobId: meta.id,
           filename: meta.filename,
           mimeType: meta.mime_type,
           contentPreview: truncatedPreview,
           rowCount: deriveRowCount(meta.mime_type, text),
-          // Hash absence is an audit-trail bug we should surface — refuse to
-          // render a fake hash, refuse to silently drop the summary.
-          contentHash: meta.content_hash ?? "",
+          contentHash: meta.content_hash,
           provenance: toInlineSourceProvenance(meta.creation_modality),
         };
         if (cancelled) return;
         setInlineSourceSummary(sessionId, summary);
-      } catch {
-        // Tier-3 (external blob endpoint).  A failed fetch leaves the
-        // stored summary untouched (intentional: we'd rather show the
-        // last-known-good projection than blank the widget on a transient
-        // failure).  A retry will fire the next time the predicate flips.
+      } catch (err) {
+        // Frontend display-projection failure.  Bound `err` (not bare
+        // `catch {}`) so programming errors are debuggable:
+        //   * Transient blob-fetch failures (Tier-3 boundary —
+        //     authenticated endpoint returning 5xx) are the expected
+        //     case; we keep the last-known-good summary in the store.
+        //   * `toInlineSourceProvenance` throws on an unknown wire
+        //     `CreationModality` value (exhaustiveness `never`).  That
+        //     would be a wire-contract drift we MUST see, not silently
+        //     swallow.
+        //   * The Tier-1 hash-invariant throw above lands here.
+        // `console.error` follows the in-codebase frontend convention
+        // (see App.tsx [preferences], CatalogDrawer.tsx, etc.) — it is
+        // NOT the backend `slog` channel (CLAUDE.md "Telemetry and
+        // Logging").  The audit trail of the failure itself lives on
+        // the server (blob-fetch attempts are recorded server-side);
+        // this is the operational mirror so a developer opening
+        // devtools sees the projection failure.
+        if (!cancelled) {
+          console.error("[inline-source] projection failed:", err);
+        }
       }
     })();
     return () => {

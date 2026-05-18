@@ -15,7 +15,7 @@ from typing import IO, TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.schema import SchemaConfig
@@ -99,8 +99,9 @@ class JSONSink(BaseSink):
     """
 
     name = "json"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fbcf7af17e132faf"
+    source_file_hash: str | None = "sha256:604a70c6c47e5ca4"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

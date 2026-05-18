@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from elspeth.contracts import PipelineRow, RunStatus
+from elspeth.contracts import Determinism, PipelineRow, RunStatus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.lineage import explain
@@ -33,6 +33,7 @@ class _AddFieldTransform(BaseTransform):
     """Transform that adds a 'stage' field to track processing."""
 
     name = "add_field"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 

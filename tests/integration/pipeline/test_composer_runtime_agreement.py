@@ -99,6 +99,7 @@ from typing import Any
 import pytest
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
+from elspeth.contracts import Determinism
 from elspeth.contracts.audit import Run
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import FrameworkBugError
@@ -2695,6 +2696,7 @@ class _BatchAggregateTransform(BaseTransform):
     """
 
     name = "agreement_batch_aggregate"
+    determinism = Determinism.DETERMINISTIC
     is_batch_aware = True
     input_schema = _TestSchema
     output_schema = _TestSchema

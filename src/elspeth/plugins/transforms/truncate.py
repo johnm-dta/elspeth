@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -85,8 +86,9 @@ class Truncate(BaseTransform):
     """
 
     name = "truncate"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:800bbbb5063458fa"
+    source_file_hash: str | None = "sha256:5bf45bf268729584"
     config_model = TruncateConfig
     passes_through_input = True
 

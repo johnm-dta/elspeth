@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -112,8 +113,9 @@ class BatchPairedPreference(BaseTransform):
     """Compare paired variant scores over an aggregation batch."""
 
     name = "batch_paired_preference"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a7da02055c68dba8"
+    source_file_hash: str | None = "sha256:c230943dfdc78811"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
 

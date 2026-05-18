@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
 from tests.fixtures.base_classes import inject_write_failure
@@ -311,7 +312,6 @@ class TestCSVSink:
 
     def test_has_determinism(self) -> None:
         """CSVSink has determinism attribute."""
-        from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         sink = inject_write_failure(CSVSink({"path": "/tmp/test.csv", "schema": STRICT_SCHEMA}))

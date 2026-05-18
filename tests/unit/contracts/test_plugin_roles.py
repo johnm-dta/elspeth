@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import PluginSchema, SinkContext, SourceContext
+from elspeth.contracts import Determinism, PluginSchema, SinkContext, SourceContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.plugin_roles import (
     require_declared_input_fields_plugin,
@@ -40,6 +40,7 @@ def _contract(fields: tuple[str, ...]) -> SchemaContract:
 
 class _DeclaredSourceBase(BaseSource):
     name = "declared-source-base"
+    determinism = Determinism.IO_READ
     output_schema = PluginSchema
     declared_guaranteed_fields = frozenset({"customer_id"})
 
@@ -55,19 +56,23 @@ class _DeclaredSourceBase(BaseSource):
 
 
 class _InheritedDeclaredSource(_DeclaredSourceBase):
+    determinism = Determinism.IO_READ
     pass
 
 
 class _BadDeclaredSourceTuple(_DeclaredSourceBase):
+    determinism = Determinism.IO_READ
     declared_guaranteed_fields = ("customer_id",)
 
 
 class _BadDeclaredSourceItem(_DeclaredSourceBase):
+    determinism = Determinism.IO_READ
     declared_guaranteed_fields = frozenset({1})
 
 
 class _DeclaredSinkBase(BaseSink):
     name = "declared-sink-base"
+    determinism = Determinism.IO_WRITE
     input_schema = PluginSchema
     declared_required_fields = frozenset({"customer_id"})
 
@@ -86,14 +91,17 @@ class _DeclaredSinkBase(BaseSink):
 
 
 class _InheritedDeclaredSink(_DeclaredSinkBase):
+    determinism = Determinism.IO_WRITE
     pass
 
 
 class _BadDeclaredSinkTuple(_DeclaredSinkBase):
+    determinism = Determinism.IO_WRITE
     declared_required_fields = ("customer_id",)
 
 
 class _BadDeclaredSinkItem(_DeclaredSinkBase):
+    determinism = Determinism.IO_WRITE
     declared_required_fields = frozenset({1})
 
 

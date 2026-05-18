@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -123,8 +124,9 @@ class BatchDriftCompare(BaseTransform):
     """Compare baseline and current cohort distributions over a batch."""
 
     name = "batch_drift_compare"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c9350885fc4f8118"
+    source_file_hash: str | None = "sha256:3cd9f3bef658efb2"
     config_model = BatchDriftCompareConfig
     is_batch_aware = True
 

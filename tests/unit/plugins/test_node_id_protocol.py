@@ -4,6 +4,8 @@ node_id is set by the Orchestrator after plugin registration with Landscape.
 This test verifies it's part of the plugin contract (protocols and base classes).
 """
 
+from elspeth.contracts import Determinism
+
 
 class TestNodeIdProtocol:
     """Verify node_id is part of plugin contract."""
@@ -32,6 +34,7 @@ class TestNodeIdProtocol:
 
         class TestSource(BaseSource):
             name = "test"
+            determinism = Determinism.IO_READ
             output_schema = TestSchema
 
             def load(self, ctx: SourceContext) -> Iterator[dict[str, Any]]:  # type: ignore[override]
@@ -67,6 +70,7 @@ class TestNodeIdProtocol:
 
         class TestTransform(BaseTransform):
             name = "test"
+            determinism = Determinism.DETERMINISTIC
             input_schema = TestSchema
             output_schema = TestSchema
 
@@ -118,6 +122,7 @@ class TestNodeIdProtocol:
 
         class TestSink(BaseSink):
             name = "test"
+            determinism = Determinism.IO_WRITE
             input_schema = TestSchema
             _on_write_failure: str | None = "discard"
 

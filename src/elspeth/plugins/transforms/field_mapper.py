@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.schema import SchemaConfig
@@ -113,8 +114,9 @@ class FieldMapper(BaseTransform):
     """
 
     name = "field_mapper"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b6c0765565548772"
+    source_file_hash: str | None = "sha256:8399af51f4a2a967"
     config_model = FieldMapperConfig
 
     @classmethod

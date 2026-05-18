@@ -12,6 +12,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -111,8 +112,9 @@ class BatchStats(BaseTransform):
     """
 
     name = "batch_stats"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4d7ff4cc4c61ba64"
+    source_file_hash: str | None = "sha256:0e99d3ed33d1b3f9"
     config_model = BatchStatsConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 

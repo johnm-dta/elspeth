@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.contracts import PipelineRow, RunStatus, SinkProtocol, SourceProtocol, TransformProtocol
+from elspeth.contracts import Determinism, PipelineRow, RunStatus, SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.core.config import AggregationSettings, CoalesceSettings, ElspethSettings, GateSettings, SourceSettings, TriggerConfig
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -41,6 +41,7 @@ class AddFieldTransform(BaseTransform):
     """Transform that adds a field to the row."""
 
     name = "add_field"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -63,6 +64,7 @@ class BatchPassthroughTransform(BaseTransform):
     """Batch-aware transform that passes through rows unchanged."""
 
     name = "batch_passthrough"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
     is_batch_aware = True

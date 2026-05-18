@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import PipelineRow, PluginSchema
+from elspeth.contracts import Determinism, PipelineRow, PluginSchema
 from elspeth.core.landscape import LandscapeDB
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -29,6 +29,8 @@ class ValueSchema(PluginSchema):
 
 class TrackingTransform(BaseTransform):
     """Transform that tracks whether close() was called."""
+
+    determinism = Determinism.DETERMINISTIC
 
     input_schema = ValueSchema
     output_schema = ValueSchema
@@ -55,6 +57,8 @@ class TrackingTransform(BaseTransform):
 
 class FailingCloseTransform(TrackingTransform):
     """Transform whose close() raises an error."""
+
+    determinism = Determinism.DETERMINISTIC
 
     def close(self) -> None:
         self.close_called = True
@@ -118,6 +122,7 @@ class TestOrchestratorCleanup:
 
         class MinimalTransform(BaseTransform):
             name = "minimal"
+            determinism = Determinism.DETERMINISTIC
             input_schema = ValueSchema
             output_schema = ValueSchema
 

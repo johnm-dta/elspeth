@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from elspeth.core.config import ElspethSettings
     from elspeth.core.landscape import LandscapeDB
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.core.operations import track_operation
@@ -85,7 +86,7 @@ def export_landscape(
     sink = sink_factory(sink_name)
     sink.node_id = f"export:{sink_name}"
 
-    from elspeth.contracts import Determinism, NodeType
+    from elspeth.contracts import NodeType
     from elspeth.contracts.schema import SchemaConfig
     from elspeth.core.landscape.factory import RecorderFactory
 

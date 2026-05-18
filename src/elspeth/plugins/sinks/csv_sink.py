@@ -17,7 +17,7 @@ from typing import IO, TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
 
 if TYPE_CHECKING:
@@ -109,8 +109,9 @@ class CSVSink(BaseSink):
     """
 
     name = "csv"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3ffa924b73275f02"
+    source_file_hash: str | None = "sha256:a359d8eccb1d5e66"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

@@ -18,6 +18,7 @@ import chromadb.errors
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import CallStatus, CallType
 from elspeth.contracts.errors import (
@@ -171,8 +172,9 @@ class ChromaSink(BaseSink):
     """
 
     name = "chroma_sink"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6c2e9ee70616c942"
+    source_file_hash: str | None = "sha256:a1501bc8365cc7f2"
     config_model = ChromaSinkConfig
     supports_resume = False
 

@@ -16,6 +16,7 @@ from pydantic import Field, ValidationError, field_validator
 from elspeth.contracts import (
     AuditCharacteristic,
     DeclaredAuditCharacteristics,
+    Determinism,
     PluginSchema,
     SourceRow,
 )
@@ -80,8 +81,9 @@ class CSVSource(BaseSource):
     """
 
     name = "csv"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e2c2e8a44fbb2963"
+    source_file_hash: str | None = "sha256:f5de059b3e63004f"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str

@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -74,8 +75,9 @@ class BatchTopK(BaseTransform):
     """Report most frequent scalar values over a batch."""
 
     name = "batch_top_k"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6cbc512eaedbf136"
+    source_file_hash: str | None = "sha256:ba5ef03f016f1092"
     config_model = BatchTopKConfig
     is_batch_aware = True
 

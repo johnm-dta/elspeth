@@ -44,10 +44,83 @@ def _create_session(client: TestClient) -> str:
 
 
 def _seed_guided_session(client: TestClient, session_id: str) -> dict:
-    """Trigger initial guided turn so guided_session is attached + at step_1."""
+    """Trigger initial guided turn so guided_session is attached + at step_1.
+
+    GET /guided is non-mutating on a fresh session (commit c4e2f69cd,
+    May 15 2026) — the latent step_1 turn is built in memory and returned
+    but no composition_state row is allocated.  The chat dispatcher
+    auto-seeds the TurnRecord on the first POST chat the same way the
+    respond endpoint does, so step_chat tests that only need a step_1
+    chat surface can rely on this helper as-is.
+
+    Tests that need the persisted composition_state row to exist
+    BEFORE the chat call (e.g. to overwrite ``composer_meta`` directly
+    via the service layer) must use :func:`_seed_persisted_state`
+    instead.
+    """
     resp = client.get(f"/api/sessions/{session_id}/guided")
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _seed_persisted_state(client: TestClient, session_id: str) -> dict:
+    """Materialise a persisted composition_state version with a guided session.
+
+    Use this in step_chat tests that read or overwrite the persisted
+    state through the service layer.  POSTs respond with ``chosen=["csv"]``
+    to trigger the auto-seed + persistence path inside the route's
+    compose-lock; the session ends up at step_2_blob with the step_1
+    TurnRecord recorded in ``guided_session.history``.  Tests that need
+    the session positioned at step_1 must use :func:`_seed_persisted_step1`
+    instead — that helper writes the initial latent state straight
+    through the service layer and leaves the session at step_1_source.
+    """
+    get_resp = client.get(f"/api/sessions/{session_id}/guided")
+    assert get_resp.status_code == 200, get_resp.json()
+    respond_resp = client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={"chosen": ["csv"]},
+    )
+    assert respond_resp.status_code == 200, respond_resp.json()
+    return respond_resp.json()
+
+
+def _seed_persisted_step1(client: TestClient, session_id: str) -> None:
+    """Persist the latent step_1 guided state via the service layer.
+
+    Unlike :func:`_seed_persisted_state`, this does NOT advance the
+    session past step_1 — it writes the same in-memory state that
+    ``_initial_composition_state_with_guided_session`` produces through
+    the route's lazy-create branches, allocating a real
+    composition_state v1 row.  Tests that need an existing
+    composition_state_id available on the audit row of a chat call that
+    happens at step_1_source (e.g. the InvariantError sanitization
+    coverage) must seed this way: the chat endpoint reads but does not
+    write state on the failure path, so the audit row's
+    composition_state_id needs to point at a pre-existing row.
+    """
+    from elspeth.web.composer.guided.state_machine import GuidedSession
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    initial_guided = GuidedSession.initial()
+    state_data = CompositionStateData(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata_={"name": None, "description": None, "tags": ()},
+        is_valid=False,
+        validation_errors=None,
+        composer_meta={"guided_session": initial_guided.to_dict()},
+    )
+    service = client.app.state.session_service
+    asyncio.run(
+        service.save_composition_state(
+            UUID(session_id),
+            state_data,
+            provenance="session_seed",
+        )
+    )
 
 
 def _fake_llm_reply(text: str) -> SimpleNamespace:
@@ -419,7 +492,7 @@ class TestStepChatRejections:
         so this is the only way to exercise the rejection path.)
         """
         session_id = _create_session(composer_test_client)
-        _seed_guided_session(composer_test_client, session_id)
+        _seed_persisted_step1(composer_test_client, session_id)
 
         # Strip guided_session from the persisted composition_state via the
         # service layer — mirrors the path a freeform-only session would take.
@@ -459,7 +532,7 @@ class TestStepChatRejections:
         a completed or exited-to-freeform session would take.
         """
         session_id = _create_session(composer_test_client)
-        _seed_guided_session(composer_test_client, session_id)
+        _seed_persisted_step1(composer_test_client, session_id)
 
         # Drop the session to terminal via the converter round-trip.
         service = composer_test_client.app.state.session_service
@@ -640,7 +713,12 @@ class TestStepChatServerInvariants:
         from structlog.testing import capture_logs
 
         session_id = _create_session(composer_test_client)
-        _seed_guided_session(composer_test_client, session_id)
+        # Pre-persist step_1 state so the audit row written on the failure
+        # path can reference a real composition_state_id (the chat
+        # InvariantError handler reads state but does not write — without a
+        # prior persistence the audit row's composition_state_id would be
+        # null, hiding the failure from per-state audit replays).
+        _seed_persisted_step1(composer_test_client, session_id)
 
         with (
             patch(
@@ -688,7 +766,9 @@ class TestStepChatServerInvariants:
     def test_whitespace_only_content_returns_sanitized_500(self, composer_test_client: TestClient) -> None:
         """Whitespace-only content → same path as empty content (``.strip()`` is empty)."""
         session_id = _create_session(composer_test_client)
-        _seed_guided_session(composer_test_client, session_id)
+        # See the sibling empty-content test for why pre-persisting is
+        # required on the InvariantError failure path.
+        _seed_persisted_step1(composer_test_client, session_id)
 
         with patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",

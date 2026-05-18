@@ -3,6 +3,8 @@
 
 from datetime import UTC, datetime
 
+from elspeth.contracts import Determinism
+
 
 class TestNodesDeterminismColumn:
     """Tests for determinism column in nodes table."""
@@ -10,7 +12,7 @@ class TestNodesDeterminismColumn:
     def test_node_model_has_determinism_field(self) -> None:
         from datetime import UTC, datetime
 
-        from elspeth.contracts import Determinism, Node, NodeType
+        from elspeth.contracts import Node, NodeType
 
         node = Node(
             node_id="node-001",
@@ -27,7 +29,6 @@ class TestNodesDeterminismColumn:
 
     def test_determinism_values(self) -> None:
         """Verify valid determinism values match Determinism enum."""
-        from elspeth.contracts import Determinism
 
         valid_values = {d.value for d in Determinism}
         # All 6 values per architecture specification

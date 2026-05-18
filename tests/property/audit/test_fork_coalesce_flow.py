@@ -20,7 +20,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
-from elspeth.contracts import ArtifactDescriptor, SourceRow, TerminalOutcome, TerminalPath
+from elspeth.contracts import ArtifactDescriptor, Determinism, SourceRow, TerminalOutcome, TerminalPath
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.core.config import CoalesceSettings, ElspethSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph
@@ -179,6 +179,7 @@ class _EnrichTransform(BaseTransform):
     """Transform that adds an 'enriched' field."""
 
     name = "enrich_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _CoalesceTestSchema
     output_schema = _CoalesceTestSchema
 

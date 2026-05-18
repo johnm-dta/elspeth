@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from elspeth.contracts import PipelineRow, RunStatus
+from elspeth.contracts import Determinism, PipelineRow, RunStatus
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.results import SourceRow
@@ -51,6 +51,7 @@ class InterruptAfterN(BaseTransform):
     """Transform that sets a shutdown event after processing N rows."""
 
     name = "interrupt_after_n"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -101,6 +102,7 @@ class InterruptAfterNBufferedBatch(BaseTransform):
     """
 
     name = "interrupt_after_n_buffered_batch"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
     is_batch_aware = True

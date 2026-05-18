@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -118,8 +119,9 @@ class BatchExperimentCompare(BaseTransform):
     """Compare experiment variants over a batch using mean deltas."""
 
     name = "batch_experiment_compare"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ee786901f9827487"
+    source_file_hash: str | None = "sha256:64e8f47d192690d0"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
 

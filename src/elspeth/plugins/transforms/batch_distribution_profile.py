@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -95,8 +96,9 @@ class BatchDistributionProfile(BaseTransform):
     """
 
     name = "batch_distribution_profile"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:af404628fc32f1f9"
+    source_file_hash: str | None = "sha256:33c43e9bd9059cbc"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar, TypedDict
 
-from elspeth.contracts import NodeStateFailed
+from elspeth.contracts import Determinism, NodeStateFailed
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BoundaryInputs,
@@ -97,6 +97,7 @@ def _contract(fields: tuple[str, ...]) -> SchemaContract:
 
 class _TestSourcePlugin(BaseSource):
     name = "SourceGuaranteedFieldsSource"
+    determinism = Determinism.IO_READ
     output_schema = object
 
     def __init__(

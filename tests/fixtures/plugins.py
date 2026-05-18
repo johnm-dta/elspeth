@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 
 from pydantic import ConfigDict
 
-from elspeth.contracts import ArtifactDescriptor, PluginSchema, SourceRow
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
@@ -32,6 +32,7 @@ class ListSource(_TestSourceBase):
         source = ListSource([{"value": 1}], name="my_source")
     """
 
+    determinism = Determinism.IO_READ
     output_schema = _EngineTestSchema
 
     def __init__(self, data: list[dict[str, Any]], name: str = "list_source", on_success: str = "default") -> None:
@@ -203,6 +204,8 @@ class FailingSource(ListSource):
         source = FailingSource(error_message="Custom load failure")
     """
 
+    determinism = Determinism.IO_READ
+
     def __init__(
         self,
         *,
@@ -220,6 +223,7 @@ class PassTransform(BaseTransform):
     """Identity transform — passes rows through unchanged."""
 
     name = "pass_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
 
@@ -249,6 +253,7 @@ class FailTransform(BaseTransform):
     """Transform that always returns an error result."""
 
     name = "fail_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     on_error = "discard"
@@ -278,6 +283,7 @@ class ConditionalErrorTransform(BaseTransform):
     """Transform that errors on rows where 'fail' key is truthy."""
 
     name = "conditional_error"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     on_error = "discard"
@@ -310,6 +316,7 @@ class CountingTransform(BaseTransform):
     """Transform that counts invocations (for retry testing)."""
 
     name = "counting_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
 
@@ -341,6 +348,7 @@ class SlowTransform(BaseTransform):
     """Transform with configurable delay (for timeout testing)."""
 
     name = "slow_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
 
@@ -375,6 +383,7 @@ class ErrorOnNthTransform(BaseTransform):
     """Transform that errors on the Nth invocation (for retry integration)."""
 
     name = "error_on_nth"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     on_error = "discard"

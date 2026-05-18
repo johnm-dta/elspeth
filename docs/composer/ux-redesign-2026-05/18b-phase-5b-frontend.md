@@ -16,9 +16,9 @@ spot-check passes:
 
 ```bash
 # Function-existence check (more reliable than commit-message grep):
-python -c "from elspeth.web.composer.interpretation_events import record_resolution" \
-  || python -c "from elspeth.web.sessions.service import SessionService; \
-     assert hasattr(SessionService, 'create_pending_interpretation_event')"
+python -c "from elspeth.web.sessions.service import SessionServiceImpl; \
+  assert hasattr(SessionServiceImpl, 'create_pending_interpretation_event'), \
+  'Backend 18a Task 4 not landed yet'"
 
 # Integration gate:
 .venv/bin/python -m pytest \
@@ -55,13 +55,13 @@ src/elspeth/web/frontend/src/
     interpretationStore.test.ts                                 CREATE    (Task 3)
     sessionStore.ts                                             MODIFY    (Task 3 — wire pending events into session reload)
   components/chat/
-    InterpretationReviewTurn.tsx                                CREATE    (Task 4 — guided mode widget)
-    InterpretationReviewTurn.test.tsx                           CREATE    (Task 4)
     InterpretationReviewInlineMessage.tsx                       CREATE    (Task 5 — freeform mode variant)
     InterpretationReviewInlineMessage.test.tsx                  CREATE    (Task 5)
     ChatPanel.tsx                                               MODIFY    (Tasks 4 + 5 — dispatch)
     ChatPanel.test.tsx                                          MODIFY    (Tasks 4 + 5)
     guided/
+      InterpretationReviewTurn.tsx                              CREATE    (Task 4 — guided mode widget)
+      InterpretationReviewTurn.test.tsx                         CREATE    (Task 4)
       GuidedTurn.tsx                                            MODIFY    (Task 4 — dispatch to InterpretationReviewTurn)
       GuidedTurn.test.tsx                                       MODIFY    (Task 4)
   components/audit/
@@ -262,6 +262,10 @@ data" — the API client has already parsed the JSON, run Pydantic-mirror
 checks (Task 2), and produced a typed object. Inside the store, direct
 field access is the right discipline. No `.optional_field()` patterns.
 
+**Telemetry:** NONE — the frontend store mirrors backend audit truth;
+it emits no operational signals of its own. The backend Landscape is
+the canonical record; client-side telemetry would be redundant duplication.
+
 ### Test shape
 
 `interpretationStore.test.ts`:
@@ -297,10 +301,19 @@ field access is the right discipline. No `.optional_field()` patterns.
 Change it" pair. Pattern follows the existing
 `InspectAndConfirmTurn.tsx` shape.
 
+**Widget placement.** `InterpretationReviewTurn` is guided-mode-only:
+it is dispatched exclusively from `GuidedTurn.tsx` and has no freeform
+consumer (freeform uses the separate `InterpretationReviewInlineMessage`
+in Task 5). Following the convention established by `InspectAndConfirmTurn`,
+`SingleSelectTurn`, and all other guided-only widgets, it lives at
+`components/chat/guided/`. `GuidedTurn.tsx` imports it with the same
+relative `"./InterpretationReviewTurn"` pattern used for every sibling
+widget.
+
 **Files:**
 
-- Create: `src/elspeth/web/frontend/src/components/chat/InterpretationReviewTurn.tsx`.
-- Create: `src/elspeth/web/frontend/src/components/chat/InterpretationReviewTurn.test.tsx`.
+- Create: `src/elspeth/web/frontend/src/components/chat/guided/InterpretationReviewTurn.tsx`.
+- Create: `src/elspeth/web/frontend/src/components/chat/guided/InterpretationReviewTurn.test.tsx`.
 - Modify: `src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx` —
   dispatch the new `TurnType="interpretation_review"` to the new widget.
 - Modify: `src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.test.tsx`.
@@ -401,7 +414,15 @@ distinct turn widget.
   store as inline messages between the assistant's message and the
   chat input. The position is "above the chat input, below the most
   recent assistant message," visually styled like an assistant message
-  with a coloured side-bar to signal "action required."
+  with a coloured side-bar to signal "action required." The dispatch
+  predicate for the interpretation inline message is: the store has
+  at least one pending event for the session AND the session is NOT
+  in guided mode. This is distinct from the `inline_blob` summary
+  banner (which fires for any `inline_blob` proposal regardless of
+  interpretation state); the two can coexist. A proposal whose summary
+  does NOT match interpretation-event context (e.g., "Created a 5-row
+  source from your input") renders as the standard `InlineSourceCreatedTurn`
+  banner, not as an `InterpretationReviewInlineMessage`.
 
 ### Component contract
 
@@ -448,6 +469,17 @@ rendering.
 16. After opt-out, no inline messages render even if pending events
     remain in the store (the opt-out clears them locally; backend
     still has the rows for audit).
+17. **Negative-case (routing predicate):** An `inline_blob` proposal
+    with a summary like `"Created a 5-row source from your input"` —
+    i.e., a summary containing neither `"I read"` nor `"interpreted as"` —
+    does NOT render `InterpretationReviewInlineMessage`. The standard
+    `InlineSourceCreatedTurn` renders instead. Assert:
+    `expect(screen.queryByTestId('interpretation-review-inline-message'))
+    .not.toBeInTheDocument()` and
+    `expect(screen.getByTestId('inline-source-created-turn')).toBeInTheDocument()`.
+    This pins the negative branch of the dispatch predicate and guards
+    against future changes that accidentally widen the interpretation-review
+    surface.
 
 ### Step 1-3 — RED → GREEN → commit
 
@@ -466,45 +498,82 @@ drive the same backend contract.
 
 ### Test shape
 
-The test:
+**Part A — 5a-then-5b combined sequence (the demo canonical prompt flow).**
 
-1. Sets up a mock API that returns:
-   - GET `/interpretations?status=all` → one pending event for
-     `user_term='cool', llm_draft='modern design + clear purpose + interactivity'`.
-   - POST `/interpretations/{id}/resolve` → 200 with a new composition
-     state response.
-2. Renders the composer in guided mode with the canonical hero
-   pipeline state.
-3. Asserts `InterpretationReviewTurn` is visible.
-4. Clicks "Use my interpretation".
-5. Asserts the POST body was `{ choice: 'accepted_as_drafted' }`.
-6. Asserts the widget collapses and the new composition state is
-   propagated into the session store.
-7. Resets the harness; re-renders in freeform mode.
-8. Asserts `InterpretationReviewInlineMessage` is visible.
-9. Clicks "Change it"; types an amendment; submits.
-10. Asserts the POST body was `{ choice: 'amended', amended_value: <text> }`.
-11. Asserts the inline message disappears.
+The canonical hero prompt drives 5a (inline blob creation) immediately
+before 5b (interpretation review). Part A pins the store-hydration
+ordering that would silently break if `interpretationStore.refreshPending`
+fires before `sessionStore` has hydrated the composition state.
+
+1. Set up a mock API:
+   - POST `set_pipeline` (the 5a `inline_blob` tool call response) →
+     returns a `CompositionState` that includes the LLM transform node
+     with `node_id='llm_rate_coolness'`.
+   - `request_interpretation_review` tool-call response → returns a
+     pending `InterpretationEvent` with
+     `{ user_term: 'cool', llm_draft: 'modern design + clear purpose + interactivity',
+       affected_node_id: 'llm_rate_coolness', choice: 'pending' }`.
+   - GET `/interpretations?status=all` → same pending event as above
+     (called by `interpretationStore.refreshPending` on session reload).
+2. Render the composer in guided mode starting from the
+   `InlineSourceCreatedTurn` (5a's turn). This corresponds to the
+   composer session state just after Phase 5a has placed the inline
+   source.
+3. Assert `compositionState.nodes` includes `node_id='llm_rate_coolness'`
+   BEFORE the interpretation turn renders. This is the hydration-ordering
+   assertion: if the store loads in the wrong order, this node will not
+   be present when `InterpretationReviewTurn` mounts.
+4. Simulate advancing past `InlineSourceCreatedTurn` (user confirms the
+   source). The guided turn dispatcher moves to the next turn.
+5. Assert `InterpretationReviewTurn` mounts. At mount time,
+   `compositionState.nodes` must still include `node_id='llm_rate_coolness'`.
+   Assert this explicitly: `expect(compositionState.nodes).toContainEqual(
+   expect.objectContaining({ node_id: 'llm_rate_coolness' }))`.
+6. Assert that `affected_node_id` on the rendered event matches a node
+   that exists in `compositionState.nodes` (no dangling reference).
+
+**Part B — guided mode resolve flow.**
+
+7. From the state reached in step 5, click "Use my interpretation".
+8. Assert the POST body sent to
+   `POST /interpretations/{id}/resolve` was
+   `{ choice: 'accepted_as_drafted' }`.
+9. Assert the widget collapses (the pending event is removed from
+   `interpretationStore.pendingBySession[sessionId]`).
+10. Assert the new composition state returned by the resolve endpoint is
+    propagated into `sessionStore` (the session's `composition_state`
+    reflects the post-resolve value).
+
+**Part C — freeform mode resolve flow.**
+
+11. Reset the harness; re-render the same session in freeform mode with
+    the mock API returning the same pending event.
+12. Assert `InterpretationReviewInlineMessage` is visible above the chat
+    input.
+13. Click "Change it"; type `'highly engaging and accessible'`; click
+    Submit.
+14. Assert the POST body was
+    `{ choice: 'amended', amended_value: 'highly engaging and accessible' }`.
+15. Assert the inline message disappears (event removed from
+    `pendingBySession`).
 
 ### Step 1-3 — RED → GREEN → commit
 
-`frontend(integration): interpretation review covers guided + freeform`.
+`frontend(integration): interpretation review covers 5a+5b flow + guided + freeform`.
 
 ---
 
 ## Task 7 — Audit-readiness panel row
 
-**Goal.** Add a new conditional row to the audit-readiness panel:
+**Goal.** Add a new row to the audit-readiness panel:
 "LLM interpretations: <pending count> pending • <accepted count>
 accepted • <amended count> amended • <opted-out count> opted-out
 (session-scoped)".
 
-**Conditional on Phase 2 having shipped.** Per overview §"Sibling
-plans": if Phase 2's `AuditReadinessPanel.tsx` does not exist at
-planning time, this task is deferred to a Phase-2 followup ticket and
-noted on the umbrella PR.
+Phase 2C has shipped (`project_phase2c_implementation_complete`);
+`AuditReadinessPanel.tsx` exists. This task is unconditional.
 
-**Files (if Phase 2 has shipped):**
+**Files:**
 
 - Modify: `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.tsx`.
 - Modify: `src/elspeth/web/frontend/src/components/audit/AuditReadinessPanel.test.tsx`.
@@ -620,7 +689,9 @@ skill edits). Frontend `npm run build` deployed to staging
         `interpretation_events` row.
 - [ ] Open a SECOND session. Type the same prompt. Click "Don't ask
       me again this session." Confirm:
-      - The opt-out audit row is in `proposal_events`.
+      - The opt-out audit row is in `interpretation_events` with
+        `choice='opted_out'` and
+        `interpretation_source='auto_interpreted_opt_out'`.
       - The pipeline compose completes without surfacing "cool" again.
       - The audit-readiness panel shows "opted out for this session".
 - [ ] Switch the SECOND session to freeform mode (if applicable);
@@ -642,8 +713,7 @@ Phase 5b frontend is complete when:
 - [ ] Task 4 (`InterpretationReviewTurn`) green, committed.
 - [ ] Task 5 (`InterpretationReviewInlineMessage`) green, committed.
 - [ ] Task 6 (Vitest integration test) green, committed.
-- [ ] Task 7 (audit-panel row) green, committed (OR deferred with a
-      tracked followup if Phase 2 has not shipped).
+- [ ] Task 7 (audit-panel row) green, committed.
 - [ ] Task 8 (copy nudges) green, committed.
 - [ ] Task 9 (manual smoke) passed end-to-end on staging.
 - [ ] Vitest `npm run test` passes from `src/elspeth/web/frontend/`.

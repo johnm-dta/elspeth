@@ -18,7 +18,15 @@ import json
 import pytest
 from sqlalchemy import select, update
 
-from elspeth.contracts import ExportStatus, FieldContract, ReproducibilityGrade, RunStatus, SchemaContract, SecretResolutionInput
+from elspeth.contracts import (
+    Determinism,
+    ExportStatus,
+    FieldContract,
+    ReproducibilityGrade,
+    RunStatus,
+    SchemaContract,
+    SecretResolutionInput,
+)
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
 from elspeth.core.dependency_config import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -997,7 +1005,7 @@ class TestFinalizeRunEdgeCases:
 
     def test_finalize_nondeterministic_run(self) -> None:
         """finalize_run with nondeterministic nodes yields REPLAY_REPRODUCIBLE."""
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
 
         db = make_landscape_db()

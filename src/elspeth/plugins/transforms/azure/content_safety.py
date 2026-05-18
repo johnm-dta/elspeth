@@ -16,6 +16,7 @@ from typing import Any, TypedDict
 
 from pydantic import BaseModel, Field
 
+from elspeth.contracts import Determinism
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -120,8 +121,9 @@ class AzureContentSafety(BaseAzureSafetyTransform):
     """
 
     name = "azure_content_safety"
+    determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6940d98599fd6dcb"
+    source_file_hash: str | None = "sha256:29c1b0c6911b8fbf"
     config_model = AzureContentSafetyConfig
     passes_through_input = True
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_semantics import (
     InputSemanticRequirements,
     OutputSemanticDeclaration,
@@ -11,6 +12,7 @@ from elspeth.plugins.infrastructure.base import BaseTransform
 
 class _StubTransform(BaseTransform):
     name = "stub"
+    determinism = Determinism.DETERMINISTIC
 
     def process(self, row, ctx):  # pragma: no cover — not exercised
         raise NotImplementedError

@@ -2,6 +2,7 @@
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_context import PluginContext
 from tests.fixtures.factories import make_source_context
 
@@ -50,7 +51,6 @@ class TestNullSource:
 
     def test_null_source_has_determinism(self) -> None:
         """NullSource has appropriate determinism marking."""
-        from elspeth.contracts import Determinism
         from elspeth.plugins.sources.null_source import NullSource
 
         source = NullSource({})

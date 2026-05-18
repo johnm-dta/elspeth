@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -134,8 +135,9 @@ class BatchClassifierMetrics(BaseTransform):
     """Compute classifier confusion matrix and F-score metrics over a batch."""
 
     name = "batch_classifier_metrics"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4eb57aba8182b96d"
+    source_file_hash: str | None = "sha256:8585f70fac811b00"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
 

@@ -25,7 +25,7 @@ from jinja2 import StrictUndefined, TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
@@ -301,8 +301,9 @@ class AzureBlobSink(BaseSink):
     """
 
     name = "azure_blob"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1816d1d5730f7f52"
+    source_file_hash: str | None = "sha256:5efeb1644e656fbb"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

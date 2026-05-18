@@ -135,10 +135,32 @@ def _probe_context(transform: BaseTransform) -> Any:
 
     The harness runs transforms in isolation without a real run; the context
     is a lightweight stub with a mock landscape recorder.
+
+    For ``is_batch_aware`` transforms the context also carries a synthetic
+    :class:`AggregationBatchContext`.  Most batch-aware transforms compute
+    from ``rows`` alone and never read ``ctx.aggregation_batch``, but the
+    contract on :class:`AggregationExecutor` is that the batch context IS
+    populated before ``process()`` runs.  The probe must mirror that
+    contract; otherwise transforms that legitimately rely on pagination
+    metadata (e.g. ``ReportAssemble`` emitting "page N of M") cannot run
+    inside the governance sweep without a special opt-out.
     """
+    from elspeth.contracts.node_state_context import AggregationBatchContext
     from tests.fixtures.factories import make_context
 
-    return make_context()
+    ctx = make_context()
+    if transform.is_batch_aware:
+        ctx.aggregation_batch = AggregationBatchContext(
+            trigger_type="count",
+            batch_id="probe-batch",
+            batch_size=1,
+            flush_index=1,
+            rows_seen_total=1,
+            row_start=1,
+            row_end=1,
+            is_end_of_source=True,
+        )
+    return ctx
 
 
 def _emitted_rows_from_result(result: Any) -> list[PipelineRow]:

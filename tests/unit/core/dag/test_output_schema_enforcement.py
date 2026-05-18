@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema import SchemaConfig
 
@@ -16,6 +17,7 @@ class _StubTransform:
     """Minimal stub implementing enough of TransformProtocol for the builder check."""
 
     name = "stub_transform"
+    determinism = Determinism.DETERMINISTIC
     config: ClassVar[dict[str, Any]] = {"schema": {"mode": "observed"}}
     input_schema = None
     output_schema = None

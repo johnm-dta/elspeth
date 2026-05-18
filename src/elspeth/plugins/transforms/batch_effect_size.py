@@ -10,6 +10,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -111,8 +112,9 @@ class BatchEffectSize(BaseTransform):
     """Compute Cohen's d and Hedges' g for batch variant comparisons."""
 
     name = "batch_effect_size"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:22ff716dde30a996"
+    source_file_hash: str | None = "sha256:9859bf65644b5388"
     config_model = BatchEffectSizeConfig
     is_batch_aware = True
 

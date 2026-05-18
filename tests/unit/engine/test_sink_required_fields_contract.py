@@ -6,6 +6,7 @@ from typing import Any, ClassVar, TypedDict
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BoundaryInputs,
@@ -63,6 +64,7 @@ def _contract(
 
 class _TestSinkPlugin(BaseSink):
     name = "SinkRequiredFieldsSink"
+    determinism = Determinism.IO_WRITE
     input_schema = object
 
     def __init__(
@@ -166,6 +168,7 @@ def test_applies_to_true_for_inherited_declared_required_fields() -> None:
 
     class _DeclaredSinkBase(BaseSink):
         name = "declared-sink-base"
+        determinism = Determinism.IO_WRITE
         input_schema = object
         declared_required_fields = frozenset({"customer_id"})
 
@@ -183,6 +186,7 @@ def test_applies_to_true_for_inherited_declared_required_fields() -> None:
             pass
 
     class _InheritedDeclaredSink(_DeclaredSinkBase):
+        determinism = Determinism.IO_WRITE
         pass
 
     assert contract.applies_to(_InheritedDeclaredSink()) is True

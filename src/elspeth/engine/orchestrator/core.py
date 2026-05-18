@@ -44,6 +44,7 @@ import elspeth.contracts.errors as contract_errors
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import (
+    Determinism,
     ExportStatus,
     NodeType,
     PendingOutcome,
@@ -1729,7 +1730,6 @@ class Orchestrator:
             config_gate_node_ids: Set of config gate node IDs (structural, no plugin).
             coalesce_node_ids: Set of coalesce node IDs (structural, no plugin).
         """
-        from elspeth.contracts import Determinism
 
         for node_id in execution_order:
             node_info = graph.get_node_info(node_id)

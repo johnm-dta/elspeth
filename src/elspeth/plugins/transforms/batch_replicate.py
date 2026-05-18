@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import PluginContractViolation, TransformSuccessReason
 from elspeth.contracts.field_collision import detect_field_collisions
@@ -94,8 +95,9 @@ class BatchReplicate(BaseTransform):
     """
 
     name = "batch_replicate"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fb88a2970208439a"
+    source_file_hash: str | None = "sha256:a9f881028f00329a"
     config_model = BatchReplicateConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 

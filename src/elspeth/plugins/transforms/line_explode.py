@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
@@ -161,8 +162,9 @@ class LineExplode(BaseTransform):
     """Explode a string field into one output row per line."""
 
     name = "line_explode"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e426cd6ca548e3e8"
+    source_file_hash: str | None = "sha256:2bf6fedc84a2eb4c"
     config_model = LineExplodeConfig
     creates_tokens = True
 

@@ -300,6 +300,37 @@ class BaseTransform(ABC):
     # None = no output contract provided (acceptable for shape-preserving transforms).
     _output_schema_config: SchemaConfig | None
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Enforces the contract documented in contracts/enums.py:Determinism —
+        # every plugin MUST declare a Determinism value at registration. The
+        # class-level default on BaseTransform exists only to satisfy typing
+        # (descendants assign on top of it); the inheritance chain is not a
+        # legitimate way to acquire a determinism classification. An author who
+        # adds a new transform that makes external calls and forgets to write
+        # `determinism = Determinism.EXTERNAL_CALL` would otherwise silently
+        # record the wrong determinism in the Landscape legal record, misclassify
+        # the node in the readiness panel, render the wrong audit-characteristic
+        # chips in the catalog, and produce a wrong ReproducibilityGrade.
+        # Intermediate ABCs (e.g. BaseAzureSafetyTransform) redeclare too —
+        # the contract is uniform, not "concrete classes only".
+        super().__init_subclass__(**kwargs)
+        if "determinism" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} inherits from BaseTransform but does not "
+                f"explicitly declare a `determinism` class attribute. Every "
+                f"plugin MUST declare its determinism classification at "
+                f"registration; there is no default (see "
+                f"elspeth.contracts.enums.Determinism). Add one of: "
+                f"`determinism = Determinism.DETERMINISTIC`, "
+                f"`Determinism.SEEDED`, `Determinism.IO_READ`, "
+                f"`Determinism.IO_WRITE`, `Determinism.EXTERNAL_CALL`, or "
+                f"`Determinism.NON_DETERMINISTIC` to the class body. "
+                f"Redeclaring the same value as the parent is acceptable — "
+                f"the point is explicit author declaration, so that an audit "
+                f"reader can read the source and see which value the author "
+                f"chose, rather than tracing inheritance to find it."
+            )
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration.
 
@@ -952,6 +983,33 @@ class BaseSink(ABC):
     _display_headers_resolved: bool
     _needs_resume_field_resolution: bool
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Enforces the contract documented in contracts/enums.py:Determinism —
+        # every plugin MUST declare a Determinism value at registration. See
+        # BaseTransform.__init_subclass__ for the rationale; this hook is the
+        # sink-side mirror. A sink that performs IO_WRITE inherits the right
+        # value by accident today; one whose semantics differ (e.g. an
+        # idempotent metrics sink that author classifies DETERMINISTIC, or
+        # an EXTERNAL_CALL sink that posts to a webhook) would silently
+        # mis-record without this guard.
+        super().__init_subclass__(**kwargs)
+        if "determinism" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} inherits from BaseSink but does not "
+                f"explicitly declare a `determinism` class attribute. Every "
+                f"plugin MUST declare its determinism classification at "
+                f"registration; there is no default (see "
+                f"elspeth.contracts.enums.Determinism). Add one of: "
+                f"`determinism = Determinism.DETERMINISTIC`, "
+                f"`Determinism.SEEDED`, `Determinism.IO_READ`, "
+                f"`Determinism.IO_WRITE`, `Determinism.EXTERNAL_CALL`, or "
+                f"`Determinism.NON_DETERMINISTIC` to the class body. "
+                f"Redeclaring the same value as the parent is acceptable — "
+                f"the point is explicit author declaration, so that an audit "
+                f"reader can read the source and see which value the author "
+                f"chose, rather than tracing inheritance to find it."
+            )
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration.
 
@@ -1226,6 +1284,32 @@ class BaseSource(ABC):
 
     # Schema contract for row validation
     _schema_contract: SchemaContract | None = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Enforces the contract documented in contracts/enums.py:Determinism —
+        # every plugin MUST declare a Determinism value at registration. See
+        # BaseTransform.__init_subclass__ for the rationale; this hook is the
+        # source-side mirror. A new source plugin that reads from a live REST
+        # API (EXTERNAL_CALL) but inherits the IO_READ default would record
+        # the wrong determinism per-node in Landscape and produce a wrong
+        # ReproducibilityGrade for any run using it.
+        super().__init_subclass__(**kwargs)
+        if "determinism" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} inherits from BaseSource but does not "
+                f"explicitly declare a `determinism` class attribute. Every "
+                f"plugin MUST declare its determinism classification at "
+                f"registration; there is no default (see "
+                f"elspeth.contracts.enums.Determinism). Add one of: "
+                f"`determinism = Determinism.DETERMINISTIC`, "
+                f"`Determinism.SEEDED`, `Determinism.IO_READ`, "
+                f"`Determinism.IO_WRITE`, `Determinism.EXTERNAL_CALL`, or "
+                f"`Determinism.NON_DETERMINISTIC` to the class body. "
+                f"Redeclaring the same value as the parent is acceptable — "
+                f"the point is explicit author declaration, so that an audit "
+                f"reader can read the source and see which value the author "
+                f"chose, rather than tracing inheritance to find it."
+            )
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration.

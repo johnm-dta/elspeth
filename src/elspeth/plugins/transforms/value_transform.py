@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import PipelineRow
@@ -111,8 +112,9 @@ class ValueTransform(BaseTransform):
     """
 
     name = "value_transform"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5a371ef8d6e0a5e9"
+    source_file_hash: str | None = "sha256:8c8adf4b7d39ff12"
     config_model = ValueTransformConfig
     passes_through_input = True
 

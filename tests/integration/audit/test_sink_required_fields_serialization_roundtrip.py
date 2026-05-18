@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, ClassVar, TypedDict
 
-from elspeth.contracts import NodeStateFailed, NodeType
+from elspeth.contracts import Determinism, NodeStateFailed, NodeType
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BoundaryInputs,
@@ -115,6 +115,7 @@ def _contract(
 
 class _TestSinkPlugin(BaseSink):
     name = "SinkRequiredFieldsSink"
+    determinism = Determinism.IO_WRITE
     input_schema = object
 
     def __init__(

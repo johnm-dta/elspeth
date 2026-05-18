@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import text
 
 from elspeth.contracts import (
+    Determinism,
     PipelineRow,
     RunStatus,
     SourceProtocol,
@@ -90,6 +91,7 @@ class DoubleValueTransform(_TestTransformBase):
     """Transform that doubles the 'value' field."""
 
     name = "double_value"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -351,6 +353,7 @@ class TestT18CharacterizationExecuteRun:
 
         class ErrorTransform(_TestTransformBase):
             name = "error_transform"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
 
@@ -416,6 +419,7 @@ class TestT18CharacterizationResumePath:
 
         class ContractCapturingTransform(_TestTransformBase):
             name = "contract_capture_transform"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
 
@@ -523,6 +527,7 @@ class TestT18CharacterizationResumePath:
 
         class TrackingTransform(_TestTransformBase):
             name = "tracking_transform"
+            determinism = Determinism.DETERMINISTIC
             input_schema = _TestSchema
             output_schema = _TestSchema
 
@@ -620,6 +625,7 @@ class SumBatchTransform(BaseTransform):
     """
 
     name = "sum_batch"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
     is_batch_aware = True

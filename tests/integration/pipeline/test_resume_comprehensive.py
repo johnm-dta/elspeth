@@ -634,6 +634,8 @@ class TestResumeComprehensive:
         resume_schema = {"mode": "observed", "guaranteed_fields": ["id", "timestamp"], "required_fields": ["id", "timestamp"]}
 
         class DatetimeAssertingPassThrough(PassThrough):
+            determinism = Determinism.DETERMINISTIC
+
             def process(self, row: Any, ctx: Any) -> Any:
                 assert isinstance(row["timestamp"], datetime)
                 return super().process(row, ctx)

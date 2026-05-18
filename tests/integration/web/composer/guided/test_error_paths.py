@@ -61,6 +61,20 @@ def _reenter_raw(client: TestClient, session_id: str) -> object:
     return client.post(f"/api/sessions/{session_id}/guided/reenter")
 
 
+def _seed_first_turn(client: TestClient, session_id: str) -> dict:
+    """Force first-turn persistence under the non-mutating GET semantics.
+
+    See ``test_get_guided.py:_seed_first_turn`` for the rationale.  Briefly:
+    GET /guided is non-mutating on a fresh session (commit c4e2f69cd,
+    May 15 2026); tests that need a persisted composition_state version
+    must trigger a mutating respond.
+    """
+    _get_guided(client, session_id)
+    resp = _respond_raw(client, session_id, chosen=["csv"])
+    assert resp.status_code == 200, resp.json()
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
 # exit_to_freeform — §5.3 manual exit
 # ---------------------------------------------------------------------------
@@ -189,7 +203,12 @@ class TestReenterGuided:
         from elspeth.web.sessions.protocol import CompositionStateData
 
         session_id = _create_session(composer_test_client)
-        _get_guided(composer_test_client, session_id)
+        # Seed a persisted composition_state version — GET /guided is
+        # non-mutating on fresh sessions (commit c4e2f69cd), so a mutating
+        # respond is required to materialise the state we then overwrite
+        # with a SOLVER_EXHAUSTED terminal to drive the reenter-rejection
+        # path.
+        _seed_first_turn(composer_test_client, session_id)
         service = composer_test_client.app.state.session_service
         session_uuid = UUID(session_id)
         state_record = asyncio.run(service.get_current_state(session_uuid))
@@ -544,15 +563,21 @@ class TestExitFromCompletedTerminal:
 
 
 class TestRespondPreconditions:
-    def test_respond_without_prior_get_guided_returns_400(self, composer_test_client: TestClient) -> None:
-        """POST /guided/respond before GET /guided (no TurnRecord) returns 400.
+    def test_respond_without_prior_get_auto_seeds_and_succeeds(self, composer_test_client: TestClient) -> None:
+        """POST /guided/respond before GET /guided auto-seeds the TurnRecord.
 
-        The route requires at least one TurnRecord to exist for the current
-        step — it cannot infer the turn type without one.  Callers must always
-        fetch GET /guided first to seed the initial turn.
+        Per the May 15 design (commit c4e2f69cd), respond auto-seeds the
+        current step's TurnRecord when history is empty so a client that
+        skips the GET still produces a complete, auditable turn record on
+        the server side.  This replaces the old pre-condition that rejected
+        respond without a prior GET — the rejection was a client-protocol
+        nicety, but at the cost of making the respond surface fragile to
+        race conditions and dropped GETs.  The auto-seed runs inside the
+        same compose-lock as the response application, so the seed and the
+        answer land atomically.
         """
         session_id = _create_session(composer_test_client)
-        # Do NOT call _get_guided — no TurnRecord exists yet.
+        # Do NOT call _get_guided — verify respond still works.
 
         resp = _respond_raw(
             composer_test_client,
@@ -560,26 +585,32 @@ class TestRespondPreconditions:
             chosen=["csv"],
         )
 
-        assert resp.status_code == 400
-        detail = resp.json()["detail"]
-        # Should mention fetching GET /guided.
-        assert "guided" in detail.lower()
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        # Auto-seeded step_1 record must be present in the persisted history.
+        step_1 = next(
+            (r for r in body["guided_session"]["history"] if r["step"] == "step_1_source"),
+            None,
+        )
+        assert step_1 is not None, body["guided_session"]["history"]
+        assert step_1["emitter"] == "server"
+        # The answer must have been applied (response_hash populated).
+        assert step_1["response_hash"] is not None
 
-    def test_respond_on_non_guided_session_returns_400(self, composer_test_client: TestClient) -> None:
-        """POST /guided/respond on a session with no guided_session returns 400.
+    def test_respond_on_fresh_session_succeeds_via_latent_guided(self, composer_test_client: TestClient) -> None:
+        """POST /guided/respond on a fresh session uses the latent guided session.
 
-        Sessions only enter guided mode when created with guided=True (or when
-        the default guided session is initialised by the first GET /guided call).
-        A bare POST /api/sessions without the guided flag has no guided_session
-        and must be rejected with 400, not 500.
-
-        NOTE: In the current implementation, GET /guided auto-initialises the
-        guided session on first call, so this test creates a session and
-        bypasses the guided initialisation entirely by calling respond
-        against the initial empty state.
+        ``_initial_composition_state_with_guided_session`` always pre-attaches
+        a latent :class:`GuidedSession.initial` so every server lazy-create
+        branch reaches a uniformly-shaped state (commit ba9ffefd0 docstring,
+        line 1903ff).  The freeform-default frontend means users may never
+        click "Switch to guided", but a direct POST respond still produces a
+        valid answer surface; the 400-on-no-guided-mode path is unreachable
+        from the public API and is retained only as a defensive guard
+        against future state-loading regressions that would set
+        ``guided_session=None``.
         """
         session_id = _create_session(composer_test_client)
-        # Do not call GET /guided — guided_session is None in initial state.
 
         resp = _respond_raw(
             composer_test_client,
@@ -587,9 +618,7 @@ class TestRespondPreconditions:
             chosen=["csv"],
         )
 
-        # Either 400 (no guided mode) or 400 (no TurnRecord) are acceptable —
-        # both indicate the call was rejected before doing any state mutation.
-        assert resp.status_code == 400
+        assert resp.status_code == 200, resp.json()
 
 
 # ---------------------------------------------------------------------------

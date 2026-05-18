@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import Field, ValidationError, field_validator
 
-from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -70,8 +70,9 @@ class TextSource(BaseSource):
     """Load one output row per text line into a configured column."""
 
     name = "text"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:13330414d4bf9b53"
+    source_file_hash: str | None = "sha256:5ec34f06095ca0e4"
     config_model = TextSourceConfig
     _on_validation_failure: str
 

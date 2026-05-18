@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from elspeth.contracts import NodeType, PipelineRow
+from elspeth.contracts import Determinism, NodeType, PipelineRow
 from elspeth.contracts.audit import NodeStateCompleted
 from elspeth.contracts.errors import AuditIntegrityError, CoalesceCollisionError
 from elspeth.contracts.schema import SchemaConfig
@@ -413,6 +413,7 @@ class _ScoreATransform(BaseTransform):
     """Adds a 'score' field with value 10 — collides with _ScoreBTransform."""
 
     name = "score_a"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -433,6 +434,7 @@ class _ScoreBTransform(BaseTransform):
     """Adds a 'score' field with value 99 — collides with _ScoreATransform."""
 
     name = "score_b"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 

@@ -189,27 +189,27 @@ allow_hits:
   reason: HTTP redirect Location header — external system boundary, header may be
     absent
   safety: Missing Location header breaks redirect loop naturally
-- key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=61d3dae5f7961222
+- key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=24ca60e7811626e8
   owner: architecture
   reason: os.environ.get() for optional env var at trust boundary — ELSPETH_ALLOW_RAW_SECRETS
     is genuinely optional with empty-string default
   safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
   expires: '2026-07-02'
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:validate_output_target:fp=4efa7c4c4895f0f4
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:validate_output_target:fp=e908c260f2d4641a
   owner: feature
   reason: Display header mapping - fields not in map keep original name (transform-added
     fields)
   safety: Intentional fallback to original field name, not bug hiding
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=f40f66f9e32a0cbd
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=8c83b27dcbe3a2b0
   owner: feature
   reason: Intentional fallback - reverse mapping may not contain all fields (transform-added)
   safety: Falls back to original field name - correct behavior for fields not in source
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=41a70dac3b172c7d
+- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=d555aa9d034e84f7
   owner: feature
   reason: Intentional fallback - display mapping may not contain all fields (transform-added)
   safety: Falls back to normalized field name - correct behavior for fields not in
     source
-- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=2498b74666fae155
+- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=49df15c4ae67af78
   owner: feature
   reason: Display header mapping - fields not in map keep original name (transform-added
     fields)
@@ -220,13 +220,13 @@ allow_hits:
     yet
   safety: Legitimate cleanup pattern in error path
   expires: '2026-07-02'
-- key: plugins/transforms/field_mapper.py:R8:FieldMapperConfig:_reject_duplicate_targets:fp=aec0e4c40bbd8fce
+- key: plugins/transforms/field_mapper.py:R8:FieldMapperConfig:_reject_duplicate_targets:fp=b4e1d7dd3320b8f6
   owner: bugfix
   reason: setdefault used for grouping sources-by-target to detect duplicate target
     field names
   safety: Grouping is deterministic; ValueError raised if duplicates found — prevents
     silent data loss
-  expires: '2026-05-17'
+  expires: '2026-07-17'
 - key: plugins/sources/field_normalization.py:R8:check_normalization_collisions:fp=5d89837a5521627f
   owner: architecture
   reason: setdefault for lazy initialization
@@ -244,7 +244,7 @@ allow_hits:
     slots are still completed
   safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
     explicit shutdown_requested errors while unrelated exception types still propagate
-  expires: '2026-05-17'
+  expires: '2026-07-17'
 - key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=5ce04fa54ab80b94
   owner: bugfix
   reason: Nominal discriminated-union dispatch — retryable_error is PluginRetryableError
@@ -581,35 +581,35 @@ allow_hits:
     from R1 rule matching .get( syntax
   safety: This is the actual HTTP call, not a defensive dict access
   expires: null
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=fcef4e9899cc8149
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=384b4135dd2e54b8
   owner: feature
   reason: Per-row KeyError catch at Tier 2→external boundary — missing id/document
     field diverts the row via _divert_row() instead of aborting the batch
   safety: Row diverted to failsink with descriptive reason; remaining valid rows written
     normally; no silent data loss
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=7cf4a40e96d811cf
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=d2b12097faa8028a
   owner: feature
   reason: Tier 2→external trust boundary — ChromaDB requires string IDs; isinstance(str)
     validates before write to avoid batch-aborting TypeError from SDK
   safety: Non-string ID diverts the row via _divert_row() with descriptive reason;
     not silent suppression
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=8e37ec696bc77c40
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=cc3a01cb6e4ca3b0
   owner: feature
   reason: Tier 2→external trust boundary — ChromaDB requires string documents; isinstance(str)
     validates before write
   safety: Non-string document diverts the row via _divert_row() with descriptive reason;
     not silent suppression
   expires: null
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=bd736d2a9c36462a
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=8bfc67e97b8b5ae3
   owner: feature
   reason: Per-row KeyError catch for optional metadata fields — missing metadata field
     skipped (metadata is optional per-field)
   safety: Missing metadata fields silently omitted from the per-row metadata dict;
     no data fabrication
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=cc01516a1d93bec0
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=5348af10db7f4a66
   owner: feature
   reason: Tier 2→external trust boundary — validates metadata value types before sending
     to ChromaDB; isinstance check filters rows with non-scalar metadata (dict, list,
@@ -617,7 +617,7 @@ allow_hits:
   safety: Invalid rows diverted via _divert_row() with per-field detail; valid rows
     written normally; no silent data loss
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=e2de75ee6893aab5
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=f8441bff114d7133
   owner: bugfix
   reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
     values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected

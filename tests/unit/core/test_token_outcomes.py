@@ -3,6 +3,7 @@
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape import LandscapeDB
@@ -223,7 +224,7 @@ class TestRecordTokenOutcome:
     @pytest.fixture
     def run_with_token(self, factory):
         """Create a run with a token for testing."""
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
 
         # Begin run
@@ -281,7 +282,7 @@ class TestRecordTokenOutcome:
 
     def test_record_buffered_then_terminal(self, factory, run_with_token) -> None:
         """BUFFERED followed by terminal should succeed."""
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
 
         run, token = run_with_token
@@ -362,7 +363,7 @@ class TestOutcomeContractValidation:
     @pytest.fixture
     def run_with_token(self, factory):
         """Create a run with a token for testing validation."""
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
 
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
@@ -498,7 +499,7 @@ class TestGetTokenOutcome:
     @pytest.fixture
     def run_with_outcome(self, factory):
         """Create run, token, and outcome for testing."""
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
 
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
@@ -549,7 +550,7 @@ class TestExplainIncludesOutcome:
     """Test that explain() returns recorded outcomes."""
 
     def test_explain_returns_outcome(self, factory) -> None:
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
         from elspeth.core.landscape.lineage import explain
 
@@ -581,7 +582,7 @@ class TestExplainIncludesOutcome:
         assert result.outcome.path == TerminalPath.DEFAULT_FLOW
 
     def test_explain_returns_none_outcome_when_not_recorded(self, factory) -> None:
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
         from elspeth.core.landscape.lineage import explain
 

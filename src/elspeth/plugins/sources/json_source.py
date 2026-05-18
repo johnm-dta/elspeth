@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
-from elspeth.contracts import PluginSchema, SourceRow
+from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -144,8 +144,9 @@ class JSONSource(BaseSource):
     """
 
     name = "json"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b6ec4f1922589c69"
+    source_file_hash: str | None = "sha256:42878f4e566994f3"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str

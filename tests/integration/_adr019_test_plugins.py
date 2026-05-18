@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import SourceRow
+from elspeth.contracts import Determinism, SourceRow
 from elspeth.plugins.infrastructure.discovery import create_dynamic_hookimpl
 from elspeth.plugins.infrastructure.manager import PluginManager
 from tests.fixtures.plugins import (
@@ -20,6 +20,7 @@ from tests.fixtures.plugins import (
 
 class ADR019ListSource(ListSource):
     name = "list_source"
+    determinism = Determinism.IO_READ
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
         options = dict(config or {})
@@ -33,6 +34,7 @@ class ADR019ListSource(ListSource):
 
 class ADR019QuarantineSource(ListSource):
     name = "quarantine_source"
+    determinism = Determinism.IO_READ
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
         options = dict(config or {})
@@ -83,6 +85,7 @@ class ADR019JsonCollectSink(ADR019CollectSink):
 
 class ADR019ConditionalErrorTransform(ConditionalErrorTransform):
     name = "conditional_error"
+    determinism = Determinism.DETERMINISTIC
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
         options = dict(config or {})

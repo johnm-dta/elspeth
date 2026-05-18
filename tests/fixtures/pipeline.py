@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.contracts import RunStatus, SinkProtocol, SourceProtocol
+from elspeth.contracts import Determinism, RunStatus, SinkProtocol, SourceProtocol
 from elspeth.core.config import SourceSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
@@ -289,6 +289,7 @@ def build_production_graph(
 
         class _AggTransform(_TestTransformBase):
             name = agg_settings.plugin
+            determinism = Determinism.DETERMINISTIC
 
             def process(self, row: Any, ctx: Any) -> Any:
                 from elspeth.plugins.infrastructure.results import TransformResult

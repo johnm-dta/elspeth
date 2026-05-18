@@ -2,6 +2,7 @@
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.plugins.infrastructure.base import BaseSink
 
 
@@ -15,6 +16,7 @@ def test_base_sink_configure_for_resume_raises_not_implemented():
 
     class TestSink(BaseSink):
         name = "test"
+        determinism = Determinism.IO_WRITE
         input_schema = None
         _on_write_failure: str | None = "discard"
 
@@ -41,6 +43,7 @@ def test_base_sink_resume_field_resolution_raises_when_required():
 
     class TestSink(BaseSink):
         name = "test"
+        determinism = Determinism.IO_WRITE
         input_schema = None
         _on_write_failure: str | None = "discard"
 

@@ -7,7 +7,7 @@ from typing import Any, TypedDict
 
 from sqlalchemy import text
 
-from elspeth.contracts import NodeStateFailed, NodeType, PluginSchema, TransformResult
+from elspeth.contracts import Determinism, NodeStateFailed, NodeType, PluginSchema, TransformResult
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BatchFlushInputs,
@@ -208,6 +208,7 @@ class _SecretRoundTripContract(DeclarationContract):
 
 class _HonestFilterTransform(BaseTransform):
     name = "honest_filter_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     passes_through_input = True

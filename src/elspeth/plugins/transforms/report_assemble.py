@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -81,8 +82,9 @@ class ReportAssemble(BaseTransform):
     """Assemble a paginated report from a flushed batch of text rows."""
 
     name = "report_assemble"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:eeecec2d86041064"
+    source_file_hash: str | None = "sha256:8a483663e3309fc9"
     config_model = ReportAssembleConfig
     is_batch_aware = True
 
@@ -188,6 +190,20 @@ class ReportAssemble(BaseTransform):
         )
         output_contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
         return self._align_output_contract(output_contract)
+
+    def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
+        # Hypothesis-generated probe rows arrive without ``text_field``, so the
+        # aggregate output path can't run on them as-is. Mirror the
+        # BatchStats override: graft the configured text_field with a sample
+        # value so the real ``process()`` aggregate path executes during the
+        # ADR-009 backward invariant sweep.
+        return [
+            self._augment_invariant_probe_row(
+                probe,
+                field_name=self._text_field,
+                value="probe text",
+            )
+        ]
 
     def process(  # type: ignore[override] # Batch signature: list[PipelineRow]
         self, rows: list[PipelineRow], ctx: TransformContext

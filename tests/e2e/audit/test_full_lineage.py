@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from elspeth.contracts import NodeStateStatus, PipelineRow, RunStatus
+from elspeth.contracts import Determinism, NodeStateStatus, PipelineRow, RunStatus
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.lineage import explain
@@ -34,6 +34,7 @@ class _EnrichTransform(BaseTransform):
     """Transform that adds enrichment fields to the data."""
 
     name = "enricher"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 

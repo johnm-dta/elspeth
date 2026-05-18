@@ -9,6 +9,7 @@ If the source outputs wrong types, the transform crashes immediately.
 import copy
 from typing import Any
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -37,8 +38,9 @@ class PassThrough(BaseTransform):
     """
 
     name = "passthrough"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2163447d28c7063d"
+    source_file_hash: str | None = "sha256:c8b2693029d47c8e"
     config_model = PassThroughConfig
 
     # ADR-007: PassThrough emits a deep copy of the input row unchanged, so every

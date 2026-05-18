@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import PluginContractViolation, RowErrorEntry, TransformErrorReason
 from elspeth.contracts.field_collision import detect_field_collisions
@@ -138,8 +139,9 @@ class BatchOutlierAnnotator(BaseTransform):
     """
 
     name = "batch_outlier_annotator"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5416806e37606b21"
+    source_file_hash: str | None = "sha256:c5e0242b6737d5c6"
     config_model = BatchOutlierAnnotatorConfig
     is_batch_aware = True
     passes_through_input = False

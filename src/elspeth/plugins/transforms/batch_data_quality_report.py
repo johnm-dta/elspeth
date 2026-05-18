@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.schema import SchemaConfig
@@ -101,8 +102,9 @@ class BatchDataQualityReport(BaseTransform):
     """Report field-level batch quality counts and rates."""
 
     name = "batch_data_quality_report"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0707c5c912fbba6f"
+    source_file_hash: str | None = "sha256:73cff8956cd26f10"
     config_model = BatchDataQualityReportConfig
     is_batch_aware = True
 

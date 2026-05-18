@@ -16,6 +16,7 @@ from typing import Any, TypedDict
 
 from pydantic import Field
 
+from elspeth.contracts import Determinism
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -94,8 +95,9 @@ class AzurePromptShield(BaseAzureSafetyTransform):
     """
 
     name = "azure_prompt_shield"
+    determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:19f08887d6f0065d"
+    source_file_hash: str | None = "sha256:5d6f2f97f55a2f28"
     config_model = AzurePromptShieldConfig
     passes_through_input = True
 

@@ -111,20 +111,38 @@ schema table is the honest representation.
 5. **The six required fields from design-spec §"Recording the
    interpretation"** are: (a) user-provided term ("cool"), (b) LLM's
    draft interpretation, (c) accepted or amended interpretation, (d)
-   timestamp, (e) user identity, (f) pipeline-state reference. None of
-   these are first-class columns on any existing table. Inventing them
-   as JSON sub-fields of an existing event payload sacrifices query
-   ergonomics, audit-tooling readability, and the spec's stated intent
-   that interpretation events be "discrete events."
+   timestamp, (e) user identity, (f) pipeline-state reference. The
+   new event class also records: (g) `model_identifier`, (h)
+   `model_version`, (i) `provider` (binding the row to the specific
+   LLM that produced the draft), (j) `composer_skill_hash` (SHA-256
+   of the skill markdown loaded into the composer LLM's context at
+   call time), (k) `arguments_hash` (canonical rfc8785 hash over the
+   row's required fields), and (l) `interpretation_source` (structural
+   discriminant — `user_approved` | `auto_interpreted_opt_out` |
+   `auto_interpreted_no_surfaces` — written by the service path, not
+   the LLM). None of the original six, nor the new five, are
+   first-class columns on any existing table. Inventing them as JSON
+   sub-fields of an existing event payload sacrifices query ergonomics,
+   audit-tooling readability, and the spec's stated intent that
+   interpretation events be "discrete events."
 
 ### Verdict (c) implications
 
 Phase 5b's backend scope is:
 
 - A **new `interpretation_events_table`** in `web/sessions/models.py`,
-  with first-class columns for the six required fields and a closed
+  with first-class columns for the six required fields plus: a closed
   enum on the choice discriminant (`accepted_as_drafted` /
-  `amended` / `opted_out`).
+  `amended` / `opted_out`); LLM-provenance columns (`model_identifier`,
+  `model_version`, `provider`, `composer_skill_hash`, `arguments_hash`)
+  that bind the row to the specific LLM call that produced the draft and
+  make the row replayable across model upgrades; and a structural
+  `interpretation_source` discriminant (closed enum: `user_approved` |
+  `auto_interpreted_opt_out` | `auto_interpreted_no_surfaces`) written
+  by the service path — not the LLM — so the audit trail can
+  definitively distinguish a user-approved interpretation from an
+  auto-interpreted one without relying on a comment the LLM may or may
+  not have emitted.
 - A **new recorder method** `record_interpretation_event` on the
   session service, called from a **new composer tool** (per design-spec
   §"Implementation notes": "needs a tool that records an
@@ -160,7 +178,9 @@ After Phase 5b ships:
   affordance, and waits for the user to accept or amend it before the
   pipeline is finalised.
 - The user's accepted or amended interpretation is recorded in the
-  session audit DB as a discrete event with all six required fields.
+  session audit DB as a discrete event with all required fields,
+  including LLM-provenance columns and a structural
+  `interpretation_source` discriminant.
 - The accepted interpretation flows into the affected LLM transform's
   prompt template **at composition time** so runtime behaviour is
   deterministic against the recorded value. Subsequent runs of the
@@ -253,8 +273,12 @@ how that string came to be → the user who accepted it.
 **In scope (Phase 5b):**
 
 - New `interpretation_events_table` in the session audit DB with the
-  six required fields plus a closed `choice` enum (`accepted_as_drafted`,
-  `amended`, `opted_out`).
+  six required fields; LLM-provenance columns (`model_identifier`,
+  `model_version`, `provider`, `composer_skill_hash`, `arguments_hash`);
+  a structural `interpretation_source` discriminant (closed enum:
+  `user_approved` | `auto_interpreted_opt_out` |
+  `auto_interpreted_no_surfaces`); and a closed `choice` enum
+  (`accepted_as_drafted`, `amended`, `opted_out`).
 - New session service methods: `create_pending_interpretation_event`,
   `resolve_interpretation_event`, `list_interpretation_events`,
   `record_session_interpretation_opt_out`.
@@ -264,8 +288,13 @@ how that string came to be → the user who accepted it.
   that commits the user's choice and patches the affected LLM
   transform's prompt template.
 - New HTTP route `POST /api/sessions/{id}/interpretations/opt_out` that
-  records the per-session "stop asking" decision and persists it on the
-  session (`session.interpretation_review_disabled = true`).
+  records the per-session "stop asking" decision as a row in
+  `interpretation_events_table` with `choice='opted_out'` and
+  `interpretation_source='auto_interpreted_opt_out'`. The session flag
+  `interpretation_review_disabled = true` is also set on the session
+  row as a fast-path read guard, but the `interpretation_events` row
+  is the canonical audit record. The session flag must never be set
+  without a corresponding audit row.
 - New `composition_states.provenance` enum value `interpretation_resolve`
   (closed-enum extension — requires the documented "NO SILENT EXTENSION"
   governance step per `models.py` lines `274-289`).
@@ -279,11 +308,12 @@ how that string came to be → the user who accepted it.
   design-spec §"When the interpretation gets surfaced").
 - A Vitest integration test asserting the end-to-end flow: LLM calls the
   tool → pending row created → user clicks "Use mine" → state version
-  advances → audit row records the six fields.
+  advances → audit row records all required fields.
 - A Landscape spot-check Python test (verdict (c) **MANDATES** this per
   CLAUDE.md attributability test): query the session audit DB and assert
-  the recorded event row contains all six required fields with the
-  correct types and the pipeline-state reference resolves to a real
+  the recorded event row contains all required fields (including the
+  LLM-provenance columns and `interpretation_source`) with the correct
+  types and the pipeline-state reference resolves to a real
   `composition_states` row.
 
 **Out of scope (deferred to a later phase):**
@@ -321,6 +351,14 @@ how that string came to be → the user who accepted it.
   decision skip a join, but the join through `composition_states.nodes`
   is already authoritative. Mark as a Phase 11 audit-tooling
   enhancement; do NOT bundle into Phase 5b.
+- **Per-row redaction of `user_term` / `llm_draft` / `accepted_value`
+  content.** Retention follows session-level deletion until then; Phase
+  11 audit-tooling will introduce a redaction event class parallel to
+  the audit-pack discipline.
+- **Hash-chaining of `interpretation_events` rows for tamper
+  detection.** The new event class is the first session-DB table whose
+  contents materially affect runtime behaviour (the resolved prompt
+  template). Tracked as a Phase 11 audit-tooling enhancement.
 
 ## Trust-tier check (mandatory before any data-handling work)
 
@@ -331,8 +369,8 @@ sections in 18a and 18b refer back to it.
 | Boundary | Direction | Trust tier | Discipline |
 |---|---|---|---|
 | LLM → composer service | Tool-call arguments crossing into `request_interpretation_review` | **Tier 3 (external)** | Pydantic-validated at the tool boundary. Type-and-range coerce where safe (`user_term` is a `str` with a length cap; `llm_draft` is a `str` with a length cap; `affected_node_id` is validated to exist in the current composition state). Reject (ARG_ERROR) anything that doesn't conform. **Never persist the LLM's draft without surfacing it for user review** — that's the entire feature. |
-| User → backend route | User's "Use mine / Change it" body crossing into `/resolve` | **Tier 3 (external)** | Pydantic-validated at the route boundary. The user's amended text is a `str` with a length cap and content sanitisation (no HTML; emit as plain text in the prompt template). The choice discriminant is a closed enum (`accepted_as_drafted` / `amended` / `opted_out`); reject anything else. |
-| Session audit DB → composer + frontend | Reading back a persisted interpretation event | **Tier 1 (ours)** | Read into a frozen dataclass (`InterpretationEventRecord`); crash on any anomaly (NULL in a NOT-NULL column, invalid enum value, dangling FK). No coercion. No `.get()`-with-default. |
+| User → backend route | User's "Use mine / Change it" body crossing into `/resolve` | **Tier 3 (external)** | Pydantic-validated at the route boundary. The user's amended text is a `str` with a length cap (8 KiB after stripping) and strict content validation: reject `{{` or `}}` (template-injection guard), control characters (U+0000–U+001F except tab), and multi-line input. A placeholder-position check further requires that any `{{interpretation:…}}` token in the downstream prompt template sits in a value-position, not inside a `system:` / `role:` / `instructions:` section header. The choice discriminant is a closed enum (`accepted_as_drafted` / `amended` / `opted_out`); reject anything else. |
+| Session audit DB → composer + frontend | Reading back a persisted interpretation event | **Tier 1 (ours)** | Read into a frozen dataclass (`InterpretationEventRecord`); crash on any anomaly (NULL in a NOT-NULL column, invalid enum value, dangling FK). No coercion. No `.get()`-with-default. The dataclass carries all columns: the six required fields, `model_identifier` / `model_version` / `provider` / `composer_skill_hash` / `arguments_hash`, and `interpretation_source`. |
 
 **Key tier-discipline implications:**
 
@@ -343,15 +381,19 @@ sections in 18a and 18b refer back to it.
    Tier-1 user-approved string). The runtime prompt-template uses
    `accepted_value`, never `llm_draft`.
 
-2. **The user's `accepted_value` cannot be a Tier-3 input "with HTML in
-   it." The composer route must enforce plain-text constraints** so
-   nothing user-submitted can later be misinterpreted as markup or as
-   a control character in a prompt-template string. The length cap (8
-   KiB after stripping; same upper bound as `chat_messages.content`)
-   prevents pathological payloads. Beyond that, the prompt-template
-   itself is rendered by the LLM-transform-plugin at runtime via
-   normal string interpolation; the runtime tier-discipline already
-   wraps that operation.
+2. **The user's `accepted_value` is subject to strict content
+   validation at the route boundary.** The composer route rejects
+   `{{` / `}}` (which would allow a user to inject or clobber template
+   placeholders), control characters (U+0000–U+001F except tab), and
+   multi-line input. Length is capped at 8 KiB after stripping — the
+   same upper bound as `chat_messages.content`. A placeholder-position
+   check ensures the `{{interpretation:…}}` token in the downstream
+   prompt template sits in a value-position, not inside a `system:` /
+   `role:` / `instructions:` section header — preventing a user-supplied
+   string from silently overriding a system prompt. These constraints are
+   enforced before the value is persisted; the runtime tier-discipline
+   wraps the interpolation as defence-in-depth, not as the primary
+   guard.
 
 3. **Reading the interpretation event back is Tier-1.** The
    `InterpretationEventRecord` dataclass has direct field access (no
@@ -369,6 +411,20 @@ sections in 18a and 18b refer back to it.
    table has no UPDATE permission either; the same posture applies
    here.
 
+5. **The `interpretation_source` discriminant is written by the service
+   path, not the LLM.** An auditor asking "did the user approve this
+   interpretation?" reads a structurally-enforced enum value, not a
+   comment the LLM may or may not have emitted. The three values are:
+   `user_approved` (the user saw the draft and accepted or amended it),
+   `auto_interpreted_opt_out` (the user had previously opted out of
+   review for the session), and `auto_interpreted_no_surfaces` (the
+   LLM produced the interpretation inline without surfacing a review
+   widget, e.g. because no subjective term was detected). This column
+   is mandatory and NOT NULL; the writer path sets it before persisting
+   the row.
+
+**Telemetry posture.** Per CLAUDE.md's primacy contract, every audit-write path declares its telemetry posture explicitly. Interpretation event writes are audit-primary (Tier 1, user-decision-class) and emit NO operational telemetry — they are not ephemeral operational signals, they are durable legal records of user intent. The absence of telemetry at these call sites is a design decision, not an omission. This posture is recorded per-method in the 18a Task 4–7 service docstrings.
+
 ## Verification approach
 
 Each backend task in 18a and each frontend task in 18b is TDD-shaped:
@@ -381,8 +437,10 @@ attributability test). The spot-check shape is a small fixture that:
    route).
 2. Opens a read-only SQLAlchemy connection to the session audit DB.
 3. Issues a `SELECT * FROM interpretation_events WHERE id = :id` and
-   asserts each of the six required fields is present, of the expected
-   type, and matches the expected value.
+   asserts each of the six required fields, the LLM-provenance columns
+   (`model_identifier`, `model_version`, `provider`,
+   `composer_skill_hash`, `arguments_hash`), and `interpretation_source`
+   is present, of the expected type, and matches the expected value.
 4. Verifies the FK to `composition_states` resolves (i.e., the
    pipeline-state reference is real, not dangling).
 
@@ -419,17 +477,22 @@ live LLM on staging after Phase 5b ships and verify the LLM surfaces
    `composition_states.nodes` JSON.
 9. Start a SECOND session; type the same hero prompt; opt out of
    interpretation review for the session ("don't ask me again this
-   session"). Confirm a `record_session_interpretation_opt_out`
-   audit row is written and the LLM proceeds to generate the
-   pipeline without surfacing "cool". Confirm the audit-readiness
-   panel reflects "interpretations: opted-out (session)".
+   session"). Confirm an `interpretation_events` row with
+   `choice='opted_out'` and
+   `interpretation_source='auto_interpreted_opt_out'` is written by
+   `record_session_interpretation_opt_out`, and the LLM proceeds to
+   generate the pipeline without surfacing "cool". Confirm the
+   audit-readiness panel reflects "interpretations: opted-out
+   (session)".
 
 Verification is complete when (a) all Pytest backend suites pass,
 (b) all Vitest frontend suites pass, (c) the Landscape spot-check
-fixture for every recording call asserts the six required fields are
-present and the FK resolves, (d) staging smoke passes end-to-end on
-the canonical hero prompt, and (e) the opt-out path is recorded as
-its own audit event.
+fixture for every recording call asserts the six required fields, the
+LLM-provenance columns, and `interpretation_source` are all present
+and the FK resolves, (d) staging smoke passes end-to-end on the
+canonical hero prompt, and (e) the opt-out path is recorded as its own
+`interpretation_events` row with `choice='opted_out'` and the correct
+`interpretation_source` value.
 
 ## File structure (cross-cutting)
 
@@ -459,6 +522,8 @@ implementation-specific rows:
 | **Race: user resolves an interpretation event while a second compose turn is mutating composition state.** | The route handler acquires the session write lock (`_session_write_lock` per `service.py`) for the entire resolve transaction (insert event + patch state + advance version). Concurrent compose loop turns serialize on the same lock. The compose loop also reads `interpretation_events.status` for the current pipeline state; if any are pending, the LLM is told via the system prompt that the user still has pending interpretations to resolve, so a polite compose-loop turn cannot bind the prompt template ahead of the user. |
 | **Failure path: the user closes the tab between the LLM tool-call and resolving the interpretation.** | The pending event row persists; on next session reload, the frontend re-renders the pending review affordance from the `list_interpretation_events(status='pending')` call. State is durable in the session audit DB, not in frontend memory. |
 | **Phase 5a's `inline_blob` flow and Phase 5b's interpretation flow collide on the same hero example.** | The integration plan is explicit: 5a fires first (source creation), 5b fires after (transform-prompt interpretation). The ordering is enforced by the composer-skill prompt and by the heuristic that the interpretation tool requires an `affected_node_id` of an already-existing LLM transform. The Vitest integration test in 18b-Task-6 covers both flows in one assertion sequence. |
+
+**Downstream prompt-injection risk (Phase 8 follow-up).** User-amended `accepted_value` content is interpolated into a runtime LLM transform's prompt template. The runtime LLM has no structural way to distinguish composer-user-controlled text from pipeline-data-controlled text — both arrive as interpolated strings. Phase 5b ships with content validation (Decision D above: rejection of `{{`/`}}`, control characters, multi-line input, and placeholder-position enforcement), which prevents the most direct injection vectors. Defence-in-depth — sentinels in the prompt template, explicit role-isolation between user-provided and system-provided prompt sections — is named as a Phase 8 polish follow-up. See [20-phase-8-polish-and-telemetry.md](20-phase-8-polish-and-telemetry.md) for the Phase 8 scope.
 
 ## Review history
 

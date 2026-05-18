@@ -33,6 +33,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph
@@ -99,6 +100,7 @@ def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
 
         class _AggTransform(_TestTransformBase):
             name = agg_settings.plugin
+            determinism = Determinism.DETERMINISTIC
 
             def process(self, row: Any, ctx: Any) -> Any:
                 from elspeth.plugins.infrastructure.results import TransformResult

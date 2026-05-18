@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeEngine
 
-from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, PluginSchema
+from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determinism, PluginSchema
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
@@ -99,8 +99,9 @@ class DatabaseSink(BaseSink):
     """
 
     name = "database"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bc72839481df1d5c"
+    source_file_hash: str | None = "sha256:fdae3de60fbab58c"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

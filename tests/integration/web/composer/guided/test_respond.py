@@ -1219,15 +1219,21 @@ class TestStep1InspectAndConfirmAccept:
 
 
 class TestRespondErrorPaths:
-    def test_respond_without_prior_get_returns_400(self, composer_test_client: TestClient) -> None:
-        """POST /respond without prior GET /guided returns 400 (no turn emitted)."""
+    def test_respond_without_prior_get_auto_seeds_and_succeeds(self, composer_test_client: TestClient) -> None:
+        """POST /respond without prior GET auto-seeds the step_1 TurnRecord.
+
+        Sibling of
+        :py:meth:`TestRespondPreconditions.test_respond_without_prior_get_auto_seeds_and_succeeds`
+        in ``test_error_paths.py``; the old 400 pre-condition was replaced
+        by the route's auto-seed (commit c4e2f69cd) so a fresh-session
+        respond produces a complete TurnRecord + audit row atomically.
+        """
         session_id = _create_session(composer_test_client)
         resp = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
             json={"chosen": ["csv"]},
         )
-        # No TurnRecord emitted yet — dispatcher crashes with 400.
-        assert resp.status_code == 400
+        assert resp.status_code == 200, resp.json()
 
     def test_respond_unknown_session_returns_404(self, composer_test_client: TestClient) -> None:
         """POST /respond for a non-existent session returns 404."""

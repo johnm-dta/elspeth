@@ -32,6 +32,7 @@ import pytest
 from elspeth.contracts import (
     CallStatus,
     CallType,
+    Determinism,
 )
 from elspeth.contracts.enums import RunStatus, TelemetryGranularity
 from elspeth.contracts.events import ExternalCallCompleted
@@ -376,6 +377,7 @@ class TestOrchestratorTelemetryWiringContract:
             """Transform that captures the telemetry_emit callback."""
 
             name = "telemetry_capturing"
+            determinism = Determinism.DETERMINISTIC
 
             def on_start(self, ctx: Any) -> None:
                 super().on_start(ctx)

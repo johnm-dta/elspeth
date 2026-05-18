@@ -59,6 +59,31 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     return resp.json()
 
 
+def _seed_first_turn(client: TestClient, session_id: str) -> dict:
+    """Force first-turn persistence under the non-mutating GET semantics.
+
+    GET /guided is non-mutating on a fresh session (commit c4e2f69cd,
+    May 15 2026, "Fix composer and session bug regressions"). It returns
+    the deterministic step_1 turn in memory but does NOT persist a
+    TurnRecord or composition_state version — the frontend auto-fetches
+    GET /guided on session load, and creating a v1 graph version per
+    auto-fetch would pollute every session's state history with an empty
+    bootstrap version.
+
+    Tests that need persisted history / composition_state version / audit
+    rows for the step_1 surface must trigger a mutating action. This
+    helper does the cheapest valid one: GET /guided to expose the step_1
+    turn (idempotent, no state change), then POST /guided/respond with
+    ``chosen=["csv"]`` to answer it. The session advances to step_2_blob;
+    the step_1 TurnRecord lands in ``guided_session.history`` as the first
+    record (with ``response_hash`` populated by the answer); composition
+    state version 1 is allocated; the ``guided_turn_emitted`` audit row
+    is persisted.
+    """
+    _get_guided(client, session_id)
+    return _respond(client, session_id, chosen=["csv"])
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -87,53 +112,84 @@ class TestGetGuidedFirstFetch:
         option_ids = [o["id"] for o in payload["options"]]
         assert "csv" in option_ids, f"csv not in option_ids: {option_ids}"
 
-    def test_history_has_one_record_after_first_fetch(self, composer_test_client: TestClient) -> None:
-        """After first fetch, guided_session.history contains exactly one TurnRecord."""
+    def test_history_is_empty_after_first_fetch_non_mutating(self, composer_test_client: TestClient) -> None:
+        """After first fetch on a fresh session, history is empty (non-mutating).
+
+        Commit c4e2f69cd made GET /guided non-mutating on fresh sessions to
+        avoid allocating a v1 composition_state version on the frontend's
+        auto-fetch. ``next_turn`` is returned in memory; ``history`` stays
+        empty until the first mutating respond seeds the TurnRecord.  See
+        ``test_history_has_one_record_after_first_mutation`` for the
+        complementary post-mutation assertion.
+        """
         session_id = _create_session(composer_test_client)
+        body = _get_guided(composer_test_client, session_id)
+
+        assert body["guided_session"]["history"] == []
+        assert body["next_turn"] is not None
+        assert body["composition_state"] is None
+
+    def test_history_has_one_record_after_first_mutation(self, composer_test_client: TestClient) -> None:
+        """After the first mutating respond, history records the step_1 turn.
+
+        The first ``POST /guided/respond`` on a fresh session auto-seeds the
+        step_1 TurnRecord (so the dispatcher knows what turn the answer is
+        for), applies the user's choice, advances to step_2, and persists.
+        The persisted ``guided_session.history`` therefore carries the
+        step_1 record with a populated ``response_hash``.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_first_turn(composer_test_client, session_id)
         body = _get_guided(composer_test_client, session_id)
 
         history = body["guided_session"]["history"]
-        assert len(history) == 1
-        record = history[0]
-        assert record["step"] == "step_1_source"
-        assert record["turn_type"] == "single_select"
-        assert record["emitter"] == "server"
-        assert record["payload_hash"]  # non-empty hash string
-        assert record["response_hash"] is None
+        assert len(history) >= 1
+        step_1 = next(r for r in history if r["step"] == "step_1_source")
+        assert step_1["turn_type"] == "single_select"
+        assert step_1["emitter"] == "server"
+        assert step_1["payload_hash"]  # non-empty hash string
+        assert step_1["response_hash"] is not None  # answered by _seed_first_turn
 
     def test_payload_hash_matches_deterministic_turn(self, composer_test_client: TestClient) -> None:
-        """payload_hash is the stable_hash of the turn payload."""
+        """``next_turn["payload"]`` is the deterministic step-1 surface; its
+        ``stable_hash`` matches the persisted ``payload_hash`` after the
+        first mutating respond.
+        """
         from elspeth.core.canonical import stable_hash
 
         session_id = _create_session(composer_test_client)
-        body = _get_guided(composer_test_client, session_id)
-
-        recorded_hash = body["guided_session"]["history"][0]["payload_hash"]
-        returned_payload = body["next_turn"]["payload"]
+        first = _get_guided(composer_test_client, session_id)
+        returned_payload = first["next_turn"]["payload"]
         expected_hash = stable_hash(returned_payload)
-        assert recorded_hash == expected_hash
+
+        _seed_first_turn(composer_test_client, session_id)
+        body = _get_guided(composer_test_client, session_id)
+        step_1 = next(r for r in body["guided_session"]["history"] if r["step"] == "step_1_source")
+        assert step_1["payload_hash"] == expected_hash
 
 
 class TestGetGuidedIdempotency:
-    def test_second_fetch_returns_same_payload_hash(self, composer_test_client: TestClient) -> None:
-        """Re-fetching the same session returns the identical payload_hash."""
+    def test_second_fetch_returns_same_payload_hash_after_mutation(self, composer_test_client: TestClient) -> None:
+        """Re-fetching after the first mutation returns the identical
+        step_1 ``payload_hash`` (deterministic rebuild)."""
         session_id = _create_session(composer_test_client)
-
+        _seed_first_turn(composer_test_client, session_id)
         body1 = _get_guided(composer_test_client, session_id)
         body2 = _get_guided(composer_test_client, session_id)
 
-        hash1 = body1["guided_session"]["history"][0]["payload_hash"]
-        hash2 = body2["guided_session"]["history"][0]["payload_hash"]
+        hash1 = next(r for r in body1["guided_session"]["history"] if r["step"] == "step_1_source")["payload_hash"]
+        hash2 = next(r for r in body2["guided_session"]["history"] if r["step"] == "step_1_source")["payload_hash"]
         assert hash1 == hash2
 
-    def test_second_fetch_does_not_append_extra_record(self, composer_test_client: TestClient) -> None:
-        """Re-fetching does not grow the history — idempotent."""
+    def test_repeated_non_mutating_fetches_leave_history_empty(self, composer_test_client: TestClient) -> None:
+        """Re-fetching a never-mutated session does not grow the history."""
         session_id = _create_session(composer_test_client)
 
         _get_guided(composer_test_client, session_id)
         body2 = _get_guided(composer_test_client, session_id)
 
-        assert len(body2["guided_session"]["history"]) == 1
+        assert body2["guided_session"]["history"] == []
+        assert body2["composition_state"] is None
 
     def test_second_fetch_has_same_turn_type(self, composer_test_client: TestClient) -> None:
         """Re-fetching returns the same turn type as the first fetch."""
@@ -147,35 +203,46 @@ class TestGetGuidedIdempotency:
 
 class TestGetGuidedStatePersistence:
     def test_guided_session_survives_roundtrip(self, composer_test_client: TestClient) -> None:
-        """guided_session restored from DB on second fetch is equal to first-fetch state.
+        """guided_session restored from DB on a post-mutation fetch is equal
+        to the in-process state.
 
         This is the key Tier 1 round-trip test: the GuidedSession serialised
-        into composer_meta on first fetch must deserialise identically on
-        second fetch.  In-process identity is not sufficient — state_from_record
-        must reconstruct the same GuidedSession.
+        into composer_meta on the first mutating respond must deserialise
+        identically on the following fetch.  In-process identity is not
+        sufficient — state_from_record must reconstruct the same
+        GuidedSession.
 
-        The test verifies the history length and record fields to catch
-        serialisation gaps (missing field, type drift, enum coercion failure).
+        The test verifies the history record fields (step_1) to catch
+        serialisation gaps (missing field, type drift, enum coercion
+        failure).
         """
         session_id = _create_session(composer_test_client)
-        _get_guided(composer_test_client, session_id)  # first fetch: saves state
-        body2 = _get_guided(composer_test_client, session_id)  # second: loads from DB
+        _seed_first_turn(composer_test_client, session_id)  # mutating: persists state
+        body2 = _get_guided(composer_test_client, session_id)  # loads from DB
 
-        # Restored session must have history.
         history = body2["guided_session"]["history"]
-        assert len(history) == 1
-        r = history[0]
-        assert r["step"] == "step_1_source"
-        assert r["turn_type"] == "single_select"
-        assert r["emitter"] == "server"
-        assert r["response_hash"] is None
+        step_1 = next((r for r in history if r["step"] == "step_1_source"), None)
+        assert step_1 is not None, f"step_1_source record missing from history: {history!r}"
+        assert step_1["turn_type"] == "single_select"
+        assert step_1["emitter"] == "server"
+        assert step_1["response_hash"] is not None  # answered by _seed_first_turn
 
-    def test_composition_state_returned_after_first_fetch(self, composer_test_client: TestClient) -> None:
-        """composition_state in response is non-None after first fetch."""
+    def test_composition_state_is_none_until_first_mutation(self, composer_test_client: TestClient) -> None:
+        """composition_state in the response is None until the first respond.
+
+        The May 15 non-mutating-GET contract is observable here: a fresh
+        session's GET /guided returns ``composition_state=None`` because no
+        v1 graph version has been allocated. The first mutating respond
+        creates v1 and subsequent fetches return a non-None
+        composition_state.
+        """
         session_id = _create_session(composer_test_client)
-        body = _get_guided(composer_test_client, session_id)
+        first = _get_guided(composer_test_client, session_id)
+        assert first["composition_state"] is None
 
-        assert body["composition_state"] is not None
+        _seed_first_turn(composer_test_client, session_id)
+        after = _get_guided(composer_test_client, session_id)
+        assert after["composition_state"] is not None
 
 
 class TestGetGuidedAuditTrail:
@@ -205,19 +272,39 @@ class TestGetGuidedAuditTrail:
         msgs = asyncio.run(service.get_messages(UUID(session_id), limit=None))
         return [m for m in msgs if m.role in ("tool", "audit")]
 
-    def test_audit_message_persisted_after_first_fetch(self, composer_test_client: TestClient) -> None:
-        """An audit role=tool message is persisted after the first GET /guided call.
+    def test_no_audit_message_after_non_mutating_fetch(self, composer_test_client: TestClient) -> None:
+        """Non-mutating GET /guided on a fresh session emits no audit row.
 
-        Verifies that _persist_tool_invocations was called with the recorder's
-        contents.
+        Under the May 15 non-mutating-GET contract, no state changed, so
+        nothing to audit.  Once the operator mutates (POST respond),
+        ``test_audit_message_persisted_after_first_mutation`` confirms
+        the audit row lands.
         """
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
+        _get_guided(composer_test_client, session_id)  # idempotent re-fetch
 
         tool_messages = self._get_tool_messages(composer_test_client, session_id)
-        assert len(tool_messages) >= 1, f"Expected at least one role=tool audit message, got {len(tool_messages)}"
+        assert tool_messages == [], (
+            f"Expected no audit messages after non-mutating fetches, got {len(tool_messages)}: {[m.tool_calls for m in tool_messages]}"
+        )
 
-        # Verify guided_turn_emitted is present.
+    def test_audit_message_persisted_after_first_mutation(self, composer_test_client: TestClient) -> None:
+        """A ``guided_turn_emitted`` audit row is persisted after the first
+        mutating respond.
+
+        The first mutating respond auto-seeds the step_1 TurnRecord (so the
+        dispatcher knows what turn the operator's answer is for) and emits
+        ``guided_turn_emitted`` for that record. The auto-seed runs inside
+        the respond endpoint's compose-lock, so the audit row is part of
+        the same atomic state transition.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_first_turn(composer_test_client, session_id)
+
+        tool_messages = self._get_tool_messages(composer_test_client, session_id)
+        assert len(tool_messages) >= 1, f"Expected at least one audit message, got {len(tool_messages)}"
+
         def _has_guided_turn_emitted(msg) -> bool:
             tool_calls = msg.tool_calls
             if not tool_calls:
@@ -231,16 +318,6 @@ class TestGetGuidedAuditTrail:
         assert any(_has_guided_turn_emitted(m) for m in tool_messages), (
             f"No guided_turn_emitted found in tool messages: {[m.tool_calls for m in tool_messages]}"
         )
-
-    def test_no_second_audit_message_on_refetch(self, composer_test_client: TestClient) -> None:
-        """Re-fetching does not add a second role=tool audit message."""
-        session_id = _create_session(composer_test_client)
-        _get_guided(composer_test_client, session_id)  # first
-        _get_guided(composer_test_client, session_id)  # re-fetch
-
-        tool_messages = self._get_tool_messages(composer_test_client, session_id)
-        # Only one guided_turn_emitted audit message — re-fetch must not re-emit.
-        assert len(tool_messages) == 1
 
 
 class TestGetGuidedNotFound:

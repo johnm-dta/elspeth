@@ -35,6 +35,7 @@ class DoubleTransform(BaseTransform):
     """Transform that doubles a value field."""
 
     name = "double"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -54,6 +55,7 @@ class AddOneTransform(BaseTransform):
     """Transform that adds 1 to a value field."""
 
     name = "add_one"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -70,6 +72,7 @@ class MultiplyTwoTransform(BaseTransform):
     """Transform that multiplies value by 2."""
 
     name = "multiply_two"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -111,6 +114,8 @@ class ValidationErrorAfterValidRowSource(_TestSourceBase):
 class LoadTrackingSource(ListSource):
     """List source that records whether the processing loop reached load()."""
 
+    determinism = Determinism.IO_READ
+
     def __init__(self, data: list[dict[str, Any]]) -> None:
         super().__init__(data)
         self.load_started = False
@@ -124,6 +129,7 @@ class RuntimePreflightFailingTransform(PassTransform):
     """Transform whose runtime preflight fails before source iteration."""
 
     name = "runtime_preflight_failing"
+    determinism = Determinism.DETERMINISTIC
     requires_runtime_preflight = True
 
     def runtime_preflight(self, ctx: Any) -> None:

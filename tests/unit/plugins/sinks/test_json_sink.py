@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
@@ -358,7 +359,6 @@ class TestJSONSink:
 
     def test_has_determinism(self) -> None:
         """JSONSink has determinism attribute."""
-        from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         sink = inject_write_failure(JSONSink({"path": "/tmp/test.json", "schema": DYNAMIC_SCHEMA}))

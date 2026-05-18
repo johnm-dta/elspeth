@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.schema import SchemaConfig
@@ -92,8 +93,9 @@ class BatchThresholdSummary(BaseTransform):
     """Report threshold match counts and rates for finite numeric batch values."""
 
     name = "batch_threshold_summary"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5f5452c7f4dd2239"
+    source_file_hash: str | None = "sha256:3f28f48a1de29d54"
     config_model = BatchThresholdSummaryConfig
     is_batch_aware = True
 

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import TransformResult
+from elspeth.contracts import Determinism, TransformResult
 from elspeth.contracts.data import PluginSchema as _PermissiveSchema
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
@@ -123,6 +123,7 @@ class _DummyTransformConfig(TransformDataConfig):
 
 class _AligningTransform(BaseTransform):
     name = "aligning_schema_mode_transform"
+    determinism = Determinism.DETERMINISTIC
     config_model = _DummyTransformConfig
     input_schema = _PermissiveSchema
     output_schema = _PermissiveSchema

@@ -21,10 +21,15 @@ Phase 9 (migration runner) is named but not yet planned.
 2. **Phase 9 — plan the migration runner** — necessary BEFORE real-user deploy of any
    schema-adding phase (Phase 1A is fine for staging; Phase 1B + 2A unblocked once
    1A ships; Phase 4 and Phase 5b are blocked on Phase 9 for production deploys).
-3. **Demo critical path** — minimum viable demo set per the systems review: Phase 1A/1B,
-   Phase 2 (2A/2B/2C), Phase 5a, Phase 4 (tutorial), Phase 3A partial (session
-   switcher only). The full IA cleanup (Phase 3B) and completion gestures (Phase 6)
-   are demo-cosmetic; ship in parallel if time permits.
+3. **Demo critical path** — minimum viable demo set: Phase 1A/1B,
+   Phase 2 (2A/2B/2C), Phase 5a, **Phase 5b** (operator decision
+   2026-05-18: the three-beat hello-world tutorial is demo-required;
+   the third beat is the LLM-interpretation review surfaced by Phase
+   5b), Phase 4 (tutorial), Phase 3A partial (session switcher only).
+   The full IA cleanup (Phase 3B) and completion gestures (Phase 6)
+   are demo-cosmetic; ship in parallel if time permits. Note: this
+   supersedes the original systems-review framing that placed Phase 5b
+   off the critical path.
 
 Open-question adjudication is in §A. Most in-phase decisions are now resolved. B1
 (audit-recorder behaviour for dynamic source) was RESOLVED 2026-05-16 with verdict (a)
@@ -142,6 +147,17 @@ Implementation-readiness legend: **READY** — reviewed plan, no upstream blocke
 All plans are now written (Phase 4 in progress). The sequence below shows the **ship order** for
 implementation — not planning. Phases on the same indentation level can ship in parallel.
 
+> **Critical-path note (operator decision 2026-05-18):** Phase 5b is on the
+> demo critical path. The hello-world tutorial (Phase 4) is delivered as a
+> three-beat experience, and the third beat is the LLM-interpretation review
+> surfaced by Phase 5b. The dependency edge `5b → 4` is therefore load-bearing
+> for the demo: if 5b slips, 4 cannot ship in its demo-required form. This
+> supersedes the original systems-review framing that placed Phase 5b "off the
+> critical path." Within 5b, Task 0 (empirical placeholder-convention gate;
+> see [18a §Task 0](18a-phase-5b-backend.md)) is the implementer's first
+> action — if it fails, 5b pivots to a runtime-resolve architecture and the
+> downstream timeline must be re-evaluated.
+
 ```text
 1A (backend)
   └─ 1B (frontend)
@@ -150,9 +166,9 @@ implementation — not planning. Phases on the same indentation level can ship i
        └─ 3B1 → 3B2   ────┘
             │
             └─ 5a (dynamic source)
-                  └─ 5b-backend → 5b-frontend
+                  └─ 5b-Task-0 → 5b-backend → 5b-frontend   ← critical path
                         │
-                        ├─ 4 (hello-world tutorial)   ← needs 1 + 5a + 5b
+                        ├─ 4 (hello-world tutorial)   ← needs 1 + 5a + 5b (5b required for the third beat)
                         └─ 6A → 6B                    ← needs 3 + 5b
 7A → 7B → 7C   (independent track; can start any time after 1B)
 8              (last; all functional phases must ship first)
@@ -162,6 +178,7 @@ Parallel opportunities summary:
 - **2 ↔ 3** — different surfaces, no shared files. Two implementers can run simultaneously after 1B.
 - **3A ↔ 3B** — within Phase 3, removals and side-rail additions are independent sub-tracks.
 - **7 ↔ 2/3** — catalog reshape is self-contained after 1B.
+- **5b ↔ 6/7** — once 5b lands, Phase 6 (completion gestures) and Phase 7 (catalog reshape, if not already shipped) can run in parallel with Phase 4 tutorial work.
 - **5a ↔ 3** — different code regions; coordinate on `InspectorPanel` removal vs side-rail additions.
 
 ---

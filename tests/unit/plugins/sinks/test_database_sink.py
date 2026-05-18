@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from sqlalchemy import MetaData, Table, create_engine, select
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.sinks.database_sink import DatabaseSink
 from tests.fixtures.base_classes import inject_write_failure
@@ -166,7 +167,6 @@ class TestDatabaseSink:
 
     def test_has_determinism(self) -> None:
         """DatabaseSink has determinism attribute."""
-        from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.database_sink import DatabaseSink
 
         sink = inject_write_failure(DatabaseSink({"url": "sqlite:///:memory:", "table": "test", "schema": STRICT_SCHEMA}))
@@ -445,7 +445,7 @@ class TestDatabaseSinkSecretHandling:
         sink = inject_write_failure(
             DatabaseSink(
                 {
-                    "url": "postgresql://user:secret@localhost/db",
+                    "url": "postgresql://user:secret@localhost/db",  # secret-scan: allow-this-line
                     "table": "test",
                     "schema": STRICT_SCHEMA,
                 }
@@ -473,7 +473,7 @@ class TestDatabaseSinkSecretHandling:
         with pytest.raises(SecretFingerprintError, match="ELSPETH_FINGERPRINT_KEY"):
             DatabaseSink(
                 {
-                    "url": "postgresql://user:secret@localhost/db",
+                    "url": "postgresql://user:secret@localhost/db",  # secret-scan: allow-this-line
                     "table": "test",
                     "schema": STRICT_SCHEMA,
                 }

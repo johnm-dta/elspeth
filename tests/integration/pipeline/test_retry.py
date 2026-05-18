@@ -18,7 +18,7 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import NodeType, PluginSchema, TokenInfo, TransformResult
+from elspeth.contracts import Determinism, NodeType, PluginSchema, TokenInfo, TransformResult
 from elspeth.contracts.config import RuntimeRetryConfig
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import MaxRetriesExceeded
@@ -57,6 +57,7 @@ class FlakyTransform(BaseTransform):
     """
 
     name = "flaky_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema = PluginSchema
     output_schema = PluginSchema
     plugin_version = "1.0.0"
@@ -81,6 +82,7 @@ class AlwaysFailTransform(BaseTransform):
     """
 
     name = "always_fail_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema = PluginSchema
     output_schema = PluginSchema
     plugin_version = "1.0.0"

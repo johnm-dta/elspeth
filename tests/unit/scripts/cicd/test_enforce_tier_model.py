@@ -335,6 +335,21 @@ class TestR1FalsePositiveFiltering:
         assert len(r1_findings) == 1, "Ambiguous get() must be flagged"
 
 
+class TestR1SourceRegressions:
+    """Source-level regressions for known R1 allowlist burn-downs."""
+
+    def test_landscape_exporter_iter_records_has_no_r1_findings(self) -> None:
+        findings = scan_file(
+            Path("src/elspeth/core/landscape/exporter.py"),
+            Path("src/elspeth"),
+        )
+
+        r1_findings = [
+            finding for finding in findings if finding.rule_id == "R1" and finding.symbol_context == ("LandscapeExporter", "_iter_records")
+        ]
+        assert r1_findings == []
+
+
 # =============================================================================
 # R2: getattr() detection
 # =============================================================================

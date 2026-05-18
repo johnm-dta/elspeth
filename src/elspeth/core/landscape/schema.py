@@ -325,6 +325,26 @@ calls_table = Table(
     Column("request_ref", String(256)),
     Column("response_hash", String(64)),
     Column("response_ref", String(256)),
+    # Cross-DB hash anchor for interpretation events (Option A — Phase 5b).
+    # Populated by the LLM-transform plugin at execution time when the runtime
+    # node config contains a ``resolved_prompt_template_hash`` sibling field
+    # (written by ``resolve_interpretation_event`` at compose time and committed
+    # into ``composition_states.nodes``). If the sibling field is absent (the
+    # LLM transform is NOT downstream of an interpretation event), this column
+    # is NULL.
+    #
+    # When non-NULL, this hash MUST equal the corresponding
+    # ``interpretation_events.resolved_prompt_template_hash`` in the session
+    # audit DB for the same resolved prompt string. An inequality indicates
+    # tampering or a composition-to-execution coherence failure. Checked by the
+    # audit-tooling layer; a mismatch is a Tier-1 crash-on-anomaly.
+    #
+    # Hash scheme: SHA-256 over rfc8785 canonical JSON of the resolved
+    # prompt-template string, using ``CANONICAL_VERSION = "sha256-rfc8785-v1"``
+    # (contracts/hashing.py:CANONICAL_VERSION). Identical scheme used by both
+    # the session service (write at resolve time) and the runtime plugin (write
+    # at execution time), so the hashes are comparable byte-for-byte.
+    Column("resolved_prompt_template_hash", String(64), nullable=True),
     Column("error_json", Text),
     Column("latency_ms", Float),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -473,6 +493,15 @@ Index("ix_node_states_token", node_states_table.c.token_id)
 Index("ix_node_states_node", node_states_table.c.node_id)
 Index("ix_calls_state", calls_table.c.state_id)
 Index("ix_calls_operation", calls_table.c.operation_id)  # For operation call lookups
+# Phase 5b — supports the cross-DB anchor lookup: "given a session-side
+# interpretation_events.resolved_prompt_template_hash, find the matching
+# Landscape calls row". The index is sparse on NULL (SQLite excludes NULL
+# keys from B-tree indexes by default), so the storage cost is proportional
+# to the number of LLM-transform calls downstream of an interpretation event.
+Index(
+    "ix_calls_resolved_prompt_template_hash",
+    calls_table.c.resolved_prompt_template_hash,
+)
 Index("ix_operations_node_run", operations_table.c.node_id, operations_table.c.run_id)
 Index("ix_artifacts_run", artifacts_table.c.run_id)
 

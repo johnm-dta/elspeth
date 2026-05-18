@@ -23,6 +23,28 @@ from elspeth.web.sessions.models import (
 
 _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 
+# F-24 — required SQLite triggers. These triggers enforce audit invariants
+# that cannot be expressed as table CHECK constraints:
+#
+# * ``trg_interpretation_events_immutable_resolved`` — resolved
+#   ``interpretation_events`` rows cannot be retroactively edited (Phase 5b
+#   Task 2; the table itself is the source of truth for user resolutions).
+# * ``trg_chat_messages_immutable_content`` — ``chat_messages.content`` is
+#   append-only once written (Phase 5a Task 2.6; chat messages anchor the
+#   ``blobs.created_from_message_id`` lineage walk).
+#
+# The validator catches the case where schema bootstrap succeeded but the
+# trigger DDL failed silently (e.g., if the DDL event listener was removed
+# or reordered). Live validation against ``sqlite_master`` so a dropped
+# trigger on an existing DB is caught at startup, not at the first attempt
+# to mutate the protected rows.
+_REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
+    {
+        "trg_interpretation_events_immutable_resolved",
+        "trg_chat_messages_immutable_content",
+    }
+)
+
 
 class SessionSchemaError(RuntimeError):
     """Raised when a session database does not match the current V0 schema."""
@@ -156,6 +178,32 @@ def _validate_current_schema(engine: Engine) -> None:
         _validate_named_checks(inspector, table_name, table)
         _validate_named_unique_constraints(inspector, table_name, table)
         _validate_named_indexes(inspector, table_name, table)
+
+    _validate_required_triggers(engine)
+
+
+def _validate_required_triggers(engine: Engine) -> None:
+    """Confirm the required SQLite triggers are present in the live DB.
+
+    Catches the case where ``metadata.create_all`` succeeded but a trigger
+    listener was bypassed or removed, OR where a trigger on an existing DB
+    was dropped (manually or by a faulty migration). Without this check, a
+    silently-missing trigger means the audit invariants it enforces are not
+    actually being enforced — a Tier-1 audit integrity failure that would
+    otherwise only surface the next time someone tried to mutate a
+    protected row (which may be never on a quiescent DB).
+    """
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.connect() as conn:
+        present = {str(row[0]) for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
+    missing = _REQUIRED_SQLITE_TRIGGERS - present
+    if missing:
+        _schema_error(
+            "missing SQLite trigger(s)",
+            expected=sorted(_REQUIRED_SQLITE_TRIGGERS),
+            actual=sorted(present),
+        )
 
 
 def _validate_columns(inspector: Inspector, table_name: str, table: Table) -> None:

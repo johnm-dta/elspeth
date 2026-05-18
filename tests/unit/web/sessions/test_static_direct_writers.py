@@ -829,6 +829,58 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         operation="sqlalchemy_insert_call",
         purpose="schema test exercises run_event_type CHECK chain (line 274); composition_state setup row required",
     ),
+    # ------ tests/unit/web/sessions/test_interpretation_events_table.py — Phase 5b Task 2 schema tests (4 sites) ------
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="_seed_composition_state",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test helper: seeds a composition_states row "
+            "to satisfy the composite FK on interpretation_events. Schema-test "
+            "direct insert — no production lock required because the test owns "
+            "the in-memory SQLite engine and is exercising DDL/constraint "
+            "behaviour, not the production write path. Helper is intentionally "
+            "named _seed_composition_state (not _insert_composition_state) so "
+            "the lock-discipline scanner does not conflate it with the "
+            "production SessionServiceImpl._insert_composition_state."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestCompositionStatesProvenanceEnum.test_invalid_provenance_rejected",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test: drives the "
+            "ck_composition_states_provenance CHECK constraint by inserting an "
+            "invalid provenance value directly; bypassing the helper is the "
+            "point of the test (the helper would only ever pass valid values)."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestCompositionStatesProvenanceEnum.test_interpretation_resolve_provenance_accepted",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test: positive case for the new "
+            "'interpretation_resolve' provenance enum value; direct insert "
+            "asserts the CHECK constraint accepts the new value."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestTriggerInstalledByBootstrap.test_chat_messages_content_immutable",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5b Task 2 schema test: seeds a chat_messages row to assert "
+            "that trg_chat_messages_immutable_content fires on UPDATE OF "
+            "content. Direct insert is required because the test exercises "
+            "trigger behaviour, not the production writer."
+        ),
+    ),
     # ------ tests/unit/web/sessions/test_fork.py — corruption fixture ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_fork.py",

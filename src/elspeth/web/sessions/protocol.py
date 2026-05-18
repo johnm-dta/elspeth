@@ -88,6 +88,7 @@ CompositionStateProvenance = Literal[
     "preflight_persist",
     "session_seed",
     "session_fork",
+    "interpretation_resolve",
 ]
 
 AUDIT_GRADE_VIEW_WRITER_PRINCIPAL = "audit_grade_view"

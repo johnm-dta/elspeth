@@ -1742,6 +1742,15 @@ class SessionServiceImpl:
         a malformed reference is a Tier-1 audit anomaly we crash on rather
         than fabricating a binding.
 
+        The ``actor`` column on the pending row is set to the sentinel
+        ``"composer-llm"`` — the row was created by the composer LLM, not
+        a user. ``resolve_interpretation_event`` overwrites this with the
+        user identity passed by the route at resolution time, which is
+        what :data:`InterpretationEventRecord` ``actor`` documents as
+        "user identity at resolution". The closed CHECK on choice and the
+        immutability trigger together prevent any other writer from
+        appearing on a resolved row.
+
         Telemetry: NONE — composition-time user decisions are audit-primary;
         no ephemeral operational signal required.
         """

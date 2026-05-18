@@ -26,6 +26,7 @@ from elspeth.contracts.contexts import SinkContext
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import OutputCollisionPolicy, SinkPathConfig
 from elspeth.plugins.infrastructure.display_headers import (
+    display_name_for,
     get_effective_display_headers,
     init_display_headers,
     resolve_contract_from_context_if_needed,
@@ -111,7 +112,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a359d8eccb1d5e66"
+    source_file_hash: str | None = "sha256:b6a47faeaf0e407c"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -177,7 +178,7 @@ class CSVSink(BaseSink):
         display_map = get_effective_display_headers(self)
         if display_map is not None:
             # Map normalized -> display for comparison against file headers
-            expected = [display_map.get(f, f) for f in expected_normalized]
+            expected = [display_name_for(display_map, f) for f in expected_normalized]
         elif self._headers_mode == HeaderMode.ORIGINAL:
             return OutputValidationResult.failure(
                 message="CSV headers: original requires source field resolution before resume validation",
@@ -489,7 +490,7 @@ class CSVSink(BaseSink):
                     # Reverse the display map to get display_name -> data_field
                     reverse_map = {v: k for k, v in display_map.items()}
                     # Map existing headers (display names) back to data field names
-                    self._fieldnames = [reverse_map.get(h, h) for h in existing_fieldnames]
+                    self._fieldnames = [display_name_for(reverse_map, h) for h in existing_fieldnames]
                 else:
                     self._fieldnames = list(existing_fieldnames)
 
@@ -595,7 +596,7 @@ class CSVSink(BaseSink):
 
         # Map field names to display names, falling back to original if not mapped
         # This handles transform-added fields that have no original header
-        display_fields = [display_map.get(field, field) for field in data_fields]
+        display_fields = [display_name_for(display_map, field) for field in data_fields]
         return data_fields, display_fields
 
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:

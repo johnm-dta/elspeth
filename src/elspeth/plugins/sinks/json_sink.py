@@ -27,6 +27,7 @@ from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import OutputCollisionPolicy, SinkPathConfig
 from elspeth.plugins.infrastructure.display_headers import (
     apply_display_headers,
+    display_name_for,
     get_effective_display_headers,
     init_display_headers,
     resolve_contract_from_context_if_needed,
@@ -101,7 +102,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:604a70c6c47e5ca4"
+    source_file_hash: str | None = "sha256:61ea9aa36a0e8a07"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -195,7 +196,7 @@ class JSONSink(BaseSink):
         display_map = get_effective_display_headers(self)
         if display_map is not None:
             # Map normalized -> display for comparison against file keys
-            expected = [display_map.get(f, f) for f in expected_normalized]
+            expected = [display_name_for(display_map, f) for f in expected_normalized]
         elif self._headers_mode == HeaderMode.ORIGINAL:
             return OutputValidationResult.failure(
                 message="JSONL headers: original requires source field resolution before resume validation",

@@ -22,15 +22,32 @@ from __future__ import annotations
 
 import argparse
 import ast
-import fnmatch
 import hashlib
 import sys
-from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    from scripts.cicd._framework.allowlist import (
+        PerFileAllowlist as Allowlist,
+    )
+    from scripts.cicd._framework.allowlist import (
+        PerFileRule,
+        load_per_file_allowlist,
+        parse_per_file_rules,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "scripts":
+        raise
+    from _framework.allowlist import (
+        PerFileAllowlist as Allowlist,
+    )
+    from _framework.allowlist import (
+        PerFileRule,
+        load_per_file_allowlist,
+        parse_per_file_rules,
+    )
 
 # =============================================================================
 # Data Structures
@@ -75,49 +92,6 @@ class Finding:
     def canonical_key(self) -> str:
         symbol_part = ":".join(self.symbol_context) if self.symbol_context else "_module_"
         return f"{self.file_path}:{self.rule_id}:{symbol_part}:fp={self.fingerprint}"
-
-
-@dataclass
-class PerFileRule:
-    """A per-file rule that allowlists patterns of specified rules for a file."""
-
-    pattern: str
-    rules: list[str]
-    reason: str
-    expires: date | None
-    max_hits: int | None = None
-    matched_count: int = field(default=0, compare=False)
-    source_file: str = field(default="", compare=False)
-
-    def matches(self, file_path: str, rule_id: str) -> bool:
-        if rule_id not in self.rules:
-            return False
-        return fnmatch.fnmatch(file_path, self.pattern)
-
-
-@dataclass
-class Allowlist:
-    """Parsed allowlist configuration."""
-
-    per_file_rules: list[PerFileRule] = field(default_factory=list)
-    fail_on_stale: bool = True
-
-    def match(self, finding: Finding) -> PerFileRule | None:
-        for rule in self.per_file_rules:
-            if rule.matches(finding.file_path, finding.rule_id):
-                rule.matched_count += 1
-                return rule
-        return None
-
-    def get_unused_rules(self) -> list[PerFileRule]:
-        return [r for r in self.per_file_rules if r.matched_count == 0]
-
-    def get_expired_rules(self) -> list[PerFileRule]:
-        today = datetime.now(UTC).date()
-        return [r for r in self.per_file_rules if r.expires and r.expires < today]
-
-    def get_exceeded_rules(self) -> list[PerFileRule]:
-        return [r for r in self.per_file_rules if r.max_hits is not None and r.matched_count > r.max_hits]
 
 
 # =============================================================================
@@ -244,90 +218,13 @@ def scan_all(root: Path, files: list[Path] | None = None) -> list[Finding]:
 # =============================================================================
 
 
-def _load_yaml_file(path: Path) -> dict[str, Any]:
-    try:
-        with path.open() as f:
-            return yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        print(f"Error: Invalid YAML in allowlist {path}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
 def _parse_per_file_rules(data: dict[str, Any], source_file: str = "") -> list[PerFileRule]:
-    rules: list[PerFileRule] = []
-    for item in data.get("per_file_rules", []):
-        rule_ids = set(item.get("rules", []))
-        unknown = rule_ids - _ALL_RULE_IDS
-        if unknown:
-            ctx = f" in {source_file}" if source_file else ""
-            print(
-                f"Error: per_file_rules entry for '{item.get('pattern', '?')}'{ctx} uses unknown rule ID(s) {unknown}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        expires_str = item.get("expires")
-        expires_date = None
-        if expires_str:
-            try:
-                expires_date = datetime.strptime(expires_str, "%Y-%m-%d").replace(tzinfo=UTC).date()
-            except ValueError:
-                print(f"Warning: Invalid date format for expires: {expires_str}", file=sys.stderr)
-
-        max_hits: int | None = None
-        raw_max_hits = item.get("max_hits")
-        if raw_max_hits is not None:
-            try:
-                max_hits = int(raw_max_hits)
-            except ValueError:
-                print(
-                    f"Error: non-numeric max_hits for '{item.get('pattern', '?')}': {raw_max_hits!r}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-        rules.append(
-            PerFileRule(
-                pattern=item["pattern"],
-                rules=item.get("rules", []),
-                reason=item.get("reason", ""),
-                expires=expires_date,
-                max_hits=max_hits,
-                source_file=source_file,
-            )
-        )
-    return rules
+    return parse_per_file_rules(data, valid_rule_ids=_ALL_RULE_IDS, source_file=source_file)
 
 
 def load_allowlist(path: Path) -> Allowlist:
     """Load allowlist from a directory of YAML files or a single file."""
-    if path.is_dir():
-        defaults_path = path / "_defaults.yaml"
-        defaults = {}
-        if defaults_path.exists():
-            defaults_data = _load_yaml_file(defaults_path)
-            defaults = defaults_data.get("defaults", {})
-
-        yaml_files = sorted(f for f in path.glob("*.yaml") if f.name != "_defaults.yaml")
-        all_rules: list[PerFileRule] = []
-        for yaml_file in yaml_files:
-            data = _load_yaml_file(yaml_file)
-            all_rules.extend(_parse_per_file_rules(data, source_file=yaml_file.name))
-
-        return Allowlist(
-            per_file_rules=all_rules,
-            fail_on_stale=defaults.get("fail_on_stale", True),
-        )
-
-    if not path.exists():
-        return Allowlist()
-
-    data = _load_yaml_file(path)
-    defaults = data.get("defaults", {})
-    return Allowlist(
-        per_file_rules=_parse_per_file_rules(data),
-        fail_on_stale=defaults.get("fail_on_stale", True),
-    )
+    return load_per_file_allowlist(path, valid_rule_ids=_ALL_RULE_IDS)
 
 
 # =============================================================================

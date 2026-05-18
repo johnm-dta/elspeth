@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 import structlog
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -18,6 +19,20 @@ from elspeth.web.sessions.protocol import AuditAccessLogWriteError
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
 from tests.unit.web.conftest import _make_session
+
+
+async def _get(test_client: TestClient, url: str) -> Response:
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=test_client.app,
+            raise_app_exceptions=getattr(test_client, "raise_server_exceptions", True),
+        ),
+        base_url="http://test",
+        cookies=test_client.cookies,
+    ) as client:
+        response = await client.get(url)
+        test_client.cookies.update(response.cookies)
+        return response
 
 
 @pytest.fixture
@@ -175,10 +190,11 @@ def test_record_audit_grade_view_translates_db_write_failure(
     assert observed_value(sessions_service._telemetry.audit_grade_view_total) == 0
 
 
-def test_endpoint_emits_audit_log_when_include_tool_rows_true(test_client: TestClient) -> None:
+@pytest.mark.asyncio
+async def test_endpoint_emits_audit_log_when_include_tool_rows_true(test_client: TestClient) -> None:
     seeded = _seed_user_assistant_tool_rows(test_client)
 
-    response = test_client.get(f"/api/sessions/{seeded['session_id']}/messages?include_tool_rows=true")
+    response = await _get(test_client, f"/api/sessions/{seeded['session_id']}/messages?include_tool_rows=true")
 
     assert response.status_code == 200
     sessions_service = test_client.app.state.session_service
@@ -187,10 +203,11 @@ def test_endpoint_emits_audit_log_when_include_tool_rows_true(test_client: TestC
     assert rows[0].query_args == {"include_tool_rows": "true"}
 
 
-def test_endpoint_does_not_emit_audit_log_when_include_tool_rows_false(test_client: TestClient) -> None:
+@pytest.mark.asyncio
+async def test_endpoint_does_not_emit_audit_log_when_include_tool_rows_false(test_client: TestClient) -> None:
     seeded = _seed_user_assistant_tool_rows(test_client)
 
-    response = test_client.get(f"/api/sessions/{seeded['session_id']}/messages")
+    response = await _get(test_client, f"/api/sessions/{seeded['session_id']}/messages")
 
     assert response.status_code == 200
     sessions_service = test_client.app.state.session_service
@@ -198,12 +215,16 @@ def test_endpoint_does_not_emit_audit_log_when_include_tool_rows_false(test_clie
     assert rows == []
 
 
-def test_endpoint_filters_unallowlisted_query_args_before_audit_writer(
+@pytest.mark.asyncio
+async def test_endpoint_filters_unallowlisted_query_args_before_audit_writer(
     test_client: TestClient,
 ) -> None:
     seeded = _seed_user_assistant_tool_rows(test_client)
 
-    response = test_client.get(f"/api/sessions/{seeded['session_id']}/messages?include_tool_rows=true&api_key=secret&limit=25")
+    response = await _get(
+        test_client,
+        f"/api/sessions/{seeded['session_id']}/messages?include_tool_rows=true&api_key=secret&limit=25",
+    )
 
     assert response.status_code == 200
     sessions_service = test_client.app.state.session_service
@@ -212,7 +233,8 @@ def test_endpoint_filters_unallowlisted_query_args_before_audit_writer(
     assert rows[0].query_args == {"include_tool_rows": "true", "limit": "25"}
 
 
-def test_endpoint_fails_closed_when_audit_access_log_write_fails(
+@pytest.mark.asyncio
+async def test_endpoint_fails_closed_when_audit_access_log_write_fails(
     test_client: TestClient,
     inject_audit_access_log_write_failure,
 ) -> None:
@@ -221,7 +243,7 @@ def test_endpoint_fails_closed_when_audit_access_log_write_fails(
     inject_audit_access_log_write_failure(sessions_service)
     test_client.raise_server_exceptions = False
 
-    response = test_client.get(f"/api/sessions/{seeded['session_id']}/messages?include_tool_rows=true")
+    response = await _get(test_client, f"/api/sessions/{seeded['session_id']}/messages?include_tool_rows=true")
 
     assert response.status_code == 500
     body = response.json()

@@ -6,11 +6,24 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import insert
 
 from elspeth.web.sessions.models import chat_messages_table
 from tests.unit.web.conftest import _make_session
+
+
+async def _get(test_client: TestClient, url: str) -> Response:
+    async with AsyncClient(
+        transport=ASGITransport(app=test_client.app),
+        base_url="http://test",
+        cookies=test_client.cookies,
+    ) as client:
+        response = await client.get(url)
+        test_client.cookies.update(response.cookies)
+        return response
 
 
 def _seed_user_assistant_tool_rows(test_client: TestClient) -> dict[str, Any]:
@@ -69,24 +82,26 @@ def _seed_user_assistant_tool_rows(test_client: TestClient) -> dict[str, Any]:
     return {"session_id": session_id, "assistant_id": assistant_id}
 
 
-def test_default_excludes_tool_rows(test_client: TestClient) -> None:
+@pytest.mark.asyncio
+async def test_default_excludes_tool_rows(test_client: TestClient) -> None:
     seeded = _seed_user_assistant_tool_rows(test_client)
     session_id = seeded["session_id"]
 
-    response = test_client.get(f"/api/sessions/{session_id}/messages")
+    response = await _get(test_client, f"/api/sessions/{session_id}/messages")
 
     assert response.status_code == 200
     rows = response.json()
     assert all(row["role"] in ("user", "assistant", "system") for row in rows)
 
 
-def test_include_tool_rows_returns_tool_rows_interleaved_by_sequence_no(
+@pytest.mark.asyncio
+async def test_include_tool_rows_returns_tool_rows_interleaved_by_sequence_no(
     test_client: TestClient,
 ) -> None:
     seeded = _seed_user_assistant_tool_rows(test_client)
     session_id = seeded["session_id"]
 
-    response = test_client.get(f"/api/sessions/{session_id}/messages?include_tool_rows=true")
+    response = await _get(test_client, f"/api/sessions/{session_id}/messages?include_tool_rows=true")
 
     assert response.status_code == 200
     rows = response.json()
@@ -95,13 +110,14 @@ def test_include_tool_rows_returns_tool_rows_interleaved_by_sequence_no(
     assert [row["role"] for row in rows] == ["user", "assistant", "tool"]
 
 
-def test_include_tool_rows_exposes_tool_row_columns(
+@pytest.mark.asyncio
+async def test_include_tool_rows_exposes_tool_row_columns(
     test_client: TestClient,
 ) -> None:
     seeded = _seed_user_assistant_tool_rows(test_client)
     session_id = seeded["session_id"]
 
-    response = test_client.get(f"/api/sessions/{session_id}/messages?include_tool_rows=true")
+    response = await _get(test_client, f"/api/sessions/{session_id}/messages?include_tool_rows=true")
 
     assert response.status_code == 200
     rows = response.json()

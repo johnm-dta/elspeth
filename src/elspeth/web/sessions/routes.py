@@ -5651,10 +5651,10 @@ def create_session_router() -> APIRouter:
                         f"before fork blob rewrite for session {new_session.id}."
                     )
 
-                options = source_dict.get("options")
-                if options is None:
+                if "options" not in source_dict or source_dict["options"] is None:
                     rewritten = False
                 else:
+                    options = source_dict["options"]
                     if not isinstance(options, dict):
                         raise AuditIntegrityError(
                             f"Tier 1 audit anomaly: composition_state {copied_state.id} "
@@ -5679,10 +5679,23 @@ def create_session_router() -> APIRouter:
                     # block archives the partially-created fork (see the
                     # cleanup-rollback site below), so this crash does
                     # not leak artifacts.
-                    old_ref = options.get("blob_ref")
+                    if "blob_ref" in options:
+                        old_ref = options["blob_ref"]
+                    else:
+                        old_ref = None
                     if old_ref is not None:
+                        if not isinstance(old_ref, str):
+                            raise AuditIntegrityError(
+                                f"Tier 1 audit anomaly: composition_state "
+                                f"{copied_state.id} has blob_ref type "
+                                f"{type(old_ref).__name__} in source.options "
+                                f"(expected a UUID string written by "
+                                f"composer/tools.py). Fork aborted to prevent "
+                                f"cross-session blob reference in forked "
+                                f"session {new_session.id}."
+                            )
                         try:
-                            old_uuid = UUID(old_ref) if isinstance(old_ref, str) else old_ref
+                            old_uuid = UUID(old_ref)
                         except ValueError as exc:
                             raise AuditIntegrityError(
                                 f"Tier 1 audit anomaly: composition_state "
@@ -5692,11 +5705,14 @@ def create_session_router() -> APIRouter:
                                 f"Fork aborted to prevent cross-session blob "
                                 f"reference in forked session {new_session.id}."
                             ) from exc
-                        rewrite_target = blob_map.get(old_uuid)
+                        if old_uuid in blob_map:
+                            rewrite_target = blob_map[old_uuid]
 
                     if rewrite_target is None:
                         for path_key in ("path", "file"):
-                            path_value = options.get(path_key)
+                            if path_key not in options:
+                                continue
+                            path_value = options[path_key]
                             if isinstance(path_value, str) and path_value in source_blob_path_map:
                                 rewrite_target = source_blob_path_map[path_value]
                                 break

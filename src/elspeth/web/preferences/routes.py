@@ -15,6 +15,11 @@ from fastapi import APIRouter, Depends, Request
 
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.telemetry_phase8 import (
+    SessionsTelemetry,
+    record_mode_opted_in,
+    record_mode_opted_out,
+)
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.preferences.models import (
     ComposerPreferences,
@@ -57,6 +62,35 @@ def create_preferences_router() -> APIRouter:
         # see the "Operational signal only" module-level comment in
         # ``preferences/service.py`` for the future-promotion criterion.
         transition = await service.update_composer_preferences(user.user_id, body)
+
+        # Phase 8 Task 2 — account-level mode opt-out / opt-in emit.
+        #
+        # The emit fires ONLY when the PATCH body actually included
+        # ``default_mode`` (``body.default_mode is not None``), matching
+        # the ``mode_changed`` field-presence semantic the service uses
+        # for its own composer-preferences PATCH counter. This is a
+        # **set-rate**, not a transition-rate (B3-r3 semantic caveat):
+        # a PATCH that sets ``default_mode=freeform`` on a session
+        # whose prior was already ``freeform`` still fires the
+        # ``record_mode_opted_out`` emit because the user re-asserted
+        # the value. Inferring "changed" from
+        # ``transition.prior.default_mode != transition.current.default_mode``
+        # would silently convert the set-rate to a transition-rate and
+        # break §"Account-level scope narrowing (B2.b — load-bearing)".
+        #
+        # Post-state-only per B2.b: helpers are kwarg-free and read the
+        # post-state from ``transition.current.default_mode`` rather
+        # than carrying ``from_mode`` attributes. The route does NOT
+        # accompany this emit with an audit event — the account-level
+        # surface is an operational signal; the future-promotion seam
+        # is documented in ``preferences/service.py``.
+        if body.default_mode is not None:
+            telemetry: SessionsTelemetry = request.app.state.sessions_telemetry
+            if transition.current.default_mode == "freeform":
+                record_mode_opted_out(telemetry)
+            elif transition.current.default_mode == "guided":
+                record_mode_opted_in(telemetry)
+
         return transition.current
 
     return router

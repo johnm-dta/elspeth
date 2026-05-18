@@ -114,6 +114,7 @@ from elspeth.web.composer.protocol import (
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
+from elspeth.web.composer.telemetry_phase8 import SessionsTelemetry, record_session_switched
 from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
 from elspeth.web.composer.yaml_generator import generate_yaml
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
@@ -3583,6 +3584,38 @@ def create_session_router() -> APIRouter:
             density_default=body.density_default,
             actor=f"user:{user.user_id}",
         )
+
+        # Phase 8 Task 2 Step 3 — per-session ``trust_mode`` switch emit.
+        #
+        # Guarded on actual change (transition-rate semantic, distinct
+        # from the account-level set-rate at preferences/routes.py).
+        # The service's ``trust_mode.changed`` audit row at
+        # ``sessions/service.py:1605-1619`` fires unconditionally on
+        # every PATCH including no-ops; emitting the counter
+        # unconditionally would over-count by the no-op rate. Guarding
+        # on ``prior != current`` also gives the Q4 contract: a
+        # combined PATCH that changes both ``trust_mode`` AND
+        # ``density_default`` fires the counter exactly once,
+        # attributed to the trust_mode change only.
+        #
+        # B1 (audit-primacy superset rule): the emit runs AFTER the
+        # audit row commits (the service ``_run_sync`` returned),
+        # which carries ``prior_trust_mode`` in its payload (B1
+        # extension at sessions/service.py:1614). Telemetry attributes
+        # are a strict subset of audit-recorded reality.
+        #
+        # Vocabulary (B1-r2): both attributes come from the per-session
+        # ``trust_mode`` CHECK-constraint vocabulary
+        # (``explicit_approve`` / ``auto_commit``), NOT the account-
+        # level ``default_composer_mode`` vocabulary.
+        if transition.prior.trust_mode != transition.current.trust_mode:
+            telemetry: SessionsTelemetry = request.app.state.sessions_telemetry
+            record_session_switched(
+                telemetry,
+                from_mode=transition.prior.trust_mode,
+                to_mode=transition.current.trust_mode,
+            )
+
         return _composer_preferences_response(transition.current)
 
     @router.get(

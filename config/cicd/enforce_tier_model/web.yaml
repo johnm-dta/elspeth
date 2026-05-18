@@ -1134,152 +1134,152 @@ allow_hits:
   reason: Blob finalization/fork recovery boundary; narrow filesystem/database failures are collected so the primary session/run operation remains inspectable.
   safety: Failures are returned in explicit result fields; programmer bugs and unrelated exceptions are not absorbed.
   expires: null
-- key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=e96cc0173e2e227d
+- key: web/sessions/routes.py:R2:_get_session_compose_lock_registry:fp=c53494d2db19b487
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=4027a863f080a557
+- key: web/sessions/routes.py:R2:_litellm_error_detail:fp=e1dc8deb53cf8408
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R1:_state_response:fp=8b3f93741dafe62b
+- key: web/sessions/routes.py:R1:_state_response:fp=762e0385e665f0c3
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R1:_extract_runtime_model_snapshot:fp=e4e6029fe406b227
+- key: web/sessions/routes.py:R1:_extract_runtime_model_snapshot:fp=54fbf643e849842a
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R1:_extract_runtime_model_snapshot:fp=6400b4aa151f2f2d
+- key: web/sessions/routes.py:R1:_extract_runtime_model_snapshot:fp=cff9f65efd1216d6
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=51c86d8daef6963d
+- key: web/sessions/routes.py:R6:_state_data_from_composer_state:fp=a7410024a567e6e2
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=f773f7c0e07f0456
+- key: web/sessions/routes.py:R6:_handle_convergence_error:fp=a8912ca8c0c66423
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=a904b560d53e4df0
+- key: web/sessions/routes.py:R6:_handle_plugin_crash:fp=34dfc4549999299e
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=c24c46dd65a8cd35
+- key: web/sessions/routes.py:R6:_handle_runtime_preflight_failure:fp=e3f7ccf3e4dbb962
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R1:create_session_router:accept_composition_proposal:fp=18012d8f6c4f1427
+- key: web/sessions/routes.py:R1:create_session_router:accept_composition_proposal:fp=6037d635293caa5c
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:accept_composition_proposal:fp=5b168acbb6e5e899
+- key: web/sessions/routes.py:R6:create_session_router:accept_composition_proposal:fp=36b858b4979991ce
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=4b003b5f1f4e34f0
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=1cdb0e5b4b7b0770
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=7909b0c30ea994ad
+- key: web/sessions/routes.py:R7:create_session_router:send_message:fp=c747aac0c697fb39
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:send_message:fp=1af8af06acd60dcf
+- key: web/sessions/routes.py:R6:create_session_router:send_message:fp=4cd0082deb416430
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=33c016c28ee824c3
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=1f130fe99be5221a
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=412f4facaeaa13b1
+- key: web/sessions/routes.py:R7:create_session_router:recompose:fp=8152f923ac524588
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=7e72b6570f7a7872
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=e119a68bf13f7122
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=0fd1f6935f11423f
+- key: web/sessions/routes.py:R6:create_session_router:fork_from_message:fp=1f91de50c47a96d5
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=8848861c07bc5513
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=46a9eca4b2bc8794
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=27dbc24d0f3311f9
+- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=5c6f852ec5ae1145
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=14ef0e611aa63520
+- key: web/sessions/routes.py:R4:create_session_router:get_guided:fp=05e68d6dc91120e1
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=5080be20faf7c1de
+- key: web/sessions/routes.py:R7:create_session_router:get_guided:fp=e02d034a575b8f3d
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=bbd7b4ecbcd94cea
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=ee80e0925ea51181
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=1ad895a17177836a
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=5cfa91fde6b51e12
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=835a97f4daee3f78
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_respond:fp=c3f5909289b9f61e
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=8ae0e4955361c363
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_respond:fp=ac21f3398d4ffcdc
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=b76e35f6f7032fa4
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=43d11639692640de
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=8af496ea1f324f2b
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=9940e94fdf7eabac
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=5782d84150ccdadc
+- key: web/sessions/routes.py:R4:create_session_router:post_guided_chat:fp=bd3cd7a1e5ea3dba
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=a6f1e20c1d11ee80
+- key: web/sessions/routes.py:R7:create_session_router:post_guided_chat:fp=b56b657b2c1a9d8b
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception; recovery catches are narrow and record class-name-only diagnostics.

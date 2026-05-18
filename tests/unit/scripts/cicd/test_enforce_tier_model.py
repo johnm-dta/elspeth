@@ -190,12 +190,11 @@ class TestR1FalsePositiveFiltering:
         r1_findings = [f for f in findings if f.rule_id == "R1"]
         assert len(r1_findings) == 0, "client.get() with URL path should not be flagged"
 
-    def test_fstring_url_still_flagged(self) -> None:
-        """client.get(f"/api/{id}") SHOULD still be flagged (documents limitation).
+    def test_unknown_receiver_fstring_url_still_flagged(self) -> None:
+        """client.get(f"/api/{id}") SHOULD still be flagged for unknown receivers.
 
-        This test documents a known limitation: f-strings are not string literals
-        in the AST, so we cannot determine if the argument is a URL. The heuristic
-        errs on the side of flagging, requiring an allowlist entry if needed.
+        F-string URLs are safe to suppress only when the receiver is known to be
+        an HTTP client. Unknown receivers may still be dict-like objects.
         """
         source = dedent("""
             def fetch_user(client, user_id):
@@ -204,7 +203,69 @@ class TestR1FalsePositiveFiltering:
         findings = parse_and_visit(source)
 
         r1_findings = [f for f in findings if f.rule_id == "R1"]
-        assert len(r1_findings) == 1, "f-string URLs cannot be detected as URLs - must be flagged"
+        assert len(r1_findings) == 1, "f-string URLs on unknown receivers must be flagged"
+
+    def test_httpx_async_client_get_with_variable_url_not_flagged(self) -> None:
+        """httpx.AsyncClient.get(variable_url) is HTTP transport, not dict access."""
+        source = dedent("""
+            import httpx
+
+            async def fetch_jwks(issuer):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    discovery_url = f"{issuer}/.well-known/openid-configuration"
+                    response = await client.get(discovery_url)
+                    return response.json()
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "httpx.AsyncClient.get() should not be flagged"
+
+    def test_httpx_module_get_with_variable_url_not_flagged(self) -> None:
+        """httpx.get(variable_url) is module-level HTTP transport, not dict access."""
+        source = dedent("""
+            import httpx
+
+            def check_readiness(count_url):
+                response = httpx.get(count_url, timeout=10.0)
+                return response.status_code
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "httpx.get() should not be flagged"
+
+    def test_asyncio_queue_get_not_flagged(self) -> None:
+        """asyncio.Queue.get() is an awaitable queue API, not dict access."""
+        source = dedent("""
+            import asyncio
+
+            async def wait_for_event():
+                queue = asyncio.Queue()
+                event = await queue.get()
+                return event
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "asyncio.Queue.get() should not be flagged"
+
+    def test_httpx_client_instance_attribute_get_not_flagged(self) -> None:
+        """self._client.get() is HTTP transport when __init__ constructs httpx.Client."""
+        source = dedent("""
+            import httpx
+
+            class AuditedHTTPClient:
+                def __init__(self):
+                    self._client = httpx.Client()
+
+                def fetch(self, url):
+                    return self._client.get(url, timeout=10.0)
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "self._client.get() backed by httpx.Client should not be flagged"
 
     def test_collection_get_with_ids_kwarg_not_flagged(self) -> None:
         """collection.get(ids=[...]) should NOT be flagged.

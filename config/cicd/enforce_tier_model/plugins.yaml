@@ -169,21 +169,6 @@ allow_hits:
     doesn't bury original diagnostic
   safety: Logs rollback error then re-raises the original exception unchanged
   expires: null
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_execute_request:fp=89f5749a5c05003a
-  owner: architecture
-  reason: httpx Client.get() method call - dispatched based on HTTP method
-  safety: This is the actual external HTTP call, not a defensive dict access
-  expires: '2026-07-02'
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:get_ssrf_safe:fp=bf32cd6693b31b20
-  owner: architecture
-  reason: httpx Client.get() method call - ephemeral client for TLS/SNI isolation
-  safety: This is the actual external HTTP call with IP pinning
-  expires: '2026-07-02'
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_follow_redirects_safe:fp=fbc6b3aca998f23c
-  owner: architecture
-  reason: httpx Client.get() method call — ephemeral client per redirect hop for TLS
-    isolation
-  safety: This is the actual external HTTP call, not a defensive dict access
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_follow_redirects_safe:fp=10ab112db646388f
   owner: architecture
   reason: HTTP redirect Location header — external system boundary, header may be
@@ -518,12 +503,6 @@ allow_hits:
   owner: feature
   reason: Azure AI Search API Tier 3 — @search.documentId fallback in source ID chain
   safety: No fabricated IDs; items without source_id skipped and recorded
-  expires: null
-- key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:check_readiness:fp=359a58efc9b7911a
-  owner: feature
-  reason: httpx.get() method call for Azure Search $count endpoint — false positive
-    from R1 rule matching .get( syntax
-  safety: This is the actual HTTP call, not a defensive dict access
   expires: null
 - key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=384b4135dd2e54b8
   owner: feature

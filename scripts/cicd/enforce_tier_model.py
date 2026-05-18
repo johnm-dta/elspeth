@@ -24,6 +24,7 @@ import hashlib
 import json
 import sys
 from calendar import monthrange
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -293,6 +294,15 @@ class TierModelVisitor(ast.NodeVisitor):
     """AST visitor that detects bug-hiding patterns."""
 
     _FASTAPI_ROUTE_METHODS: ClassVar[frozenset[str]] = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "websocket"})
+    _R1_HTTP_GET_MODULES: ClassVar[frozenset[str]] = frozenset({"httpx"})
+    _R1_HTTP_CLIENT_CONSTRUCTORS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "aiohttp.ClientSession",
+            "httpx.AsyncClient",
+            "httpx.Client",
+        }
+    )
+    _R1_QUEUE_CONSTRUCTORS: ClassVar[frozenset[str]] = frozenset({"asyncio.Queue"})
     # CLOSED LIST: audited R5b boundary-normalization helpers from
     # docs/audit/2026-05-19-cicd-allowlist-audit.md and findings/fp-analyst.md.
     # Do not replace this with a broad ``web/**`` or ``plugins/**`` glob; new
@@ -420,6 +430,7 @@ class TierModelVisitor(ast.NodeVisitor):
         self.function_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.path_stack: list[str] = []
         self._decorator_lines: set[int] = set()  # Track lines that are decorators
+        self._import_aliases: dict[str, str] = {}
 
     def _get_code_snippet(self, lineno: int) -> str:
         """Get the source line for a given line number."""
@@ -454,6 +465,21 @@ class TierModelVisitor(ast.NodeVisitor):
                 message=message,
             )
         )
+
+    def visit_Import(self, node: ast.Import) -> None:
+        """Track import aliases used by receiver-type heuristics."""
+        for alias in node.names:
+            root_name = alias.name.split(".", 1)[0]
+            self._import_aliases[alias.asname or root_name] = alias.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Track from-import aliases used by receiver-type heuristics."""
+        if node.module is None:
+            return
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            self._import_aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Track class context."""
@@ -518,16 +544,22 @@ class TierModelVisitor(ast.NodeVisitor):
         1. Decorator context: @router.get("/path") is a route decorator
         2. URL-like first arg: client.get("https://...") is an HTTP method
         3. ChromaDB keywords: collection.get(ids=[...]) is SDK retrieval
+        4. Receiver type: httpx module/client and asyncio.Queue receivers are
+           transport/queue APIs, not dicts
 
-        Note: f-string URLs (client.get(f"/api/{id}")) are NOT filtered
-        because we cannot statically determine their runtime value.
-        These must be allowlisted if they are legitimate HTTP calls.
+        Note: f-string URLs on unknown receivers are NOT filtered because we
+        cannot statically determine their runtime value. They must be tied to a
+        known transport receiver before this rule suppresses them.
         """
         # Heuristic 1: Decorator context
         if node.lineno in self._decorator_lines:
             return True
 
-        # Heuristic 2: URL-like first argument
+        # Heuristic 2: Known module/client/queue receiver type.
+        if self._is_known_non_dict_get_receiver(node):
+            return True
+
+        # Heuristic 3: URL-like first argument
         if node.args:
             first_arg = node.args[0]
             if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
@@ -535,13 +567,96 @@ class TierModelVisitor(ast.NodeVisitor):
                 if val.startswith(("/", "http://", "https://")):
                     return True
 
-        # Heuristic 3: ChromaDB-specific keywords
+        # Heuristic 4: ChromaDB-specific keywords
         # IMPORTANT: Only include keywords that are unambiguous to ChromaDB/vector DBs.
         # Generic pagination keywords (limit, offset) are NOT included because they
         # collide with SQLAlchemy, Django ORM, and other common patterns.
         chromadb_keywords = {"ids", "include", "where"}
         call_keywords = {kw.arg for kw in node.keywords if kw.arg is not None}
         return bool(call_keywords & chromadb_keywords)
+
+    def _qualified_import_name(self, expr: ast.expr) -> str | None:
+        if isinstance(expr, ast.Name):
+            return self._import_aliases.get(expr.id)
+        if isinstance(expr, ast.Attribute):
+            base = self._qualified_import_name(expr.value)
+            if base is None:
+                return None
+            return f"{base}.{expr.attr}"
+        return None
+
+    def _call_constructs_known_non_dict_get_receiver(self, call: ast.Call) -> bool:
+        constructor = self._qualified_import_name(call.func)
+        if constructor is None:
+            return False
+        return constructor in self._R1_HTTP_CLIENT_CONSTRUCTORS or constructor in self._R1_QUEUE_CONSTRUCTORS
+
+    def _target_matches_receiver(self, target: ast.expr, receiver: ast.expr) -> bool:
+        if isinstance(target, ast.Name) and isinstance(receiver, ast.Name):
+            return target.id == receiver.id
+        if isinstance(target, ast.Attribute) and isinstance(receiver, ast.Attribute):
+            return (
+                target.attr == receiver.attr
+                and isinstance(target.value, ast.Name)
+                and isinstance(receiver.value, ast.Name)
+                and target.value.id == receiver.value.id
+            )
+        return False
+
+    def _walk_scope_nodes(self, node: ast.AST) -> Iterator[ast.AST]:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            yield child
+            yield from self._walk_scope_nodes(child)
+
+    def _receiver_assigned_known_type_before(self, scope: ast.AST, receiver: ast.expr, lineno: int) -> bool:
+        known: bool | None = None
+        for child in self._walk_scope_nodes(scope):
+            if getattr(child, "lineno", lineno) >= lineno:
+                continue
+            if isinstance(child, ast.Assign):
+                value_is_known = isinstance(child.value, ast.Call) and self._call_constructs_known_non_dict_get_receiver(child.value)
+                for target in child.targets:
+                    if self._target_matches_receiver(target, receiver):
+                        known = value_is_known
+            elif isinstance(child, ast.AnnAssign):
+                value_is_known = isinstance(child.value, ast.Call) and self._call_constructs_known_non_dict_get_receiver(child.value)
+                if self._target_matches_receiver(child.target, receiver):
+                    known = value_is_known
+            elif isinstance(child, (ast.With, ast.AsyncWith)):
+                for item in child.items:
+                    if item.optional_vars is None:
+                        continue
+                    value_is_known = isinstance(item.context_expr, ast.Call) and self._call_constructs_known_non_dict_get_receiver(
+                        item.context_expr
+                    )
+                    if self._target_matches_receiver(item.optional_vars, receiver):
+                        known = value_is_known
+        return known is True
+
+    def _current_class_init_assigns_known_type(self, receiver: ast.expr) -> bool:
+        current_class = self._current_class()
+        if current_class is None or not isinstance(receiver, ast.Attribute):
+            return False
+        if not isinstance(receiver.value, ast.Name) or receiver.value.id != "self":
+            return False
+        for stmt in current_class.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
+                return self._receiver_assigned_known_type_before(stmt, receiver, lineno=10**9)
+        return False
+
+    def _is_known_non_dict_get_receiver(self, node: ast.Call) -> bool:
+        if not isinstance(node.func, ast.Attribute):
+            return False
+        receiver = node.func.value
+        receiver_module = self._qualified_import_name(receiver)
+        if receiver_module in self._R1_HTTP_GET_MODULES:
+            return True
+        current_function = self._current_function()
+        if current_function is not None and self._receiver_assigned_known_type_before(current_function, receiver, node.lineno):
+            return True
+        return self._current_class_init_assigns_known_type(receiver)
 
     def _decorator_leaf_name(self, decorator: ast.expr) -> str | None:
         """Return the called/decorated symbol leaf name for decorator classification."""

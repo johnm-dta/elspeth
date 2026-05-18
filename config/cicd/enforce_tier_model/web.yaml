@@ -65,16 +65,6 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 JSON schema field 'default' is optional"
   safety: Returns None; ConfigFieldSummary.default accepts None
   expires: null
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:ensure_jwks:fp=d483e7b28d3d938b
-  owner: web-auth
-  reason: "False positive \u2014 httpx.AsyncClient.get() is an HTTP GET request, not dict.get()"
-  safety: HTTP errors caught by raise_for_status() and except block
-  expires: null
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:ensure_jwks:fp=1ae4ffe8bcf071bb
-  owner: web-auth
-  reason: "False positive \u2014 httpx.AsyncClient.get() is an HTTP GET request, not dict.get()"
-  safety: HTTP errors caught by raise_for_status() and except block
-  expires: null
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=c10514f46a44024c
   owner: web-auth
   reason: "Tier 3 boundary \u2014 JWT header kid field is optional per RFC 7515"
@@ -500,11 +490,6 @@ allow_hits:
     internal-error signal rather than fabricating heartbeat or terminal payloads.
   safety: Closes with 1011 and exits the loop; programming and infrastructure errors outside the validation/integrity union
     still propagate to the outer handler.
-  expires: null
-- key: web/app.py:R1:lifespan:fp=1610ba228723c98b  # fp rotated 2026-05-16 (was 2da537fe227f2e1f) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
-  owner: web-app
-  reason: "False positive \u2014 httpx.AsyncClient.get() is an HTTP GET request, not dict.get()"
-  safety: HTTP errors caught by raise_for_status(); failure now raises SystemExit
   expires: null
 - key: web/app.py:R7:lifespan:fp=4229f4beee226037  # fp rotated 2026-05-16 (was f54eafec6d004ac2) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
   owner: web-execution

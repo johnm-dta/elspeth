@@ -80,6 +80,7 @@ class TestEndToEndPipelineExecution:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         app = create_app(settings=settings)
 
@@ -270,6 +271,7 @@ class TestGateRoutedPipelineExecution:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         app = create_app(settings=settings)
 

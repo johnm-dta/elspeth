@@ -99,6 +99,7 @@ def composer_test_client(tmp_path: Path) -> TestClient:
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
@@ -193,6 +194,7 @@ def _build_audit_readiness_app(
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     app = create_app(settings=settings)
 

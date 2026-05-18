@@ -36,6 +36,7 @@ def _settings(tmp_path: Path, **overrides) -> WebSettings:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
     }
     defaults.update(overrides)
     return WebSettings(**defaults)
@@ -514,6 +515,10 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS", "10")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS", "85.0")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE", "10")
+        # Phase 6A required: shareable_link_signing_key. The env-loader
+        # passes the raw string through; Pydantic coerces str → bytes via
+        # utf-8. 32 bytes is the validator floor.
+        monkeypatch.setenv("ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY", "0" * 32)
 
     def test_parses_json_tuple_values(self, monkeypatch) -> None:
         """JSON-encoded lists are converted to tuples for tuple-typed fields."""
@@ -827,6 +832,7 @@ class TestDataDirCreation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         create_app(settings)
         assert fresh_dir.exists()

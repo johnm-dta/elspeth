@@ -176,6 +176,51 @@ class WebSettings(BaseModel):
     # Separate from landscape_url (audit DB)
     session_db_url: str | None = None
 
+    # Phase 6A — shareable-review token signing.
+    #
+    # The HMAC key backs the ``ShareTokenSigner`` primitive at
+    # ``web/shareable_reviews/signer.py``. Required (Field(...)): the web
+    # service refuses to start without it — there is no test-friendly
+    # default because rotation/recovery is "re-issue all links," and a
+    # silent dev-mode default would let a misconfigured staging deploy
+    # ship outstanding links signed with the well-known dev key. Pair the
+    # operator-action runbook entry at
+    # ``docs/guides/sharing-pipelines.md`` (Task 12 of plan 19a) with the
+    # generation step ``openssl rand -base64 32``.
+    #
+    # 32-byte minimum mirrors HMAC-SHA256's block size. Longer keys
+    # (e.g. the 44-char base64 string from ``openssl rand -base64 32``
+    # interpreted as utf-8 bytes) are accepted as opaque key material.
+    #
+    # Rotating this key invalidates EVERY outstanding shareable link.
+    # There is no dual-key acceptance window in v1; see plan 19a §"Scope
+    # boundaries" → "Out of scope: Key rotation tooling."
+    shareable_link_signing_key: bytes = Field(
+        ...,
+        description=(
+            "HMAC-SHA256 key for shareable-review tokens. Required — the "
+            "service refuses to start without it. Rotating invalidates "
+            "ALL outstanding shareable links. Generate with "
+            "``openssl rand -base64 32`` and store as utf-8 bytes."
+        ),
+    )
+
+    # Phase 6A — shareable-review token lifetime.
+    #
+    # Stamps ``expires_at = now() + this delta`` on every newly minted
+    # signed token. The signer verifies expiry on resolve (see
+    # ``ShareTokenSigner.verify``). Default is 30 days; operators may
+    # lower or raise as appropriate to their review cadence.
+    shareable_link_lifetime_seconds: int = Field(
+        default=30 * 24 * 3600,
+        gt=0,
+        description=(
+            "Lifetime (in seconds) for shareable-review tokens. Default: "
+            "30 days. The service stamps expires_at = now() + this delta "
+            "when creating a token."
+        ),
+    )
+
     @field_validator(
         "oidc_issuer",
         "oidc_audience",
@@ -215,6 +260,20 @@ class WebSettings(BaseModel):
     def _reject_blank_secret_key(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("must not be blank")
+        return v
+
+    @field_validator("shareable_link_signing_key")
+    @classmethod
+    def _signing_key_min_length(cls, v: bytes) -> bytes:
+        """Phase 6A — reject signing keys shorter than HMAC-SHA256's block size.
+
+        32 bytes is the minimum; ``openssl rand -base64 32`` produces 44 utf-8
+        bytes which comfortably exceeds the floor. Shorter keys reduce the
+        effective entropy of the HMAC tag and make brute-force token forgery
+        easier; pre-release ELSPETH refuses to start a service with such a key.
+        """
+        if len(v) < 32:
+            raise ValueError("shareable_link_signing_key must be at least 32 bytes")
         return v
 
     @field_validator("data_dir", "payload_store_path", mode="before")

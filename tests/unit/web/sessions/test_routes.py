@@ -392,6 +392,7 @@ def _make_progress_route_app(
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
@@ -439,6 +440,7 @@ def _make_app(
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     # composer_service is set to None here; tests that POST messages
     # must replace it with a mock before sending requests.
@@ -1666,6 +1668,7 @@ class TestIDORProtection:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
             app.state.catalog_service = None
 
@@ -1908,6 +1911,7 @@ class TestSendMessageStateIdValidation:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
             app.state.catalog_service = None
             # Composer MUST NOT be called — state_id validation fails
@@ -3575,6 +3579,7 @@ class TestRevertEndpoint:
                 composer_max_discovery_turns=10,
                 composer_timeout_seconds=85.0,
                 composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
             )
 
             from elspeth.web.middleware.rate_limit import ComposerRateLimiter

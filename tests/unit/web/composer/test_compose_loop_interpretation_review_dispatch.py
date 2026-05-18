@@ -325,6 +325,7 @@ def _build_composer(tmp_path: Path, sessions_service: SessionServiceImpl) -> Com
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
         composer_model="anthropic/claude-opus-4-7",
+        shareable_link_signing_key=b"\x00" * 32,
     )
     return ComposerServiceImpl(
         catalog=catalog,

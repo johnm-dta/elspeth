@@ -49,7 +49,7 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 plugin_type from URL path parameter, lookup in constant dict"
   safety: Returns None on miss, handled by 404 response
   expires: null
-- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=1d4fbdc28be0b96a
+- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=c697608447ad7bad
   owner: architecture
   reason: "Pydantic before-validator at Tier 3 config boundary \u2014 isinstance(v, str) distinguishes raw YAML string input\
     \ (which may be all-whitespace) from already-coerced Path values or None, rejecting blank strings before Pydantic's str\u2192\

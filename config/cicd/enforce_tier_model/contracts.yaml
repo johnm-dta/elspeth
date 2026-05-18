@@ -157,11 +157,6 @@ allow_hits:
   reason: vars(item) raises TypeError on non-object Pydantic metadata (plain strings, ints); skipping is correct since only object metadata can carry allow_inf_nan
   safety: Only catches TypeError from vars(); attribute access on the result uses direct dict lookup, not hasattr
   expires: '2026-08-15'  # Renewed 2026-05-16: contracts/data.py:141 _get_allow_inf_nan unchanged; fingerprint still matches; safety justification still applies.
-- key: contracts/contract_builder.py:R6:ContractBuilder:process_first_row:fp=4d3f0bdcf6fdd56f
-  owner: bugfix
-  reason: TypeError from normalize_type_for_contract for unsupported types (dict, list, Decimal) — maps to object
-  safety: Preserves field in contract as 'any' type; no data loss or silent skip
-  expires: '2026-06-15'
 - key: contracts/transform_contract.py:R2:_get_python_type:fp=24df5cf5593bf5fa
   owner: bugfix
   reason: Type annotation objects (e.g. list[str]) may not have __name__ attribute - getattr is needed for safe error messages
@@ -234,15 +229,6 @@ allow_hits:
   owner: architecture
   reason: "ADR-010 H2 (2026-04-20) payload_schema type gate — register_declaration_contract uses isinstance(payload_schema, type) to reject non-type payload_schema values (must be a TypedDict class, not an instance or string). Tier-1 trust boundary at registry entry; caller-supplied bad shape is a framework bug that crashes before the registry freezes. Predates H2 (C2 closure); H2 preserves the same pattern."
   safety: TypeError raised immediately with diagnostic message
-  expires: null
-- key: contracts/contract_propagation.py:R6:_infer_new_field_contract:fp=7af526cf8ac3b4be
-  owner: bugfix
-  reason: >-
-    TypeError from normalize_type_for_contract for unsupported transform-created
-    field values is intentionally mapped to object by the shared inference helper.
-  safety: >-
-    The field remains present in the propagated contract as object/any; non-finite
-    values still raise ValueError and no row data is dropped or coerced.
   expires: null
 - key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=f01f2689fdd1623e
   owner: composer-audit

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any
+from typing import Any, Final, cast
 
 # NOTE: numpy and pandas are imported LAZILY inside normalize_type_for_contract()
 # to avoid breaking the contracts leaf module boundary. Importing them at module
@@ -37,14 +37,36 @@ CONTRACT_TYPE_MAP: dict[str, type] = {
 ALLOWED_CONTRACT_TYPES: frozenset[type] = frozenset(CONTRACT_TYPE_MAP.values())
 
 
-def normalize_type_for_contract(value: Any) -> type:
+class _UnsupportedContractTypeSignal:
+    """Singleton signal for runtime values that cannot be checkpointed as field types."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSUPPORTED_CONTRACT_TYPE"
+
+
+UNSUPPORTED_CONTRACT_TYPE: Final = _UnsupportedContractTypeSignal()
+NormalizedContractType = type | _UnsupportedContractTypeSignal
+
+
+def _unsupported_contract_type_message(value: Any) -> str:
+    final_type = type(value)
+    return (
+        f"Unsupported type '{final_type.__name__}' for schema contract. "
+        f"Allowed types: {', '.join(sorted(t.__name__ for t in ALLOWED_CONTRACT_TYPES))}. "
+        f"Use 'any' type declaration for fields with complex/dynamic types."
+    )
+
+
+def normalize_type_for_contract(value: Any) -> NormalizedContractType:
     """Convert value's type to Python primitive for contract storage.
 
     Args:
         value: Any Python value
 
     Returns:
-        Python primitive type or original type for unknowns
+        Python primitive type or UNSUPPORTED_CONTRACT_TYPE for unknowns
 
     Raises:
         ValueError: If value is NaN or Infinity (invalid for audit trail)
@@ -95,19 +117,28 @@ def normalize_type_for_contract(value: Any) -> type:
     if isinstance(value, np.str_):
         return str
     # NOTE: np.bytes_ is NOT normalized to str (or bytes). It falls through
-    # to the ALLOWED_CONTRACT_TYPES check and raises TypeError. This prevents
+    # to the ALLOWED_CONTRACT_TYPES check and returns the unsupported signal. This prevents
     # silent misclassification of binary data as text in schema contracts.
 
-    # Reject unsupported types immediately (fail-fast for checkpoint compatibility)
-    # Per CLAUDE.md: Silent failures corrupt audit trail - crash early with clear error
+    # Return an explicit unsupported signal instead of raising TypeError as a
+    # protocol value. Inference callers can map this to object/any, while
+    # fail-fast callers can opt in via require_supported_contract_type().
     final_type = type(value)
     if final_type not in ALLOWED_CONTRACT_TYPES:
-        raise TypeError(
-            f"Unsupported type '{final_type.__name__}' for schema contract. "
-            f"Allowed types: {', '.join(sorted(t.__name__ for t in ALLOWED_CONTRACT_TYPES))}. "
-            f"Use 'any' type declaration for fields with complex/dynamic types."
-        )
+        return UNSUPPORTED_CONTRACT_TYPE
     return final_type
+
+
+def require_supported_contract_type(value: Any) -> type:
+    """Normalize a value and raise TypeError when it cannot be checkpointed.
+
+    This keeps fail-fast callers explicit without requiring inference callers
+    to catch TypeError as a control-flow protocol.
+    """
+    normalized_type = normalize_type_for_contract(value)
+    if normalized_type is UNSUPPORTED_CONTRACT_TYPE:
+        raise TypeError(_unsupported_contract_type_message(value))
+    return cast(type, normalized_type)
 
 
 def classify_runtime_type(value: Any) -> type:

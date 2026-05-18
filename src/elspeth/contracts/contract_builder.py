@@ -10,10 +10,10 @@ Handles the "infer-and-lock" pattern for OBSERVED and FLEXIBLE modes:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
-from elspeth.contracts.type_normalization import normalize_type_for_contract
+from elspeth.contracts.type_normalization import UNSUPPORTED_CONTRACT_TYPE, normalize_type_for_contract
 
 
 class ContractBuilder:
@@ -103,10 +103,12 @@ class ContractBuilder:
             original_name = normalized_to_original[normalized_name]
 
             # Infer type from value, mapping unsupported types to object ("any").
-            try:
-                python_type = normalize_type_for_contract(value)
-            except TypeError:
+            normalized_type = normalize_type_for_contract(value)
+            python_type: type
+            if normalized_type is UNSUPPORTED_CONTRACT_TYPE:
                 python_type = object
+            else:
+                python_type = cast(type, normalized_type)
 
             # Null-like values (None, pd.NA, pd.NaT) normalize to type(None),
             # but for inference that means "type unknown, field is nullable" —

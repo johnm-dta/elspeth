@@ -15,8 +15,18 @@
 //
 //  2. resolvedCountBySession[sid] — { accepted_as_drafted, amended, opted_out }
 //     Audit-readiness-panel counters.  We don't keep the full resolved
-//     event list in memory (the audit-readiness panel only needs counts);
+//     event list in memory for the readiness panel (it only needs counts);
 //     the wire route is the source of truth for individual resolved rows.
+//
+//  2a. resolvedBySession[sid] — InterpretationEvent[]
+//     Resolved events kept in memory for the Phase 6B NarrativeResults
+//     overlay (19b-phase-6b-frontend.md Task 6, load-bearing run-window
+//     filter). The overlay needs to filter resolved events to the active
+//     run's wall-clock window so it does not surface resolutions from
+//     prior runs in the same session. The audit-readiness panel
+//     deliberately reads `resolvedCountBySession`, not this slice — the
+//     two surfaces have different invariants and the count-only view
+//     remains canonical for the readiness gauge.
 //
 //  3. optedOutBySession[sid] — boolean
 //     Mirror of sessions.interpretation_review_disabled.  When true,
@@ -71,6 +81,19 @@ interface InterpretationEventsState {
   // ── Primary projections ──────────────────────────────────────────────────
   pendingBySession: Record<string, Record<string, InterpretationEvent>>;
   resolvedCountBySession: Record<string, ResolvedCounts>;
+  /**
+   * Resolved interpretation events keyed by session_id, populated by
+   * `refreshAll` (and incrementally by `resolveEvent`). Used by Phase 6B
+   * NarrativeResults to filter events by run wall-clock window for
+   * overlay rendering — see 19b-phase-6b-frontend.md Task 6.
+   *
+   * Events arrive in the API's order (chronological by `created_at` /
+   * `resolved_at`). The component performs the wall-clock filter; the
+   * store does not — keeping ordering responsibilities at the read site
+   * means a future schema change (e.g. adding `run_id` to events) only
+   * touches the consumer.
+   */
+  resolvedBySession: Record<string, InterpretationEvent[]>;
   optedOutBySession: Record<string, boolean>;
 
   // ── Actions ──────────────────────────────────────────────────────────────
@@ -198,6 +221,7 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
   (set) => ({
     pendingBySession: {},
     resolvedCountBySession: {},
+    resolvedBySession: {},
     optedOutBySession: {},
 
     async refreshPending(sessionId: string) {
@@ -217,6 +241,12 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
       const events = await api.listInterpretationEvents(sessionId, "all");
       const pendingMap: Record<string, InterpretationEvent> = {};
       const counts: ResolvedCounts = { ...EMPTY_COUNTS };
+      // Resolved-event list for the Phase 6B NarrativeResults overlay.
+      // Preserves API order (chronological); the consumer (NarrativeResults)
+      // owns the wall-clock filter. We include every non-pending choice
+      // that the counts surface tracks; 'abandoned' rows are skipped here
+      // for the same reason they're skipped from counts.
+      const resolvedList: InterpretationEvent[] = [];
       let optedOutFromHistory = false;
       for (const event of events) {
         if (event.interpretation_source === "auto_interpreted_opt_out") {
@@ -233,6 +263,7 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
           // — we're building a fresh ResolvedCounts in one pass, not
           // accumulating onto a prior store state.
           counts[event.choice] += 1;
+          resolvedList.push(event);
         }
         // 'abandoned' rows are not counted in this store; the audit-readiness
         // panel surfaces them via a separate code path if needed.
@@ -248,6 +279,10 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
           resolvedCountBySession: {
             ...state.resolvedCountBySession,
             [sessionId]: counts,
+          },
+          resolvedBySession: {
+            ...state.resolvedBySession,
+            [sessionId]: resolvedList,
           },
           optedOutBySession: optedOut
             ? { ...state.optedOutBySession, [sessionId]: true }
@@ -265,6 +300,7 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
       // is untouched (atomicity invariant).
       const response = await api.resolveInterpretation(sessionId, eventId, body);
       const resolvedChoice = response.event.choice;
+      const resolvedEvent = response.event;
 
       set((state) => {
         // Remove the event from pending.  Use a fresh inner map rather
@@ -280,6 +316,12 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
           }
         }
 
+        // Append the newly resolved event into the resolved-list slice
+        // so NarrativeResults (Phase 6B Task 6) can render it without
+        // forcing a refreshAll round-trip after every resolve.
+        const priorResolved = state.resolvedBySession[sessionId] ?? [];
+        const nextResolved = [...priorResolved, resolvedEvent];
+
         return {
           pendingBySession: {
             ...state.pendingBySession,
@@ -290,6 +332,10 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
             sessionId,
             resolvedChoice,
           ),
+          resolvedBySession: {
+            ...state.resolvedBySession,
+            [sessionId]: nextResolved,
+          },
         };
       });
 

@@ -85,6 +85,7 @@ describe("interpretationEventsStore", () => {
       const state = useInterpretationEventsStore.getState();
       expect(state.pendingBySession).toEqual({});
       expect(state.resolvedCountBySession).toEqual({});
+      expect(state.resolvedBySession).toEqual({});
       expect(state.optedOutBySession).toEqual({});
     });
   });
@@ -162,6 +163,28 @@ describe("interpretationEventsStore", () => {
         amended: 2,
         opted_out: 0,
       });
+      // resolvedBySession captures the same non-pending events in API order
+      // — Phase 6B NarrativeResults overlay relies on this slice.
+      expect(state.resolvedBySession["sess-1"]).toEqual([
+        acceptedEvt,
+        amendedEvt1,
+        amendedEvt2,
+      ]);
+    });
+
+    it("populates resolvedBySession for the opt-out history case", async () => {
+      const optedOutEvt = makePendingEvent({
+        id: "evt-optout",
+        choice: "opted_out",
+        resolved_at: "2026-05-18T00:04:00Z",
+        interpretation_source: "auto_interpreted_opt_out",
+      });
+      vi.mocked(api.listInterpretationEvents).mockResolvedValue([optedOutEvt]);
+
+      await useInterpretationEventsStore.getState().refreshAll("sess-1");
+
+      const state = useInterpretationEventsStore.getState();
+      expect(state.resolvedBySession["sess-1"]).toEqual([optedOutEvt]);
     });
 
     it("rehydrates opt-out from history and suppresses stale pending entries", async () => {
@@ -262,6 +285,73 @@ describe("interpretationEventsStore", () => {
       expect(state.pendingBySession["sess-1"]).toEqual({ "evt-1": evt });
       // No counter bump.
       expect(state.resolvedCountBySession["sess-1"]).toBeUndefined();
+    });
+
+    it("appends the resolved event to resolvedBySession so the overlay can render without a refreshAll round-trip", async () => {
+      // Seed with a pending event via refreshPending — note this does NOT
+      // touch resolvedBySession (only refreshAll seeds it). The resolved
+      // slice starts empty for this session.
+      const evt = makePendingEvent();
+      vi.mocked(api.listInterpretationEvents).mockResolvedValue([evt]);
+      await useInterpretationEventsStore.getState().refreshPending("sess-1");
+      expect(
+        useInterpretationEventsStore.getState().resolvedBySession["sess-1"],
+      ).toBeUndefined();
+
+      // Resolve produces the new (non-pending) event row.
+      const resolvedRow = makePendingEvent({
+        choice: "accepted_as_drafted",
+        accepted_value: "interesting and engaging",
+        resolved_at: "2026-05-18T00:01:00Z",
+      });
+      vi.mocked(api.resolveInterpretation).mockResolvedValue({
+        event: resolvedRow,
+        new_state: makeCompositionState(),
+      });
+
+      await useInterpretationEventsStore
+        .getState()
+        .resolveEvent("sess-1", "evt-1", { choice: "accepted_as_drafted" });
+
+      const state = useInterpretationEventsStore.getState();
+      expect(state.resolvedBySession["sess-1"]).toEqual([resolvedRow]);
+    });
+
+    it("preserves prior resolved events when a new resolve lands (append, not replace)", async () => {
+      // Seed the resolved slice via refreshAll.
+      const prior = makePendingEvent({
+        id: "evt-prior",
+        choice: "amended",
+        accepted_value: "first",
+        resolved_at: "2026-05-18T00:00:30Z",
+      });
+      vi.mocked(api.listInterpretationEvents).mockResolvedValue([
+        prior,
+        makePendingEvent({ id: "evt-active" }),
+      ]);
+      await useInterpretationEventsStore.getState().refreshAll("sess-1");
+      expect(
+        useInterpretationEventsStore.getState().resolvedBySession["sess-1"],
+      ).toEqual([prior]);
+
+      // Resolve the still-pending event.
+      const fresh = makePendingEvent({
+        id: "evt-active",
+        choice: "accepted_as_drafted",
+        accepted_value: "second",
+        resolved_at: "2026-05-18T00:01:00Z",
+      });
+      vi.mocked(api.resolveInterpretation).mockResolvedValue({
+        event: fresh,
+        new_state: makeCompositionState(),
+      });
+
+      await useInterpretationEventsStore
+        .getState()
+        .resolveEvent("sess-1", "evt-active", { choice: "accepted_as_drafted" });
+
+      const state = useInterpretationEventsStore.getState();
+      expect(state.resolvedBySession["sess-1"]).toEqual([prior, fresh]);
     });
 
     it("increments the 'amended' counter on amended resolution", async () => {

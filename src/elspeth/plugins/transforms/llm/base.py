@@ -77,6 +77,23 @@ class LLMConfig(TransformDataConfig):
     lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
     system_prompt_source: str | None = Field(None, description="System prompt file path for audit (None if inline)")
 
+    # Phase 5b Task 9 — cross-DB hash anchor for interpretation events.
+    # When this LLM transform is downstream of a resolved interpretation
+    # event, the session service writes the SHA-256 of the resolved prompt
+    # template here (via ``resolve_interpretation_event`` →
+    # ``_patch_llm_transform_prompt`` → ``composition_states.nodes[i].options``).
+    # The runtime reads this field and forwards it to every LLM call so the
+    # Landscape ``calls.resolved_prompt_template_hash`` column is populated
+    # — the cross-DB anchor an auditor uses to join a Landscape call back to
+    # the session-DB interpretation_events row. ``None`` is the legitimate
+    # value for non-interpretation LLM transforms (most LLM nodes never go
+    # through an interpretation surface).
+    resolved_prompt_template_hash: str | None = Field(
+        None,
+        description="Cross-DB hash anchor for interpretation events (Phase 5b Task 9)",
+        json_schema_extra={"composer_hidden": True},
+    )
+
     # Pool configuration fields (flat - assembled into PoolConfig by pool_config property)
     pool_size: int = Field(1, ge=1, description="Number of concurrent requests (1 = sequential)")
     min_dispatch_delay_ms: int = Field(0, ge=0, description="Minimum dispatch delay in milliseconds")

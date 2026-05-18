@@ -771,6 +771,7 @@ class ExecutionRepository:
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         """Record an external call for a node state.
 
@@ -785,6 +786,14 @@ class ExecutionRepository:
             latency_ms: Call duration in milliseconds
             request_ref: Optional payload store reference for request
             response_ref: Optional payload store reference for response
+            resolved_prompt_template_hash: Cross-DB hash anchor (Phase 5b Task 9).
+                When this LLM-transform call is downstream of an interpretation
+                event the L3 plugin forwards the SHA-256 of the resolved prompt
+                template string here; the value MUST equal
+                ``interpretation_events.resolved_prompt_template_hash`` in the
+                session audit DB for the same resolved string. ``None`` for
+                non-LLM calls or for LLM transforms not downstream of an
+                interpretation event.
 
         Returns:
             The recorded Call model
@@ -815,6 +824,7 @@ class ExecutionRepository:
             "request_ref": prepared.request_ref,
             "response_hash": prepared.response_hash,
             "response_ref": prepared.response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
             "error_json": prepared.error_json,
             "latency_ms": latency_ms,
             "created_at": timestamp,
@@ -837,6 +847,7 @@ class ExecutionRepository:
             response_ref=response_ref,
             error_json=prepared.error_json,
             latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     # === Operations (Source/Sink I/O) ===
@@ -1020,6 +1031,7 @@ class ExecutionRepository:
         call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         """Record an external call made during an operation.
 
@@ -1063,6 +1075,7 @@ class ExecutionRepository:
             "request_ref": prepared.request_ref,
             "response_hash": prepared.response_hash,
             "response_ref": prepared.response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
             "error_json": prepared.error_json,
             "latency_ms": latency_ms,
             "created_at": timestamp,
@@ -1085,6 +1098,7 @@ class ExecutionRepository:
             response_ref=response_ref,
             error_json=prepared.error_json,
             latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def get_operation(self, operation_id: str) -> Operation | None:

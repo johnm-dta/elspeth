@@ -92,13 +92,22 @@ def _llm_node(
     user_term: str = "cool",
     prompt_template: str | None = None,
 ) -> dict:
-    """Return a minimally-shaped LLM-transform node carrying a placeholder."""
+    """Return a minimally-shaped LLM-transform node carrying a placeholder.
+
+    Shape note: ``prompt_template`` lives inside ``options`` because that is
+    the field ``_patch_llm_transform_prompt`` reads (mirroring
+    ``NodeSpec.options["prompt_template"]`` — the shape consumed by the
+    runtime YAML generator). Earlier fixture iterations placed
+    ``prompt_template`` at the top level, which silently dropped after
+    ``state_from_record`` and meant the patched resolved template never
+    reached the runtime. See Phase 5b Task 9.
+    """
     if prompt_template is None:
         prompt_template = f"Rate how {{{{interpretation:{user_term}}}}} this is."
     return {
         "id": node_id,
         "kind": "llm",
-        "prompt_template": prompt_template,
+        "options": {"prompt_template": prompt_template},
     }
 
 
@@ -257,9 +266,12 @@ async def test_03_resolve_accepted_as_drafted_uses_llm_draft(service) -> None:
     assert new_state.version == state.version + 1
     assert new_state.nodes is not None
     patched = next(n for n in new_state.nodes if n["id"] == "llm_transform_1")
-    assert "{{interpretation:cool}}" not in patched["prompt_template"]
-    assert "Innovative and creative" in patched["prompt_template"]
-    assert patched["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
+    # Patched prompt and resolved hash live inside ``options`` so they survive
+    # ``state_from_record`` and reach the runtime YAML.
+    patched_template = patched["options"]["prompt_template"]
+    assert "{{interpretation:cool}}" not in patched_template
+    assert "Innovative and creative" in patched_template
+    assert patched["options"]["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
 
     # Verify provenance in DB.
     with service._engine.begin() as conn:
@@ -299,8 +311,9 @@ async def test_04_resolve_amended_uses_amended_value(service) -> None:
     assert resolved.accepted_value == "Strikingly original"
     assert new_state.version == state.version + 1
     patched = next(n for n in new_state.nodes if n["id"] == "llm_transform_1")
-    assert "Strikingly original" in patched["prompt_template"]
-    assert "{{interpretation:cool}}" not in patched["prompt_template"]
+    patched_template = patched["options"]["prompt_template"]
+    assert "Strikingly original" in patched_template
+    assert "{{interpretation:cool}}" not in patched_template
 
 
 @pytest.mark.asyncio
@@ -677,10 +690,14 @@ def test_14_patch_helper_succeeds_on_clean_template() -> None:
     nodes_list = list(nodes_out)
     assert len(nodes_list) == 1
     patched = nodes_list[0]
-    assert "{{interpretation:cool}}" not in patched["prompt_template"]
-    assert "Innovative and creative" in patched["prompt_template"]
+    # The patched template lives in ``options.prompt_template`` so it lands
+    # on ``NodeSpec.options`` after ``state_from_record`` and reaches the
+    # runtime YAML through ``generate_pipeline_dict``. See Phase 5b Task 9.
+    patched_template = patched["options"]["prompt_template"]
+    assert "{{interpretation:cool}}" not in patched_template
+    assert "Innovative and creative" in patched_template
     # The other surrounding text is preserved verbatim.
-    assert patched["prompt_template"] == "Rate how Innovative and creative this is."
+    assert patched_template == "Rate how Innovative and creative this is."
     # Node id/kind unchanged.
     assert patched["id"] == "llm_transform_1"
     assert patched["kind"] == "llm"
@@ -711,9 +728,25 @@ def test_patch_helper_rejects_non_llm_kind() -> None:
 
 
 def test_patch_helper_rejects_missing_prompt_template() -> None:
-    """Helper-contract guard: no prompt_template field ⇒ raise."""
-    state = _state_with_node({"id": "llm_transform_1", "kind": "llm"})
+    """Helper-contract guard: no options.prompt_template field ⇒ raise."""
+    state = _state_with_node({"id": "llm_transform_1", "kind": "llm", "options": {}})
     with pytest.raises(ValueError, match="prompt_template"):
+        _patch_llm_transform_prompt(
+            state,
+            affected_node_id="llm_transform_1",
+            user_term="cool",
+            accepted_value="x",
+        )
+
+
+def test_patch_helper_rejects_missing_options() -> None:
+    """Helper-contract guard: no options mapping at all ⇒ raise.
+
+    Mirrors the runtime contract: options is the carrier for prompt_template,
+    so a node without options can never be a valid LLM interpretation target.
+    """
+    state = _state_with_node({"id": "llm_transform_1", "kind": "llm"})
+    with pytest.raises(ValueError, match="options"):
         _patch_llm_transform_prompt(
             state,
             affected_node_id="llm_transform_1",
@@ -829,3 +862,101 @@ async def test_resolve_after_resolve_classifies_trigger_message_to_valueerror(se
             runtime_model_identifier=None,
             runtime_model_version=None,
         )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5b Task 9 — composer round-trip: resolve must land the resolved
+# prompt-template and the hash in NodeSpec.options so the runtime YAML
+# carries both. Regression guard against the Task 4 escape where the patch
+# helper wrote top-level fields that NodeSpec.from_dict dropped.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_resolve_round_trips_through_state_from_record_and_yaml(service) -> None:
+    """resolve → state_from_record → generate_yaml lands the resolved template
+    and the cross-DB hash on the runtime YAML's options.
+
+    The probe at Phase 5b Task 9 discovered that an earlier shape (top-level
+    ``prompt_template`` / ``resolved_prompt_template_hash`` on the node JSON)
+    was silently dropped by NodeSpec.from_dict — the runtime YAML still
+    contained the unresolved placeholder, which would crash the F-17 gate
+    on every interpretation-resolved execution. This test pins the fix:
+    both fields must survive the round-trip into ``options``.
+    """
+    from elspeth.web.composer.yaml_generator import generate_yaml
+    from elspeth.web.sessions.converters import state_from_record
+
+    session_id = uuid4()
+
+    # Seed a composition state with a NodeSpec-compatible node shape so
+    # ``state_from_record`` reconstructs the LLM transform via NodeSpec.
+    nodes = [
+        {
+            "id": "llm_transform_1",
+            "kind": "llm",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "input",
+            "on_success": "out",
+            "on_error": "quarantine",
+            "options": {
+                "prompt_template": "Rate how {{interpretation:cool}} this is.",
+                "model": "stub-model",
+            },
+            "condition": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+        }
+    ]
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=nodes,
+            is_valid=True,
+            metadata_={"name": "t", "description": "t"},
+        ),
+        provenance="tool_call",
+    )
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_round_trip",
+        user_term="cool",
+        llm_draft="modern and clear",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+    resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.AMENDED,
+        amended_value="modern design + clear purpose",
+        actor="user:alice",
+        runtime_model_identifier="anthropic/claude-opus-4-7",
+        runtime_model_version="2026-05-01",
+    )
+
+    # NodeSpec view must show the resolved template and the hash inside options.
+    cs = state_from_record(new_state)
+    assert len(cs.nodes) == 1
+    node = cs.nodes[0]
+    assert node.id == "llm_transform_1"
+    assert "{{interpretation:cool}}" not in node.options["prompt_template"]
+    assert "modern design + clear purpose" in node.options["prompt_template"]
+    assert node.options["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
+
+    # Generated YAML must carry both fields under transforms[0].options.
+    yaml_str = generate_yaml(cs)
+    assert "prompt_template: Rate how modern design + clear purpose this is." in yaml_str
+    assert f"resolved_prompt_template_hash: {resolved.resolved_prompt_template_hash}" in yaml_str
+    # Negative assertion: the placeholder must not survive into the YAML.
+    assert "{{interpretation:cool}}" not in yaml_str

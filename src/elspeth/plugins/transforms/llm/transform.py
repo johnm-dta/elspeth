@@ -1039,7 +1039,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6b6bb595f475a9b6"
+    source_file_hash: str | None = "sha256:9f47e3ce2e151d1b"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1236,6 +1236,14 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         self._response_field = self._config.response_field
         self._max_capacity_retry_seconds = self._config.max_capacity_retry_seconds
         self._pool_size = self._config.pool_size
+        # Phase 5b Task 9 — cross-DB hash anchor. ``None`` when this LLM
+        # transform was not staged via an interpretation event; populated
+        # by the session service's ``resolve_interpretation_event`` writer
+        # when the transform's prompt template carried a
+        # ``{{interpretation:<term>}}`` placeholder the user resolved.
+        # Forwarded to every audited LLM call so the Landscape
+        # ``calls.resolved_prompt_template_hash`` column populates.
+        self._resolved_prompt_template_hash = self._config.resolved_prompt_template_hash
 
         # Schema (input — same for both single and multi-query)
         schema_config = self._config.schema_config
@@ -1495,6 +1503,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 run_id=self._run_id,
                 telemetry_emit=self._telemetry_emit,
                 limiter=self._limiter,
+                resolved_prompt_template_hash=self._resolved_prompt_template_hash,
             )
         elif isinstance(self._config, OpenRouterConfig):
             return OpenRouterLLMProvider(
@@ -1505,6 +1514,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 run_id=self._run_id,
                 telemetry_emit=self._telemetry_emit,
                 limiter=self._limiter,
+                resolved_prompt_template_hash=self._resolved_prompt_template_hash,
             )
         else:
             raise RuntimeError(f"Unknown config type: {type(self._config).__name__}")

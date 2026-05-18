@@ -156,7 +156,7 @@ async def _seed_session(service: SessionServiceImpl, session_id: UUID) -> UUID:
                 {
                     "id": "rate_node",
                     "kind": "llm",
-                    "prompt_template": "Rate how {{interpretation:cool}} this row is.",
+                    "options": {"prompt_template": "Rate how {{interpretation:cool}} this row is."},
                 }
             ],
             is_valid=True,
@@ -486,7 +486,7 @@ async def test_15_per_session_day_rate_cap_resets_at_utc_midnight(service: Sessi
                     {
                         "id": "rate_node",
                         "kind": "llm",
-                        "prompt_template": f"Rate how {{{{interpretation:term_{i}}}}} this row is.",
+                        "options": {"prompt_template": f"Rate how {{{{interpretation:term_{i}}}}} this row is."},
                     }
                 ],
                 is_valid=True,

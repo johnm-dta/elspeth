@@ -40,11 +40,18 @@ def _llm_node(
     model: str | None = "anthropic/claude-opus-4-7",
     model_version: str | None = "2026-05-01",
 ) -> dict[str, Any]:
-    """Return an LLM transform node carrying a single interpretation placeholder."""
+    """Return an LLM transform node carrying a single interpretation placeholder.
+
+    Shape note: ``prompt_template`` lives inside ``options`` because that is
+    the field ``_patch_llm_transform_prompt`` reads and the field NodeSpec
+    surfaces to the runtime YAML generator. See Phase 5b Task 9.
+    """
     node: dict[str, Any] = {
         "id": node_id,
         "kind": "llm",
-        "prompt_template": f"Rate how {{{{interpretation:{user_term}}}}} this is.",
+        "options": {
+            "prompt_template": f"Rate how {{{{interpretation:{user_term}}}}} this is.",
+        },
     }
     if model is not None:
         node["model"] = model

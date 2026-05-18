@@ -118,6 +118,7 @@ class AzureLLMProvider:
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         limiter: Any = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> None:
         self._endpoint = endpoint
         self._api_key: str | None = api_key
@@ -127,6 +128,10 @@ class AzureLLMProvider:
         self._run_id = run_id
         self._telemetry_emit = telemetry_emit
         self._limiter = limiter
+        # Phase 5b Task 9 — cross-DB hash anchor. Forwarded to every
+        # ``client.chat_completion`` call so the Landscape ``calls`` row
+        # carries the matching SHA-256.
+        self._resolved_prompt_template_hash = resolved_prompt_template_hash
 
         # Client caches — lock ordering: _llm_clients_lock → _underlying_client_lock
         # (always acquire _llm_clients_lock first to prevent deadlock)
@@ -178,6 +183,7 @@ class AzureLLMProvider:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format=response_format,
+                resolved_prompt_template_hash=self._resolved_prompt_template_hash,
             )
 
             # Extract finish_reason from raw_response.

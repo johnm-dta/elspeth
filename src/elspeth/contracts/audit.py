@@ -350,6 +350,15 @@ class Call:
     response_ref: str | None = None
     error_json: str | None = None
     latency_ms: float | None = None
+    # Cross-DB hash anchor for LLM transforms downstream of an interpretation
+    # event (Phase 5b Task 9 / Option A). Populated at execution time by the
+    # LLM plugin when it reads ``options.resolved_prompt_template_hash`` from
+    # the node config (written there by ``resolve_interpretation_event`` at
+    # compose time). ``None`` for non-LLM calls and for LLM transforms that
+    # never went through an interpretation surface. Must equal the matching
+    # ``interpretation_events.resolved_prompt_template_hash`` in the session
+    # audit DB when non-None; inequality = Tier-1 audit anomaly.
+    resolved_prompt_template_hash: str | None = None
 
     def __post_init__(self) -> None:
         """Validate enum fields and structural invariants — Tier 1 crash on invalid types."""

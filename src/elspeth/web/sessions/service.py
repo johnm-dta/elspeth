@@ -439,16 +439,27 @@ def _patch_llm_transform_prompt(
     template patched to embed ``accepted_value`` for ``user_term``.
 
     The patch convention (Phase 5b §"Prompt-template patch helper"): the
-    LLM transform's ``prompt_template`` field contains exactly one
+    LLM transform's ``options.prompt_template`` field contains exactly one
     ``{{interpretation:<term>}}`` placeholder that the LLM writes when it
     first stages the LLM transform. This helper substitutes the placeholder
-    with the user's ``accepted_value``.
+    with the user's ``accepted_value`` and writes the result back into
+    ``options.prompt_template``.
+
+    The ``prompt_template`` field lives **inside the node's ``options``
+    mapping** because that is the shape ``CompositionState.NodeSpec``
+    consumes (``node.options["prompt_template"]``) and the shape
+    ``yaml_generator.generate_pipeline_dict`` emits to the runtime engine.
+    The ``kind`` discriminator is read from the top level of the
+    composition_states.nodes JSON entry because that field is JSON-only
+    metadata (no NodeSpec equivalent; the typed sibling reads
+    ``node.plugin == "llm"`` instead).
 
     Raises :class:`ValueError` when:
 
     * the affected node is not present in ``state.nodes``;
     * the affected node's ``kind`` is not ``'llm'``;
-    * the affected node has no ``prompt_template`` field;
+    * the affected node has no ``options`` mapping;
+    * ``options.prompt_template`` is missing or not a string;
     * the prompt template does not contain the expected placeholder;
     * the placeholder appears more than once in the template;
     * the prefix immediately before the placeholder matches (case-insensitive)
@@ -479,13 +490,28 @@ def _patch_llm_transform_prompt(
                 f"{node['kind']!r}; only kind='llm' nodes carry interpretation placeholders"
             )
 
-        if "prompt_template" not in node:
-            raise ValueError(f"_patch_llm_transform_prompt: node {affected_node_id!r} has no prompt_template field")
+        # ``composition_states.nodes`` is Tier-1 (our own audit data) but
+        # stored as schemaless JSON. Membership checks here are an
+        # offensive pattern: assert the invariant, raise a structured
+        # ValueError with a precise message. Direct indexing on the
+        # ``Mapping[str, Any]`` annotation lets a wrong type surface as a
+        # KeyError/TypeError at the operation site — informative crash
+        # rather than fabricated default, per CLAUDE.md offensive
+        # programming rules.
+        if "options" not in node:
+            raise ValueError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} has no options "
+                f"mapping; expected options.prompt_template carrying the placeholder"
+            )
+        options: Mapping[str, Any] = node["options"]
 
-        template: str = node["prompt_template"]
+        if "prompt_template" not in options:
+            raise ValueError(f"_patch_llm_transform_prompt: node {affected_node_id!r} has no options.prompt_template field")
+
+        template: str = options["prompt_template"]
         if placeholder not in template:
             raise ValueError(
-                f"_patch_llm_transform_prompt: node {affected_node_id!r} prompt_template does not contain placeholder {placeholder!r}"
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template does not contain placeholder {placeholder!r}"
             )
 
         # Count occurrences. Exactly one is required; more is a structural
@@ -495,7 +521,7 @@ def _patch_llm_transform_prompt(
         if occurrences != 1:
             raise ValueError(
                 f"_patch_llm_transform_prompt: placeholder {placeholder!r} appears "
-                f"{occurrences} times in node {affected_node_id!r}'s prompt_template; "
+                f"{occurrences} times in node {affected_node_id!r}'s options.prompt_template; "
                 f"the placeholder must appear exactly once"
             )
 
@@ -517,10 +543,19 @@ def _patch_llm_transform_prompt(
                 )
 
         # Patch is a single str.replace; we already verified exactly one
-        # occurrence so this is unambiguous.
+        # occurrence so this is unambiguous. The resolved string is written
+        # back into ``options.prompt_template`` so it lands on
+        # ``NodeSpec.options`` after ``state_from_record`` and flows into the
+        # runtime YAML emitted by ``generate_pipeline_dict``. Phase 5b Task 9
+        # extends this helper to ALSO write the resolved-prompt-template hash
+        # into ``options.resolved_prompt_template_hash`` (the cross-DB anchor
+        # the LLM transform plugin reads at execution time to populate the
+        # Landscape ``calls.resolved_prompt_template_hash`` column).
         new_template = template.replace(placeholder, accepted_value)
         patched_node = dict(node)
-        patched_node["prompt_template"] = new_template
+        patched_options = dict(options)
+        patched_options["prompt_template"] = new_template
+        patched_node["options"] = patched_options
         patched_nodes.append(patched_node)
 
     if not found:
@@ -1961,19 +1996,28 @@ class SessionServiceImpl:
 
                 # Step 4a: compute resolved_prompt_template_hash. Hash over
                 # the resolved prompt-template string only (not the node).
+                # ``_patch_llm_transform_prompt`` writes the resolved template
+                # into ``options.prompt_template`` (the NodeSpec-compatible
+                # shape that survives ``state_from_record`` and lands in the
+                # runtime YAML); read it back from the same field.
                 patched_node = next(n for n in patched_nodes if n["id"] == event_row.affected_node_id)
-                resolved_template: str = patched_node["prompt_template"]
+                resolved_template: str = patched_node["options"]["prompt_template"]
                 resolved_prompt_template_hash = stable_hash(resolved_template)
 
-                # Attach the hash on the node JSON so the runtime plugin
-                # reads it directly (no re-computation, no rfc8785 drift
-                # risk). The patched_nodes list contains a fresh dict for
-                # the affected node — safe to mutate that dict locally.
+                # Attach the hash inside the node's options mapping so the
+                # runtime plugin can read it via ``NodeSpec.options`` (the
+                # same path that surfaces the resolved prompt template). The
+                # hash is the cross-DB anchor written into the L1 Landscape
+                # ``calls.resolved_prompt_template_hash`` column at execution
+                # time — see Phase 5b Task 9. ``patched_node["options"]`` is
+                # a fresh dict produced by the patch helper; mutate locally.
                 final_nodes: list[Mapping[str, Any]] = []
                 for n in patched_nodes:
                     if n["id"] == event_row.affected_node_id:
                         node_with_hash = dict(n)
-                        node_with_hash["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+                        options_with_hash = dict(n["options"])
+                        options_with_hash["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+                        node_with_hash["options"] = options_with_hash
                         final_nodes.append(node_with_hash)
                     else:
                         final_nodes.append(n)

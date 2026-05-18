@@ -57,6 +57,7 @@ class CallRecorder(Protocol):
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call: ...
 
     def record_operation_call(
@@ -72,6 +73,7 @@ class CallRecorder(Protocol):
         call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call: ...
 
 
@@ -105,6 +107,7 @@ class PluginAuditWriter(Protocol):
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call: ...
 
     def record_operation_call(
@@ -120,6 +123,7 @@ class PluginAuditWriter(Protocol):
         call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call: ...
 
     def get_node_state(self, state_id: str) -> NodeState | None: ...

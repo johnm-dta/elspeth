@@ -127,8 +127,17 @@ class AuditedClientBase:
         response_data: CallPayload | None = None,
         error: CallPayload | None = None,
         latency_ms: float | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
-        """Record a call under the configured audit parent."""
+        """Record a call under the configured audit parent.
+
+        ``resolved_prompt_template_hash`` is the Phase 5b Task 9 cross-DB
+        anchor: when an LLM transform is downstream of a resolved
+        interpretation event, the runtime reads the SHA-256 from
+        ``options.resolved_prompt_template_hash`` on the node config and
+        forwards it here. ``None`` for non-LLM calls and for LLM transforms
+        that never went through an interpretation surface.
+        """
         if self._operation_id is not None:
             return self._execution.record_operation_call(
                 operation_id=self._operation_id,
@@ -139,6 +148,7 @@ class AuditedClientBase:
                 response_data=response_data,
                 error=error,
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
         if self._state_id is None:
             raise FrameworkBugError("Audited client has neither state_id nor operation_id")
@@ -151,6 +161,7 @@ class AuditedClientBase:
             response_data=response_data,
             error=error,
             latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def _acquire_rate_limit(self) -> None:

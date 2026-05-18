@@ -238,7 +238,7 @@ async def _seed_session_and_state(
                 {
                     "id": "rate_node",
                     "kind": "llm",
-                    "prompt_template": "Rate how {{interpretation:cool}} this row is.",
+                    "options": {"prompt_template": "Rate how {{interpretation:cool}} this row is."},
                 }
             ],
             is_valid=True,

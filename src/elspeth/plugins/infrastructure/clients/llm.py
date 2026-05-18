@@ -295,6 +295,7 @@ class AuditedLLMClient(AuditedClientBase):
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,
+        resolved_prompt_template_hash: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Make chat completion call with automatic audit recording.
@@ -304,6 +305,15 @@ class AuditedLLMClient(AuditedClientBase):
             messages: List of message dicts with "role" and "content"
             temperature: Sampling temperature (default: 0.0 for determinism)
             max_tokens: Maximum tokens to generate (optional)
+            resolved_prompt_template_hash: Phase 5b Task 9 cross-DB anchor.
+                When the LLM transform is downstream of a resolved
+                interpretation event, the runtime reads the SHA-256 from
+                ``options.resolved_prompt_template_hash`` on the node config
+                and forwards it here. Persisted to
+                ``calls.resolved_prompt_template_hash`` on every call this
+                method records (SUCCESS or ERROR), making the cross-DB
+                hash join discoverable from any LLM-call audit row.
+                ``None`` for non-interpretation LLM transforms.
             **kwargs: Additional arguments passed to the underlying client
 
         Returns:
@@ -365,6 +375,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=is_retryable,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
 
             # Telemetry emitted AFTER successful Landscape recording (even for call errors)
@@ -445,6 +456,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
             raise LLMClientError(
                 f"Failed to serialize LLM response: {dump_exc}",
@@ -468,6 +480,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
 
             response_data = response_payload.to_dict()
@@ -529,6 +542,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
             raise LLMClientError(error_msg, retryable=False)
 
@@ -558,6 +572,7 @@ class AuditedLLMClient(AuditedClientBase):
                         retryable=False,
                     ),
                     latency_ms=latency_ms,
+                    resolved_prompt_template_hash=resolved_prompt_template_hash,
                 )
                 raise LLMClientError(error_msg, retryable=False)
 
@@ -584,6 +599,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
 
             # Telemetry emitted AFTER successful Landscape recording (even for null-content errors)
@@ -648,6 +664,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
             raise LLMClientError(error_msg, retryable=False)
 
@@ -666,6 +683,7 @@ class AuditedLLMClient(AuditedClientBase):
             request_data=request_dto,
             response_data=response_dto,
             latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
         # Telemetry emitted AFTER successful Landscape recording

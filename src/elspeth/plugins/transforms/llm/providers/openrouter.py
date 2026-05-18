@@ -182,6 +182,7 @@ class OpenRouterLLMProvider:
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         limiter: Any = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> None:
         # Pre-build auth headers — avoids storing the raw API key as a named attribute
         self._request_headers = {
@@ -194,6 +195,10 @@ class OpenRouterLLMProvider:
         self._run_id = run_id
         self._telemetry_emit = telemetry_emit
         self._limiter = limiter
+        # Phase 5b Task 9 — cross-DB hash anchor. Forwarded to every HTTP
+        # post() call so the Landscape ``calls`` row carries the matching
+        # SHA-256.
+        self._resolved_prompt_template_hash = resolved_prompt_template_hash
 
         # Client cache with reference counting for parallel multi-query safety.
         # Multiple parallel queries share the same state_id, so _get_http_client()
@@ -255,6 +260,7 @@ class OpenRouterLLMProvider:
                     "/chat/completions",
                     json=request_body,
                     headers={"Content-Type": "application/json"},
+                    resolved_prompt_template_hash=self._resolved_prompt_template_hash,
                 )
                 response.raise_for_status()
             except httpx.HTTPStatusError as e:

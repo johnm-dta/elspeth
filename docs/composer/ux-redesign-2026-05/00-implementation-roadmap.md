@@ -228,22 +228,26 @@ per-session toggle exists. Phase 1 does **not** rebuild it — Phase 1 only adds
 
 `B2` is now resolved: **verdict (c) — new event class**, detailed in
 [18-phase-5b-surface-llm-interpretation.md](18-phase-5b-surface-llm-interpretation.md). Phase 5b
-adds an `interpretation_events_table` to the audit Landscape. This is the third schema-extension
+adds an `interpretation_events_table` to the session audit DB. This is the third schema-extension
 event under `project_db_migration_policy`: Phase 1A adds `user_preferences_table`; Phase 4 adds
-`user_preferences.tutorial_completed_at`; Phase 5b adds `interpretation_events_table`. The
+`user_preferences.tutorial_completed_at`; Phase 5b adds `interpretation_events_table`; Phase 6
+adds `composer_completion_events_table` (the fourth — adjudicated 2026-05-18 under Path A, see
+[19a-phase-6a-backend.md](19a-phase-6a-backend.md) Task 1). The
 cumulative DB-delete cost is acknowledged; the structural fix (migration runner) remains a follow-up
 named in Phase 1A's review history.
 
-### D6. Three schema additions ship without a migration runner (Phase 9 owns the fix)
+### D6. Four schema additions ship without a migration runner (Phase 9 owns the fix)
 
 Plans 12 (Phase 1A — user_preferences_table), 21a (Phase 4A — tutorial_completed_at
-column), and 18a (Phase 5b — interpretation_events_table + provenance enum extension)
-each add schema. Under project_db_migration_policy each addition forces a DB delete,
-which wipes the *previous* phase's user state. Cumulative effect: a user who completes
-the tutorial after Phase 4 ships gets the tutorial again after Phase 5b ships.
+column), 18a (Phase 5b — interpretation_events_table + provenance enum extension),
+and 19a (Phase 6 — composer_completion_events_table + append-only triggers, adjudicated
+under Path A 2026-05-18) each add schema. Under project_db_migration_policy each
+addition forces a DB delete, which wipes the *previous* phase's user state. Cumulative
+effect: a user who completes the tutorial after Phase 4 ships gets the tutorial again
+after Phase 5b ships, and again after Phase 6 ships.
 
 The structural fix — a migration runner that preserves user-state tables across
-schema changes — is OWNED BY A NEW PHASE 9 (post-launch). All three current schema
+schema changes — is OWNED BY A NEW PHASE 9 (post-launch). All four current schema
 plans explicitly defer to Phase 9 with the caveat that pre-Phase-9 deploys to
 production with real users are BLOCKED. Staging deploys are unblocked because
 "WE HAVE NO USERS YET" per CLAUDE.md.
@@ -340,7 +344,7 @@ Per operator instruction, all plans must clear review-and-fix before implementat
 The full review panel (reality + architecture + quality + systems) on plans 2/3/4/5a/5b/6/8
 surfaced cross-phase patterns now resolved or named:
 
-1. **Cumulative DB-delete loop** — Phases 1A/4A/5b each force a DB delete. Resolved by
+1. **Cumulative DB-delete loop** — Phases 1A/4A/5b/6 each force a DB delete. Resolved by
    naming Phase 9 as the migration-runner owner (see §D6).
 2. **AuditReadinessPanel mount-point ownership gap** — Phase 14c mounted in InspectorPanel;
    Phase 15b2 deletes the inspector. Resolved by assigning the relocation to 15b2 Task 9

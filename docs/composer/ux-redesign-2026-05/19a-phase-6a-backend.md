@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or superpowers:executing-plans. Steps use `- [ ]` checkboxes.
 
-**Goal:** Land the backend half of Phase 6 — the signing primitive and content-addressable HMAC-signed artifact that back the "Save for review" verb, the read-only inspect route for shareable-link recipients, the per-plugin `supports_narrative_summary` ClassVar declaration on the plugin Protocol that the frontend uses to choose result-rendering mode, and a Tier-1 audit event for YAML export (B3). **No DB schema changes — no new tables, no closed-enum extensions.** All audit events route through the existing Landscape decision-event channel (same path Phase 1A uses for preference updates). The signed save-for-review artifact is stored in the existing payload store as a content-addressable blob under the normal retention policy. The completion verb set is three, not four: Save-for-review, Run-pipeline (= existing Execute path; result rendering branches on narrative-mode), and Copy-YAML (= existing Export YAML route + audit event). Per design doc 09 ("Why not four"), Run-analysis is not a separate verb — narrative result rendering is the post-run rendering layer that consumes Phase 5b's interpretation events.
+**Goal:** Land the backend half of Phase 6 — the signing primitive and content-addressable HMAC-signed artifact that back the "Save for review" verb, the read-only inspect route for shareable-link recipients, the per-plugin `supports_narrative_summary` ClassVar declaration on the plugin Protocol that the frontend uses to choose result-rendering mode, and two Tier-1 audit events recorded in a new sessions-DB table. **One DB schema addition: a new `composer_completion_events_table` in the sessions DB for the two new completion-gesture audit events (`mark_ready_for_review`, `export_yaml`).** This follows the Phase 18 (5b) precedent of "one new table per event family" — see [18-phase-5b-surface-llm-interpretation.md](18-phase-5b-surface-llm-interpretation.md) §"interpretation_events_table" for the analogue. Per `project_db_migration_policy`, this is a schema-change cohort and requires a DB delete on next deploy. The signed save-for-review artifact is stored in the existing payload store as a content-addressable blob under the normal retention policy. The completion verb set is three, not four: Save-for-review, Run-pipeline (= existing Execute path; result rendering branches on narrative-mode), and Copy-YAML (= existing Export YAML route + audit event). Per design doc 09 ("Why not four"), Run-analysis is not a separate verb — narrative result rendering is the post-run rendering layer that consumes Phase 5b's interpretation events.
 
-**Architecture:** Service-then-routes (mirrors Phase 1A and Phase 2A). A new `src/elspeth/web/shareable_reviews/` package exposes `ShareableReviewService` taking the existing `SessionServiceProtocol`, the Landscape audit recorder, the payload store (from `app.state`), `WebSettings`, and the new `ShareTokenSigner` as injected dependencies. The token signer is a thin wrapper around `hmac.new(..., hashlib.sha256)` — it reuses the **primitive** from `core/landscape/exporter.py`, not the exporter API (different payload shape, different rotation cadence, different blast radius). The token is **self-verifying**: its payload encodes `(version, session_id, state_id, expires_at, nonce, payload_digest, signature)` where `payload_digest` is the content-address of the snapshot blob in the payload store. The signature is over the canonical-JSON of the payload (including `payload_digest`) — tampering with either the token fields or the blob detects on verify. Three new routes plus one extension to the existing YAML route.
+**Architecture:** Service-then-routes (mirrors Phase 1A and Phase 2A). A new `src/elspeth/web/shareable_reviews/` package exposes `ShareableReviewService` taking the existing `SessionServiceProtocol`, the sessions-DB connection (for writing to `composer_completion_events_table`), the payload store (from `app.state`), `WebSettings`, and the new `ShareTokenSigner` as injected dependencies. The token signer is a thin wrapper around `hmac.new(..., hashlib.sha256)` — it reuses the **primitive** from `core/landscape/exporter.py`, not the exporter API (different payload shape, different rotation cadence, different blast radius). The token is **self-verifying**: its payload encodes `(version, session_id, state_id, expires_at, nonce, payload_digest, signature)` where `payload_digest` is the content-address of the snapshot blob in the payload store. The signature is over the canonical-JSON of the payload (including `payload_digest`) — tampering with either the token fields or the blob detects on verify. One new sessions-DB table, three new routes, and one extension to the existing YAML route.
 
-**Tech Stack:** FastAPI, Pydantic v2 (strict, extra=forbid), payload store (Tier-1 content-addressable blob storage; no SQLAlchemy schema changes), pytest. Mirrors the stack of every prior backend phase plan.
+**Tech Stack:** FastAPI, Pydantic v2 (strict, extra=forbid), payload store (Tier-1 content-addressable blob storage), SQLAlchemy Core (new `composer_completion_events_table` in the sessions DB), pytest. Mirrors the stack of every prior backend phase plan.
 
 **Sibling plan:** [19b-phase-6b-frontend.md](19b-phase-6b-frontend.md) — completion-bar component, Save-for-review confirmation dialog, shareable-link inspect view, context-aware result rendering.
 
@@ -30,21 +30,23 @@ If a future operator decides to ship Phase 6 ahead of Phase 3, the fallback is d
 
 **In scope:**
 
+- New `composer_completion_events_table` in `src/elspeth/web/sessions/models.py` (sessions DB, alongside `proposal_events_table` and `interpretation_events_table`). Closed-enum CHECK on `event_type` (`'mark_ready_for_review'`, `'export_yaml'`). Per Phase 18 precedent — see schema spec in Task 1 below.
 - New package `src/elspeth/web/shareable_reviews/` with `__init__.py`, `models.py`, `signer.py`, `service.py`, `routes.py`.
-- Pydantic models for the three new endpoints, all `_StrictResponse`-style (`extra="forbid"`, `strict=True`). `SharedInspectResponse` includes an `audit_readiness: AuditReadinessSnapshot` field (the existing Phase 2 model, reused verbatim) — see Task 4.
+- Pydantic models for the three new endpoints, all `_StrictResponse`-style (`extra="forbid"`, `strict=True`). `SharedInspectResponse` includes an `audit_readiness: AuditReadinessSnapshot` field (the existing Phase 2 model, reused verbatim) — see Task 5.
 - `ShareTokenSigner` — a `hmac.new(key, msg, hashlib.sha256)` wrapper that produces URL-safe base64 tokens encoding `(version, session_id, state_id, expires_at, nonce, payload_digest, signature)`. Token signing key sourced from a new `WebSettings.shareable_link_signing_key` field (required, ≥32 bytes).
-- HMAC-signed snapshot artifact stored as a **content-addressable blob in the existing payload store**. Per project tier model the payload store is Tier-1; the blob is read back by digest on resolve. No new table; no per-token row.
-- Landscape decision-event recording for two completion-gesture events. Both go through the same audit channel Phase 1A uses for preference updates — same recorder, same primacy rules (sync, crash-on-failure). Event kinds: `composer.mark_ready_for_review` and `composer.export_yaml`.
-- `POST /api/sessions/{session_id}/mark-ready-for-review` — generates a fresh signed token + writes the snapshot to the payload store + emits the Tier-1 Landscape audit event + returns the token and share URL.
+- HMAC-signed snapshot artifact stored as a **content-addressable blob in the existing payload store**. Per project tier model the payload store is Tier-1; the blob is read back by digest on resolve. No per-token row — only the audit event row in `composer_completion_events_table`.
+- Two Tier-1 audit events recorded in `composer_completion_events_table` (sessions DB). Both writes are sync, crash-on-failure per CLAUDE.md audit primacy. Event types: `mark_ready_for_review` and `export_yaml`.
+- `POST /api/sessions/{session_id}/mark-ready-for-review` — generates a fresh signed token + writes the snapshot to the payload store + inserts a `mark_ready_for_review` row in `composer_completion_events_table` + returns the token and share URL.
 - `GET /api/sessions/{session_id}/shareable-link` — re-mints a fresh token for the current `(session, state)` pair on demand. Because there is no per-token row, this endpoint always mints; idempotency at the artifact level is provided by content-addressing (identical snapshot → identical `payload_digest`).
 - `GET /api/sessions/shared/{token}` — read-only inspect view. Recipient still authenticates via `Depends(get_current_user)`; the token authorizes a specific authenticated user to read a session they don't own.
 - New `BaseTransform.supports_narrative_summary: ClassVar[bool] = False` declaration on the plugin Protocol. Set to `True` on `batch_classifier_metrics` and `batch_distribution_profile` in the same commit (bootstrap pair).
 - Plugin-schema endpoint extension: surface `supports_narrative_summary` on the existing per-plugin metadata payload consumed by the frontend catalog.
-- Tier-1 audit event on YAML export (B3) via the existing `GET /api/sessions/{session_id}/state/yaml` route — the route already exists at `web/sessions/routes.py:5145`; this plan adds the audit write. The write is **sync, crash-on-failure**, like every other Landscape audit write — no "low-priority / telemetry-class" carve-out. Per CLAUDE.md audit primacy: "Audit fires first (sync, crash-on-failure)" with no exemptions.
+- Tier-1 audit event on YAML export (B3) via the existing `GET /api/sessions/{session_id}/state/yaml` route — the route already exists at `web/sessions/routes.py:5145`; this plan adds the audit write as an `export_yaml` row in `composer_completion_events_table`. The write is **sync, crash-on-failure** per CLAUDE.md audit primacy — no "low-priority / telemetry-class" carve-out.
 
 **Out of scope (explicit deferrals, with link to follow-up):**
 
-- **Queryable shareable-reviews index.** A "review list" UI ("show me all the pipelines I've shared / all the pipelines shared with me") needs a queryable index. Per the schema-scope adjudication, that index requires a new table and therefore belongs to Phase 9's schema cohort — out of scope for Phase 6.
+- **Queryable shareable-reviews index.** A "review list" UI ("show me all the pipelines I've shared / all the pipelines shared with me") needs a queryable index. That index requires a separate table and belongs to Phase 9's schema cohort — out of scope for Phase 6.
+- **Generic "composer decision log."** The `composer_completion_events_table` is scoped to *completion gestures* (`mark_ready_for_review`, `export_yaml`). Future composer-level decisions (e.g., a hypothetical "save draft" gesture) get their own `event_type` value within the same table only if the operator extends the CHECK constraint in a new schema-change cohort, or get a separate table per the Phase 18 precedent. Adding a third event type is a schema change — not an implementation-time decision.
 - **Token revocation v1.** Tokens expire by `expires_at`; no revoke endpoint, no "invalidate all my tokens" affordance. Without a per-token row there is no place to mark a token revoked short of rotating the signing key; that is the documented v1 behaviour.
 - **Multi-user collaborative editing.** A3 was adjudicated as "shareable link → read-only inspect view (initial impl)." The inspect view is read-only; co-editing is **not** implementable on top of this plan without a separate design pass.
 - **A separate reviewer surface** (accept/reject UI). E2 = (a) read-only inspect view v1.
@@ -64,7 +66,7 @@ If a future operator decides to ship Phase 6 ahead of Phase 3, the fallback is d
 | `composition_states` row read | Tier 1 | Existing path; reuse `state_from_record(record)`. |
 | Snapshot blob read from payload store (by `payload_digest`) | Tier 1 | Direct read of a Tier-1 content-addressable blob; the digest is the integrity check — mismatch on retrieval crashes. |
 | HMAC primitive (sign/verify) | Tier 1 | The signed payload is canonical-encoded bytes; tampering → signature mismatch → 401. |
-| Landscape audit-event writes (mark-ready, yaml-export) | Tier 1 | Recorded through the existing Landscape decision-event channel that Phase 1A uses for preference updates. Sync, crash-on-failure — no carve-outs. |
+| `composer_completion_events_table` insert (mark-ready, yaml-export) | Tier 1 | Sessions-DB write through SQLAlchemy Core inside the request handler. Sync, crash-on-failure — same primacy rule as every other audit write. |
 | YAML payload returned to the user | Tier 1 outbound | Generated by the existing `yaml_generator.py`; not re-validated. |
 | Response models | Tier 1 outbound | Strict Pydantic; drift crashes at construction. |
 
@@ -79,44 +81,54 @@ Three candidates were considered:
 1. `sessions.ready_for_review_state_id: String | None FK → composition_states.id` (per-session pointer) — **rejected**: schema change.
 2. `composition_states.is_ready_for_review: Boolean` (per-version flag) — **rejected**: schema change.
 3. New `shareable_reviews` table with `(token, session_id, state_id, expires_at, created_by, signature, …)` — **rejected**: schema change (and per `project_db_migration_policy` forces a destructive DB delete).
-4. **Self-verifying HMAC token + content-addressable snapshot blob in the existing payload store.** No DB row. The token encodes everything needed to verify: session id, state id, expiry, nonce, payload digest, signature. The snapshot is fetched from the payload store by digest. Audit events go to the Landscape decision-event channel — same place every other composer decision lands.
+4. **Self-verifying HMAC token + content-addressable snapshot blob in the existing payload store, with audit event in `composer_completion_events_table`.** No per-token row. The token encodes everything needed to verify: session id, state id, expiry, nonce, payload digest, signature. The snapshot is fetched from the payload store by digest. The audit event lands in the new `composer_completion_events_table` in the sessions DB — see §"Audit-event recording" below.
 
-**Decision: option 4.** Per the schema-scope adjudication (`project_db_migration_policy`: any schema change including closed-enum extensions forces a DB delete), Phase 6 must not add schema. Option 4 satisfies that constraint while preserving every audit property the original `shareable_reviews` table promised:
+**Decision: option 4 (Path A amendment).** Per the schema-scope adjudication (`project_db_migration_policy`: any schema change including closed-enum extensions forces a DB delete), Phase 6 avoids schema changes to existing tables. The `composer_completion_events_table` is a new addition (one schema change, accepted under Path A), following the Phase 18 (5b) precedent of "one new table per event family." Option 4 preserves every audit property the original `shareable_reviews` table promised:
 
-| Property | Original (table) | Adjudicated (token + blob + Landscape) |
+**Important:** the term "schema-free" applies only to the **token + snapshot** persistence (HMAC capability + content-addressable blob). It does **not** apply to the **audit event**, which lands in the new `composer_completion_events_table` per §"Audit-event recording" below. The two storage concerns are deliberately separated: the token is the user-visible capability, the audit event is the operator-visible record of issuance.
+
+| Property | Original (table) | Adjudicated (token + blob + sessions-DB event) |
 |---|---|---|
-| Audit-trail of "user X marked Y ready at Z" | Row + writer_principal | Landscape decision event |
-| Per-token writer attribution | `created_by_user_id` column | `created_by_user_id` field in the signed payload + Landscape event |
-| Expiry tracking | `expires_at` column | `expires_at` field in the signed payload (verified on resolve) |
+| Audit-trail of "user X marked Y ready at Z" | Row + writer_principal | `composer_completion_events_table` row (`actor`, `created_at`, `payload_digest`, `expires_at`) |
+| Per-token writer attribution | `created_by_user_id` column | `actor` column in `composer_completion_events_table` + `created_by_user_id` field in the signed payload |
+| Expiry tracking | `expires_at` column | `expires_at` field in the signed payload (verified on resolve) + `expires_at` column in the event row |
 | Tamper detection | Stored signature + recompute | Signature over the canonical payload (including `payload_digest`); mismatch → reject |
-| Snapshot persistence | Composite FK to composition_states | Content-addressable blob in payload store; digest in token |
+| Snapshot persistence | Composite FK to composition_states | Content-addressable blob in payload store; digest in token and event row |
 | Revocation | (deferred) | (deferred — rotate signing key to invalidate all) |
 
 Implications:
 
 - **No change to `composition_states.provenance` closed enum.** Mark-ready-for-review does not write a new composition_state row; the snapshot blob is a frozen copy of the existing state.
 - **No change to `sessions_table`.** No new column, no new check constraint, no new default.
-- **No change to `audit_access_log_table`.** No `writer_principal` extension. The two new audit events use the Landscape decision-event channel, not the audit-access log.
-- **No new tables.** The payload store and Landscape audit channel already exist; both are used here without schema modification.
-- **Cost of "no row":** the `GET /shareable-link` endpoint cannot look up "the existing valid token for this (session, state)" because there is no per-token row. It re-mints a fresh token on every call. Idempotency at the snapshot level is provided by content-addressing: re-saving an unchanged composition yields the identical `payload_digest`, so two tokens for the same snapshot resolve to the same blob. The signed-payload nonce makes the two tokens differ as strings, which is acceptable for v1.
+- **No change to `audit_access_log_table`.** No `writer_principal` extension. The two new audit events land in `composer_completion_events_table`, not the audit-access log.
+- **One new table (`composer_completion_events_table`)** per Path A. The payload store is used without schema modification.
+- **Cost of "no per-token row":** the `GET /shareable-link` endpoint cannot look up "the existing valid token for this (session, state)" because there is no per-token row. It re-mints a fresh token on every call. Idempotency at the snapshot level is provided by content-addressing: re-saving an unchanged composition yields the identical `payload_digest`, so two tokens for the same snapshot resolve to the same blob. The signed-payload nonce makes the two tokens differ as strings, which is acceptable for v1.
 
 ---
 
 ## Audit-event recording (load-bearing — DO NOT defer)
 
-Two new audit events ship in Phase 6:
+Two new Tier-1 audit events ship in Phase 6, recorded in the new `composer_completion_events_table` in the sessions DB:
 
-1. **Mark-ready-for-review** — Tier-1 event ("user X marked composition Y as ready for review at timestamp Z, with snapshot digest D").
-2. **YAML export** — Tier-1 event (B3) ("user X exported YAML for composition Y").
+1. **Mark-ready-for-review** — event type `mark_ready_for_review` ("user X marked composition Y as ready for review at timestamp Z, with snapshot digest D"). Columns populated: `id`, `session_id`, `composition_state_id`, `event_type`, `actor`, `created_at`, `payload_digest`, `expires_at`.
+2. **YAML export** — event type `export_yaml` (B3) ("user X exported YAML for composition Y"). Columns populated: `id`, `session_id`, `composition_state_id`, `event_type`, `actor`, `created_at`. `payload_digest` and `expires_at` stay NULL.
 
-Both go through the **Landscape decision-event channel** — the same channel Phase 1A's preference-update events use. This channel is:
+**Precedent:** this pattern — one new table per event family, closed-enum CHECK constraint, nullable optional columns — is established by Phase 18 (5b)'s `interpretation_events_table` (see `web/sessions/models.py`, alongside `proposal_events_table` at line 342). Phase 6 is the third event family in this pattern; it does not extend any existing table.
 
-- **Sync, crash-on-failure.** Per CLAUDE.md audit primacy: "Audit fires first (sync, crash-on-failure)." Both events follow this discipline; there is no logging-not-raised carve-out for either.
-- **No new schema.** The Landscape channel exists; the events are recorded through the existing recorder API. Adding a new event *kind* is not a schema change — event kinds are open strings in the Landscape decision-event surface.
+**Why not `proposal_events_table`:** that table's closed CHECK constraint (`'proposal.created'`, `'proposal.accepted'`, `'proposal.rejected'`, `'trust_mode.changed'`) is a governance boundary. Adding new event types is a schema change under `project_db_migration_policy`. Completion-gesture events belong to a different event family and get their own table.
 
-**Why not `audit_access_log_table`:** that table's writer_principal column is a closed enum (governance-locked at `models.py:634`). Extending it is a schema change under `project_db_migration_policy`. The Landscape decision-event channel is the correct surface — it's the same channel Phase 1A's preference events use, which is the closest analogue to "user made a composer-level decision."
+**Why not `audit_access_log_table`:** that table's `writer_principal` column is a closed enum (governance-locked at `models.py:634`). Extending it is a schema change. Completion-gesture events are not access-log entries.
 
-**The recorder dependency:** the `ShareableReviewService` and the YAML-export route both depend on the Landscape audit recorder. The recorder is already wired in `app.state` for use elsewhere; grep `record_decision`/`audit_recorder` to find the existing injection site and reuse it. The recorder's contract is "called at the point of decision; raises on persistence failure; caller's request fails." That is the contract Phase 6 inherits.
+**Why not the Landscape pipeline-execution audit:** the Landscape records pipeline *execution* decisions (sources, transforms, sinks, gate routing). Composition-time decisions ("user marked a draft ready") are a different audit domain. The sessions DB is the correct home — the same home as `proposal_events_table` and `interpretation_events_table`.
+
+**Primacy rules:**
+
+- **Sync, crash-on-failure.** Per CLAUDE.md audit primacy: "Audit fires first (sync, crash-on-failure)." Both event writes follow this discipline; there is no logging-not-raised carve-out for either. The sessions-DB write is a synchronous SQLAlchemy `connection.execute()` call inside the request handler; the HTTP response is not returned until the write commits.
+- If the audit write fails, the entire request fails. For `mark_ready_for_review`: no token is returned, no orphan blob is exposed via API (the blob may be written before the audit write; its existence is not user-visible without a token, and the payload-store retention policy reaps unreferenced blobs).
+
+**The writer dependency:** `ShareableReviewService` and the YAML-export route take the sessions-DB connection (or a `ComposerCompletionEventWriter` service object) as an injected dependency. The write path is a direct `connection.execute(composer_completion_events_table.insert().values(...))` call — the same pattern `proposal_events_table` uses at its write site. Grep `proposal_events_table.insert()` in `web/` to find the existing pattern.
+
+**Read-back surface for integration tests:** `SELECT event_type, payload_digest, created_at, actor FROM composer_completion_events WHERE session_id = ? AND event_type IN ('mark_ready_for_review', 'export_yaml') ORDER BY created_at`. The sessions DB file path comes from `WebSettings.sessions_db_url` (resolved at runtime via the test app's settings). Sessions-DB writes are synchronous; no flush step needed; immediate read is correct.
 
 ---
 
@@ -166,31 +178,272 @@ The canonical encoding is `json.dumps(payload_dict, sort_keys=True, separators=(
 - `tests/unit/web/shareable_reviews/test_signer.py`
 - `tests/unit/web/shareable_reviews/test_service.py`
 - `tests/unit/web/shareable_reviews/test_models.py`
+- `tests/unit/web/sessions/test_composer_completion_events_table.py` — schema tests for the new table (Task 1).
 - `tests/integration/web/test_shareable_reviews_routes.py`
 - `tests/integration/web/test_yaml_export_audit_event.py`
 
 **Modified:**
 
+- `src/elspeth/web/sessions/models.py` — add `composer_completion_events_table` (Task 1). No changes to `proposal_events_table`, `interpretation_events_table`, or `audit_access_log_table`.
 - `src/elspeth/web/config.py` — add `WebSettings.shareable_link_signing_key: bytes` (required) and `WebSettings.shareable_link_lifetime_seconds: int` (default 30 days).
-- `src/elspeth/web/app.py` — instantiate `ShareTokenSigner` and `ShareableReviewService`; `include_router(create_shareable_reviews_router())`. Inject the existing Landscape audit recorder and the existing payload store.
-- `src/elspeth/web/sessions/routes.py` — extend the existing `GET /{session_id}/state/yaml` route at line 5145 to emit a `composer.export_yaml` Landscape decision event before returning (sync, crash-on-failure).
-- `src/elspeth/plugins/infrastructure/base.py` — add `supports_narrative_summary: ClassVar[bool] = False` to the plugin Protocol that `BaseTransform` implements (see Task 7 for the Protocol-vs-concrete-class choice).
+- `src/elspeth/web/app.py` — instantiate `ShareTokenSigner` and `ShareableReviewService`; `include_router(create_shareable_reviews_router())`. Inject the sessions-DB connection and the existing payload store.
+- `src/elspeth/web/sessions/routes.py` — extend the existing `GET /{session_id}/state/yaml` route at line 5145 to insert an `export_yaml` row in `composer_completion_events_table` before returning (sync, crash-on-failure).
+- `src/elspeth/plugins/infrastructure/base.py` — add `supports_narrative_summary: ClassVar[bool] = False` to the plugin Protocol that `BaseTransform` implements (see Task 8 for the Protocol-vs-concrete-class choice).
 - `src/elspeth/plugins/transforms/batch_classifier_metrics.py` — declare `supports_narrative_summary: ClassVar[bool] = True`.
 - `src/elspeth/plugins/transforms/batch_distribution_profile.py` — declare `supports_narrative_summary: ClassVar[bool] = True`.
-- `src/elspeth/web/catalog/` (verify path in Task 7) — surface `supports_narrative_summary` on the per-plugin metadata payload.
-- `docs/decisions/` — ADR for the schema-free save-for-review design and the HMAC artifact contract.
+- `src/elspeth/web/catalog/` (verify path in Task 9) — surface `supports_narrative_summary` on the per-plugin metadata payload.
+- `docs/architecture/adr/` — ADR for the shareable-reviews design and the HMAC artifact contract.
 
-**Not modified (deliberately, to keep Phase 6 schema-free):**
+**Not modified (deliberately):**
 
-- `src/elspeth/web/sessions/models.py` — **no changes.** No `shareable_reviews_table`, no `writer_principal` extension, no new constraints. Phase 9 owns the queryable index if one is later required.
+- `src/elspeth/web/sessions/models.py` existing tables — `proposal_events_table`, `interpretation_events_table`, `audit_access_log_table`, `sessions_table`, `composition_states` — **no changes** to any existing table. Phase 9 owns the queryable shareable-reviews index if one is later required.
 
 ---
 
-## Task 1: `WebSettings.shareable_link_signing_key` + lifetime
+## Task 1: New `composer_completion_events_table` schema
+
+**Files:** `src/elspeth/web/sessions/models.py`, `tests/unit/web/sessions/test_composer_completion_events_table.py` (new).
+
+This task adds the `composer_completion_events_table` to the sessions DB, following the Phase 18 (5b) precedent of creating one new table per event family rather than extending an existing table or routing through the pipeline-execution Landscape. See [18-phase-5b-surface-llm-interpretation.md](18-phase-5b-surface-llm-interpretation.md) §"interpretation_events_table" for the analogue.
+
+**Table definition** (add to `src/elspeth/web/sessions/models.py` alongside `proposal_events_table` and `interpretation_events_table`):
+
+```python
+composer_completion_events_table = Table(
+    "composer_completion_events",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("session_id", String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("composition_state_id", String, ForeignKey("composition_states.id"), nullable=True),
+    Column("event_type", String, nullable=False),  # CHECK constraint below
+    Column("actor", String, nullable=False),  # user_id of the actor
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("payload_digest", String, nullable=True),  # content-address; populated for mark_ready_for_review
+    Column("expires_at", DateTime(timezone=True), nullable=True),  # populated for mark_ready_for_review
+    CheckConstraint(
+        "event_type IN ('mark_ready_for_review', 'export_yaml')",
+        name="ck_composer_completion_events_type",
+    ),
+    Index("ix_composer_completion_events_session_created", "session_id", "created_at"),
+)
+```
+
+**Append-only triggers (required):**
+
+The `composer_completion_events_table` is an audit table — every row is a permanent audit fact and is never updated or deleted in v1. Following the `interpretation_events_table` precedent (and correcting the Phase 18 omission that filigree finding `elspeth-9aba8da942` is remediating), this table ships with **both** `BEFORE UPDATE` and `BEFORE DELETE` triggers from day 1. Unlike `interpretation_events_table` — which permits DELETE on PENDING rows for orphan recovery — completion events have no recovery path; both triggers are **unconditional ABORT**.
+
+Add to `src/elspeth/web/sessions/models.py` adjacent to the existing interpretation-events trigger DDL (around `models.py:704–733`):
+
+```python
+_COMPOSER_COMPLETION_EVENTS_NO_UPDATE_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS trg_composer_completion_events_no_update
+BEFORE UPDATE ON composer_completion_events
+BEGIN
+    SELECT RAISE(ABORT, 'composer_completion_events is append-only; UPDATE is forbidden');
+END;
+"""
+
+_COMPOSER_COMPLETION_EVENTS_NO_DELETE_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS trg_composer_completion_events_no_delete
+BEFORE DELETE ON composer_completion_events
+BEGIN
+    SELECT RAISE(ABORT, 'composer_completion_events is append-only; DELETE is forbidden');
+END;
+"""
+```
+
+Both triggers MUST be registered in `_REQUIRED_SQLITE_TRIGGERS` so the startup validator refuses to start if either is missing — see the `interpretation_events_table` precedent for the registration pattern.
+
+**Design notes:**
+
+- **Closed-enum CHECK on `event_type`**: only two values in v1 (`mark_ready_for_review`, `export_yaml`). Adding a third value in a later phase is a schema change and requires its own schema-change cohort (DB delete on next deploy).
+- **`payload_digest` and `expires_at` are nullable** because they are only meaningful for `mark_ready_for_review`. For `export_yaml` events, both stay NULL. This follows the `interpretation_events_table` precedent of one table with nullable optional columns rather than splitting into two tables.
+- **SQLite-only** per `project_phase9_sqlite_only`. Shipping this table forces a DB delete on next deploy of any environment that already has the v1 sessions DB (per `project_db_migration_policy`).
+- **Read-back surface for integration tests:** SQL `SELECT * FROM composer_completion_events WHERE session_id = ? AND event_type IN (?, ?)`. The sessions DB file path comes from `WebSettings.sessions_db_url` (resolved at runtime via the test app's settings).
+
+**Schema-epoch bump (required):**
+
+Sessions-DB schema additions MUST bump `SESSION_SCHEMA_EPOCH` at `src/elspeth/web/sessions/models.py:55` from `2` to `3`. The sentinel is validated at startup by `_assert_schema_version()` in `src/elspeth/web/sessions/schema.py:140–143`: if the DB's `PRAGMA user_version` doesn't match the constant, the service refuses to start and instructs the operator to delete the sessions DB.
+
+This is the **mechanical trigger** for the DB-delete operator action documented in `project_db_migration_policy` (memory). Without the bump, live deployments at epoch 2 pass validation and crash mid-request on the first INSERT to the new table — the exact silent-corruption mode the sentinel exists to prevent. The Phase 18 defect-pass finding `elspeth-c03e9bfcf8` filed the same bug class against the Landscape DB's `SQLITE_SCHEMA_EPOCH`; Phase 6 must not repeat it on the sessions DB.
+
+- [ ] **Step 1: Failing tests.**
+
+```python
+"""Tests for composer_completion_events_table schema."""
+
+import pytest
+from sqlalchemy import create_engine, text
+
+from elspeth.web.sessions.models import metadata
+
+
+def test_table_exists_in_metadata() -> None:
+    assert "composer_completion_events" in metadata.tables
+
+
+def test_check_constraint_rejects_invalid_event_type() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    with engine.connect() as conn:
+        with pytest.raises(Exception):
+            conn.execute(
+                text(
+                    "INSERT INTO composer_completion_events "
+                    "(id, session_id, event_type, actor, created_at) "
+                    "VALUES (:id, :sid, :et, :actor, :ts)"
+                ),
+                {"id": "e1", "sid": "s1", "et": "invalid_type", "actor": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+            )
+            conn.commit()
+
+
+def test_check_constraint_accepts_mark_ready_for_review() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO sessions (id, user_id, created_at) VALUES (:id, :uid, :ts)"
+            ),
+            {"id": "s1", "uid": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO composer_completion_events "
+                "(id, session_id, event_type, actor, created_at) "
+                "VALUES (:id, :sid, :et, :actor, :ts)"
+            ),
+            {"id": "e1", "sid": "s1", "et": "mark_ready_for_review", "actor": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.commit()
+
+
+def test_check_constraint_accepts_export_yaml() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO sessions (id, user_id, created_at) VALUES (:id, :uid, :ts)"
+            ),
+            {"id": "s1", "uid": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO composer_completion_events "
+                "(id, session_id, event_type, actor, created_at) "
+                "VALUES (:id, :sid, :et, :actor, :ts)"
+            ),
+            {"id": "e2", "sid": "s1", "et": "export_yaml", "actor": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.commit()
+
+
+def test_session_fk_cascades_on_delete() -> None:
+    """FK cascade from sessions → composer_completion_events is blocked by the append-only trigger.
+
+    When a parent sessions row is deleted with FK cascades enabled, SQLite attempts to
+    cascade-delete the dependent composer_completion_events rows. The BEFORE DELETE trigger
+    on composer_completion_events fires before the cascade can complete and raises ABORT,
+    which rolls back the parent DELETE as well. This confirms that completion events are
+    permanently retained: a session cannot be deleted while it has completion-event children.
+    """
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA foreign_keys = ON"))
+        conn.execute(
+            text("INSERT INTO sessions (id, user_id, created_at) VALUES (:id, :uid, :ts)"),
+            {"id": "s1", "uid": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO composer_completion_events "
+                "(id, session_id, event_type, actor, created_at) "
+                "VALUES (:id, :sid, :et, :actor, :ts)"
+            ),
+            {"id": "e1", "sid": "s1", "et": "export_yaml", "actor": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.commit()
+        with pytest.raises(Exception, match="append-only"):
+            conn.execute(text("DELETE FROM sessions WHERE id = 's1'"))
+            conn.commit()
+
+
+def test_session_schema_epoch_bumped_to_3() -> None:
+    """Phase 6 schema-change cohort: SESSION_SCHEMA_EPOCH must bump from 2 to 3.
+
+    Per project_db_migration_policy, bumping the epoch is the mechanical signal
+    that triggers the operator's DB-delete action on next deploy. Without the
+    bump, live deployments crash mid-request on first INSERT — see filigree
+    finding elspeth-c03e9bfcf8 for the analogous Landscape-DB defect.
+    """
+    from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH
+
+    assert SESSION_SCHEMA_EPOCH == 3
+
+
+def test_update_trigger_blocks_mutation() -> None:
+    """Audit table is append-only — UPDATE must raise."""
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(
+            text("INSERT INTO sessions (id, user_id, created_at) VALUES (:id, :uid, :ts)"),
+            {"id": "s1", "uid": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO composer_completion_events "
+                "(id, session_id, event_type, actor, created_at) "
+                "VALUES (:id, :sid, :et, :actor, :ts)"
+            ),
+            {"id": "e1", "sid": "s1", "et": "export_yaml", "actor": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.commit()
+        with pytest.raises(Exception, match="append-only"):
+            conn.execute(
+                text("UPDATE composer_completion_events SET actor = 'attacker' WHERE id = 'e1'")
+            )
+            conn.commit()
+
+
+def test_delete_trigger_blocks_removal() -> None:
+    """Audit table is append-only — DELETE must raise. Phase 6 ships both UPDATE and DELETE triggers from day 1, correcting the Phase 18 omission tracked at filigree elspeth-9aba8da942."""
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(
+            text("INSERT INTO sessions (id, user_id, created_at) VALUES (:id, :uid, :ts)"),
+            {"id": "s1", "uid": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO composer_completion_events "
+                "(id, session_id, event_type, actor, created_at) "
+                "VALUES (:id, :sid, :et, :actor, :ts)"
+            ),
+            {"id": "e1", "sid": "s1", "et": "export_yaml", "actor": "user1", "ts": "2026-01-01T00:00:00+00:00"},
+        )
+        conn.commit()
+        with pytest.raises(Exception, match="append-only"):
+            conn.execute(text("DELETE FROM composer_completion_events WHERE id = 'e1'"))
+            conn.commit()
+```
+
+- [ ] **Step 2: Run to fail.**
+- [ ] **Step 3: Implementation.** Add the `composer_completion_events_table` definition to `src/elspeth/web/sessions/models.py` alongside `proposal_events_table` and `interpretation_events_table`. No migration script — per `project_phase9_sqlite_only`, the Phase 9 migration runner owns schema evolution; for now, DB delete on redeploy is the documented operator action.
+  - Bump `SESSION_SCHEMA_EPOCH = 3` in `src/elspeth/web/sessions/models.py` (currently `2` at line 55). The validator at `web/sessions/schema.py:140` enforces this against `PRAGMA user_version`; existing deployments will refuse startup until the sessions DB is deleted, matching the documented operator action.
+  - Add the two trigger DDL strings to `src/elspeth/web/sessions/models.py` adjacent to the existing interpretation-events trigger registrations. Add both to `_REQUIRED_SQLITE_TRIGGERS` so the startup validator catches missing triggers.
+- [ ] **Step 4: Run to pass.**
+- [ ] **Step 5: Commit.** `feat(web/sessions): add composer_completion_events_table + append-only triggers + bump SESSION_SCHEMA_EPOCH (Phase 6 schema-change cohort)`.
+
+---
+
+## Task 2: `WebSettings.shareable_link_signing_key` + lifetime
 
 **Files:** `web/config.py`, `tests/unit/web/test_config_shareable_link.py` (new).
-
-> **Note:** the original Task 1 ("Add `shareable_reviews` table + extend `audit_access_log` writer principal") has been **deleted**. Phase 6 is schema-free. The task numbering below reflects the new structure.
 
 - [ ] **Step 1: Failing test.**
 
@@ -270,7 +523,7 @@ def _signing_key_min_length(cls, v: bytes) -> bytes:
 
 ---
 
-## Task 2: `ShareTokenSigner` primitive
+## Task 3: `ShareTokenSigner` primitive
 
 **Files:** `web/shareable_reviews/__init__.py` (new package marker), `web/shareable_reviews/signer.py` (new), `tests/unit/web/shareable_reviews/__init__.py` (new), `tests/unit/web/shareable_reviews/test_signer.py` (new).
 
@@ -508,7 +761,7 @@ class ShareTokenSigner:
 
 ---
 
-## Task 3: Pydantic response models for the three new endpoints
+## Task 4: Pydantic response models for the three new endpoints
 
 **Files:** `web/shareable_reviews/models.py`, `tests/unit/web/shareable_reviews/test_models.py`.
 
@@ -614,11 +867,11 @@ The `audit_readiness` field is **load-bearing**: 19b Task 8 mounts `<SharedAudit
 
 ---
 
-## Task 4: `ShareableReviewService` — business logic
+## Task 5: `ShareableReviewService` — business logic
 
 **Files:** `web/shareable_reviews/service.py`, `tests/unit/web/shareable_reviews/test_service.py`.
 
-The service owns: validating the session is in a runnable state, freezing the composition snapshot, writing the snapshot blob to the payload store and obtaining the digest, signing the token, emitting the Landscape decision event, and resolving an inbound token to a read-only snapshot.
+The service owns: validating the session is in a runnable state, freezing the composition snapshot, writing the snapshot blob to the payload store and obtaining the digest, signing the token, writing the audit event row to `composer_completion_events_table`, and resolving an inbound token to a read-only snapshot.
 
 **Methods:**
 
@@ -630,7 +883,7 @@ The service owns: validating the session is in a runnable state, freezing the co
 
 **Validation contract:** `mark_ready_for_review` requires the composition to pass validation (per design doc 09 "Conditions"). It calls `ExecutionService.validate(session_id)` and refuses with a typed `CompositionNotRunnableError` if `is_valid is False`. The route translates this to a 409.
 
-**Audit-event recording:** on success, `mark_ready_for_review` records a `composer.mark_ready_for_review` Landscape decision event with `(user_id, session_id, state_id, payload_digest, expires_at)`. The recorder call is **sync, crash-on-failure** — if the audit write fails, the entire request fails and no token is returned to the caller. This matches CLAUDE.md audit primacy.
+**Audit-event recording:** on success, `mark_ready_for_review` inserts a `mark_ready_for_review` row into `composer_completion_events_table` with `(id, session_id, composition_state_id, event_type, actor, created_at, payload_digest, expires_at)`. The insert is **sync, crash-on-failure** — if the audit write fails, the entire request fails and no token is returned to the caller. This matches CLAUDE.md audit primacy.
 
 - [ ] **Step 1: Failing tests.** Cover:
     1. `mark_ready_for_review` happy path: writes blob, records audit event, returns token + digest.
@@ -641,13 +894,13 @@ The service owns: validating the session is in a runnable state, freezing the co
     6. `resolve_token` raises `InvalidToken` for tampered/expired tokens.
     7. `resolve_token` raises `ResourceNotFound` if the payload store has expired the blob (token verifies but blob is gone).
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Inject `SessionServiceProtocol`, `ExecutionService`, `ShareTokenSigner`, `WebSettings`, the **Landscape audit recorder** (the same instance used by Phase 1A's preferences-update events; find via grep `record_decision`/`audit_recorder` in `web/` and reuse), the **payload store** (existing infrastructure; from `app.state`), and the **Phase 2 audit-readiness service** (to populate `audit_readiness` on resolve).
+- [ ] **Step 3: Implementation.** Inject `SessionServiceProtocol`, `ExecutionService`, `ShareTokenSigner`, `WebSettings`, the **sessions-DB connection** (for writing to `composer_completion_events_table` — same connection used by `proposal_events_table` writes; find via grep `proposal_events_table.insert()` in `web/` to identify the existing injection site and reuse the pattern), the **payload store** (existing infrastructure; from `app.state`), and the **Phase 2 audit-readiness service** (to populate `audit_readiness` on resolve).
 - [ ] **Step 4: Run to pass.**
-- [ ] **Step 5: Commit.** `feat(web/shareable_reviews): add ShareableReviewService with mark/get/resolve over payload store + Landscape audit`.
+- [ ] **Step 5: Commit.** `feat(web/shareable_reviews): add ShareableReviewService with mark/get/resolve over payload store + sessions-DB audit`.
 
 ---
 
-## Task 5: Routes — three endpoints + wiring
+## Task 6: Routes — three endpoints + wiring
 
 **Files:** `web/shareable_reviews/routes.py`, `web/app.py`, `tests/integration/web/test_shareable_reviews_routes.py`.
 
@@ -656,8 +909,8 @@ The service owns: validating the session is in a runnable state, freezing the co
     2. Same — 409 when validation fails.
     3. Same — 401 when auth missing.
     4. Same — 404 when session belongs to another user (IDOR — byte-identical 404, no oracle).
-    5. Same — Landscape decision event `composer.mark_ready_for_review` recorded.
-    6. Same — request fails (no token returned) when the Landscape recorder raises.
+    5. Same — `composer_completion_events_table` row with `event_type='mark_ready_for_review'` recorded in the sessions DB.
+    6. Same — request fails (no token returned) when the audit write raises.
     7. `GET /api/sessions/{id}/shareable-link` — returns a fresh token with the current snapshot's digest.
     8. `GET /api/sessions/shared/{token}` — 200 with snapshot + `audit_readiness` for authenticated recipient.
     9. Same — 401 when unauthenticated.
@@ -680,8 +933,8 @@ shareable_review_service = ShareableReviewService(
     execution_service=execution_service,
     signer=signer,
     settings=settings,
-    audit_recorder=audit_recorder,        # existing Landscape recorder
-    payload_store=payload_store,          # existing payload store
+    sessions_db_connection=sessions_db_connection,  # for composer_completion_events_table writes
+    payload_store=payload_store,                    # existing payload store
     audit_readiness_service=audit_readiness_service,  # Phase 2 service
 )
 app.state.shareable_review_service = shareable_review_service
@@ -693,19 +946,19 @@ app.include_router(create_shareable_reviews_router())
 
 ---
 
-## Task 6: YAML-export Landscape audit event (B3)
+## Task 7: YAML-export sessions-DB audit event (B3)
 
 **Files:** `web/sessions/routes.py` (modify the existing route at line 5145), `tests/integration/web/test_yaml_export_audit_event.py`.
 
-- [ ] **Step 1: Failing test.** Hit `GET /api/sessions/{id}/state/yaml`, then read the Landscape decision-event log and assert a `composer.export_yaml` event was recorded with `(user_id, session_id, state_id)`.
+- [ ] **Step 1: Failing test.** Hit `GET /api/sessions/{id}/state/yaml`, then read `composer_completion_events` in the sessions DB and assert a row with `event_type='export_yaml'` and the correct `(actor, session_id, composition_state_id)` was inserted.
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Add a single synchronous Landscape audit-recorder call to the existing route after the YAML is generated, before returning the response. The write is **sync, crash-on-failure** — if the audit recorder raises, the request fails. **No carve-out, no telemetry-class exception.** Per CLAUDE.md audit primacy: audit fires first, sync, crash-on-failure, with no exemptions. The Landscape decision-event channel is the same channel Phase 1A uses for preference updates; YAML export is recorded there for the same reason — it is a user-attributable composer-level decision worth recording.
+- [ ] **Step 3: Implementation.** Add a single synchronous `composer_completion_events_table.insert()` call to the existing route after the YAML is generated, before returning the response. The write is **sync, crash-on-failure** — if the insert raises, the request fails. **No carve-out, no telemetry-class exception.** Per CLAUDE.md audit primacy: audit fires first, sync, crash-on-failure, with no exemptions. The sessions-DB write uses the same connection wiring as `proposal_events_table` inserts — grep `proposal_events_table.insert()` in `web/sessions/routes.py` to find the existing injection site.
 - [ ] **Step 4: Run to pass.**
-- [ ] **Step 5: Commit.** `feat(web/sessions): record Landscape audit event on YAML export (B3)`.
+- [ ] **Step 5: Commit.** `feat(web/sessions): record sessions-DB audit event on YAML export (B3)`.
 
 ---
 
-## Task 7: Plugin narrative-summary ClassVar declaration
+## Task 8: Plugin narrative-summary ClassVar declaration
 
 **Files:** `plugins/infrastructure/base.py`, `plugins/transforms/batch_classifier_metrics.py`, `plugins/transforms/batch_distribution_profile.py`, tests in `tests/unit/plugins/`.
 
@@ -773,7 +1026,7 @@ The docstring is load-bearing: it pins the wire contract the frontend consumes i
 
 ---
 
-## Task 8: Surface `supports_narrative_summary` in plugin catalog API
+## Task 9: Surface `supports_narrative_summary` in plugin catalog API
 
 **Files:** `web/catalog/` (verify file path during step 1), `tests/integration/web/test_catalog_narrative_field.py`.
 
@@ -787,20 +1040,20 @@ The frontend reads plugin metadata via the catalog endpoint to decide whether to
 
 ---
 
-## Task 9: Documentation + ADR
+## Task 10: Documentation + ADR
 
-**Files:** `docs/decisions/<NNN>-shareable-reviews.md` (new ADR), `docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md` (this file — update Review history).
+**Files:** `docs/architecture/adr/022-shareable-reviews.md` (new ADR), `docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md` (this file — update Review history).
 
 - [ ] **Step 1:** Write the ADR covering:
-    1. The decision to keep Phase 6 schema-free: no `shareable_reviews_table`, no closed-enum extension. Per `project_db_migration_policy` both count as schema changes; Phase 9 owns the queryable index if one is later required.
-    2. The decision to record completion-gesture audit events on the Landscape decision-event channel (same channel as Phase 1A preference updates), not on `audit_access_log_table`.
+    1. The decision to add `composer_completion_events_table` to the sessions DB per the Phase 18 (5b) precedent of "one new table per event family." Per `project_db_migration_policy` this forces a DB delete on next deploy.
+    2. The decision to record completion-gesture audit events in `composer_completion_events_table`, not on `audit_access_log_table` and not through any Landscape pipeline-execution channel.
     3. The decision to reuse the HMAC primitive (not the exporter API), with the content-address envelope.
     4. The decision to store the save-for-review snapshot as a content-addressable blob in the existing payload store.
     5. Token expiry only (no revocation) in v1; signing-key rotation invalidates all outstanding tokens.
     6. The token-is-a-capability invariant.
     7. The decision to follow design doc 09's three-verb model (Save-for-review, Run-pipeline with narrative-mode result rendering, Copy-YAML); Run-analysis is **not** a separate verb. Narrative result rendering (Phase 6B Task 6) is the surface that consumes Phase 5b interpretation events.
 - [ ] **Step 2:** Update this plan's Review history with the implementation pass.
-- [ ] **Step 3:** Commit. `docs(decisions): record schema-free shareable-reviews ADR for Phase 6`.
+- [ ] **Step 3:** Commit. `docs(decisions): record shareable-reviews ADR for Phase 6 (with composer_completion_events_table)`.
 
 ---
 
@@ -814,7 +1067,8 @@ The frontend reads plugin metadata via the catalog endpoint to decide whether to
 | Recipient receives token but cannot authenticate | The token is a capability, not an authenticator. Recipient must have an account on the deployment. v1 assumes single-deployment shared-organization use. |
 | Payload-store blob is deleted before the token expires | The retention policy on the blob is independent of the token expiry. If the blob is gone, `resolve_token` returns 404 with a "ask the sender for a fresh link" message. Operators configuring retention shorter than `shareable_link_lifetime_seconds` accept this. |
 | Two tokens for "the same" state have different strings | Acceptable for v1. Content-addressing makes them resolve to the same blob. A future queryable index (Phase 9) could surface "your share for this state" if real users surface that need. |
-| Audit-event write fails | Crash-on-failure per CLAUDE.md primacy. The caller's request fails, no token is returned, no orphan blob is exposed via API. (Blob may be written before the audit write; the blob's existence is not user-visible without a token, so this is acceptable. The payload-store retention policy reaps unreferenced blobs.) |
+| `composer_completion_events_table` insert fails | Crash-on-failure per CLAUDE.md primacy. The caller's request fails, no token is returned, no orphan blob is exposed via API. (Blob may be written before the audit insert; the blob's existence is not user-visible without a token, so this is acceptable. The payload-store retention policy reaps unreferenced blobs.) |
+| Phase 6 schema-change cohort not communicated to operators | The `composer_completion_events_table` addition forces a DB delete on next deploy (per `project_db_migration_policy`). Operator runbook and ADR (Task 10) must document this. Staging deploys are unblocked; production deploys with real users are blocked until Phase 9 ships the migration runner. |
 | Narrative-mode false positives (plugin opts in but emits no `summary` field) | Wire contract pinned in the ClassVar's docstring on `BaseTransform`. Frontend gracefully renders an empty narrative; follow-up adds a runtime contract test that opted-in plugins emit the field. |
 | Phase 3 has not shipped when Phase 6B is started | 6B has a documented fallback (header-area mount with TODO). 6A is independent. |
 | Phase 5b has not shipped when narrative result rendering needs to consume interpretation events | Narrative rendering (Phase 6B Task 6) consumes Phase 5b's interpretation events. If 5b is behind, 6B's narrative renderer falls back to the raw `summary` field from the plugin output; the interpretation-event overlay is additive. |
@@ -831,22 +1085,39 @@ The frontend reads plugin metadata via the catalog endpoint to decide whether to
 5. `#/shared/{token}` route + read-only inspect view consuming `SharedInspectResponse` (including `audit_readiness`).
 
 Backend wire contracts that 19b consumes:
-- `MarkReadyForReviewResponse` shape (Task 3).
-- `ShareableLinkResponse` shape (Task 3).
-- `SharedInspectResponse` shape including `audit_readiness: AuditReadinessSnapshot` (Task 3).
-- `supports_narrative_summary` on the catalog response (Task 8).
-- Existing `GET /state/yaml` route (no shape change; Task 6 only adds the audit-event side effect).
+- `MarkReadyForReviewResponse` shape (Task 4).
+- `ShareableLinkResponse` shape (Task 4).
+- `SharedInspectResponse` shape including `audit_readiness: AuditReadinessSnapshot` (Task 4).
+- `supports_narrative_summary` on the catalog response (Task 9).
+- Existing `GET /state/yaml` route (no shape change; Task 7 only adds the audit-event side effect).
 
 ---
 
 ## Review history
 
+**2026-05-18 — Path A adjudication applied (false-premise correction)**
+
+- BLOCKER resolved (audit-event false premise): The prior design claimed both new audit events route through a "Landscape decision-event channel" shared with Phase 1A preference updates. Both claims were false: (1) there is no such channel — Landscape audits pipeline execution, not composition-time decisions; (2) Phase 1A's preference events land in `proposal_events_table` (sessions DB) with a closed CHECK constraint that cannot be extended without a schema change. **Path A adjudication:** Phase 6 follows the Phase 18 (5b) precedent and adds a new `composer_completion_events_table` to the sessions DB for the two completion-gesture event types (`mark_ready_for_review`, `export_yaml`). This is a schema-change cohort and requires a DB delete on next deploy per `project_db_migration_policy`.
+- All "Landscape decision-event channel" references removed from §"Audit-event recording", §"Where the ready-for-review state lives", §"Trust tier check", Task 5, Task 6, Task 7, and the File structure section.
+- Task numbering: inserted new Task 1 (`composer_completion_events_table` schema); former Tasks 1–9 renumbered as Tasks 2–10. All cross-references within the file updated.
+- `<!-- TODO -->` comment (added 2026-05-18 in a prior pass) resolved and removed — the blocker it identified is now addressed by Path A.
+- ADR Task 10 (formerly Task 9) bullet 1 updated: the ADR now documents the new table addition rather than the discarded "schema-free" framing.
+- ADR Task 10 bullet 2 updated: audit surface is `composer_completion_events_table`, not any Landscape channel.
+- 2026-05-16 history entry "BLOCKER resolved (audit primacy)" annotation: the Landscape channel framing was correct that the write is sync/crash-on-failure; the surface (sessions DB table) was wrong. Both are now correct.
+- Carry-forward from Phase 18 defect-pass epic (`elspeth-4cf3f22bc7`): Task 1 amended to bump `SESSION_SCHEMA_EPOCH` (carrying the Phase 18 epoch-sentinel discipline forward; see finding `elspeth-c03e9bfcf8` for the Landscape-DB analogue) and to ship append-only `BEFORE UPDATE` + `BEFORE DELETE` triggers from day 1 (avoiding the Phase 18 omission tracked at finding `elspeth-9aba8da942`). Both are correctness-from-day-1 measures, not later remediations.
+
+**2026-05-18 — Six plan-internal corrections applied (earlier pass, same date)**
+
+- Edit 6 (ADR number, trivial): Replaced `<NNN>` placeholder in Task 10 (was Task 9) with `022` — the next available ADR number after the highest existing ADR `021-sources-and-sinks-uniformly-boundary.md`.
+- Follow-up (ADR path correction): Corrected the ADR directory at both reference sites (File-structure list and Task 10 Files line) from the non-existent `docs/decisions/` to the canonical `docs/architecture/adr/`. Surfaced as an out-of-scope finding by the complex-writer; applied inline as a low-risk follow-up after complex-reviewer verification.
+- Edit 2 (Landscape table name, medium): Added a `<!-- TODO -->` comment at the end of §"Audit-event recording" identifying that the Landscape decision-event SQL table name referenced as `landscape_events` in 19b Task 11 is unverified. Research found no such table in `core/landscape/schema.py` or `web/sessions/models.py`; Phase 1A preference updates land in `proposal_events` (sessions DB), not a shared Landscape DB table. *(Superseded 2026-05-18 Path A adjudication above — the TODO is now resolved.)*
+
 **2026-05-16 — Operator adjudications applied**
 
-- BLOCKER resolved (schema scope): Deleted the original Task 1 (`shareable_reviews_table` + `writer_principal` enum extension). Phase 6 is now schema-free. Save-for-review snapshot stored in the existing payload store as a content-addressable blob; audit events route through the Landscape decision-event channel (same channel Phase 1A uses for preference updates). Queryable shareable-reviews index deferred to Phase 9's schema cohort.
+- BLOCKER resolved (schema scope): Deleted the original Task 1 (`shareable_reviews_table` + `writer_principal` enum extension). Phase 6 described as schema-free at this point. Save-for-review snapshot stored in the existing payload store as a content-addressable blob; audit events described as routing through the Landscape decision-event channel. Queryable shareable-reviews index deferred to Phase 9's schema cohort. *(Partially superseded 2026-05-18 Path A adjudication: Phase 6 is no longer schema-free; see new Task 1 and revised §"Audit-event recording".)*
 - BLOCKER resolved (Run-analysis verb): Removed Run-analysis as a separate completion verb. Three verbs total (Save-for-review, Run-pipeline, Copy-YAML) per design doc 09 §"Why not four". Narrative result rendering (Phase 6B Task 6) consumes Phase 5b interpretation events as the post-run overlay.
 - BLOCKER resolved (ClassVar shape): `supports_narrative_summary` declared as `ClassVar[bool]` on the plugin Protocol per roadmap §E3 verdict (c). Test inverted to assert ClassVar (not "plain attribute").
-- BLOCKER resolved (audit primacy): Deleted the "telemetry-class / logging-not-raised" carve-out from the YAML-export audit event. The write is now sync, crash-on-failure, like every other Landscape audit write.
+- BLOCKER resolved (audit primacy): Deleted the "telemetry-class / logging-not-raised" carve-out from the YAML-export audit event. The write is now sync, crash-on-failure. The audit *surface* (sessions DB table, not Landscape channel) is corrected by the 2026-05-18 Path A adjudication above.
 - BLOCKER resolved (internal contract): `SharedInspectResponse` now includes `audit_readiness: AuditReadinessSnapshot` (reused verbatim from Phase 2). 19b Task 8 consumes this field directly.
 
 **2026-05-15 — Review panel findings applied (pre-implementation)**

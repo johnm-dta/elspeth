@@ -8,7 +8,7 @@
 
 **Tech Stack:** React 18, TypeScript strict, Zustand for store, Vitest + Testing Library for tests. The app uses a hash-router (`useHashRouter.ts`), **not** React Router. The `#/shared/{token}` path is handled via a top-level branch in `App.tsx` (see Task 8).
 
-**Sibling plan:** [19a-phase-6a-backend.md](19a-phase-6a-backend.md) — schema-free save-for-review (HMAC-signed token + content-addressable snapshot blob in the payload store; Landscape decision-event channel for audit), token signing primitive, three new endpoints, narrative-summary `ClassVar[bool]` catalog field, YAML-export Landscape audit event.
+**Sibling plan:** [19a-phase-6a-backend.md](19a-phase-6a-backend.md) — new `composer_completion_events_table` in the sessions DB (Task 1, Phase 18 precedent), HMAC-signed token + content-addressable snapshot blob in the payload store, token signing primitive, three new endpoints, narrative-summary `ClassVar[bool]` catalog field, YAML-export sessions-DB audit event.
 
 **Design reference:** [09-completion-gestures.md](09-completion-gestures.md).
 
@@ -74,7 +74,7 @@ These are the exact shapes 19b reads. Drift in either direction is a typed-parse
 
 ```ts
 // New types added to types/api.ts in Task 2.
-// Mirror the shapes in 19a Task 3 verbatim — drift here is a typed-parse failure.
+// Mirror the shapes in 19a Task 4 verbatim — drift here is a typed-parse failure.
 
 export interface MarkReadyForReviewResponse {
   token: string;
@@ -220,10 +220,10 @@ The bar is a presentation component with three buttons. Click handlers dispatch 
     4. Export-YAML button is **always** enabled (design doc 09: "Available always — even with ⚠ status").
     5. Clicking Save-for-review opens the `SaveForReviewDialog`.
     6. Clicking Run-pipeline calls the existing Execute action from `executionStore`.
-    7. Clicking Export-YAML opens the existing `YamlView` (verify the open mechanism — likely a state flag in the inspector).
+    7. Clicking Export-YAML opens the existing `YamlView` modal (asserts `ExportYamlModal` becomes visible; use `waitFor(() => screen.getByRole("dialog"))`).
     8. No button has visual primary emphasis (CSS classes match co-equal styling — assert by class name, not visual snapshot).
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** The component reads `compositionState` from `sessionStore` and dispatches to: `shareableReviewStore.markReadyForReview` / `executionStore.execute` / a new `inspectorStore.openYamlView` action (if Yaml visibility isn't already a store, add it as a one-liner). Styling: three side-by-side buttons in a single flex row; no primary modifier class on any of them. Aria labels match the design doc verbs verbatim. Each button has a tooltip with the design doc 09's per-verb summary.
+- [ ] **Step 3: Implementation.** The component reads `compositionState` from `sessionStore` and dispatches to: `shareableReviewStore.markReadyForReview` / `executionStore.execute` / the window-level `OPEN_YAML_MODAL_EVENT` CustomEvent (defined in `lib/composer-events.ts`) for Export-YAML. The open mechanism is a window CustomEvent: `window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT))`, matching the existing pattern at `components/common/CommandPalette.tsx:158`. No store change is needed; `ExportYamlModal` already listens for this event. Styling: three side-by-side buttons in a single flex row; no primary modifier class on any of them. Aria labels match the design doc verbs verbatim. Each button has a tooltip with the design doc 09's per-verb summary.
 - [ ] **Step 4: Run to pass.**
 - [ ] **Step 5: Commit.** `feat(web/frontend): add CompletionBar with three co-equal completion verbs`.
 
@@ -295,11 +295,11 @@ The hook returns `true` if any transform in the current pipeline has a catalog e
 
 **Files:** `components/execution/NarrativeResults.tsx`, `components/execution/NarrativeResults.test.tsx`.
 
-Renders the narrative summary from the run output. The contract (per backend Task 7's ClassVar docstring) is that the opted-in transform's output schema includes a `summary` field. The component reads that field and renders it as Markdown (reusing `MarkdownRenderer` from `components/chat/`). When Phase 5b has shipped, the component additionally overlays Phase 5b's interpretation events for the current run — the interpretation overlay is additive (it surfaces user-affirmed interpretations alongside the raw narrative) and the component must render gracefully when no interpretation events are available (e.g., 5b not shipped, or the run produced none).
+Renders the narrative summary from the run output. The contract (per backend Task 8's ClassVar docstring) is that the opted-in transform's output schema includes a `summary` field. The component reads that field and renders it as Markdown (reusing `MarkdownRenderer` from `components/chat/`). When Phase 5b has shipped, the component additionally overlays Phase 5b's interpretation events for the current run — the interpretation overlay is additive (it surfaces user-affirmed interpretations alongside the raw narrative) and the component must render gracefully when no interpretation events are available (e.g., 5b not shipped, or the run produced none).
 
 - [ ] **Step 1: Failing tests.**
     1. Renders the `summary` field from the run output as Markdown.
-    2. Falls back to "No narrative available" when the field is missing or empty (graceful failure for opted-in-without-summary plugins, per backend Task 7's documented contract gap).
+    2. Falls back to "No narrative available" when the field is missing or empty (graceful failure for opted-in-without-summary plugins, per backend Task 8's documented contract gap).
     3. Renders alongside a "Download full output" link to the existing artifact endpoint.
     4. Streams correctly when the run is still in progress (renders partial summary if available).
     5. When Phase 5b interpretation events are present, the overlay renders them above the raw summary; when absent, only the raw summary renders.
@@ -390,7 +390,7 @@ const token = match?.[1] ?? "";
 ```
 
 Mounts `InspectorPanel readOnly` and `SharedAuditReadinessPanel readOnlyState={...}` (subtasks below).
-- [ ] **Step 3a:** If `InspectorPanel` does not accept `readOnly`, add the prop with a one-line guard in each editable subcomponent. Mirror Phase 7's pattern if Phase 7 has shipped.
+- [ ] **Step 3a:** If `InspectorPanel` does not accept `readOnly`, add the prop and propagate it via a `ReadOnlyContext` React context provider at the panel root. Editable subcomponents (form inputs, drag handles, drawer toggles, etc.) consume the context via `useReadOnly()` and render disabled / non-interactive variants when `readOnly === true`. Prefer this over enumerating editable subcomponents at the call site: a context guard is robust against future additions (a new editable surface added in a sibling phase automatically respects the read-only mode), whereas an enumeration is fragile (a missed subcomponent grants accidental edit access to the shared-inspect recipient). Add a Vitest test that mounts `InspectorPanel` with `readOnly={true}` and asserts no `<input>`, `<textarea>`, or interactive `<button>` (excluding navigation/disclosure controls) is rendered with `disabled !== true`. Mirror Phase 7's pattern if Phase 7 has shipped.
 - [ ] **Step 3b:** Implement `<SharedAuditReadinessPanel readOnlyState={AuditReadinessSnapshot} />` as specified in the introduction above. Do **not** mount the existing `<AuditReadinessPanel />` directly — that component reads from the session store and would require an isolation-breaking store population. The shared variant takes the payload as a prop; test it with:
 
 ```typescript
@@ -468,54 +468,7 @@ it("renders audit readiness checks from prop without session store", () => {
 - [ ] **Step 2: Run to fail.**
 - [ ] **Step 3: Implementation.** Insert `<CompletionBar />` in the rail layout. If Phase 3's layout uses named slots, use the appropriate slot; otherwise insert the JSX directly between the readiness panel and the catalog mount.
 - [ ] **Step 3a (fallback path):** If Phase 3 has **not** shipped, mount the CompletionBar in a temporary header-area `<div className="completion-bar--header-fallback">` in the composer view. Add the TODO comment linking to [15b1-phase-3b-side-rail-part-1.md](15b1-phase-3b-side-rail-part-1.md). Document the fallback in the commit message.
-- [ ] **Step 3b (self-retiring fallback test):** Add the following Vitest test so the header-area fallback mount cannot become permanent:
-
-```typescript
-// SideRailFallbackRetirement.test.ts
-// This test fails if the fallback marker coexists with a real SideRail slot,
-// making the TODO self-enforcing. When Phase 3 ships and the slot exists,
-// the implementer MUST remove the fallback div or this test breaks the build.
-import { readFileSync } from "fs";
-import { resolve } from "path";
-
-it("completion-bar--header-fallback is absent when SideRail slot exists", () => {
-  // Check whether Phase 3's SideRail has the completionBar slot.
-  // Adjust the path to match Phase 3's actual SideRail file when known.
-  const sideRailCandidates = [
-    "components/composer/SideRail.tsx",
-    "components/inspector/InspectorPanel.tsx",
-  ];
-  const sideRailFile = sideRailCandidates.find((p) => {
-    try { readFileSync(resolve("src", p)); return true; } catch { return false; }
-  });
-
-  if (!sideRailFile) {
-    // Phase 3 not yet shipped — fallback is acceptable.
-    return;
-  }
-
-  const sideRailSource = readFileSync(resolve("src", sideRailFile), "utf-8");
-  const slotExists = sideRailSource.includes("completionBar");
-  if (!slotExists) {
-    // Phase 3 file exists but slot not added yet — fallback still acceptable.
-    return;
-  }
-
-  // Phase 3 slot exists — fallback mount must be gone.
-  const composerViewCandidates = [
-    "components/composer/ComposerView.tsx",
-    "components/composer/Composer.tsx",
-  ];
-  for (const candidate of composerViewCandidates) {
-    try {
-      const src = readFileSync(resolve("src", candidate), "utf-8");
-      expect(src).not.toContain("completion-bar--header-fallback");
-    } catch {
-      // File doesn't exist — skip.
-    }
-  }
-});
-```
+- [ ] **Step 3b (fallback-removal enforcement):** When the fallback path is used, the implementer MUST file a Filigree follow-up issue titled "Retire Phase-6B completion-bar header-fallback after Phase 3 side-rail ships" with a `blocked-by` dependency on the Phase 3 issue. Include the canonical pattern `completion-bar--header-fallback` in the issue body so it's grep-discoverable. Do not rely on source-reading tests to enforce retirement — they silently no-op when their preconditions don't match and create false confidence.
 
 - [ ] **Step 4: Run to pass.**
 - [ ] **Step 5: Commit.** `feat(web/frontend): mount CompletionBar in the side rail` (or `…in the header (Phase-3 fallback)`).
@@ -536,21 +489,7 @@ The design doc 09 explicitly says the completion bar **replaces** the previous s
 
 ---
 
-## Task 11: Export YAML top-level button wiring
-
-**Files:** `CompletionBar.tsx` (already covered in Task 3 click handler), `components/inspector/YamlView.tsx` (verify no changes needed), tests updated.
-
-The existing `YamlView.tsx` at `components/inspector/` already renders the YAML in a modal/drawer. Phase 6 just needs the top-level button (the CompletionBar's third button) to open it. The open mechanism is likely a store flag — find it via grep on `YamlView` usage and reuse.
-
-- [ ] **Step 1: Failing test.** Click the Export-YAML button on the CompletionBar; assert the YamlView is open.
-- [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Wire the CompletionBar's Export-YAML handler to set whatever flag opens `YamlView`. If the open mechanism is currently coupled to a specific parent component (e.g., only the inspector can open it), refactor to a top-level store flag so the CompletionBar can also open it. This is a small refactor — keep it under 30 lines diff.
-- [ ] **Step 4: Run to pass.**
-- [ ] **Step 5: Commit.** `feat(web/frontend): wire Export YAML button on CompletionBar to existing YamlView`.
-
----
-
-## Task 12: Cross-cutting tests
+## Task 11: Cross-cutting tests
 
 **Files:** `tests/integration/web/test_phase6_e2e.py` (Python integration test that exercises the full flow end-to-end against the running backend), or a Vitest integration test if the existing test infrastructure prefers frontend-side e2e.
 
@@ -559,23 +498,26 @@ The existing `YamlView.tsx` at `components/inspector/` already renders the YAML 
     2. User A clicks Save-for-review → receives a share_url.
     3. User B (different user) opens the share_url → sees the SharedInspectView with the YAML.
     4. User B cannot click Save-for-review (no CompletionBar in the read-only view).
-    5. The Landscape decision-event log has a `composer.mark_ready_for_review` event recorded with `(user_id, session_id, state_id)`. Per 19a lines 37 and 112-117, both completion-gesture events route through the Landscape decision-event channel, not `audit_access_log_table`. Read the Landscape via direct SQLite query against the audit DB (path from `web/config.py:293`):
+    5. The `composer_completion_events_table` in the sessions DB has a `mark_ready_for_review` row per 19a Task 1. Read the sessions DB via direct SQLite query (path from `WebSettings.sessions_db_url`, resolved at runtime via the test app's settings):
 
        ```python
        import sqlite3
-       from elspeth.contracts.composer_audit import canonical_audit_query
-       conn = sqlite3.connect(audit_db_path)
+       sessions_db_path = test_app_settings.sessions_db_url.replace("sqlite:///", "")
+       conn = sqlite3.connect(sessions_db_path)
        rows = conn.execute(
-           "SELECT kind, payload FROM landscape_events WHERE session_id = ? AND kind IN (?, ?) ORDER BY recorded_at",
-           (session_id, "composer.mark_ready_for_review", "composer.export_yaml"),
+           "SELECT event_type, payload_digest, created_at, actor "
+           "FROM composer_completion_events "
+           "WHERE session_id = ? AND event_type IN ('mark_ready_for_review', 'export_yaml') "
+           "ORDER BY created_at",
+           (session_id,),
        ).fetchall()
        ```
 
-       **Landscape write invariant (no flush needed):** The Landscape uses synchronous SQLite writes per the audit primacy rule in CLAUDE.md — the row is committed before the HTTP 200 returns. Test setup should state this explicitly: "Landscape writes are synchronous; no flush step needed; immediate read is correct."
+       **Sessions-DB write invariant (no flush needed):** Sessions-DB writes are synchronous SQLAlchemy `connection.execute()` calls inside the request handler; no flush step needed; immediate read is correct.
 
-       Assert the returned rows contain a row with `kind == "composer.mark_ready_for_review"`.
+       Assert the returned rows contain a row with `event_type == "mark_ready_for_review"` and the correct `actor` (User A's user_id).
 
-    6. User A clicks Export YAML → the Landscape decision-event log has a `composer.export_yaml` event recorded with `(user_id, session_id, state_id)`. Use the same direct SQLite query from Step 5 (the query already selects both event kinds). See 19a Task 6 for the test pattern: "Hit `GET /api/sessions/{id}/state/yaml`, then read the Landscape decision-event log and assert a `composer.export_yaml` event was recorded."
+    6. User A clicks Export YAML → the `composer_completion_events_table` has an `export_yaml` row. Use the same direct SQLite query from Step 5 (the query already selects both event types). See 19a Task 7 for the test pattern: "Hit `GET /api/sessions/{id}/state/yaml`, then read `composer_completion_events` in the sessions DB and assert a row with `event_type='export_yaml'` was inserted."
 - [ ] **Step 2: Run to fail.**
 - [ ] **Step 3: Implementation.** This is a test of the integration of 19a + 19b; no new product code. If the existing integration-test harness in `tests/integration/web/` supports multi-user scenarios, use it; otherwise add the missing user-switching helper.
 - [ ] **Step 4: Run to pass.**
@@ -583,13 +525,13 @@ The existing `YamlView.tsx` at `components/inspector/` already renders the YAML 
 
 ---
 
-## Task 13: Documentation + handover
+## Task 12: Documentation + handover
 
 **Files:** `docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md` (this file — update Review history), `docs/guides/sharing-pipelines.md` (new user-facing doc).
 
 - [ ] **Step 1:** Write the user-facing doc covering:
     1. How to use Save-for-review (recipient must have an account on the same deployment).
-    2. Token expiry policy (7 days default).
+    2. Token expiry policy (30 days default).
     3. Token rotation (signing key rotation invalidates outstanding links).
     4. "What the recipient sees" (read-only inspect view).
 - [ ] **Step 2:** Update this plan's Review history.
@@ -616,6 +558,22 @@ The existing `YamlView.tsx` at `components/inspector/` already renders the YAML 
 
 ## Review history
 
+**2026-05-18 — Path A adjudication applied (false-premise correction)**
+
+- BLOCKER resolved (integration-test false premise): Task 11 Step 1 items 5 and 6 previously queried `landscape_events` (an unverified table) in the "audit DB" (via an incorrect path reference to `web/config.py:293`). Both the table name and the DB reference were wrong. **Path A adjudication:** the two completion-gesture events are recorded in `composer_completion_events_table` in the sessions DB (per 19a Task 1). Task 11 integration-test SQL updated to query `composer_completion_events` with `event_type IN ('mark_ready_for_review', 'export_yaml')`. DB path corrected to `WebSettings.sessions_db_url` (runtime-resolved via test app settings). The "no flush needed" invariant note is updated to reference synchronous SQLAlchemy sessions-DB writes, not Landscape writes. This is a schema-change cohort: the `composer_completion_events_table` addition forces a DB delete on next deploy per `project_db_migration_policy`.
+- `<!-- TODO -->` comment in Task 11 Step 1 (added 2026-05-18 in an earlier pass) resolved and removed — the blocker it identified is now addressed by Path A.
+- Sibling plan description updated: "Landscape decision-event channel for audit" replaced with "new `composer_completion_events_table` in the sessions DB (Task 1, Phase 18 precedent)".
+- 19a task-number cross-references updated: "19a Task 3" → "19a Task 4" (wire shapes); "backend Task 7" → "backend Task 8" (ClassVar docstring) in Tasks 6 and 19b review history; "19a Task 6" → "19a Task 7" (YAML export test pattern in Task 11 item 6).
+
+**2026-05-18 — Six plan-internal corrections applied (earlier pass, same date)**
+
+- Edit 1 (token expiry, trivial): Task 12 Step 1 user-facing doc bullet corrected from "7 days default" to "30 days default" to match the authoritative value at 19a:252–256 (`shareable_link_lifetime_seconds = 30 * 24 * 3600`).
+- Edit 3 (Task 11 duplication, low): Task 11 (Export YAML button wiring) folded into Task 3. Research confirmed the open mechanism is a window CustomEvent `OPEN_YAML_MODAL_EVENT` defined in `lib/composer-events.ts`, already used by `CommandPalette.tsx:158` and `CompletionSummary.tsx:76` — no store refactor required. Task 3 Step 3 updated to name the mechanism explicitly. Task 11 section deleted. Former Tasks 12 and 13 renumbered to 11 and 12.
+- Edit 4 (fallback-test brittleness, low): Deleted the `SideRailFallbackRetirement.test.ts` Vitest source-reading test from Task 9 Step 3b. Replaced with a procedural requirement to file a Filigree follow-up issue with a `blocked-by` dependency and the `completion-bar--header-fallback` grep pattern in the issue body.
+- Edit 5 (InspectorPanel readOnly propagation, low): Task 8 Step 3a rewritten to specify a `ReadOnlyContext` React context provider pattern with `useReadOnly()` hook consumption in editable subcomponents, plus a Vitest test that asserts no unguarded `<input>`, `<textarea>`, or interactive `<button>` is rendered when `readOnly={true}`.
+- Edit 2 (Landscape table name, medium): Added `<!-- TODO -->` comment in Task 11 Step 1 noting that `landscape_events` is unverified as the SQL table name and `web/config.py:293` is the wrong line for the DB path. See the matching TODO in 19a §"Audit-event recording". Blocker for integration-test implementation.
+- Follow-up (history consistency): Annotated the 2026-05-15 IMPORTANT entry referring to the now-deleted `SideRailFallbackRetirement.test.ts` Vitest test as superseded by Edit 4. Surfaced by complex-reviewer; the entry described an artefact that no longer exists in Task 9 Step 3b.
+
 **2026-05-16 — Operator adjudications applied (sibling 19a rewrite)**
 
 - Wire-contract updates aligned to 19a's adjudicated shapes:
@@ -624,11 +582,11 @@ The existing `YamlView.tsx` at `components/inspector/` already renders the YAML 
   - `SharedInspectResponse` gains `audit_readiness: AuditReadinessSnapshot` (reused verbatim from Phase 2) — Task 8 already consumes this field, so the type is now contract-compliant.
 - Narrative result rendering (Task 6) documents Phase 5b interpretation events as the post-run overlay; component must tolerate absent overlay when 5b is not yet shipped. Two new test cases added.
 - No verb-count changes (Task 3 already specified three buttons matching design doc 09); the 19a rewrite confirms three-verb model is normative.
-- `supports_narrative_summary` on the wire is unchanged (boolean); backend declares it as `ClassVar[bool]` on the plugin Protocol per 19a Task 7.
+- `supports_narrative_summary` on the wire is unchanged (boolean); backend declares it as `ClassVar[bool]` on the plugin Protocol per 19a Task 8.
 
 **2026-05-15 — Review panel findings applied (pre-implementation)**
 
 - CRITICAL: Task 8 `AuditReadinessPanel` architectural issue resolved: specified a `<SharedAuditReadinessPanel readOnlyState={...} />` read-only variant that takes the readiness payload as a prop (no session-store read). Retired old Step 3b ("verify and adapt") and replaced with concrete component contract and new Step 3b.
 - CRITICAL: Task 4 navigator.clipboard mock setup added explicitly to the test scaffold; behavioral test for copy-link click documented with exact assertion.
 - IMPORTANT: Task 8 unauthenticated redirect spec extended with a named test scenario covering sessionStorage save/restore round-trip.
-- IMPORTANT: Task 9 fallback-marker self-retirement test added as Step 3b: a Vitest test that fails if the fallback marker is present when the SideRail slot exists, making the TODO self-enforcing.
+- IMPORTANT: Task 9 fallback-marker self-retirement test added as Step 3b: a Vitest test that fails if the fallback marker is present when the SideRail slot exists, making the TODO self-enforcing. *(Superseded 2026-05-18: the Vitest source-reading test was replaced with a procedural Filigree-issue-with-blocked-by-dependency requirement; see Edit 4 in the 2026-05-18 history entry.)*

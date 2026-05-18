@@ -149,9 +149,6 @@ def record_mode_opted_out(tel: SessionsTelemetry) -> None:
     try:
         tel.mode_opted_out_total.add(1, attributes={})
     except Exception:
-        # Telemetry-only exemption per CLAUDE.md logging-telemetry-policy:
-        # counter-emit failures are silently swallowed; the audit row
-        # (where present) already wrote.
         return None
     return None
 

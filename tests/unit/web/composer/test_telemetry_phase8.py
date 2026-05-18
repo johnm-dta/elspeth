@@ -200,30 +200,60 @@ def test_factory_registers_canonical_counter_names() -> None:
     build_sessions_telemetry(meter=meter)
 
     # The real-meter branch wires every counter including Phase 1+ ones;
-    # this snapshot covers the Phase 8 wire names explicitly. The
-    # broader full-set assertion lives in
+    # this snapshot pins the Phase-8 wire names EXACTLY (set equality) so
+    # both directions are caught: a missing name (typo, deletion) AND an
+    # accidental extra Phase-8-shaped name (a future PR adds a counter
+    # without updating this snapshot or filing a Decision-2-style
+    # exception).  The broader full-set assertion lives in
     # ``tests/unit/web/sessions/test_telemetry.py``
-    # (``test_production_meter_registers_named_metrics``); this assertion
-    # adds a Phase-8-scoped sanity check that none of the new names was
-    # dropped from the factory.
-    phase_8_expected = [
-        "composer.mode.opted_out_total",
-        "composer.mode.opted_in_total",
-        "composer.session.switched_total",
-        "composer.tutorial.started_total",
-        "composer.tutorial.completed_total",
-        # composer.tutorial.replayed_total — deferred to Phase 9
-        # per Decision 2 resolution (Option C). Do NOT add it back
-        # to expected_names without re-opening that decision.
-        "composer.session.completed_total",
-        "composer.share.token_verify_failure_total",
-        "composer.share.link_expiry_hit_total",
-        "composer.interpretation.opt_out_total",
-        "composer.audit.fetch_failure_total",
-        "composer.source.dynamic_created_total",
-    ]
-    for name in phase_8_expected:
-        assert name in meter.names, f"missing Phase 8 wire name in real-meter branch: {name}"
+    # (``test_production_meter_registers_named_metrics``) and covers the
+    # complete cross-phase wire-name set; this assertion is the
+    # Phase-8-scoped equivalent for the module's own test surface.
+    phase_8_expected: frozenset[str] = frozenset(
+        {
+            "composer.mode.opted_out_total",
+            "composer.mode.opted_in_total",
+            "composer.session.switched_total",
+            "composer.tutorial.started_total",
+            "composer.tutorial.completed_total",
+            # composer.tutorial.replayed_total — deferred to Phase 9
+            # per Decision 2 resolution (Option C). Do NOT add it back
+            # to expected_names without re-opening that decision.
+            "composer.session.completed_total",
+            "composer.share.token_verify_failure_total",
+            "composer.share.link_expiry_hit_total",
+            "composer.interpretation.opt_out_total",
+            "composer.audit.fetch_failure_total",
+            "composer.source.dynamic_created_total",
+        }
+    )
+    phase_8_actual = frozenset(name for name in meter.names if name.startswith("composer."))
+    # Subtract pre-Phase-8 composer counters so the assertion only sees the
+    # Phase 8 surface.  The list is hand-maintained alongside this test;
+    # when a counter graduates out of Phase 8 (or a pre-Phase-8 counter is
+    # retired), update both lists in the same commit.
+    pre_phase_8_composer_counters: frozenset[str] = frozenset(
+        {
+            "composer.audit.tool_row_tier1_violation_total",
+            "composer.audit.state_rolled_back_during_persist_total",
+            "composer.audit.tool_row_persist_failed_during_unwind_total",
+            "composer.audit.tool_row_integrity_violation_total",
+            "composer.tool_call_cap_exceeded_total",
+            "composer.audit.audit_grade_view_total",
+            "composer.audit.audit_access_log_write_failed_total",
+            "composer.interpretation_rate_cap_exceeded_total",
+            "composer.interpretation_placeholder_unresolved_at_runtime_total",
+        }
+    )
+    phase_8_actual_filtered = phase_8_actual - pre_phase_8_composer_counters
+    missing = phase_8_expected - phase_8_actual_filtered
+    extra = phase_8_actual_filtered - phase_8_expected
+    assert not missing, f"missing Phase 8 wire name(s) in real-meter branch: {sorted(missing)}"
+    assert not extra, (
+        f"extra Phase-8-shaped wire name(s) registered by factory but not in this test's expected set: "
+        f"{sorted(extra)}.  If this is intentional, update phase_8_expected (and reconcile with "
+        f"21-phase-9-followups.md if the counter is a Phase-9 graduation)."
+    )
     # Probe-failed counter is module-local, not factory-wired.
     assert "composer.phase_8.probe_failed_total" not in meter.names, (
         "probe-failed counter must NOT be wired through build_sessions_telemetry — it is module-local in telemetry_phase8.py per W8-r2."

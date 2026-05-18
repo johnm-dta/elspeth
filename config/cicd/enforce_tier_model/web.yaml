@@ -1413,4 +1413,9 @@ per_file_rules:
     by test_helper_swallows_exporter_failure parametrised across every record_* helper. Future emit-site additions should reuse the same wrap shape — extending
     this allowlist max_hits requires re-reading the W5 rationale section in the Phase 8 plan.
   expires: null
-  max_hits: 12
+  # max_hits matches the exact count of `except Exception: return None` swallow
+  # blocks in telemetry_phase8.py (11 record_* helpers).  Adding a 12th helper
+  # MUST bump this value AND require the implementer to re-read the W5
+  # rationale per the safety annotation above — buffer/headroom would silently
+  # defeat that ratchet.
+  max_hits: 11

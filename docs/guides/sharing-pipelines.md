@@ -70,7 +70,7 @@ accept this trade-off.
 Phase 6A is a **schema-change cohort**: it adds the
 `composer_completion_events_table` to the sessions database and bumps
 `SESSION_SCHEMA_EPOCH` from `3` to `4`. The startup validator
-(`_assert_schema_sentinels` at `web/sessions/schema.py:112`) refuses to
+(`_assert_schema_sentinels` at `web/sessions/schema.py:121`) refuses to
 start the service against any DB whose `PRAGMA user_version` is not
 `4`.
 

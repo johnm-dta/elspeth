@@ -26,7 +26,7 @@ This ADR records the architectural decisions made during Phase 6A (backend imple
 **Why a new table, not an extension:**
 
 * `proposal_events_table.event_type` is a governance-locked closed enum (`'proposal.created'`, `'proposal.accepted'`, `'proposal.rejected'`, `'trust_mode.changed'`). Extending it would conflate composer-time proposal decisions with completion-gesture decisions; each event family has its own writer path and its own audit invariants.
-* `audit_access_log_table.writer_principal` is also a closed enum (`models.py:634`). Completion-gesture events are not access-log entries.
+* `audit_access_log_table.writer_principal` is also a closed enum (`models.py:1241`). Completion-gesture events are not access-log entries.
 * The Landscape audit DB records pipeline *execution* decisions (sources, transforms, sinks, gate routing). Composition-time decisions ("user marked a draft ready") belong to the composer audit domain, not the Landscape.
 
 The pattern is **established** by Phase 18 (5b)'s `interpretation_events_table` — one new table per event family, closed-enum CHECK, nullable optional columns. Phase 6 is the third event family in this pattern.

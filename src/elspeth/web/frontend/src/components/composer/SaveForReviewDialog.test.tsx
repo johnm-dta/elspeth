@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { axe, toHaveNoViolations } from "jest-axe";
 import { SaveForReviewDialog } from "./SaveForReviewDialog";
 import { useShareableReviewStore } from "@/stores/shareableReviewStore";
@@ -143,5 +143,89 @@ describe("SaveForReviewDialog", () => {
     const { container } = render(<SaveForReviewDialog />);
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+
+  // Plan line 278 (`docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md`)
+  // requires Esc-to-close focus management on the modal. WAI-ARIA Authoring
+  // Practices: any element with `role="dialog"` + `aria-modal="true"` must
+  // close on Escape. The listener is attached to `document` rather than the
+  // dialog element itself because the dialog does not auto-focus on open in
+  // jsdom (and would not reliably receive keydown otherwise); document-level
+  // keydown is the canonical pattern for modal Esc handling in React.
+  it("closes the dialog when Escape is pressed", () => {
+    useShareableReviewStore.setState({
+      dialogOpen: true,
+      latestResponse: _validResponse,
+      sessionIdForResponse: "sess-1",
+    } as never);
+    render(<SaveForReviewDialog />);
+    expect(screen.getByTestId("save-for-review-dialog")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(useShareableReviewStore.getState().dialogOpen).toBe(false);
+    expect(screen.queryByTestId("save-for-review-dialog")).not.toBeInTheDocument();
+  });
+
+  // Plan line 272 AC 6 (`docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md`):
+  // "Copied!" feedback after clicking copy auto-clears after 2000ms. The
+  // timer is named COPY_FEEDBACK_TIMEOUT_MS in the component; vi fake
+  // timers exercise the setTimeout branch end-to-end.
+  it("auto-clears the 'Copied!' confirmation after 2000ms", async () => {
+    // Fake setTimeout/clearTimeout only — leave the microtask queue
+    // (Promise / queueMicrotask) on real timers so the awaited
+    // navigator.clipboard.writeText promise can resolve. Then flush
+    // microtasks via a real-timer `setImmediate`-style yield, assert
+    // the "Copied!" state, advance the fake setTimeout by 2000ms inside
+    // `act(...)`, and assert the auto-clear has fired.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      useShareableReviewStore.setState({
+        dialogOpen: true,
+        latestResponse: _validResponse,
+        sessionIdForResponse: "sess-1",
+      } as never);
+      const writeText = vi.fn().mockResolvedValueOnce(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+
+      render(<SaveForReviewDialog />);
+      fireEvent.click(screen.getByTestId("save-for-review-copy"));
+      // Flush the awaited writeText promise + React state update.
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("save-for-review-copy")).toHaveTextContent(
+        /copied/i,
+      );
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(screen.getByTestId("save-for-review-copy")).toHaveTextContent(
+        /^copy$/i,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Plan line 273 AC 7 (`docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md`):
+  // Open-link affordance opens in a new tab with rel="noopener noreferrer"
+  // — security hardening for the user-shared URL.
+  it("renders an open-in-new-tab anchor with noopener/noreferrer and correct href", () => {
+    _withOrigin("https://elspeth.example", () => {
+      useShareableReviewStore.setState({
+        dialogOpen: true,
+        latestResponse: _validResponse,
+        sessionIdForResponse: "sess-1",
+      } as never);
+      render(<SaveForReviewDialog />);
+      const link = screen.getByTestId("save-for-review-open-link");
+      expect(link.tagName).toBe("A");
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener noreferrer");
+      expect(link).toHaveAttribute(
+        "href",
+        "https://elspeth.example/#/shared/abc",
+      );
+    });
   });
 });

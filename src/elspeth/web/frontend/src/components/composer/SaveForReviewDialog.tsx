@@ -55,6 +55,23 @@ export function SaveForReviewDialog(): JSX.Element | null {
     };
   }, []);
 
+  // WAI-ARIA Authoring Practices require role="dialog" + aria-modal="true"
+  // modals to close on Escape. The listener is attached to `document` rather
+  // than the dialog element because the dialog does not auto-focus on mount
+  // and would otherwise not receive keydown events when focus is elsewhere
+  // (the canonical React modal pattern). Effect re-runs when `dialogOpen`
+  // or `close` change so the handler only listens while the dialog is open.
+  useEffect(() => {
+    if (!dialogOpen) return undefined;
+    function _onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        close();
+      }
+    }
+    document.addEventListener("keydown", _onKeyDown);
+    return () => document.removeEventListener("keydown", _onKeyDown);
+  }, [dialogOpen, close]);
+
   if (!dialogOpen) return null;
 
   const absoluteShareUrl = latestResponse !== null

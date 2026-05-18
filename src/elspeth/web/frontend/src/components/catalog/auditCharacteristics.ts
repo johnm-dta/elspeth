@@ -3,8 +3,23 @@
 //
 // Source of truth for how audit-characteristic flag strings render on the
 // plugin card and in the filter chip strip. The backend (Phase 7A
-// _derive_audit_characteristics) emits flag strings; this table maps each
-// to its UI metadata.
+// _derive_audit_characteristics in `src/elspeth/web/catalog/service.py`)
+// emits flag strings drawn from the closed Python vocabulary
+// `AuditCharacteristic` enum in `src/elspeth/contracts/enums.py`; this
+// table maps each to its UI metadata.
+//
+// PARALLEL FILES (keep in sync — Python is the source of truth):
+//   - Python enum:   src/elspeth/contracts/enums.py :: AuditCharacteristic
+//   - This file:     AUDIT_CHARACTERISTICS (one entry per enum member)
+//   - Parity test:   tests/unit/web/catalog/
+//                    test_audit_characteristic_vocabulary_parity.py
+//   - Wire shape:    src/elspeth/web/frontend/src/types/index.ts ::
+//                    PluginSummary.audit_characteristics (literal-union
+//                    type derived from this file's AuditCharacteristicFlag)
+//
+// Adding or removing a member in any one of those four sites without the
+// matching change in the others fails CI (vocabulary parity test on
+// adds/removes, TS compiler on type drift).
 //
 // Unknown flags (no entry here) render as a small grey "unknown" chip with
 // the raw flag string as label; this is the forward-compatibility path

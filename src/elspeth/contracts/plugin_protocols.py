@@ -56,7 +56,40 @@ class PluginConfigProtocol(Protocol):
         ...
 
 
-class SourceProtocol(Protocol):
+class _PluginReferenceContent(Protocol):
+    """Reference-content attributes shared by every plugin protocol.
+
+    Mirrors the Phase 7A fields added to ``BaseSource`` /
+    ``BaseTransform`` / ``BaseSink`` in
+    ``src/elspeth/plugins/infrastructure/base.py``. ``SourceProtocol``,
+    ``TransformProtocol``, ``BatchTransformProtocol``, and
+    ``SinkProtocol`` all inherit from this mixin so the attribute set
+    is declared once.
+
+    The single-source-of-truth pattern lets mypy verify that
+    ``PluginClass``-typed variables in ``web/catalog/service.py`` can
+    access these fields uniformly without per-protocol declarations
+    drifting. Adding a Phase-8 reference field means one edit here
+    plus matching additions to the three ``BaseX`` classes — instead
+    of four protocol edits plus three base edits.
+
+    Types are stdlib-only by L0 constraint (``DeclaredAuditCharacteristics``
+    is a stdlib ``frozenset`` alias from ``contracts/enums.py``).
+
+    Not ``@runtime_checkable`` — these are attribute declarations
+    (no methods), and ``TransformProtocol``'s runtime-checkable
+    isinstance() machinery already verifies the concrete plugin class
+    has every needed attribute via the ``BaseTransform`` inheritance.
+    """
+
+    usage_when_to_use: str | None
+    usage_when_not_to_use: str | None
+    example_use: str | None
+    capability_tags: tuple[str, ...]
+    audit_characteristics: DeclaredAuditCharacteristics
+
+
+class SourceProtocol(_PluginReferenceContent, Protocol):
     """Protocol for source plugins — type-checking only, not @runtime_checkable.
 
     Sources load data into the system. There is exactly one source per run.
@@ -96,16 +129,7 @@ class SourceProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
-    # ── Reference content (Phase 7A) ────────────────────────────────────
-    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
-    # Protocol declarations here let mypy verify that PluginClass-typed
-    # variables in catalog/service.py can access these fields without
-    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
-    usage_when_to_use: str | None
-    usage_when_not_to_use: str | None
-    example_use: str | None
-    capability_tags: tuple[str, ...]
-    audit_characteristics: DeclaredAuditCharacteristics
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
 
     # Sink name for quarantined rows, or "discard" to drop invalid rows
     # All sources must set this - config-based sources get it from SourceDataConfig
@@ -231,7 +255,7 @@ class SourceProtocol(Protocol):
 
 
 @runtime_checkable
-class TransformProtocol(Protocol):
+class TransformProtocol(_PluginReferenceContent, Protocol):
     """Protocol for stateless single-row transforms.
 
     Transforms process individual rows and emit results.
@@ -281,16 +305,7 @@ class TransformProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
-    # ── Reference content (Phase 7A) ────────────────────────────────────
-    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
-    # Protocol declarations here let mypy verify that PluginClass-typed
-    # variables in catalog/service.py can access these fields without
-    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
-    usage_when_to_use: str | None
-    usage_when_not_to_use: str | None
-    example_use: str | None
-    capability_tags: tuple[str, ...]
-    audit_characteristics: DeclaredAuditCharacteristics
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
 
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # The TransformExecutor checks _on_start_called before process() to ensure
@@ -441,7 +456,7 @@ class TransformProtocol(Protocol):
         ...
 
 
-class BatchTransformProtocol(Protocol):
+class BatchTransformProtocol(_PluginReferenceContent, Protocol):
     """Protocol for batch-aware transforms — type-checking only, not @runtime_checkable.
 
     Batch transforms receive lists of rows and emit results. Used in aggregation
@@ -497,16 +512,7 @@ class BatchTransformProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
-    # ── Reference content (Phase 7A) ────────────────────────────────────
-    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
-    # Protocol declarations here let mypy verify that PluginClass-typed
-    # variables in catalog/service.py can access these fields without
-    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
-    usage_when_to_use: str | None
-    usage_when_not_to_use: str | None
-    example_use: str | None
-    capability_tags: tuple[str, ...]
-    audit_characteristics: DeclaredAuditCharacteristics
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
 
     # Lifecycle guards (set by BaseTransform.on_start()/on_complete()).
     # Batch transforms inherit BaseTransform which manages these. Contract tests
@@ -608,7 +614,7 @@ class BatchTransformProtocol(Protocol):
         ...
 
 
-class SinkProtocol(Protocol):
+class SinkProtocol(_PluginReferenceContent, Protocol):
     """Protocol for sink plugins — type-checking only, not @runtime_checkable.
 
     Sinks output data to external destinations.
@@ -663,16 +669,7 @@ class SinkProtocol(Protocol):
     plugin_version: str
     source_file_hash: str | None
 
-    # ── Reference content (Phase 7A) ────────────────────────────────────
-    # Mirrors the fields added to BaseSource / BaseTransform / BaseSink.
-    # Protocol declarations here let mypy verify that PluginClass-typed
-    # variables in catalog/service.py can access these fields without
-    # attr-defined suppressions. Types are stdlib-only (L0 constraint).
-    usage_when_to_use: str | None
-    usage_when_not_to_use: str | None
-    example_use: str | None
-    capability_tags: tuple[str, ...]
-    audit_characteristics: DeclaredAuditCharacteristics
+    # Reference content (Phase 7A) inherited from _PluginReferenceContent.
 
     # Resume capability
     supports_resume: bool  # Can this sink append to existing output on resume?

@@ -239,32 +239,88 @@ def _build_validation_row(result: ValidationResult) -> ReadinessRow:
     )
 
 
-# Determinism values that flag a Transform as audit-relevant beyond the
-# pure-deterministic baseline. Two distinct semantics share this set:
+# Determinism values that classify a Transform as INTERNAL — i.e. NOT
+# audit-flagged. The transform-boundary predicate is derived by
+# exclusion: every Determinism value NOT in this set is audit-flagged.
 #
-#   EXTERNAL_CALL    — the Transform crosses an external trust boundary
-#                      via a network request (web_scrape, RAG, Azure
-#                      moderation). The audit trail records request +
-#                      response so replay is reproducible.
+# The set is declared as the explicit exclusion list (rather than as
+# the audit-flagged inclusion list) so that adding a new Determinism
+# value to ``contracts/enums.py`` forces an explicit decision rather
+# than silently inheriting "internal" by omission:
 #
-#   NON_DETERMINISTIC — the Transform's output is not reproducible from
-#                      inputs alone (LLM completions). The audit trail
-#                      records the verbatim output. The classification
-#                      shares an audit signal with EXTERNAL_CALL even
-#                      though the mechanism differs — both produce values
-#                      that came from outside our deterministic control,
-#                      which an auditor needs to see surfaced.
+#   - Inclusive form (rejected): a new ``Determinism.GPU_ACCELERATED``
+#     added without updating an inclusive ``_AUDIT_FLAGGED_DETERMINISMS``
+#     set silently classifies as INTERNAL. The auditor never sees a
+#     new audit-relevant signal that the language already named.
 #
-# The set name reflects that audit-relevance, not strict
-# external-boundary semantics. A hypothetical future plugin that's
-# NON_DETERMINISTIC without making an external call (e.g. uses unseeded
-# randomness) would also classify as audit-flagged here — that's the
-# correct outcome under ELSPETH's auditability standard.
-_AUDIT_FLAGGED_DETERMINISMS: frozenset[Determinism] = frozenset(
+#   - Exclusive form (chosen): a new value defaults to BOUNDARY unless
+#     the author explicitly adds it to ``_INTERNAL_TRANSFORM_DETERMINISMS``.
+#     Audit-relevance becomes the default classification.
+#
+# The "force a conscious decision" property of this code path is
+# completed by the per-plugin parity test
+# (``tests/unit/web/audit_readiness/test_boundary_predicate_parity.py``):
+# when a new Determinism value is added AND used on a builtin plugin,
+# the per-name expected-determinism map in
+# ``boundary_expectations.py`` no longer matches, the parity test
+# fails, and the author must either pin the new declared value in the
+# expectations map (acknowledging the new audit-relevant signal) or
+# add the value to ``_INTERNAL_TRANSFORM_DETERMINISMS`` (declaring it
+# reproducibility-clean). The exclusion form alone biases the default;
+# the parity test forces the decision to be recorded.
+#
+# A defensive parity test asserts the exclusion set is a subset of
+# ``Determinism``; if a future rename drops a value from the enum the
+# test surfaces immediately.
+#
+# Current internal classifications (every other Determinism value
+# automatically classifies as audit-flagged for Transforms):
+#
+#   DETERMINISTIC — pure functions: replay reproduces output from input.
+#   SEEDED         — pseudo-random, seed captured: replay reproducible.
+#   IO_READ        — Transforms only; reads from filesystem/env. Sources
+#                    short-circuit boundary via the kind check, so a
+#                    rare IO_READ Transform is internal here.
+#   IO_WRITE       — Transforms only; writes to filesystem/env. Sinks
+#                    short-circuit boundary via the kind check, so a
+#                    rare IO_WRITE Transform is internal here.
+#
+# The complement (currently {EXTERNAL_CALL, NON_DETERMINISTIC}) carries
+# two audit semantics that happen to share a signal:
+#
+#   EXTERNAL_CALL — crosses an external trust boundary via network
+#                   request (web_scrape, RAG, Azure moderation). The
+#                   audit trail records request + response so replay
+#                   is reproducible.
+#
+#   NON_DETERMINISTIC — output is not reproducible from inputs alone
+#                   (LLM completions). The audit trail records the
+#                   verbatim output. A hypothetical future plugin that
+#                   is NON_DETERMINISTIC without making an external
+#                   call (e.g. unseeded randomness) would also
+#                   classify as audit-flagged — correct under
+#                   ELSPETH's auditability standard.
+_INTERNAL_TRANSFORM_DETERMINISMS: frozenset[Determinism] = frozenset(
     {
-        Determinism.EXTERNAL_CALL,
-        Determinism.NON_DETERMINISTIC,
+        Determinism.DETERMINISTIC,
+        Determinism.SEEDED,
+        Determinism.IO_READ,
+        Determinism.IO_WRITE,
     },
+)
+
+_AUDIT_FLAGGED_DETERMINISMS: frozenset[Determinism] = frozenset(Determinism) - _INTERNAL_TRANSFORM_DETERMINISMS
+
+# Module-load assertion: the exclusion list must be a subset of the
+# live enum. A drop or rename of a Determinism member that leaves a
+# stale name in ``_INTERNAL_TRANSFORM_DETERMINISMS`` would otherwise
+# silently shrink ``_AUDIT_FLAGGED_DETERMINISMS`` without test signal.
+# This assertion runs at import time so a stale exclusion surfaces
+# before any test exercises the predicate.
+assert frozenset(Determinism) >= _INTERNAL_TRANSFORM_DETERMINISMS, (
+    "_INTERNAL_TRANSFORM_DETERMINISMS contains values not in Determinism; "
+    f"stale members: {sorted(_INTERNAL_TRANSFORM_DETERMINISMS - frozenset(Determinism))}. "
+    "Remove the stale entries or restore the missing enum members."
 )
 
 # Version identifier for the boundary-classification rule encoded by

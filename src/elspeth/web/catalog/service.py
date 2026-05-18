@@ -69,13 +69,26 @@ _DETERMINISM_TO_AUDIT_FLAG: dict[Determinism, AuditCharacteristic] = {
 # BaseSink (`plugins/infrastructure/base.py`).
 #
 # Used by `_derive_audit_characteristics` to suppress emission of the
-# determinism-derived AuditCharacteristic flag when the plugin inherits
-# the kind default unchanged. The principle: a card surfaces metadata
-# only when the author made a meaningful per-plugin choice. Every
-# Source inheriting Determinism.IO_READ is a kind-constant signal that
-# teaches the user nothing about CSV-vs-JSON-vs-Dataverse; an explicit
-# override (NullSource → DETERMINISTIC, DataverseSource → EXTERNAL_CALL)
-# is a deliberate author claim and *is* worth surfacing.
+# determinism-derived AuditCharacteristic flag when the plugin's declared
+# value EQUALS the kind default. The predicate is value-equality, not
+# inheritance-detection — every concrete plugin redeclares `determinism`
+# explicitly under the ADR-010 declaration-trust framework's
+# `__init_subclass__` guard, so "inherited the default" never literally
+# occurs at runtime. The suppression is therefore about display
+# redundancy, not authorial intent:
+#
+#   "Every Source has Determinism.IO_READ" is an architectural fact,
+#   not a per-plugin signal. Showing the io_read chip on every Source
+#   card adds visual noise without distinguishing CSV from Dataverse.
+#   A non-default value (e.g. NullSource → DETERMINISTIC, DataverseSource
+#   → EXTERNAL_CALL) does distinguish — the chip's presence then
+#   communicates "this Source deviates from the kind norm in a
+#   reproducibility-relevant way."
+#
+# A plugin author who explicitly redeclares the kind default still gets
+# suppression — the chip would teach the user nothing they couldn't
+# infer from the kind. Surfacing authorial intent (the *act* of
+# declaring) belongs in source-code review, not on the catalog card.
 #
 # Subscript access is deliberate: a future PluginKind addition or
 # Determinism rebase on the base classes that drifts from this table

@@ -91,45 +91,83 @@ Layer: L3 (application).
 
 from __future__ import annotations
 
-# Every registered Source is a boundary plugin by architecture: a Source
-# reads external data into the pipeline. There is no such thing as an
-# "internal source" in ELSPETH.
-EXPECTED_BOUNDARY_SOURCES: frozenset[str] = frozenset(
-    {
-        "azure_blob",
-        "csv",
-        "dataverse",
-        "json",
-        "null",
-        "text",
-    },
-)
+from elspeth.contracts.enums import Determinism
 
-# Every registered Sink is a boundary plugin by architecture: writing
-# data out of the pipeline crosses an external trust boundary regardless
-# of whether the destination is a local file or a remote service.
-EXPECTED_BOUNDARY_SINKS: frozenset[str] = frozenset(
-    {
-        "azure_blob",
-        "chroma_sink",
-        "csv",
-        "database",
-        "dataverse",
-        "json",
-    },
-)
+# Per-plugin determinism expectations. The previous frozenset-of-names
+# form was strengthened to a per-name map after a parity-test review
+# observed that set-equality could theoretically cancel under offsetting
+# drift (rename + re-add, or determinism change on a boundary-classified
+# plugin where the kind short-circuits the predicate). Per-plugin
+# determinism pinning catches both:
+#
+#   - A new builtin plugin not added here fails the parity test (name set
+#     drift).
+#   - A determinism declaration that changes value on a registered plugin
+#     fails the parity test (value drift), even when the plugin's kind
+#     would short-circuit the boundary predicate. A Source that flips
+#     from IO_READ to NON_DETERMINISTIC remains boundary by kind, but the
+#     declaration drift is itself audit-relevant — auditors care about
+#     the declared determinism, not only the boundary outcome.
+#
+# Sources and sinks are uniformly boundary by architecture regardless of
+# declared determinism (ADR-021). The maps below pin the declared
+# determinism per builtin, not the boundary classification (which is
+# derivable from kind + the predicate in
+# ``_build_plugin_trust_row``). Transforms classify as boundary iff
+# their declared determinism is in ``_AUDIT_FLAGGED_DETERMINISMS``.
 
-# Boundary Transforms — those whose declared determinism is in
-# ``_AUDIT_FLAGGED_DETERMINISMS`` (currently EXTERNAL_CALL and
-# NON_DETERMINISTIC). Every other Transform is internal-only. See the
-# module docstring's TWO-TIER RATIONALE for the automated-vs-manual
-# distinction.
+EXPECTED_SOURCE_DETERMINISMS: dict[str, Determinism] = {
+    "azure_blob": Determinism.IO_READ,
+    "csv": Determinism.IO_READ,
+    "dataverse": Determinism.EXTERNAL_CALL,
+    "json": Determinism.IO_READ,
+    "null": Determinism.DETERMINISTIC,
+    "text": Determinism.IO_READ,
+}
+
+EXPECTED_SINK_DETERMINISMS: dict[str, Determinism] = {
+    "azure_blob": Determinism.IO_WRITE,
+    "chroma_sink": Determinism.IO_WRITE,
+    "csv": Determinism.IO_WRITE,
+    "database": Determinism.IO_WRITE,
+    "dataverse": Determinism.EXTERNAL_CALL,
+    "json": Determinism.IO_WRITE,
+}
+
+EXPECTED_TRANSFORM_DETERMINISMS: dict[str, Determinism] = {
+    "azure_content_safety": Determinism.EXTERNAL_CALL,
+    "azure_prompt_shield": Determinism.EXTERNAL_CALL,
+    "batch_classifier_metrics": Determinism.DETERMINISTIC,
+    "batch_data_quality_report": Determinism.DETERMINISTIC,
+    "batch_distribution_profile": Determinism.DETERMINISTIC,
+    "batch_drift_compare": Determinism.DETERMINISTIC,
+    "batch_effect_size": Determinism.DETERMINISTIC,
+    "batch_experiment_compare": Determinism.DETERMINISTIC,
+    "batch_outlier_annotator": Determinism.DETERMINISTIC,
+    "batch_paired_preference": Determinism.DETERMINISTIC,
+    "batch_replicate": Determinism.DETERMINISTIC,
+    "batch_stats": Determinism.DETERMINISTIC,
+    "batch_threshold_summary": Determinism.DETERMINISTIC,
+    "batch_top_k": Determinism.DETERMINISTIC,
+    "field_mapper": Determinism.DETERMINISTIC,
+    "json_explode": Determinism.DETERMINISTIC,
+    "keyword_filter": Determinism.DETERMINISTIC,
+    "line_explode": Determinism.DETERMINISTIC,
+    "llm": Determinism.NON_DETERMINISTIC,  # manual curation (LLM API boundary)
+    "passthrough": Determinism.DETERMINISTIC,
+    "rag_retrieval": Determinism.EXTERNAL_CALL,
+    "report_assemble": Determinism.DETERMINISTIC,
+    "truncate": Determinism.DETERMINISTIC,
+    "type_coerce": Determinism.DETERMINISTIC,
+    "value_transform": Determinism.DETERMINISTIC,
+    "web_scrape": Determinism.EXTERNAL_CALL,
+}
+
+# Derived name-only sets preserved for the unchanged "every Source/Sink
+# is boundary by architecture" assertions. These are computed from the
+# determinism maps above so a single declaration site governs both.
+EXPECTED_BOUNDARY_SOURCES: frozenset[str] = frozenset(EXPECTED_SOURCE_DETERMINISMS)
+EXPECTED_BOUNDARY_SINKS: frozenset[str] = frozenset(EXPECTED_SINK_DETERMINISMS)
 EXPECTED_BOUNDARY_TRANSFORMS: frozenset[str] = frozenset(
-    {
-        "azure_content_safety",  # Determinism.EXTERNAL_CALL
-        "azure_prompt_shield",  # Determinism.EXTERNAL_CALL
-        "llm",  # Determinism.NON_DETERMINISTIC — manual curation (LLM API boundary)
-        "rag_retrieval",  # Determinism.EXTERNAL_CALL
-        "web_scrape",  # Determinism.EXTERNAL_CALL
-    },
+    {name for name, det in EXPECTED_TRANSFORM_DETERMINISMS.items() if det in {Determinism.EXTERNAL_CALL, Determinism.NON_DETERMINISTIC}},
 )

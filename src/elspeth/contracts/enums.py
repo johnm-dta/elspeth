@@ -128,7 +128,19 @@ class Determinism(StrEnum):
 
 
 class RoutingKind(StrEnum):
-    """Kind of routing action from a gate.
+    """Kind of routing action a gate returns.
+
+    Each kind pairs with specific destination and ``RoutingMode``
+    invariants enforced in ``contracts.routing.RoutingAction.__post_init__``:
+
+    - CONTINUE: Token continues to the next node in the pipeline.
+      No destinations (``destinations == ()``); MOVE mode only.
+    - ROUTE: Token is sent to a single labeled destination (sink or
+      "continue"); exactly one destination; MOVE or DIVERT mode (COPY
+      is rejected to preserve the single-terminal-state-per-token
+      audit invariant).
+    - FORK_TO_PATHS: Token clones to multiple parallel paths; one or
+      more destinations; COPY mode only (fork always copies).
 
     Stored in routing_events.
     """

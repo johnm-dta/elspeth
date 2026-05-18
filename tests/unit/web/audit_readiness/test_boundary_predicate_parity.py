@@ -16,11 +16,15 @@ add a Tier-3 crossing surface as a production-code diff in PR review
 
 from __future__ import annotations
 
+from elspeth.contracts.enums import Determinism
 from elspeth.plugins.infrastructure.manager import PluginManager
 from elspeth.web.audit_readiness.boundary_expectations import (
     EXPECTED_BOUNDARY_SINKS,
     EXPECTED_BOUNDARY_SOURCES,
     EXPECTED_BOUNDARY_TRANSFORMS,
+    EXPECTED_SINK_DETERMINISMS,
+    EXPECTED_SOURCE_DETERMINISMS,
+    EXPECTED_TRANSFORM_DETERMINISMS,
 )
 from elspeth.web.audit_readiness.service import _AUDIT_FLAGGED_DETERMINISMS
 from elspeth.web.catalog.schemas import PluginKind
@@ -41,13 +45,46 @@ def _make_manager() -> PluginManager:
     return manager
 
 
+def _registered_determinisms(classes: list[type]) -> dict[str, Determinism]:
+    return {cls.name: cls.determinism for cls in classes}
+
+
+def _assert_per_plugin_parity(actual: dict[str, Determinism], expected: dict[str, Determinism], kind_label: str) -> None:
+    """Per-plugin determinism equality.
+
+    Stronger than set-equality of names: catches the case where two
+    offsetting drifts (e.g. rename + readd, or determinism change on a
+    plugin whose kind short-circuits the boundary predicate) would
+    cancel under set-equality. Per-plugin pinning means a value drift
+    on any single name fails immediately with a named diff.
+    """
+    missing_in_actual = expected.keys() - actual.keys()
+    extra_in_actual = actual.keys() - expected.keys()
+    mismatched = {name: (actual[name], expected[name]) for name in expected.keys() & actual.keys() if actual[name] is not expected[name]}
+    assert not (missing_in_actual or extra_in_actual or mismatched), (
+        f"{kind_label} catalog drifted from declared expectations.\n"
+        f"  missing from catalog (declared in expectations but no longer registered): {sorted(missing_in_actual)}\n"
+        f"  unexpected in catalog (registered but not in expectations): {sorted(extra_in_actual)}\n"
+        f"  determinism value changed on registered plugin (name: (actual, expected)): {mismatched}\n"
+        f"Update src/elspeth/web/audit_readiness/boundary_expectations.py "
+        f"to reflect the catalog change AS PART OF THE SAME COMMIT — "
+        f"the production-code diff is the audit-discoverability signal."
+    )
+
+
 def test_every_source_classifies_as_boundary() -> None:
     """Every registered source must classify as boundary under the
-    (kind, determinism) predicate. A source that fails to classify
-    indicates either a missing class in the catalog or a determinism
-    classification that doesn't make sense for a Source."""
+    (kind, determinism) predicate. The per-plugin determinism map
+    additionally pins each source's declared determinism so a silent
+    drift (e.g. a Source whose determinism flips from IO_READ to
+    NON_DETERMINISTIC while remaining boundary by kind) fails here."""
     manager = _make_manager()
-    registered_names = frozenset(cls.name for cls in manager.get_sources())
+    actual = _registered_determinisms(list(manager.get_sources()))
+    _assert_per_plugin_parity(actual, EXPECTED_SOURCE_DETERMINISMS, "Source")
+    # Set-equality assertion preserved alongside per-plugin parity so the
+    # name-only invariant (every registered source appears in the boundary
+    # set, since sources short-circuit boundary by kind) stays explicit.
+    registered_names = frozenset(actual)
     assert registered_names == EXPECTED_BOUNDARY_SOURCES, (
         f"Expected boundary sources drifted from catalog: "
         f"missing={EXPECTED_BOUNDARY_SOURCES - registered_names}, "
@@ -62,9 +99,13 @@ def test_every_source_classifies_as_boundary() -> None:
 def test_every_sink_classifies_as_boundary() -> None:
     """Every registered sink must classify as boundary — writing data
     out of the pipeline is a boundary crossing regardless of whether
-    the destination is local file or remote service."""
+    the destination is local file or remote service. The per-plugin
+    determinism map pins each sink's declared determinism for the
+    same anti-drift reason documented on the sources test."""
     manager = _make_manager()
-    registered_names = frozenset(cls.name for cls in manager.get_sinks())
+    actual = _registered_determinisms(list(manager.get_sinks()))
+    _assert_per_plugin_parity(actual, EXPECTED_SINK_DETERMINISMS, "Sink")
+    registered_names = frozenset(actual)
     assert registered_names == EXPECTED_BOUNDARY_SINKS, (
         f"Expected boundary sinks drifted from catalog: "
         f"missing={EXPECTED_BOUNDARY_SINKS - registered_names}, "
@@ -78,10 +119,15 @@ def test_every_sink_classifies_as_boundary() -> None:
 
 def test_external_call_transforms_classify_as_boundary() -> None:
     """Transforms declaring Determinism.EXTERNAL_CALL are boundary;
-    every other Transform is internal-only. The lists below pin the
-    current partition so a drift (an internal transform mistakenly
-    flagged EXTERNAL_CALL, or vice versa) fails here."""
+    every other Transform is internal-only. The per-plugin determinism
+    map pins each transform's declared value so any drift (an internal
+    transform mistakenly flagged EXTERNAL_CALL or vice versa, or any
+    silent value change) fails here with a per-name diff."""
     manager = _make_manager()
+    actual = _registered_determinisms(list(manager.get_transforms()))
+    _assert_per_plugin_parity(actual, EXPECTED_TRANSFORM_DETERMINISMS, "Transform")
+    # Boundary-set assertion preserved alongside per-plugin parity so
+    # the predicate's downstream classification is also pinned.
     boundary_actual = frozenset(cls.name for cls in manager.get_transforms() if _predicate_says_boundary("transform", cls))
     assert boundary_actual == EXPECTED_BOUNDARY_TRANSFORMS, (
         f"Boundary transform set drifted: "

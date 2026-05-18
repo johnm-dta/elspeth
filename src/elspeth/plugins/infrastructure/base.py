@@ -192,7 +192,33 @@ class BaseTransform(ABC):
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
     are non-exhaustive; pick the two or three most useful for a user
-    who is searching the catalog."""
+    who is searching the catalog.
+
+    **Open vocabulary — deliberate.** ``capability_tags`` is typed as
+    bare ``tuple[str, ...]`` rather than a closed-vocabulary enum (cf.
+    ``audit_characteristics`` below, which uses ``AuditCharacteristic``).
+    The asymmetry is intentional:
+
+      - ``audit_characteristics`` drives compliance-relevant rendering
+        (the chip vocabulary an auditor reads). A typo silently
+        degrades the audit signal, so the vocabulary is closed and
+        typos fail at the type-check + registration boundary.
+      - ``capability_tags`` drives discovery affordances (filter chips,
+        fuzzy search ranking) for an operator browsing for a plugin
+        that fits a use case. A new tag like ``"streaming"`` or
+        ``"webhook"`` is meaningful to a human reader without a
+        centrally-coordinated enum bump, and an "unrecognised" tag
+        renders fine — it just doesn't join an existing filter cluster.
+
+    Keep tags lowercase, short, and aligned with existing tags
+    (``grep`` ``capability_tags`` for current usage) so the filter
+    chip strip clusters related plugins. A new tag is fine; a typo on
+    an existing tag fragments the chip strip and is the failure mode
+    to avoid.
+
+    The BaseSink and BaseSource declarations of this attribute share
+    the same open-vocabulary rationale; treat this docstring as
+    canonical."""
 
     audit_characteristics: DeclaredAuditCharacteristics = frozenset()
     """Declared audit characteristics that the framework cannot derive
@@ -203,7 +229,10 @@ class BaseTransform(ABC):
     ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
     the enum itself is the closed vocabulary; typos fail mypy at the
     declaration site rather than disappearing silently from the rendered
-    catalog card."""
+    catalog card. The build-time test
+    ``tests/unit/web/catalog/test_audit_characteristics_declaration_typed.py``
+    additionally rejects bare-string members that pass mypy under
+    StrEnum/str inference."""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
@@ -342,7 +371,22 @@ class BaseTransform(ABC):
             config: Plugin configuration
         """
         self.config = config
-        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        # Per-instance lifecycle-guard initialization.
+        #
+        # `_on_start_called` and `_on_complete_called` are the
+        # falsifiable post-conditions that contract tests use to detect
+        # missing-super() bugs in subclass lifecycle overrides: a stub
+        # `on_start()` that forgets to call `super().on_start()` leaves
+        # the flag False after construction-then-invocation, breaking
+        # the contract test. The flags MUST be per-instance — declaring
+        # them at class level (`_on_start_called: bool = False`) would
+        # make the True/False state shared across every plugin instance
+        # of the same class, so a single completed run would mask
+        # missing super() calls in every subsequent instance.
+        #
+        # Mirrored on BaseSink and BaseSource; see those `__init__`
+        # comments referring back here for the lifecycle-guard
+        # rationale.
         self._on_start_called: bool = False
         self._on_complete_called: bool = False
         self.declared_input_fields = frozenset()
@@ -868,7 +912,11 @@ class BaseSink(ABC):
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
     are non-exhaustive; pick the two or three most useful for a user
-    who is searching the catalog."""
+    who is searching the catalog.
+
+    See ``BaseTransform.capability_tags`` for the open-vocabulary
+    rationale (why this is bare ``tuple[str, ...]`` rather than a
+    closed-vocabulary enum like ``audit_characteristics`` below)."""
 
     audit_characteristics: DeclaredAuditCharacteristics = frozenset()
     """Declared audit characteristics that the framework cannot derive
@@ -1021,7 +1069,9 @@ class BaseSink(ABC):
             config: Plugin configuration
         """
         self.config = config
-        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        # Per-instance lifecycle guards — see BaseTransform.__init__ for
+        # the full rationale (lifecycle-guard contract, missing-super()
+        # detection, why class-level state would mask bugs).
         self._on_start_called: bool = False
         self._on_complete_called: bool = False
         self._on_write_failure: str | None = None
@@ -1235,7 +1285,11 @@ class BaseSource(ABC):
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
     are non-exhaustive; pick the two or three most useful for a user
-    who is searching the catalog."""
+    who is searching the catalog.
+
+    See ``BaseTransform.capability_tags`` for the open-vocabulary
+    rationale (why this is bare ``tuple[str, ...]`` rather than a
+    closed-vocabulary enum like ``audit_characteristics`` below)."""
 
     audit_characteristics: DeclaredAuditCharacteristics = frozenset()
     """Declared audit characteristics that the framework cannot derive
@@ -1322,7 +1376,9 @@ class BaseSource(ABC):
             config: Plugin configuration
         """
         self.config = config
-        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        # Per-instance lifecycle guards — see BaseTransform.__init__ for
+        # the full rationale (lifecycle-guard contract, missing-super()
+        # detection, why class-level state would mask bugs).
         self._on_start_called: bool = False
         self._on_complete_called: bool = False
         self._schema_contract = None

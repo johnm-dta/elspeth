@@ -89,6 +89,10 @@ class ShareTokenPayload:
     * ``version`` — closed enum; only ``1`` is accepted in v1.
     * ``session_id`` / ``state_id`` — composition session and state the
       reviewer can inspect via the shared route.
+    * ``created_at`` — when the token was minted (wall-clock at issuance).
+      Carried in the envelope rather than in the snapshot blob so two
+      re-mints over an unchanged composition still produce the same blob
+      digest (the blob is content-addressed; only stable content goes in).
     * ``expires_at`` — absolute UTC datetime; the signer's verify() rejects
       tokens past this point. Lifetime is stamped at issue time using
       ``WebSettings.shareable_link_lifetime_seconds``.
@@ -106,6 +110,7 @@ class ShareTokenPayload:
     version: int
     session_id: UUID
     state_id: UUID
+    created_at: datetime
     expires_at: datetime
     nonce_hex: str
     payload_digest: str
@@ -124,6 +129,7 @@ class ShareTokenPayload:
             "version": self.version,
             "session_id": str(self.session_id),
             "state_id": str(self.state_id),
+            "created_at": self.created_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
             "nonce_hex": self.nonce_hex,
             "payload_digest": self.payload_digest,
@@ -204,6 +210,7 @@ class ShareTokenSigner:
                 version=payload_dict["version"],
                 session_id=UUID(payload_dict["session_id"]),
                 state_id=UUID(payload_dict["state_id"]),
+                created_at=datetime.fromisoformat(payload_dict["created_at"]),
                 expires_at=datetime.fromisoformat(payload_dict["expires_at"]),
                 nonce_hex=payload_dict["nonce_hex"],
                 payload_digest=payload_dict["payload_digest"],

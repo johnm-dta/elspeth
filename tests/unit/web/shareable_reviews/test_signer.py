@@ -23,11 +23,13 @@ from elspeth.web.shareable_reviews.signer import (
 
 
 def _make_payload() -> ShareTokenPayload:
+    now = datetime.now(UTC)
     return ShareTokenPayload(
         version=1,
         session_id=uuid4(),
         state_id=uuid4(),
-        expires_at=datetime.now(UTC) + timedelta(days=7),
+        created_at=now,
+        expires_at=now + timedelta(days=7),
         nonce_hex="deadbeef" * 4,
         payload_digest="sha256:" + ("ab" * 32),
         created_by_user_id="user-1",
@@ -60,11 +62,13 @@ def test_wrong_key_rejected() -> None:
 
 def test_expired_token_rejected() -> None:
     signer = ShareTokenSigner(b"k" * 32)
+    now = datetime.now(UTC)
     expired = ShareTokenPayload(
         version=1,
         session_id=uuid4(),
         state_id=uuid4(),
-        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        created_at=now - timedelta(hours=2),
+        expires_at=now - timedelta(seconds=1),
         nonce_hex="ff" * 16,
         payload_digest="sha256:" + ("ab" * 32),
         created_by_user_id="user-1",
@@ -155,11 +159,13 @@ def test_payload_with_unknown_version_rejected() -> None:
     """A signed payload with a future version must reject (defense against
     forward-compat bypass attempts)."""
     signer = ShareTokenSigner(b"k" * 32)
+    now = datetime.now(UTC)
     p = ShareTokenPayload(
         version=99,
         session_id=uuid4(),
         state_id=uuid4(),
-        expires_at=datetime.now(UTC) + timedelta(days=7),
+        created_at=now,
+        expires_at=now + timedelta(days=7),
         nonce_hex="ff" * 16,
         payload_digest="sha256:" + ("ab" * 32),
         created_by_user_id="user-1",

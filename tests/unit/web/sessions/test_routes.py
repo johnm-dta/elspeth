@@ -433,6 +433,9 @@ def _make_app(
 
     # Set up app state
     app.state.session_service = service
+    # Phase 6A B3 — YAML export route's audit-write reaches into
+    # ``app.state.session_engine`` for the composer_completion_events insert.
+    app.state.session_engine = engine
     app.state.settings = WebSettings(
         data_dir=tmp_path,
         max_upload_bytes=max_upload_bytes,

@@ -859,6 +859,21 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         ),
     ),
     ReviewedWriter(
+        path="tests/unit/web/shareable_reviews/test_service.py",
+        enclosing_symbol="session_engine_with_row",
+        table="composition_states",
+        operation="sqlalchemy_table_insert",
+        purpose=(
+            "Phase 6A Task 5 unit-test fixture: seeds a composition_states row "
+            "to satisfy the composite FK on composer_completion_events. The "
+            "ShareableReviewService's audit write references "
+            "composition_state_id; the test owns the in-memory SQLite engine "
+            "and the fixture exists solely to populate the parent row for FK "
+            "resolution. No production lock required — the test exercises "
+            "service logic, not the production write path."
+        ),
+    ),
+    ReviewedWriter(
         path="tests/unit/web/sessions/test_interpretation_events_table.py",
         enclosing_symbol="TestCompositionStatesProvenanceEnum.test_interpretation_resolve_provenance_accepted",
         table="composition_states",

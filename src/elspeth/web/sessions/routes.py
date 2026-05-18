@@ -15,12 +15,13 @@ from dataclasses import dataclass
 from dataclasses import replace as _replace
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from opentelemetry import metrics
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
@@ -123,6 +124,7 @@ from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
+from elspeth.web.sessions.models import composer_completion_events_table
 from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -5588,6 +5590,33 @@ def create_session_router() -> APIRouter:
                 detail = f"{detail} First error: {runtime_validation.errors[0].message}"
             raise HTTPException(status_code=409, detail=detail)
         yaml_str = generate_yaml(state)
+
+        # Phase 6A B3 — sessions-DB audit event for YAML export.
+        #
+        # Two Tier-1 audit events ship in Phase 6 (mark_ready_for_review and
+        # export_yaml). This is the export_yaml site. Sync, crash-on-failure
+        # per CLAUDE.md audit primacy — if this write fails the request
+        # fails, no YAML is returned, no carve-out is permitted. The write
+        # MUST land before the response is returned: the audit row is the
+        # legal record that the YAML was exported on the user's behalf.
+        #
+        # The state record was just read via ``service.get_current_state``
+        # above; ``state_record.id`` is the composition_state_id this
+        # export is bound to.
+        with request.app.state.session_engine.begin() as conn:
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id=str(uuid4()),
+                    session_id=str(session_id),
+                    composition_state_id=str(state_record.id),
+                    event_type="export_yaml",
+                    actor=str(user.user_id),
+                    created_at=datetime.now(UTC),
+                    payload_digest=None,
+                    expires_at=None,
+                )
+            )
+
         response = {"yaml": yaml_str}
         if state.source is not None and "blob_ref" in state.source.options:
             response["source_blob_id"] = str(state.source.options["blob_ref"])

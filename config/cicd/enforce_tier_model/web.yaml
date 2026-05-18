@@ -427,7 +427,7 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=760f3956112a0b17
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=871776fa3f817d23
   owner: web-composer
   reason: "Narrow OSError around storage_path.write_bytes(old_content) rollback \u2014 disk faults during post-replace divergence\
     \ rollback expected; programmer bugs still propagate"
@@ -435,13 +435,13 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=07153cfe5b633412
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=61bbdd70d4bfd8c0
   owner: web-composer
   reason: "Narrow OSError around tombstone restore after a failed blob delete \u2014 compensation disk faults must not bury\
     \ the primary DB exception"
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=7ad7ef1f9db0783c
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=f6efca749d6531e6
   owner: web-composer
   reason: "Tier-3 trust boundary \u2014 UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure\
     \ mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content). Failure\
@@ -451,7 +451,7 @@ allow_hits:
     lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the audit-bound facts.warnings
     tuple; integrity guards (status=ready, hash match) remain authoritative.
   expires: null
-- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=8cf1a5be6e0f31ef
+- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=cc0c68adfd809d81
   owner: web-composer
   reason: "Preview proof boundary \u2014 ExpressionEvaluationError from evaluating a gate condition against bounded observed-CSV\
     \ sample rows is the exact runtime failure class this proof diagnostic exists to catch."
@@ -805,7 +805,7 @@ allow_hits:
   reason: "Tier 3 \u2014 os.environ.get() for optional WEB_CONCURRENCY env var"
   safety: Defaults to "1" when absent
   expires: null
-- key: web/blobs/service.py:R6:BlobServiceImpl:copy_blobs_for_fork:fp=14086b8bd98e86fb
+- key: web/blobs/service.py:R6:BlobServiceImpl:copy_blobs_for_fork:fp=3b8d687ff684903a
   owner: web-blobs
   reason: "Narrow (SQLAlchemyError, OSError) around fork-rollback delete_blob \u2014 DB/IO faults expected during cleanup;\
     \ programmer bugs still propagate"
@@ -870,17 +870,17 @@ allow_hits:
   reason: "Tier 3 \u2014 os.environ.get() for optional ELSPETH_ENV"
   safety: Returns None when absent; only used for test guard
   expires: null
-- key: web/blobs/service.py:R6:BlobServiceImpl:finalize_run_output_blobs:_sync:fp=f42cb3b7a088a6fc
+- key: web/blobs/service.py:R6:BlobServiceImpl:finalize_run_output_blobs:_sync:fp=934f4d1a740d7b7f
   owner: web-blobs
   reason: Quota exceeded during finalization marks blob as error instead of crashing run
   safety: Over-quota file deleted; blob marked error; run still finalized
   expires: null
-- key: web/blobs/service.py:R6:BlobServiceImpl:finalize_run_output_blobs:_sync:fp=776152c8201dc2cc
+- key: web/blobs/service.py:R6:BlobServiceImpl:finalize_run_output_blobs:_sync:fp=55dc5380ce734e36
   owner: web-blobs
   reason: Per-blob operational errors caught to prevent one failure from aborting remaining blobs
   safety: Failed blobs moved to "error" status best-effort; errors returned in BlobFinalizationResult
   expires: null
-- key: web/blobs/service.py:R6:BlobServiceImpl:finalize_run_output_blobs:_sync:fp=07a1eccedf848930
+- key: web/blobs/service.py:R6:BlobServiceImpl:finalize_run_output_blobs:_sync:fp=0214fb8980868e93
   owner: web-blobs
   reason: "Narrow (SQLAlchemyError, OSError) around pending->error recovery UPDATE \u2014 DB/IO faults expected; programmer\
     \ bugs still propagate"

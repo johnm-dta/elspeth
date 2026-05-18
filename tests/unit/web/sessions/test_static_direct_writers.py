@@ -980,6 +980,47 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         operation="raw_string_in_OperationalError",
         purpose="OperationalError canary (line 5590): tests runtime-preflight save-failure flag",
     ),
+    # ------ tests/integration/web/composer/test_inline_source_provenance.py ------
+    #
+    # Phase 5a Task 2.5 integration test seeds a session + one user
+    # chat_messages row directly (no compose loop). These are
+    # fixture-only inserts that verify the new
+    # ``creation_modality`` / ``created_from_message_id`` /
+    # ``creating_*`` columns + composite FK on ``blobs_table``; routing
+    # them through ``SessionServiceImpl.add_message`` would require
+    # spinning up the full sessions service and offload worker just to
+    # land a single deterministic message id, which adds no audit-
+    # integrity coverage and obscures the schema-level assertions the
+    # test is actually pinning.
+    ReviewedWriter(
+        path="tests/integration/web/composer/test_inline_source_provenance.py",
+        enclosing_symbol="_session_with_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5a Task 2.5 inline-source provenance fixture: seeds one "
+            "session + one user chat message so the test can assert the new "
+            "blobs_table provenance columns (creation_modality, "
+            "created_from_message_id, creating_*) and the composite FK "
+            "fk_blobs_created_from_message_session. Direct insert keeps the "
+            "fixture deterministic (caller controls the message id) and "
+            "scope-narrow (no service-stack initialisation)."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/integration/web/composer/test_inline_source_provenance.py",
+        enclosing_symbol="test_cross_session_message_id_rejected",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5a Task 2.5 cross-session FK rejection test: seeds a "
+            "second session (B) with its own user message so the test can "
+            "drive a blob insert in session A that references session B's "
+            "message id. The composite FK fk_blobs_created_from_message_session "
+            "must raise IntegrityError; routing through add_message would "
+            "obscure the schema-level assertion."
+        ),
+    ),
 )
 
 

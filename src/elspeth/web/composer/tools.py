@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, delete, func, select, update
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.schema import get_aggregation_contract_options
@@ -2039,7 +2040,14 @@ _MIME_TO_SOURCE: dict[str, tuple[str, dict[str, str]]] = {
 
 
 class BlobToolRecord(TypedDict):
-    """Closed dict shape returned by composer blob discovery helpers."""
+    """Closed dict shape returned by composer blob discovery helpers.
+
+    Inline-blob provenance fields (Phase 5a Task 2.5) mirror the columns
+    introduced on ``blobs_table``: ``creation_modality`` carries the
+    closed-enum string (wire form), ``created_from_message_id`` binds to
+    the originating chat message, and the five ``creating_*`` fields
+    carry LLM-provenance for the three LLM-authored modalities.
+    """
 
     id: str
     session_id: str
@@ -2051,6 +2059,13 @@ class BlobToolRecord(TypedDict):
     created_by: str
     source_description: str | None
     status: str
+    creation_modality: str
+    created_from_message_id: str | None
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
 
 
 class BlobCreatePayload(TypedDict):
@@ -2105,6 +2120,16 @@ def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
         "created_by": row.created_by,
         "source_description": row.source_description,
         "status": row.status,
+        # Inline-blob provenance (Phase 5a Task 2.5). The Tier 1 guard in
+        # ``_guard_blob_row_literals`` already validated
+        # ``creation_modality`` against the closed CreationModality enum.
+        "creation_modality": row.creation_modality,
+        "created_from_message_id": row.created_from_message_id,
+        "creating_model_identifier": row.creating_model_identifier,
+        "creating_model_version": row.creating_model_version,
+        "creating_provider": row.creating_provider,
+        "creating_composer_skill_hash": row.creating_composer_skill_hash,
+        "creating_arguments_hash": row.creating_arguments_hash,
     }
 
 
@@ -3024,7 +3049,20 @@ def _resolve_blob_quota_bytes(max_blob_storage_per_session_bytes: int | None) ->
 
 @dataclass(frozen=True, slots=True)
 class _PreparedBlobCreate:
-    """Validated blob-create payload ready for filesystem/DB persistence."""
+    """Validated blob-create payload ready for filesystem/DB persistence.
+
+    Provenance fields (Phase 5a Task 2.5)
+    -------------------------------------
+    ``creation_modality`` declares how the content was produced; mirror
+    enum is :class:`elspeth.contracts.enums.CreationModality`.  The five
+    ``creating_*`` fields carry LLM-provenance and are populated only for
+    LLM-authored modalities — the all-or-nothing invariant is enforced at
+    the DB layer by ``ck_blobs_creating_llm_provenance_nullability`` in
+    ``web/sessions/models.py``.  ``created_from_message_id`` binds the
+    blob to the user chat message that triggered its creation; the
+    composite FK on ``(created_from_message_id, session_id)`` rejects
+    cross-session lineage.
+    """
 
     blob_id: str
     filename: str
@@ -3033,6 +3071,13 @@ class _PreparedBlobCreate:
     content_hash: str
     storage_path: Path
     description: Any | None
+    creation_modality: CreationModality
+    created_from_message_id: str | None
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
 
 
 def _blob_storage_path(data_dir: str, session_id: str, blob_id: str, filename: str) -> Path:
@@ -3070,6 +3115,13 @@ def _prepare_blob_create(
     *,
     data_dir: str,
     session_id: str,
+    creation_modality: CreationModality,
+    created_from_message_id: str | None,
+    creating_model_identifier: str | None = None,
+    creating_model_version: str | None = None,
+    creating_provider: str | None = None,
+    creating_composer_skill_hash: str | None = None,
+    creating_arguments_hash: str | None = None,
 ) -> _PreparedBlobCreate:
     """Validate a create_blob-style payload and allocate its storage path.
 
@@ -3095,8 +3147,19 @@ def _prepare_blob_create(
     wave that makes it dead (CLAUDE.md "No Legacy Code Policy").
 
     Semantic checks below this point (MIME allowlist, filename
-    sanitisation) ARE NOT type checks — they enforce content-validity
-    rules Pydantic cannot express — and remain.
+    sanitisation, UTF-8 encodability) ARE NOT type checks — they enforce
+    content-validity rules Pydantic cannot express — and remain.
+
+    Provenance kwargs (Phase 5a Task 2.5)
+    ------------------------------------
+    All callers MUST supply ``creation_modality`` and
+    ``created_from_message_id``.  The five ``creating_*`` kwargs default
+    to ``None`` and MUST be left as ``None`` for ``CreationModality.VERBATIM``;
+    the three LLM-authored modalities require all five.  The DB-side
+    CHECK ``ck_blobs_creating_llm_provenance_nullability`` rejects any
+    other combination.  We do not duplicate the biconditional in Python
+    — the constraint IS the validation, per the offensive-programming
+    discipline in CLAUDE.md ("The CHECK constraint is the validation").
     """
     filename = arguments["filename"]
     mime_type = arguments["mime_type"]
@@ -3130,7 +3193,21 @@ def _prepare_blob_create(
             actual_type="str",
         ) from exc
 
-    content_bytes = content.encode("utf-8")
+    # UTF-8 encode guard (Phase 5a Task 2.5): a Python ``str`` that contains
+    # an unpaired surrogate code point (e.g. ``"\udc80"``) is a valid
+    # ``str`` but is NOT encodable to UTF-8 — the underlying file write
+    # would raise UnicodeEncodeError downstream and leave the audit layer
+    # holding a half-written blob row.  Wrap as ToolArgumentError here
+    # so the compose loop's ARG_ERROR routing handles it the same way as
+    # disallowed MIME types and unsanitizable filenames (CEC1 channel).
+    try:
+        content_bytes = content.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ToolArgumentError(
+            argument="content",
+            expected="valid UTF-8 text",
+            actual_type="str (contained non-encodable character, e.g. surrogate)",
+        ) from exc
     file_hash = content_hash(content_bytes)
     blob_id = str(uuid4())
     return _PreparedBlobCreate(
@@ -3141,6 +3218,13 @@ def _prepare_blob_create(
         content_hash=file_hash,
         storage_path=_blob_storage_path(data_dir, session_id, blob_id, safe_filename),
         description=arguments.get("description"),
+        creation_modality=creation_modality,
+        created_from_message_id=created_from_message_id,
+        creating_model_identifier=creating_model_identifier,
+        creating_model_version=creating_model_version,
+        creating_provider=creating_provider,
+        creating_composer_skill_hash=creating_composer_skill_hash,
+        creating_arguments_hash=creating_arguments_hash,
     )
 
 
@@ -3243,6 +3327,17 @@ def _persist_prepared_blob_create(
                     created_by="assistant",
                     source_description=prepared.description,
                     status="ready",
+                    # Inline-blob provenance (Phase 5a Task 2.5). The
+                    # DB-side CHECK ck_blobs_creating_llm_provenance_nullability
+                    # rejects any combination where the modality and the
+                    # five creating_* fields disagree on LLM authorship.
+                    creation_modality=prepared.creation_modality.value,
+                    created_from_message_id=prepared.created_from_message_id,
+                    creating_model_identifier=prepared.creating_model_identifier,
+                    creating_model_version=prepared.creating_model_version,
+                    creating_provider=prepared.creating_provider,
+                    creating_composer_skill_hash=prepared.creating_composer_skill_hash,
+                    creating_arguments_hash=prepared.creating_arguments_hash,
                 )
             )
     except Exception:
@@ -3270,6 +3365,7 @@ def _execute_create_blob(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
+    user_message_id: str | None = None,
     max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Create a new blob (file) in the session from inline content.
@@ -3313,7 +3409,23 @@ def _execute_create_blob(
     # The Pydantic model catches type/shape violations; _prepare_blob_create
     # catches value-domain violations.  Both route via ToolArgumentError
     # to ARG_ERROR (CEC1 channel discipline).
-    prepared = _prepare_blob_create(validated.model_dump(), data_dir=data_dir, session_id=session_id)
+    # Provenance classification (Phase 5a Task 2.5). The ``create_blob``
+    # tool is invoked by the LLM as a self-directed action — the content
+    # the LLM passes is, by construction, content the LLM authored as part
+    # of its tool-call response. However, in this commit we tag every
+    # create_blob payload as VERBATIM with NULL creating_* fields,
+    # matching the set_pipeline.inline_blob path, until Phase 5a Tasks
+    # 3/4/8 supply the call-loop context (model identifier, version,
+    # provider, prompt hash) needed to populate LLM_GENERATED.  The
+    # ``created_from_message_id`` still names the user turn that
+    # triggered the LLM's response, so the audit walk works today.
+    prepared = _prepare_blob_create(
+        validated.model_dump(),
+        data_dir=data_dir,
+        session_id=session_id,
+        creation_modality=CreationModality.VERBATIM,
+        created_from_message_id=user_message_id,
+    )
 
     quota_error = _persist_prepared_blob_create(
         prepared,
@@ -4069,6 +4181,7 @@ def _execute_apply_pipeline_recipe(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
+    user_message_id: str | None = None,
     max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
@@ -4143,6 +4256,7 @@ def _execute_apply_pipeline_recipe(
         data_dir,
         session_engine=session_engine,
         session_id=session_id,
+        user_message_id=user_message_id,
         max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
     )
 
@@ -4334,6 +4448,7 @@ def _execute_set_pipeline(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
+    user_message_id: str | None = None,
     max_blob_storage_per_session_bytes: int | None = None,
 ) -> ToolResult:
     """Atomically replace the entire pipeline composition state.
@@ -4449,7 +4564,27 @@ def _execute_set_pipeline(
         # (str/str/str + extra=forbid), so the isinstance guards inside
         # _prepare_blob_create are unreachable from this caller — see
         # the Task 14 cleanup that removes them.
-        prepared_inline_blob = _prepare_blob_create(inline_blob.model_dump(), data_dir=data_dir, session_id=session_id)
+        # Provenance classification (Phase 5a Task 2.5).  In this commit
+        # we always tag inline-blob set_pipeline payloads as VERBATIM with
+        # all five creating_* fields = None.  The discriminant that
+        # distinguishes LLM-authored vs verbatim content (substring match
+        # against the triggering chat message body, or a tool-call-loop
+        # tag the LLM emits explicitly) is deferred to Phase 5a Tasks
+        # 3/4/8 per the plan: those tasks own the call-loop context (model
+        # identifier, version, provider, prompt hash) required to populate
+        # the LLM-authored variant without violating the
+        # ck_blobs_creating_llm_provenance_nullability CHECK.  Until the
+        # discriminant exists, defaulting VERBATIM keeps the CHECK
+        # satisfied trivially (no creating_* fields) AND preserves the
+        # audit guarantee that ``created_from_message_id`` always names
+        # the user message that triggered the tool call.
+        prepared_inline_blob = _prepare_blob_create(
+            inline_blob.model_dump(),
+            data_dir=data_dir,
+            session_id=session_id,
+            creation_modality=CreationModality.VERBATIM,
+            created_from_message_id=user_message_id,
+        )
         header_conflict = _header_only_inline_csv_conflict(
             prepared_inline_blob,
             session_engine=session_engine,
@@ -6236,6 +6371,20 @@ _BLOB_QUOTA_MUTATION_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Blob-mutation tools that create a NEW blob row and therefore accept the
+# ``user_message_id`` provenance kwarg (Phase 5a Task 2.5).
+# ``set_source_from_blob`` and ``delete_blob`` operate on existing rows
+# whose provenance was fixed at create time; ``update_blob`` rewrites the
+# file but leaves the original blob row's provenance intact.
+# ``apply_pipeline_recipe`` synthesises a ``set_pipeline`` call internally
+# that may carry an inline blob, so it also needs the kwarg.
+_BLOB_PROVENANCE_MUTATION_TOOLS: frozenset[str] = frozenset(
+    {
+        "create_blob",
+        "apply_pipeline_recipe",
+    }
+)
+
 # Secret tools use an extended handler signature with secret_service + user_id kwargs
 _SECRET_DISCOVERY_TOOLS: dict[str, SecretToolHandler] = {
     "list_secret_refs": _handle_list_secret_refs,
@@ -6338,6 +6487,7 @@ def execute_tool(
     prior_validation: ValidationSummary | None = None,
     runtime_preflight: RuntimePreflight | None = None,
     max_blob_storage_per_session_bytes: int | None = None,
+    user_message_id: str | None = None,
 ) -> ToolResult:
     """Execute a composition tool by name.
 
@@ -6406,6 +6556,7 @@ def execute_tool(
             data_dir,
             session_engine=session_engine,
             session_id=session_id,
+            user_message_id=user_message_id,
             max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
         )
         return _inject_prior_validation(result, prior)
@@ -6435,6 +6586,13 @@ def execute_tool(
         }
         if tool_name in _BLOB_QUOTA_MUTATION_TOOLS:
             blob_kwargs["max_blob_storage_per_session_bytes"] = max_blob_storage_per_session_bytes
+        # Phase 5a Task 2.5: ``create_blob`` writes the blob row with a
+        # ``created_from_message_id`` provenance pointer.  Only tools that
+        # actually persist a new blob need the kwarg; ``set_source_from_blob``,
+        # ``delete_blob``, and ``update_blob`` operate on existing rows
+        # whose provenance is fixed at create time.
+        if tool_name in _BLOB_PROVENANCE_MUTATION_TOOLS:
+            blob_kwargs["user_message_id"] = user_message_id
         result = blob_mutation(
             arguments,
             state,

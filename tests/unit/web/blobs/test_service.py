@@ -2418,6 +2418,17 @@ class TestRowToRecordTierOneGuards:
             "created_by": "user",
             "source_description": None,
             "status": "ready",
+            # Inline-blob provenance defaults (Phase 5a Task 2.5): the
+            # synthetic row mirrors a verbatim row produced by the
+            # user-upload write path (creation_modality='verbatim',
+            # everything else NULL).
+            "creation_modality": "verbatim",
+            "created_from_message_id": None,
+            "creating_model_identifier": None,
+            "creating_model_version": None,
+            "creating_provider": None,
+            "creating_composer_skill_hash": None,
+            "creating_arguments_hash": None,
         }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

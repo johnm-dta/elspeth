@@ -687,6 +687,7 @@ class ComposerService(Protocol):
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
         guided_terminal: TerminalState | None = None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop.
 
@@ -706,6 +707,16 @@ class ComposerService(Protocol):
             guided_terminal: When set, the resolved TerminalState from the
                 completed guided session; triggers the layered mode-transition
                 prompt for this first freeform turn (spec §8.2).
+            user_message_id: Database id of the just-persisted user
+                ``chat_messages`` row that triggered this compose call
+                (Phase 5a Task 2.5). Threaded through the compose loop into
+                inline-blob writers so any blob materialised by a tool call
+                this turn records ``created_from_message_id`` pointing back
+                at this id. Defaults to ``None`` for test paths and
+                non-route callers; the composite FK on
+                ``(created_from_message_id, session_id)`` in ``blobs_table``
+                rejects cross-session lineage, so a wrong id surfaces as
+                IntegrityError rather than silent provenance corruption.
 
         Returns:
             ComposerResult with assistant message and updated state.

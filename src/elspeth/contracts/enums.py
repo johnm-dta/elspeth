@@ -465,6 +465,56 @@ type DeclaredAuditCharacteristics = frozenset[AuditCharacteristic]
 type DerivedAuditCharacteristics = tuple[AuditCharacteristic, ...]
 
 
+# ── Inline-blob provenance (Phase 5a) ──────────────────────────────────
+#
+# CLOSED LIST — do not extend without design review.
+# Describes how an inline-blob source's content was produced.  Mirrored by
+# the ``ck_blobs_creation_modality`` CHECK constraint in
+# ``web/sessions/models.py``: the StrEnum is the canonical declaration,
+# the SQL CHECK is the DB-side enforcement. Both must change together.
+#
+# Adding a fifth value MUST include:
+#   (a) a spec amendment documenting the new modality and its audit
+#       semantics;
+#   (b) an integration test exercising the new write/read path;
+#   (c) a Filigree ticket linking the change back to this enum.
+#
+# An auditor calling ``explain(recorder, run_id, token_id)`` reaches the
+# originating blob row's ``creation_modality`` field through the
+# inline-source provenance projection (Task 2.5 / Phase 5a); the closed
+# vocabulary keeps the rendered chip set bounded so the UI's switch
+# arms remain exhaustive.
+class CreationModality(StrEnum):
+    VERBATIM = "verbatim"
+    """User typed content directly; content is byte-identical to the
+    triggering chat-message body."""
+
+    LLM_GENERATED = "llm_generated"
+    """LLM generated rows; user confirmed without amendment."""
+
+    DISAMBIGUATED = "disambiguated"
+    """LLM interpreted ambiguous user input into structured rows; user
+    confirmed the interpretation."""
+
+    LLM_GENERATED_THEN_AMENDED = "llm_generated_then_amended"
+    """LLM generated rows, user then amended the content before
+    finalisation."""
+
+
+# The set of modalities that require LLM-provenance fields (the five
+# ``creating_*`` columns on ``blobs_table``).  Mirrored by the
+# ``ck_blobs_creating_llm_provenance_nullability`` CHECK constraint in
+# ``web/sessions/models.py``.  An auditor querying ``creating_provider IS
+# NOT NULL`` MUST get exactly the rows whose modality is in this set.
+_LLM_AUTHORED_CREATION_MODALITIES: frozenset[CreationModality] = frozenset(
+    {
+        CreationModality.LLM_GENERATED,
+        CreationModality.DISAMBIGUATED,
+        CreationModality.LLM_GENERATED_THEN_AMENDED,
+    }
+)
+
+
 def error_edge_label(transform_id: str) -> str:
     """Canonical label for a transform error DIVERT edge.
 

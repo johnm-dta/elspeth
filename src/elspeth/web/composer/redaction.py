@@ -1042,7 +1042,17 @@ class _InlineBlobModel(BaseModel):
 
     filename: str
     mime_type: str
-    content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
+    # max_length=262_144 (256 KiB) is the inline-blob payload cap (Phase
+    # 5a Task 2.5).  The composer is intended for prose-sized inline data
+    # — a single CSV with up to a few thousand rows — not for binary
+    # transfers.  Pydantic rejects oversize content at the boundary so
+    # ``_prepare_blob_create`` and the storage-write layer never see it;
+    # ToolArgumentError surfaces through the compose loop's ARG_ERROR
+    # routing (CEC1).  The siblings ``CreateBlobArgumentsModel.content``
+    # / ``UpdateBlobArgumentsModel.content`` do not yet carry this cap;
+    # alignment is deferred to the same task that introduces a shared
+    # _BlobPayloadContent Annotated alias (Phase 5a follow-on).
+    content: Annotated[str, Field(max_length=262_144), Sensitive(summarizer=_summarize_inline_blob_content)]
     description: str | None = None
 
     model_config = ConfigDict(extra="forbid")

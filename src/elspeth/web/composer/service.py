@@ -1890,6 +1890,7 @@ class ComposerServiceImpl:
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
         guided_terminal: TerminalState | None = None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop with dual-counter budget.
 
@@ -1939,6 +1940,7 @@ class ComposerServiceImpl:
                 deadline,
                 progress,
                 guided_terminal,
+                user_message_id,
             )
         except ComposerConvergenceError as exc:
             await _emit_progress(
@@ -2170,6 +2172,7 @@ class ComposerServiceImpl:
         deadline: float = 0.0,
         progress: ComposerProgressSink | None = None,
         guided_terminal: TerminalState | None = None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
         """Inner composition loop with dual-counter budget tracking.
 
@@ -3201,6 +3204,7 @@ class ComposerServiceImpl:
                     _state: CompositionState = state,
                     _last_validation: ValidationSummary | None = last_validation,
                     _runtime_preflight_callback: RuntimePreflight | None = runtime_preflight_callback,
+                    _user_message_id: str | None = user_message_id,
                 ) -> Any:
                     return await run_sync_in_worker(
                         execute_tool,
@@ -3216,6 +3220,7 @@ class ComposerServiceImpl:
                         prior_validation=_last_validation,
                         runtime_preflight=_runtime_preflight_callback,
                         max_blob_storage_per_session_bytes=self._settings.max_blob_storage_per_session_bytes,
+                        user_message_id=_user_message_id,
                     )
 
                 # ``_arg_error_payload`` is a module-level helper (F2 — testable

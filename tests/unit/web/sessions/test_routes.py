@@ -194,8 +194,9 @@ class _BlockingRecordingComposer:
         user_id: str | None = None,
         progress=None,
         guided_terminal=None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
-        del state, session_id, current_state_id, user_id, progress, guided_terminal
+        del state, session_id, current_state_id, user_id, progress, guided_terminal, user_message_id
 
         self.calls.append(
             {
@@ -233,8 +234,9 @@ class _ProgressAwareComposer:
         user_id: str | None = None,
         progress=None,
         guided_terminal=None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
-        del message, chat_messages, session_id, current_state_id, user_id, guided_terminal
+        del message, chat_messages, session_id, current_state_id, user_id, guided_terminal, user_message_id
         assert progress is not None, "session routes must pass a composer progress sink"
         self.progress_sink_seen = True
         await progress(
@@ -4229,8 +4231,9 @@ class TestComposerProgressRoutes:
                 user_id: str | None = None,
                 progress=None,
                 guided_terminal=None,
+                user_message_id: str | None = None,
             ) -> ComposerResult:
-                del message, chat_messages, session_id, current_state_id, user_id, progress
+                del message, chat_messages, session_id, current_state_id, user_id, progress, user_message_id
                 assert guided_terminal == guided.terminal
                 return ComposerResult(message="Freeform response", state=state)
 

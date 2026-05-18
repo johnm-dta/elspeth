@@ -3882,6 +3882,16 @@ def create_session_router() -> APIRouter:
                         user_id=str(user.user_id),
                         progress=progress_sink,
                         guided_terminal=_guided_terminal_for_compose,
+                        # Phase 5a Task 2.5: bind the freshly persisted
+                        # user message id so any inline_blob created by
+                        # this turn's tool calls can record provenance
+                        # back to it.  The composite FK on
+                        # ``(created_from_message_id, session_id)`` in
+                        # ``blobs_table`` rejects cross-session lineage,
+                        # so a stale or wrong id from a prior request
+                        # would surface as an IntegrityError, not as a
+                        # silent provenance corruption.
+                        user_message_id=str(user_msg.id),
                     )
                 except ComposerConvergenceError as exc:
                     terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"

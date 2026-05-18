@@ -10,6 +10,7 @@
 import type {
   ApiError,
   AuthConfig,
+  BlobCreationModalityWire,
   BlobMetadata,
   ChatMessage,
   ComposerPreferences,
@@ -20,6 +21,7 @@ import type {
   ExecutionFanoutAck,
   ExecutionFanoutGuard,
   CancelRunResponse,
+  InlineSourceProvenance,
   PluginSchemaInfo,
   PluginSummary,
   Run,
@@ -919,6 +921,44 @@ export async function listBlobs(sessionId: string): Promise<BlobMetadata[]> {
     headers: authHeaders(),
   });
   return parseResponse<BlobMetadata[]>(response);
+}
+
+/**
+ * Wire → display translation for the inline-blob creation modality
+ * (Phase 5a Task 2.5). The server records the modality in snake_case
+ * (matching the SQL CHECK constraint); the frontend's
+ * `InlineSourceSummary.provenance` discriminant uses the hyphenated form
+ * so URL-fragment routing and aria-label rendering work without a
+ * second normalisation step. This adapter is the SINGLE translation
+ * point — no second mapping in the store, no third one in a component.
+ *
+ * The mapping is exhaustive over `BlobCreationModalityWire`; a future
+ * enum extension at the server forces both `BlobCreationModalityWire`
+ * and `InlineSourceProvenance` to widen, and the TypeScript exhaustive
+ * `never` arm here turns into a compile error rather than silently
+ * dropping into the default branch. That's the discoverability
+ * mechanism that lets a future change cascade through both wire and
+ * display layers in the same commit.
+ */
+export function toInlineSourceProvenance(
+  wire: BlobCreationModalityWire,
+): InlineSourceProvenance {
+  switch (wire) {
+    case "verbatim":
+      return "verbatim";
+    case "llm_generated":
+      return "llm-generated";
+    case "disambiguated":
+      return "disambiguated";
+    case "llm_generated_then_amended":
+      return "llm-generated-then-amended";
+    default: {
+      const _exhaustive: never = wire;
+      throw new Error(
+        `Unhandled BlobCreationModalityWire value: ${String(_exhaustive)}`,
+      );
+    }
+  }
 }
 
 /** Get metadata for a single blob. */

@@ -824,6 +824,32 @@ export interface SystemStatus {
 
 // ── Blob Manager ────────────────────────────────────────────────────────────
 
+/**
+ * Wire form of the closed `creation_modality` enum (Phase 5a Task 2.5).
+ * Snake_case mirrors the SQL CHECK constraint exactly. The frontend
+ * `InlineSourceSummary.provenance` discriminant uses hyphenated forms;
+ * the single translation point is the `fetchBlob` response adapter in
+ * `api/client.ts` (`toInlineSourceProvenance`).
+ */
+export type BlobCreationModalityWire =
+  | "verbatim"
+  | "llm_generated"
+  | "disambiguated"
+  | "llm_generated_then_amended";
+
+/**
+ * Display form of the creation modality used by
+ * `InlineSourceSummary.provenance` (Phase 5a Task 2.5). Hyphenated form;
+ * see `BlobCreationModalityWire` for the snake_case wire form. The
+ * adapter `toInlineSourceProvenance` in `api/client.ts` is the only
+ * place wire → display translation is performed.
+ */
+export type InlineSourceProvenance =
+  | "verbatim"
+  | "llm-generated"
+  | "disambiguated"
+  | "llm-generated-then-amended";
+
 /** Blob metadata returned by all blob endpoints. */
 export interface BlobMetadata {
   id: string;
@@ -836,6 +862,16 @@ export interface BlobMetadata {
   created_by: "user" | "assistant" | "pipeline";
   source_description: string | null;
   status: "ready" | "pending" | "error";
+  // Inline-blob provenance (Phase 5a Task 2.5). The wire form is
+  // snake_case; the frontend's `InlineSourceSummary.provenance` field is
+  // hyphenated. Translation lives in `api/client.ts` only.
+  creation_modality: BlobCreationModalityWire;
+  created_from_message_id: string | null;
+  creating_model_identifier: string | null;
+  creating_model_version: string | null;
+  creating_provider: string | null;
+  creating_composer_skill_hash: string | null;
+  creating_arguments_hash: string | null;
 }
 
 /**
@@ -938,9 +974,5 @@ export interface InlineSourceSummary {
    * (`llm_generated`, `llm_generated_then_amended`). The adapter in
    * `client.ts` is the single translation point.
    */
-  provenance:
-    | "verbatim"
-    | "llm-generated"
-    | "disambiguated"
-    | "llm-generated-then-amended";
+  provenance: InlineSourceProvenance;
 }

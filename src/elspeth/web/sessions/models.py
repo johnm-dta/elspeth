@@ -464,6 +464,81 @@ blobs_table = Table(
     Column("created_by", String, nullable=False),
     Column("source_description", String, nullable=True),
     Column("status", String, nullable=False, server_default="ready"),
+    # --- Inline-blob provenance (Phase 5a Task 2.5) ---
+    # creation_modality: closed enum — how this blob's content was produced.
+    # Non-nullable with default "verbatim" so pre-Task-2.5 blobs (created
+    # via the legacy create_blob / inline_blob writers before the columns
+    # existed) retain a valid value when the DB is rebuilt (we have no
+    # users yet; the operator deletes-and-recreates per
+    # project_db_migration_policy).
+    #
+    # Tier 1 crash-on-anomaly applies to reads: the read path
+    # (_row_to_blob_record / _blob_row_to_tool_dict) asserts the value is a
+    # valid CreationModality member; the SQL CHECK below mirrors the
+    # closed enum at the DB layer.
+    #
+    # CLOSED LIST — do not extend without design review.  Three locations
+    # must change together: the CreationModality StrEnum at
+    # contracts/enums.py, this column's CHECK, and the catalog-side
+    # tier-3 plumbing on the read/write paths (tools.py).  No fourth
+    # location.
+    Column("creation_modality", Text, nullable=False, server_default="verbatim"),
+    # created_from_message_id: FK to chat_messages.id of the user message
+    # that triggered the set_pipeline / create_blob call.  The composite
+    # FK (created_from_message_id, session_id) → (chat_messages.id,
+    # chat_messages.session_id) closes the cross-session lineage hole the
+    # same way fk_chat_messages_parent_assistant_session does for tool
+    # rows.  Nullable to admit (a) the migration-window default insert
+    # path before the route layer is wired, and (b) future programmatic
+    # blob creation paths that have no originating user message
+    # (e.g. pipeline-emitted blobs whose audit anchor is the run record).
+    Column("created_from_message_id", Text, nullable=True),
+    # LLM-provenance columns (Phase 5a Task 2.5): populated for the three
+    # LLM-authored modalities (llm_generated, disambiguated,
+    # llm_generated_then_amended); NULL for verbatim.  Required together —
+    # a blob cannot claim LLM authorship without naming the model,
+    # version, provider, the composer-skill prompt hash, and the
+    # tool-call arguments hash.  The all-or-nothing invariant is enforced
+    # by the ck_blobs_creating_llm_provenance_nullability CHECK below;
+    # the L0 _LLM_AUTHORED_CREATION_MODALITIES frozenset is the Python
+    # mirror used by the write path's pre-insert guard.
+    Column("creating_model_identifier", String, nullable=True),
+    Column("creating_model_version", String, nullable=True),
+    Column("creating_provider", String, nullable=True),
+    Column("creating_composer_skill_hash", String, nullable=True),
+    Column("creating_arguments_hash", String, nullable=True),
+    # Composite FK: (created_from_message_id, session_id) must reference an
+    # existing (chat_messages.id, chat_messages.session_id) pair.  Mirrors
+    # fk_chat_messages_parent_assistant_session above.  ON DELETE RESTRICT
+    # (NOT CASCADE) because the blob is the audit anchor — deleting its
+    # originating message would silently truncate the lineage walk and
+    # leave the audit trail confidently asserting "this blob came from
+    # message X" while X no longer exists.  An operator who genuinely
+    # wants to delete a message must first delete or re-anchor every blob
+    # bound to it; the RESTRICT failure surfaces that explicitly.
+    ForeignKeyConstraint(
+        ["created_from_message_id", "session_id"],
+        ["chat_messages.id", "chat_messages.session_id"],
+        name="fk_blobs_created_from_message_session",
+        ondelete="RESTRICT",
+    ),
+    CheckConstraint(
+        "creation_modality IN ('verbatim', 'llm_generated', 'disambiguated', 'llm_generated_then_amended')",
+        name="ck_blobs_creation_modality",
+    ),
+    # LLM-provenance nullability invariant: the three LLM-authored
+    # modalities MUST carry all five creating_* fields; verbatim MUST NOT
+    # carry any.  Expressed as ``LHS = RHS`` where LHS is the modality
+    # membership predicate and RHS is the "all five fields populated"
+    # predicate — the biconditional rejects both "claimed LLM but missing
+    # provenance" and "verbatim but somehow has LLM fields".
+    CheckConstraint(
+        "(creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) = "
+        "(creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
+        "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
+        "creating_arguments_hash IS NOT NULL)",
+        name="ck_blobs_creating_llm_provenance_nullability",
+    ),
     CheckConstraint(
         "created_by IN ('user', 'assistant', 'pipeline')",
         name="ck_blobs_created_by",
@@ -516,6 +591,16 @@ blobs_table = Table(
         "status != 'ready' OR (content_hash IS NOT NULL AND length(content_hash) = 64 AND content_hash ~ '^[a-f0-9]+$')",
         name="ck_blobs_ready_hash",
     ).ddl_if(dialect="postgresql"),
+)
+
+# Index for the reverse-lookup path: "given a chat message, which inline
+# blobs were created from it?"  Backs the Phase 5a explain() walk —
+# chat_messages.id → blobs.created_from_message_id → blobs.id — without
+# triggering a full table scan when an auditor opens the lineage drawer
+# on a session with thousands of blobs.
+Index(
+    "ix_blobs_created_from_message_id",
+    blobs_table.c.created_from_message_id,
 )
 
 blob_run_links_table = Table(

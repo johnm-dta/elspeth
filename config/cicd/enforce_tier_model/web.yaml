@@ -125,7 +125,7 @@ allow_hits:
   reason: Tier 3 boundary — preferred_username is optional in Entra tokens, falls back to sub
   safety: Default is payload['sub'] which is required
   expires: null
-- key: web/app.py:R6:_settings_from_env:fp=0a53972059ccdd02
+- key: web/app.py:R6:_settings_from_env:fp=59f970181b3e73b2
   owner: web-app
   reason: Tier 3 boundary — env var value that isn't valid JSON is treated as plain string (the common case)
   safety: JSONDecodeError caught only to fall back to raw string; no silent data loss
@@ -406,12 +406,12 @@ allow_hits:
 
     '
   expires: null
-- key: web/app.py:R1:create_app:fp=6aa93e899dcd33e8
+- key: web/app.py:R1:create_app:fp=edf6dbce7e2f2690
   owner: web-app
   reason: Tier 3 — os.environ.get() for optional WEB_CONCURRENCY env var
   safety: Defaults to "1" when absent
   expires: null
-- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=cfb051d53bae1f84
+- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=0295c8fc0fca352e
   owner: web-app
   reason: Tier 3 — request.headers.get('content-length') reads an optional HTTP header from untrusted client input; absent header means no declared size and the request
     proceeds to per-field Pydantic caps which are the actual guarantee.
@@ -419,7 +419,7 @@ allow_hits:
     with a 413 before any handler or downstream middleware touches the body. The Pydantic per-field caps (SendMessageRequest.content 64 KiB, _InlineBlobModel.content
     256 KiB) remain the binding contract.
   expires: null
-- key: web/app.py:R1:create_app:fp=d11640927c0d4c48
+- key: web/app.py:R1:create_app:fp=e866cf105bbfc3e5
   owner: web-app
   reason: Tier 3 — os.environ.get() for optional ELSPETH_ENV
   safety: Returns None when absent; only used for test guard
@@ -481,7 +481,7 @@ allow_hits:
     fabricating heartbeat or terminal payloads.
   safety: Closes with 1011 and exits the loop; programming and infrastructure errors outside the validation/integrity union still propagate to the outer handler.
   expires: null
-- key: web/app.py:R7:lifespan:fp=0e98aa09519140f6
+- key: web/app.py:R7:lifespan:fp=f7fd4c1151bac65d
   owner: web-execution
   reason: contextlib.suppress(CancelledError) is the expected shutdown path for the periodic orphan cleanup task
   safety: Clean cancellation during app shutdown; no error suppression
@@ -499,7 +499,7 @@ allow_hits:
     is unaffected — this path runs on the SUCCESS branch where the handler returned a result and the state was already advanced. The _canonicalization_error key is
     an internal sentinel name reserved by the audit subsystem (composer_mcp/server.py and web/composer/audit.py — single source of truth).
   expires: null
-- key: web/app.py:R6:_periodic_orphan_cleanup:fp=372a7c6a880b4630
+- key: web/app.py:R6:_periodic_orphan_cleanup:fp=783a6b9b2751b5b1
   owner: web-execution
   reason: Audit/IO-cleanup narrow catch — except (SQLAlchemyError, OSError) absorbs recoverable failures of cancel_all_orphaned_runs (transient DB loss, lock contention,
     SQLite file I/O) so the periodic loop retries on the next interval. Catch is intentionally narrow; programmer-bug exceptions (AttributeError from a drifted attribute
@@ -576,7 +576,7 @@ allow_hits:
   reason: YAML navigation — source key may be absent in generated YAML
   safety: Returns None; source path rewriting skipped
   expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=60ac06026828431d
+- key: web/app.py:R2:create_app:_request_id:fp=3c155979a63c6cb6
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
 

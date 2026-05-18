@@ -145,6 +145,9 @@ webui = [
     "httpx>=0.28,<1",
     "bcrypt>=4.3,<5",
     "litellm>=1.83,<2",
+    # Prometheus metrics exposition endpoint (B1-r3 MeterProvider precondition)
+    "opentelemetry-exporter-prometheus>=0.62b0,<1",
+    "prometheus_client>=0.21,<1",
 ]
 
 tracing-langfuse = [
@@ -214,6 +217,14 @@ all = [
     "websockets>=14.2,<15",
     "httpx>=0.28,<1",
     "bcrypt>=4.3,<5",
+    # NOTE: opentelemetry-exporter-prometheus and prometheus_client are listed in
+    # the webui extra but intentionally omitted from the all extra because
+    # azure-monitor-opentelemetry-exporter pins opentelemetry-sdk==1.40 exactly
+    # while opentelemetry-exporter-prometheus requires >=1.41. The packages are
+    # runtime-compatible (b52 works fine with 1.41.1) but the resolver rejects
+    # the declared metadata. Developers running [all] should install the webui
+    # deps separately: uv pip install 'opentelemetry-exporter-prometheus>=0.62b0,<1'
+    # 'prometheus_client>=0.21,<1'. Tracked for resolution in Phase 9.
 ]
 
 [project.scripts]

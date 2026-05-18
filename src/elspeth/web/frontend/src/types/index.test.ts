@@ -1,4 +1,5 @@
 import { describe, it, expect, expectTypeOf } from "vitest";
+import type { AuditCharacteristicFlag } from "../components/catalog/auditCharacteristics";
 import type { PluginSummary } from "./index";
 
 describe("PluginSummary type extension (Phase 7B)", () => {
@@ -16,7 +17,12 @@ describe("PluginSummary type extension (Phase 7B)", () => {
     };
     expectTypeOf(summary.usage_when_to_use).toEqualTypeOf<string | null>();
     expectTypeOf(summary.capability_tags).toEqualTypeOf<string[]>();
-    expectTypeOf(summary.audit_characteristics).toEqualTypeOf<string[]>();
+    // audit_characteristics is the closed-vocabulary union, not bare
+    // string[]: a typo'd flag in an internal call site (test mock,
+    // hand-constructed PluginSummary) is rejected at compile time.
+    // Forward compatibility for unknown wire values is preserved by the
+    // lookup boundary at lookupAuditCharacteristic(flag: string).
+    expectTypeOf(summary.audit_characteristics).toEqualTypeOf<AuditCharacteristicFlag[]>();
   });
 
   it("accepts null / empty defaults for unfilled plugins", () => {

@@ -267,6 +267,22 @@ _AUDIT_FLAGGED_DETERMINISMS: frozenset[Determinism] = frozenset(
     },
 )
 
+# Version identifier for the boundary-classification rule encoded by
+# ``_AUDIT_FLAGGED_DETERMINISMS`` and ``_build_plugin_trust_row``. The
+# rule is presently code-only: an auditor at T+12 months has no
+# in-snapshot way to reconstruct which rule produced a verdict shown in
+# the readiness panel. That is acceptable today because the panel is a
+# UX surface, not a legal record. If a future phase persists derived
+# audit characteristics into the Landscape (the legal record), the
+# version pin recorded here MUST be stamped alongside each persisted
+# verdict so historical rows remain reproducible.
+#
+# Bump on every semantic change to either the predicate or the
+# ``_AUDIT_FLAGGED_DETERMINISMS`` set (membership, name, or wire-format
+# meaning). The pin is opaque to consumers — they record it verbatim and
+# never parse the version string.
+_BOUNDARY_RULE_VERSION = "phase-7a-v1"
+
 
 def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
     """Classify every plugin in the composition (boundary vs internal).
@@ -281,6 +297,18 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
     The predicate is derived from (kind, determinism) so any future plugin
     is classified correctly at registration time without a separate
     declared attribute.
+
+    The rule version encoded by this predicate and
+    ``_AUDIT_FLAGGED_DETERMINISMS`` is ``_BOUNDARY_RULE_VERSION``
+    (currently ``"phase-7a-v1"``). Bump that constant on any semantic
+    change here. See its module-level docstring for the
+    persistence-vs-UX rationale.
+
+    Cross-reference: ``elspeth.web.catalog.service._derive_audit_characteristics``
+    consumes the same ``determinism`` attribute to compose display chips
+    for the catalog card; the two surfaces deliberately differ in their
+    treatment of kind-default determinism — see that function's docstring
+    for the divergence rationale.
     """
     boundary: list[tuple[str, str, str]] = []
     unknown: list[tuple[str, str]] = []

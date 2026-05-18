@@ -79,6 +79,13 @@ Source reads external data into the pipeline; a Sink writes pipeline
 data out — both cross Tier-3 by definition, regardless of whether the
 destination is local or remote).
 
+The deliberate widening of sink classification (csv/json sinks are now
+boundary, where the deleted ``trust.py`` excluded them) is recorded in
+ADR-021 (``docs/architecture/adr/021-sources-and-sinks-uniformly-boundary.md``).
+Read that ADR for the rationale, the three rejected alternatives, and
+the follow-up UX nit about detail-row wording for local-filesystem
+sinks.
+
 Layer: L3 (application).
 """
 

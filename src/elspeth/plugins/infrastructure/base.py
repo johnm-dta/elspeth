@@ -124,14 +124,18 @@ class BaseTransform(ABC):
         process() with list[PipelineRow]. Use this for transforms inside
         aggregation nodes (batch LLM calls, statistical aggregations).
 
+        The engine dispatches single-row vs. batch from the class-level
+        ``is_batch_aware`` flag; the transform never inspects the runtime
+        argument shape. A runtime ``isinstance(row, list)`` branch in
+        process() is a forbidden defensive type-check — it duplicates a
+        decision the dispatcher has already made.
+
         class MyBatchTransform(BaseTransform):
             name = "my_batch"
             is_batch_aware = True
 
-            def process(self, row, ctx):  # row is list[PipelineRow] in batch mode
-                if isinstance(row, list):
-                    return self._process_batch(row, ctx)
-                return self._process_single(row, ctx)
+            def process(self, rows: list[PipelineRow], ctx: TransformContext) -> TransformResult:
+                return self._process_batch(rows, ctx)
 
     When to Use Which
     -----------------

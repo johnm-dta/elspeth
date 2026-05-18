@@ -115,6 +115,36 @@ def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: Plugi
     the catalog has them. A plugin without these attributes would be a
     malformed system plugin (Tier 1 bug); crash via AttributeError is
     the correct response, not defensive fallback.
+
+    Cross-reference (do not unify):
+    ``elspeth.web.audit_readiness.service._build_plugin_trust_row`` also
+    reads ``determinism`` from every plugin in a composition, but for a
+    *different* purpose: it classifies each plugin as boundary-vs-internal
+    for the readiness panel's plugin-trust row. The two surfaces
+    deliberately diverge on kind-default determinism:
+
+      - **This function** suppresses the determinism-derived audit-
+        characteristic flag when a plugin uses its kind's default,
+        because surfacing "every Source reads I/O" on every Source card
+        teaches the user nothing per-plugin (architectural facts
+        belong in category-level documentation, not in a repeated chip).
+
+      - **``_build_plugin_trust_row``** does NOT suppress: every Source
+        and every Sink is unconditionally boundary, because writing
+        data out of the pipeline (or reading external data in) crosses
+        a Tier-3 trust boundary regardless of whether the destination
+        is a local file or a remote service. The readiness panel's
+        compliance question ("which components cross a trust boundary
+        on this run?") is structurally different from the catalog
+        card's UX question ("what does this plugin teach the operator
+        that they don't already know from its kind?").
+
+    The deliberate widening of sink classification (csv/json sinks are
+    now boundary, where the deleted ``trust.py`` excluded them) is
+    captured in ADR-021. Extracting a shared
+    ``BoundaryDerivation`` helper would conflate "compose display
+    chips" with "classify trust crossings" — two operations that
+    happen to read the same input but answer different questions.
     """
     declared: frozenset[AuditCharacteristic] = plugin_cls.audit_characteristics
     determinism = plugin_cls.determinism

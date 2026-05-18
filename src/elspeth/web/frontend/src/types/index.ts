@@ -6,6 +6,7 @@
 // is available, these can be replaced with imports from the generated file.
 // ============================================================================
 
+import type { AuditCharacteristicFlag } from "../components/catalog/auditCharacteristics";
 import type { FailedTurn } from "./recovery";
 
 // ── Auth ────────────────────────────────────────────────────────────────────
@@ -278,6 +279,16 @@ export interface ComposerProgressSnapshot {
  * Phase 7A added reference-content fields populated by plugin authors.
  * Unfilled plugins return `null` / empty values; the catalog drawer
  * renders a "see the technical description" fallback for them.
+ *
+ * ``audit_characteristics`` is typed as the closed vocabulary union to
+ * mirror the Python ``DerivedAuditCharacteristics = tuple[AuditCharacteristic, ...]``
+ * type. The wire is structurally JSON ``string[]``; the union tightens
+ * the in-TS surface so internal call sites cannot construct a
+ * PluginSummary with a typo'd flag. Forward compatibility for unknown
+ * wire values is preserved by the lookup boundary at
+ * ``lookupAuditCharacteristic(flag: string)``, which still accepts
+ * ``string`` and returns ``null`` (rendering the grey "unknown" chip)
+ * for a flag outside the union.
  */
 export interface PluginSummary {
   name: string;
@@ -290,7 +301,7 @@ export interface PluginSummary {
   usage_when_not_to_use: string | null;
   example_use: string | null;
   capability_tags: string[];
-  audit_characteristics: string[];
+  audit_characteristics: AuditCharacteristicFlag[];
 }
 
 /** Detailed plugin schema info including configuration JSON Schema. */

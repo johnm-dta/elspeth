@@ -11,6 +11,46 @@
 // for flags added on the backend without a corresponding frontend update.
 // ============================================================================
 
+/** Closed vocabulary of audit-characteristic flag strings.
+ *
+ * Mirrors the Python ``AuditCharacteristic`` StrEnum in
+ * ``src/elspeth/contracts/enums.py``. Python is the source of truth; the
+ * vocabulary parity test at
+ * ``tests/unit/web/catalog/test_audit_characteristic_vocabulary_parity.py``
+ * fails CI when either side drifts.
+ *
+ * Why a literal union and not ``string``:
+ *
+ *   - Internal call sites (test mocks, hand-constructed ``PluginSummary``
+ *     objects) cannot accidentally introduce a typo'd flag — the TS
+ *     compiler rejects ``"signe"`` where ``AuditCharacteristicFlag`` is
+ *     expected.
+ *   - Every ``AUDIT_CHARACTERISTICS`` metadata entry is type-checked
+ *     against the union: a record whose ``flag`` is a string not in this
+ *     union fails compilation, so the metadata table cannot silently
+ *     reference a flag the closed vocabulary does not define.
+ *
+ * Forward compatibility for unknown-on-the-wire flags is preserved by
+ * keeping ``lookupAuditCharacteristic(flag: string)`` accepting
+ * ``string`` — an unknown wire value still resolves to ``null`` and
+ * renders the grey "unknown" chip rather than crashing.
+ */
+export type AuditCharacteristicFlag =
+  // Determinism-derived (composed from Determinism enum)
+  | "io_read"
+  | "io_write"
+  | "external_call"
+  | "deterministic"
+  | "seeded"
+  | "non_deterministic"
+  // Author-declared (08-catalog-reshape.md vocabulary)
+  | "provenance"
+  | "retention"
+  | "quarantine"
+  | "coerce"
+  | "signed"
+  | "credentials";
+
 /** Visual tone for an audit-characteristic chip / icon.
  *  "positive"      — green checkmark-style chip (safe / good news)
  *  "attention"     — yellow warning-style chip (operator should be aware)
@@ -19,8 +59,10 @@ export type AuditCharacteristicTone = "positive" | "attention" | "informational"
 
 /** Display metadata for one audit-characteristic flag. */
 export interface AuditCharacteristicMeta {
-  /** Canonical flag string (matches the backend wire format). */
-  flag: string;
+  /** Canonical flag string (matches the backend wire format).
+   *  Typed as the closed-vocabulary union so the metadata table cannot
+   *  silently reference a flag outside ``AuditCharacteristic``. */
+  flag: AuditCharacteristicFlag;
   /** Short label shown next to the icon on the card. */
   label: string;
   /** Single-character or short glyph (Unicode) used as the icon. */
@@ -157,7 +199,7 @@ const _byFlag = new Map<string, AuditCharacteristicMeta>(
   AUDIT_CHARACTERISTICS.map((m) => [m.flag, m]),
 );
 
-export const KNOWN_AUDIT_FLAGS: string[] = AUDIT_CHARACTERISTICS.map((m) => m.flag);
+export const KNOWN_AUDIT_FLAGS: AuditCharacteristicFlag[] = AUDIT_CHARACTERISTICS.map((m) => m.flag);
 
 /** Look up the display metadata for a flag string.
  *  Returns null for unknown flags (forward-compatible). */

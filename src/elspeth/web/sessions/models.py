@@ -31,6 +31,37 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import JSON
 
+# ``SESSION_SCHEMA_EPOCH`` — schema version sentinel. Bump this constant
+# whenever a table is added, removed, or otherwise altered in a way that
+# requires the operator to delete the existing session DB. The startup
+# validator (``schema._assert_schema_version``) reads ``PRAGMA user_version``
+# and crashes if it does not match, producing an actionable
+# "Delete the session DB file and restart" message rather than a cryptic
+# SQLAlchemy error the first time a new code path touches the stale DB.
+#
+# Pattern mirrors ``SQLITE_SCHEMA_EPOCH`` in ``core/landscape/schema.py``
+# but is independent: the Landscape and session DBs are separate files
+# with separate lifecycles and separate epochs.
+#
+# Epoch history (pre-1.0 policy — bumps require DB recreation):
+#   1 → initial schema (Phase 1A baseline)
+#   2 → Phase 5b: interpretation_events_table arrives in Task 2; the
+#        epoch is bumped HERE in Task 1.5 so the guard is wired before
+#        the table lands. Operators upgrading across Phase 5b MUST delete
+#        their session DB.
+SESSION_SCHEMA_EPOCH = 2
+
+# ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
+# Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
+# given SQLite file is in fact an ELSPETH session DB rather than some
+# other SQLite file that happens to live at the configured path.
+#
+# Hex 0x454C5350 spells "ELSP" (E=0x45, L=0x4C, S=0x53, P=0x50). Magic
+# numbers in SQLite's ``application_id`` slot are conventionally chosen
+# so a hexdump of the first 100 bytes of the file makes the project
+# identifiable to a human auditor.
+SESSION_DB_APPLICATION_ID = 0x454C5350
+
 metadata = MetaData()
 
 sessions_table = Table(

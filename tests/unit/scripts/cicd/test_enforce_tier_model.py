@@ -383,6 +383,34 @@ class TestR1SourceRegressions:
         ]
         assert r1_findings == []
 
+    def test_source_boundary_non_r5_findings_are_site_allowlisted(self) -> None:
+        allowlist = load_allowlist(Path("config/cicd/enforce_tier_model"))
+
+        blanket_source_rules = [
+            rule
+            for rule in allowlist.per_file_rules
+            if rule.pattern == "plugins/sources/*" and {"R1", "R2", "R4", "R6", "R9"} & set(rule.rules)
+        ]
+        assert blanket_source_rules == []
+
+        source_files = [
+            Path("src/elspeth/plugins/sources/azure_blob_source.py"),
+            Path("src/elspeth/plugins/sources/csv_source.py"),
+            Path("src/elspeth/plugins/sources/dataverse.py"),
+            Path("src/elspeth/plugins/sources/json_source.py"),
+            Path("src/elspeth/plugins/sources/text_source.py"),
+        ]
+        findings = [
+            finding
+            for source_file in source_files
+            for finding in scan_file(source_file, Path("src/elspeth"))
+            if finding.rule_id in {"R1", "R2", "R4", "R6", "R9"}
+        ]
+        allowed_keys = {entry.key for entry in allowlist.entries}
+
+        missing_keys = [finding.canonical_key for finding in findings if finding.canonical_key not in allowed_keys]
+        assert missing_keys == []
+
 
 # =============================================================================
 # R2: getattr() detection

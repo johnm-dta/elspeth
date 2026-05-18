@@ -2075,4 +2075,75 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       screen.queryByTestId("interpretation-review-inline-message"),
     ).not.toBeInTheDocument();
   });
+
+  // ── Phase 5b.18b.8 resolve-success confirmation copy ──────────────────────
+  //
+  // After the inline-review widget resolves (Use mine / Submit amend), the
+  // chat shows a short assistant-styled confirmation line so the user has
+  // a closure cue. The widget unmounts on resolve (pendingBySession clears
+  // the event); the confirmation lives in ChatPanel-local state captured
+  // via onResolved BEFORE unmount.
+  //
+  // Spec lines 768-774: "Got it — using your interpretation of *<user_term>*."
+  // — pure UI nudge, NOT persisted to the audit trail (which already
+  // recorded the resolved interpretation_event row).
+  it("renders a resolve-success confirmation line after the user resolves an interpretation (Phase 5b.18b.8)", async () => {
+    const event = makeInterpretationEvent({ user_term: "cool" });
+    // Stub the resolve API so the store's resolveEvent action completes.
+    const resolveSpy = vi
+      .spyOn(apiClient, "resolveInterpretation")
+      .mockResolvedValue({
+        event: { ...event, choice: "accepted_as_drafted" },
+        new_state: makeComposition(2),
+      });
+
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [],
+    });
+    act(() => {
+      useInterpretationEventsStore
+        .getState()
+        .addPendingEvent(sessionFixture.id, event);
+    });
+
+    render(<ChatPanel />);
+
+    // Initially the inline widget is mounted; no confirmation yet.
+    expect(
+      screen.getByTestId("interpretation-review-inline-message"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("interpretation-review-confirmation"),
+    ).not.toBeInTheDocument();
+
+    // Click "Use my interpretation" — the widget calls the store's
+    // resolveEvent, which calls api.resolveInterpretation, which our
+    // spy resolves; on resolution the widget fires its onResolved
+    // callback, ChatPanel records the confirmation, and the widget
+    // unmounts (its event was removed from pendingBySession).
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Accept the LLM's interpretation/i }),
+      );
+    });
+
+    // Confirmation copy is now visible; widget is gone.
+    const confirmation = await screen.findByTestId(
+      "interpretation-review-confirmation",
+    );
+    expect(confirmation.textContent).toMatch(
+      /Got it — using your interpretation of/i,
+    );
+    expect(confirmation.textContent).toMatch(/cool/);
+    expect(
+      screen.queryByTestId("interpretation-review-inline-message"),
+    ).not.toBeInTheDocument();
+    expect(resolveSpy).toHaveBeenCalledWith(
+      sessionFixture.id,
+      event.id,
+      { choice: "accepted_as_drafted" },
+    );
+  });
 });

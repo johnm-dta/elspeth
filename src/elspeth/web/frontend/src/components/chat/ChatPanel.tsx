@@ -485,6 +485,65 @@ export function ChatPanel({
     );
   }, [activeSessionId, pendingInterpretationEventsBySession]);
 
+  // ── Interpretation review resolve-success confirmation (Phase 5b.18b.8) ──
+  //
+  // The interpretation-review widget (InterpretationReviewInlineMessage)
+  // unmounts on successful resolve because the parent re-renders with the
+  // event removed from `pendingBySession`. The widget's onResolved callback
+  // is therefore the only signal we can use to push a confirmation line
+  // back into the chat after dismissal — by the time the next render runs,
+  // `event.user_term` is no longer reachable.
+  //
+  // Spec lines 768-774: "Got it — using your interpretation of *<user_term>*."
+  // We render this as an assistant-styled chat bubble inside the
+  // message-stream region so the user sees a natural continuation of the
+  // conversation. The confirmations are LOCAL UI state — NOT pushed to
+  // sessionStore.messages and NOT written to the audit trail (the audit
+  // trail's interpretation_event row is the canonical record; this is the
+  // human-readable echo, an explicit UI nudge per spec line 772).
+  //
+  // Each confirmation carries a local id so React reconciliation keeps
+  // confirmation bubbles stable when new events resolve while older
+  // confirmations are still visible. Confirmations persist for the
+  // lifetime of the ChatPanel mount; switching sessions or reloading clears
+  // them, which matches the "ephemeral UI nudge" intent.
+  interface ResolveConfirmation {
+    id: string;
+    userTerm: string;
+  }
+  const [resolveConfirmations, setResolveConfirmations] = useState<
+    ReadonlyArray<ResolveConfirmation>
+  >([]);
+  // Monotonic counter for confirmation ids — useId is per-component and
+  // would collide across appended entries; crypto.randomUUID is overkill
+  // for ephemeral UI state. A ref-backed counter is identity-stable across
+  // renders and produces predictable, debuggable ids in DevTools.
+  const confirmationIdCounterRef = useRef(0);
+
+  const handleInterpretationResolved = useCallback(
+    (resolvedEvent: { user_term: string | null }) => {
+      // Skip the confirmation when user_term is null — this is the case
+      // for opt-out and auto-interpretation rows, which do not have a
+      // user term to echo. The opt-out flow has its own confirm dialog
+      // ("Stop reviewing interpretations for this session"); a chat-stream
+      // echo would be redundant noise.
+      const userTerm = resolvedEvent.user_term;
+      if (userTerm === null || userTerm === "") return;
+      confirmationIdCounterRef.current += 1;
+      const id = `resolve-confirmation-${confirmationIdCounterRef.current}`;
+      setResolveConfirmations((prev) => [...prev, { id, userTerm }]);
+    },
+    [],
+  );
+
+  // Reset confirmations on session switch — the confirmations are
+  // per-session UI state and showing previous-session confirmations in a
+  // new session's chat would be confusing.
+  useEffect(() => {
+    setResolveConfirmations([]);
+    confirmationIdCounterRef.current = 0;
+  }, [activeSessionId]);
+
   // Disambiguation re-fire guards (F-10 / F-11). Subscribed via the
   // store so the widget surface updates when a guard flips — without
   // this, clicking "treat as 1 row" once would not remove the widget
@@ -1247,7 +1306,40 @@ export function ChatPanel({
             key={event.id}
             event={event}
             sessionId={activeSessionId}
+            // Capture user_term BEFORE the widget unmounts so the
+            // confirmation line below can show it. The callback fires
+            // for both "Use mine" and "Submit amendment" resolves; we do
+            // NOT fire it for opt-out (event.user_term is null for
+            // opt-out rows — see InterpretationEvent contract) and the
+            // handler skips null/empty user_terms.
+            onResolved={() => handleInterpretationResolved(event)}
           />
+        ))}
+        {/*
+          Resolve-success confirmation bubbles (Phase 5b.18b.8).
+
+          One assistant-styled bubble per resolved interpretation. Rendered
+          inside the role="log" region so the new bubble is announced to
+          AT users on append (aria-live="polite" on the parent). The
+          bubbles use the same chat-message--assistant styling as ordinary
+          assistant turns so the confirmation visually flows with the
+          conversation. These are NOT persisted to sessionStore.messages
+          and do NOT round-trip to the server — see the
+          handleInterpretationResolved comment above for the rationale.
+        */}
+        {resolveConfirmations.map((conf) => (
+          <div
+            key={conf.id}
+            className="chat-message chat-message--assistant interpretation-review-confirmation"
+            data-testid="interpretation-review-confirmation"
+            role="status"
+          >
+            Got it — using your interpretation of{" "}
+            <em className="interpretation-review-confirmation-user-term">
+              {conf.userTerm}
+            </em>
+            .
+          </div>
         ))}
         {/*
           Inline-source disambiguation widgets (Phase 5a Task 4).

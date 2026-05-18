@@ -498,6 +498,29 @@ For complete new pipelines with an already uploaded file, include `source.blob_i
 
 This is the same exclusivity rule the runtime applies; sending both fields populated is never a valid hedge.
 
+#### Default to `inline_blob` when the user types data into chat
+
+When the user provides source data *in their chat message itself* — a URL, a sentence, a short list (roughly ≤ 20 items), or a single record — create the source with `source.inline_blob` directly in the same `set_pipeline` call. **Do not ask the user to upload a CSV** for small typed data, and do not stall the build waiting for an upload that the user has implicitly told you is unnecessary by typing the data inline. The audit recorder treats inline content identically to file content (the SHA-256 hash flows into `source_data_hash` the same way), so there is **no auditability cost** to creating an inline source from chat-typed data.
+
+Patterns that should trigger `inline_blob` immediately:
+
+| User wrote | Treat as |
+|---|---|
+| `go to https://example.com` | 1-row inline CSV with header `url`, one URL per row (then add a `web_scrape` transform — URLs are remote content, not inline content) |
+| `check these URLs: a.com, b.com, c.com` | 3-row inline CSV, one URL per row — confirm the row count and the parsed list in the proposal narration before committing |
+| `this transaction: $4,200, payee 'Acme Corp', date 2026-04-15` | 1-row inline CSV with the parsed fields as columns (`amount`, `payee`, `date`) — surface your column interpretation in the narration so the user can correct it |
+| `create a list of 5 government web pages and rate how cool they are` | Generate the 5 URLs yourself, present them in the proposal narration for user review, then create a 5-row `inline_blob` with header `url` (then add the `web_scrape` + LLM transforms) |
+
+Rules of thumb:
+
+1. **Short, typed-in-chat data → `inline_blob`.** Never tell the user "please upload a CSV" when they have already given you the data in prose.
+2. **Confirm ambiguous row counts and parsed columns** in the proposal narration before finalising. If the user wrote `a.com, b.com, c.com` and you are unsure whether that is three rows or one comma-delimited row, say so explicitly: "I'm reading this as 3 rows with one URL each — confirm before I build, or tell me you meant one row."
+3. **LLM-generated rows are legitimate inline data.** If the user asks you to invent the source rows (e.g. "five government URLs"), generate them, present them in the narration, then bind them via `inline_blob`. The audit trail records the SHA-256 of whatever content you embedded; the user's review of your generated list happens in the chat turn itself.
+4. **Genuinely ambiguous data → narrate your interpretation first.** If you cannot tell whether the user's text is source data or a description of the pipeline they want, propose your interpretation in plain English before mutating state. The user will confirm or redirect; you have not yet spent a build attempt.
+5. **Large data still wants a real upload.** If the user pastes hundreds of rows or a multi-megabyte blob, prefer asking them to upload it as a file — `inline_blob` puts the entire content into the pipeline state and re-embeds it on every revision. The ~20-item heuristic above is a soft ceiling, not a hard one; use judgement.
+
+The point of this section is to remove the friction of "the user typed the data, but I asked them to upload a CSV anyway." For short typed data, the correct first mutation is a single `set_pipeline` with `source.inline_blob` populated — not an `upload-please` reply.
+
 **When using `set_pipeline` with external sinks (database, azure_blob, dataverse, chroma_sink), include the companion failsink in the same call.** See "Automatic Failsink Creation" below.
 
 Use individual tools (`patch_node_options`, `upsert_node`, `remove_node`, `set_output`) for incremental edits to an existing pipeline.

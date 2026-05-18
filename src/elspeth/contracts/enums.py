@@ -410,7 +410,16 @@ class AuditCharacteristic(StrEnum):
     _DETERMINISM_TO_AUDIT_FLAG in web/catalog/service.py):
         IO_READ, IO_WRITE, EXTERNAL_CALL, DETERMINISTIC, SEEDED, NON_DETERMINISTIC
     Author-declared (per 08-catalog-reshape.md vocabulary):
-        PROVENANCE, RETENTION, QUARANTINE, COERCE, SIGNED, NETWORK, CREDENTIALS
+        PROVENANCE, RETENTION, QUARANTINE, COERCE, SIGNED, CREDENTIALS
+
+    External-network behaviour is signalled exclusively through
+    ``EXTERNAL_CALL`` (derived from ``Determinism.EXTERNAL_CALL``). An
+    earlier ``NETWORK`` author-declared variant was deleted: no plugin
+    declared it, and its rendered chip ("Network call", attention tone)
+    was visually identical to ``EXTERNAL_CALL``'s. Add it back only when
+    a concrete plugin needs to signal a network call that the
+    determinism derivation rules can't infer, AND pair the addition
+    with a distinguishing UI label.
 
     The StrEnum IS the closed vocabulary: a typo at the declaration site
     (e.g. ``frozenset({"io-read"})``) fails mypy rather than silently
@@ -431,7 +440,6 @@ class AuditCharacteristic(StrEnum):
     QUARANTINE = "quarantine"
     COERCE = "coerce"
     SIGNED = "signed"
-    NETWORK = "network"
     CREDENTIALS = "credentials"
 
 

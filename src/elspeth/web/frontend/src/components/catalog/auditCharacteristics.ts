@@ -151,17 +151,6 @@ export const AUDIT_CHARACTERISTICS: AuditCharacteristicMeta[] = [
       "pipeline config.",
     tone: "attention",
   },
-  {
-    flag: "network",
-    label: "Network call",
-    glyph: "📡",
-    tooltip:
-      "Plugin reaches an external system over the network. This is the " +
-      "authored variant of the determinism-derived external_call flag — " +
-      "plugin authors set it explicitly when the call is not captured by " +
-      "the determinism derivation rules.",
-    tone: "attention",
-  },
 ];
 
 const _byFlag = new Map<string, AuditCharacteristicMeta>(

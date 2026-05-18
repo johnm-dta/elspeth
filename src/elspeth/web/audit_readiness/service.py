@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from functools import cache, lru_cache
-from typing import Any, Protocol
+from functools import lru_cache
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from elspeth.contracts.enums import Determinism
@@ -39,75 +39,87 @@ _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
 
 
 @lru_cache(maxsize=1)
-def _registered_plugin_names() -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
-    """Return source/transform/sink plugin names from the live builtin catalog.
+def _plugin_catalog_snapshot() -> dict[PluginKind, dict[str, type[Any]]]:
+    """Build the live builtin-plugin catalog once and freeze it.
 
-    Inlined from the now-deleted ``elspeth.web.audit_readiness.trust`` module
-    (Phase 7A No-Legacy commitment). Layer: L3.
+    Returns a per-kind mapping ``plugin_name → plugin_class``. Both
+    ``_is_registered_plugin`` (membership query) and
+    ``_get_plugin_class_for_kind`` (class resolution) read from this
+    single snapshot, so the two helpers cannot disagree about what is
+    and isn't in the catalog. The previous implementation built two
+    independent ``PluginManager`` instances and relied on import-time
+    stability to keep them in sync — that "shared snapshot" assumption
+    is now mechanically enforced rather than load-bearing-but-documented.
+
+    Inlined from the now-deleted ``elspeth.web.audit_readiness.trust``
+    module (Phase 7A No-Legacy commitment). Layer: L3.
     """
     from elspeth.plugins.infrastructure.manager import PluginManager
 
     manager = PluginManager()
     manager.register_builtin_plugins()
-    return (
-        frozenset(cls.name for cls in manager.get_sources()),
-        frozenset(cls.name for cls in manager.get_transforms()),
-        frozenset(cls.name for cls in manager.get_sinks()),
-    )
+    return {
+        "source": {cls.name: cls for cls in manager.get_sources()},
+        "transform": {cls.name: cls for cls in manager.get_transforms()},
+        "sink": {cls.name: cls for cls in manager.get_sinks()},
+    }
 
 
 def _is_registered_plugin(kind: PluginKind, name: str) -> bool:
     """Return True when ``name`` exists in the live catalog for ``kind``.
 
-    Inlined from the now-deleted ``elspeth.web.audit_readiness.trust`` module
-    (Phase 7A No-Legacy commitment). Layer: L3.
+    Raises:
+        ValueError: when ``kind`` is not one of "source", "transform",
+            or "sink". Unreachable under the ``PluginKind`` Literal type;
+            retained as an offensive-programming guard so a non-typed
+            caller crashes loudly rather than returning a misleading
+            False.
     """
-    sources, transforms, sinks = _registered_plugin_names()
-    if kind == "source":
-        return name in sources
-    if kind == "transform":
-        return name in transforms
-    if kind == "sink":
-        return name in sinks
-    raise ValueError(f"unknown plugin kind: {kind!r}")
+    snapshot = _plugin_catalog_snapshot()
+    if kind not in snapshot:
+        raise ValueError(f"unknown plugin kind: {kind!r}")
+    return name in snapshot[kind]
 
 
-@cache
 def _get_plugin_class_for_kind(kind: PluginKind, name: str) -> type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol]:
     """Return the registered plugin class for (kind, name).
 
-    Layer: L3. Called only after _is_registered_plugin() confirms the
-    name is present.
-
-    Cached: the builtin plugin catalog is process-stable (registered at
-    import time via ``register_builtin_plugins``), so repeated lookups
-    for the same (kind, name) pair return the same class. The sibling
-    ``_registered_plugin_names`` uses the same caching strategy; the
-    pair stays symmetric.
+    Layer: L3. Callers MUST guard with ``_is_registered_plugin()``
+    first (as ``_record()`` does). The two helpers share a single
+    ``_plugin_catalog_snapshot()`` so under correct usage the
+    RuntimeError branch below is unreachable.
 
     Raises:
-        StopIteration: when ``name`` is not in the catalog for ``kind``.
-            Caller must guard with ``_is_registered_plugin()`` first
-            (as ``_record()`` does). Under correct usage this is
-            unreachable because the two helpers share a stable catalog
-            snapshot.
         ValueError: when ``kind`` is not one of "source", "transform",
-            or "sink". Unreachable under the ``PluginKind`` Literal
-            type; retained as an offensive-programming guard so a
-            non-typed caller crashes loudly rather than returning a
-            wrong-kind class. Mirrors ``_is_registered_plugin``.
+            or "sink". Mirrors ``_is_registered_plugin``.
+        RuntimeError: when ``name`` is not in the catalog for ``kind``.
+            Indicates a contract violation in this module's callers —
+            either the ``_is_registered_plugin`` guard was skipped, or
+            the snapshot was rebuilt between the guard call and this
+            resolution call (which the ``lru_cache`` rules out under
+            normal use). Replaces the bare ``StopIteration`` that the
+            previous ``next(...)`` form would have raised — that
+            exception type carried no diagnostic.
     """
-    from elspeth.plugins.infrastructure.manager import PluginManager
-
-    manager = PluginManager()
-    manager.register_builtin_plugins()
-    if kind == "source":
-        return next(cls for cls in manager.get_sources() if cls.name == name)
-    if kind == "transform":
-        return next(cls for cls in manager.get_transforms() if cls.name == name)
-    if kind == "sink":
-        return next(cls for cls in manager.get_sinks() if cls.name == name)
-    raise ValueError(f"unknown plugin kind: {kind!r}")
+    snapshot = _plugin_catalog_snapshot()
+    if kind not in snapshot:
+        raise ValueError(f"unknown plugin kind: {kind!r}")
+    catalog = snapshot[kind]
+    try:
+        plugin_cls = catalog[name]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"plugin {kind!r}/{name!r} not in catalog snapshot — caller "
+            f"must guard with _is_registered_plugin() first. The two "
+            f"helpers share a single _plugin_catalog_snapshot(), so "
+            f"reaching this branch means the guard was skipped. This "
+            f"is an audit_readiness contract violation, not a plugin "
+            f"issue."
+        ) from exc
+    return cast(
+        "type[SourceProtocol] | type[TransformProtocol] | type[SinkProtocol]",
+        plugin_cls,
+    )
 
 
 class CompositionStateNotFoundError(LookupError):

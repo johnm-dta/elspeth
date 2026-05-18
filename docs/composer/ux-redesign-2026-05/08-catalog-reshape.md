@@ -109,7 +109,7 @@ Quick visual cues on each card. Examples:
 | ✓ quarantine | Quarantines malformed rows instead of crashing |
 | ✓ coerce | Coerces types at the boundary (Tier 3 behaviour) |
 | ✓ signed | Output is HMAC-signed |
-| ⚠ network | Reaches an external system (network call) |
+| ⚠ external_call | Reaches an external system (network call) |
 | ⚠ credentials | Requires user secrets |
 
 Hover or tap reveals the explanation in plain language.
@@ -119,7 +119,7 @@ Hover or tap reveals the explanation in plain language.
 Each tab (Sources / Transforms / Sinks) gets a filter strip at the top:
 
 ```text
-  Filter: [ all ] [ ✓ provenance ] [ no network ]
+  Filter: [ all ] [ ✓ provenance ] [ no external_call ]
 ```
 
 The filter strip lets users narrow the catalog to "what works for my

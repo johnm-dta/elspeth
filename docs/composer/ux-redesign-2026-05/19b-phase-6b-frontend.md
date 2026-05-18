@@ -1,8 +1,11 @@
 # Phase 6B — Frontend: completion bar, shareable-link inspect view, context-aware results
 
+> **Note on line-number citations.** Plan was authored against an earlier codebase snapshot. When a line citation conflicts with reality, **trust `rg`, not the line number** — `rg -n "<symbol>" src/elspeth/web/frontend/src/` is the authoritative locator. Symbols are stable; line numbers drift.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or superpowers:executing-plans. Steps use `- [ ]` checkboxes.
 
-**Goal:** Land the frontend half of Phase 6 — the three-verb completion bar in the side rail, the Save-for-review confirmation dialog with shareable-link display, the read-only inspect view at `/shared/{token}` for shareable-link recipients, the context-aware result-rendering refactor (narrative summary when any pipeline transform declares `supports_narrative_summary=True`, table preview otherwise), and the Export-YAML top-level button that promotes the existing `YamlView` drawer.
+**Goal:** Land the frontend half of Phase 6 — the three-verb completion bar in the side rail, the Save-for-review confirmation dialog with shareable-link display, the read-only inspect view at `/shared/{token}` for shareable-link recipients, the context-aware result-rendering refactor (narrative summary when any pipeline transform's `capability_tags` includes `"narrative-summary"`, table preview otherwise), and the Export-YAML top-level button that promotes the existing `YamlView` drawer.
 
 **Architecture:** React + Vite + Zustand + Vitest, matching every prior frontend phase plan. A new `CompletionBar.tsx` component lives in `components/composer/` (creating the directory if not present — verify in Task 1). The side-rail mount is added by Phase 3; this plan assumes Phase 3 has shipped and adds the new component to the rail. A new `components/shared/` directory houses the read-only inspect view. The existing `YamlView.tsx` at `components/inspector/` is reused — no duplication.
 
@@ -22,7 +25,7 @@ This plan **requires** that Phase 3 (side rail) and Phase 6A (backend) have ship
 
 If Phase 3 is not shipped when implementation starts, fall back to a temporary header-area mount: the `CompletionBar` is wrapped in `<div className="completion-bar--header-fallback">` and inserted into the existing composer header. A `// TODO: relocate to side rail after Phase 3 ships` comment links back to [15b1-phase-3b-side-rail-part-1.md](15b1-phase-3b-side-rail-part-1.md). The fallback is documented in Task 1 below; do not let it become permanent.
 
-If Phase 6A is not shipped, this plan **cannot** proceed — the three endpoints and the `supports_narrative_summary` catalog field do not exist yet. The implementing agent must verify 6A merged via `git log --oneline | grep shareable_reviews` before starting.
+If Phase 6A is not shipped, this plan **cannot** proceed — the three endpoints and the `"narrative-summary"` `capability_tags` declarations do not exist yet. The implementing agent must verify 6A merged via `git log --oneline | grep shareable_reviews` before starting.
 
 **Phase 5b dependency for narrative result rendering:** Task 6's `NarrativeResults` consumes Phase 5b's interpretation events as a post-run overlay layered on top of the plugin's raw `summary` field. If Phase 5b is not yet shipped, the component falls back to rendering the raw `summary` field only; the interpretation-event overlay is additive and the renderer must tolerate its absence. Do not block Phase 6 on Phase 5b.
 
@@ -37,7 +40,7 @@ If Phase 6A is not shipped, this plan **cannot** proceed — the three endpoints
 - "Run pipeline" click → existing Execute path (unchanged); result rendering refactored to detect narrative-summary plugins.
 - "Export YAML" click → opens the existing `YamlView` (already implemented at `components/inspector/YamlView.tsx`); the button is the top-level affordance the design doc calls for.
 - `#/shared/{token}` hash path — read-only inspect view (`SharedInspectView`). Entered via a top-level hash-branch in `App.tsx` (see Task 8; hash-router, not React-Router). Renders: pipeline metadata, audit-readiness panel (read-only), graph mini-view, and the YAML. No edit affordances; the composer chat panel is hidden.
-- Result-rendering refactor: a new `useNarrativeMode()` hook reads the catalog and the current composition state, returns `true` if any pipeline transform's catalog entry has `supports_narrative_summary === true`. The existing results view branches on this.
+- Result-rendering refactor: a new `useNarrativeMode()` hook reads the catalog and the current composition state, returns `true` if any pipeline transform's catalog entry has `capability_tags.includes("narrative-summary")`. The existing results view branches on this.
 - API client extensions: `markReadyForReview`, `fetchShareableLink`, `fetchSharedInspect`.
 - Store extensions: a new `shareableReviewStore` for the dialog state and the latest token; the existing `sessionStore` and `executionStore` are not modified beyond reading the new catalog field.
 
@@ -60,7 +63,7 @@ If Phase 6A is not shipped, this plan **cannot** proceed — the three endpoints
 | Token in URL (`/shared/{token}`) | Tier 3 inbound to backend | Frontend forwards verbatim; the backend verifies the signature. The frontend never inspects the token bytes. |
 | `MarkReadyForReviewResponse` from backend | Tier 1 inbound to frontend | Typed parse (`parseResponse<MarkReadyForReviewResponse>`); shape drift crashes. |
 | `SharedInspectResponse` from backend | Tier 1 inbound | Same. |
-| Catalog response (extended with `supports_narrative_summary`) | Tier 1 inbound | TypeScript types must be widened in lockstep; drift breaks the build. |
+| Catalog response (`capability_tags` field — already on the wire pre-Phase-6) | Tier 1 inbound | If the local TypeScript type omits `capability_tags`, widen it in lockstep — the wire payload carries it regardless. |
 | User clicks "Save for review" with pending changes | n/a — UI contract | Disable the button if `compositionState.is_valid === false`; the backend will also reject, but the UX is friendlier if the button shows the precondition. |
 | Copy-to-clipboard surface | n/a — browser API | `navigator.clipboard.writeText`; fallback to selectable text if the API is unavailable. |
 
@@ -103,12 +106,18 @@ export interface SharedInspectResponse {
   expires_at: string;
 }
 
-// Extension to the existing plugin metadata type. The backend declares this as
-// ClassVar[bool] on the plugin Protocol; on the wire it's a plain boolean.
-export interface TransformPluginMetadata {
-  // ...existing fields...
-  supports_narrative_summary: boolean;
-}
+// No TransformPluginMetadata extension is needed in Phase 6.
+//
+// Per multi-reviewer adjudication B6 (2026-05-19), the narrative-summary
+// opt-in rides the existing `capability_tags: string[]` field already on the
+// catalog wire (serialized at `web/catalog/service.py:333,345`). The
+// frontend reads the tag list it already receives — `useNarrativeMode`
+// (Task 5) branches on `capability_tags.includes("narrative-summary")`.
+//
+// If your local `TransformPluginMetadata` definition does not already
+// include `capability_tags: readonly string[]`, the existing field is
+// missing from the type — fix the type before reading the tag. The wire
+// payload carries it regardless of whether the TS type names it.
 ```
 
 ---
@@ -137,7 +146,7 @@ export interface TransformPluginMetadata {
 - `src/elspeth/web/frontend/src/App.tsx` — add a top-level hash-branch guard for `#/shared/{token}` (see Task 8 Step 4; no React-Router `<Route>` or server-side path).
 - `src/elspeth/web/frontend/src/components/composer/SideRail.tsx` (or whatever the Phase 3 side-rail mount is) — mount `<CompletionBar />` below the audit-readiness panel and above Catalog. Verify the file path during Task 1.
 - `src/elspeth/web/frontend/src/components/execution/<existing-results-view>.tsx` (verify path) — branch on `useNarrativeMode()` to render `<NarrativeResults />` or the existing table preview.
-- `src/elspeth/web/frontend/src/components/inspector/InspectorPanel.tsx` (or wherever Execute lives today) — promote Execute into the new CompletionBar; remove the legacy button if it duplicates.
+- **TBD** (the Execute-button host file — `components/inspector/InspectorPanel.tsx` does **not** exist; discover the actual host via `rg -n "executionStore\.execute\(" src/elspeth/web/frontend/src/` per Task 10 Step 1a) — promote Execute into the new CompletionBar; remove the legacy button if it duplicates.
 
 ---
 
@@ -182,7 +191,7 @@ describe("shareable-review API", () => {
 ```
 
 - [ ] **Step 2: Run to fail** (`npm test -- client.test.ts`).
-- [ ] **Step 3: Implementation.** Add the three functions to `client.ts`, following the existing pattern (the file already has ~60 fetch helpers; mirror the closest existing shape — `fetchYaml` at line 644). Add the four new types to `types/api.ts`. Update `TransformPluginMetadata` to include `supports_narrative_summary: boolean`.
+- [ ] **Step 3: Implementation.** Add the three functions to `client.ts`, following the existing pattern (the file already has ~60 fetch helpers; mirror the closest existing shape — `fetchYaml`; locate with `rg -n "fetchYaml" src/elspeth/web/frontend/src/api/client.ts`). Add the three new response types to `types/api.ts`. **No `TransformPluginMetadata` extension is needed** — the narrative-mode opt-in rides the existing `capability_tags` field (see Task 5). If the local TypeScript type definition for `TransformPluginMetadata` does not already include `capability_tags: readonly string[]`, widen it to match the wire shape — the field is already on the catalog response.
 - [ ] **Step 4: Run to pass.**
 - [ ] **Step 5: Commit.** `feat(web/frontend): add shareable-review API client + response types`.
 
@@ -264,10 +273,11 @@ Full test list:
     7. Open-in-new-tab is an `<a target="_blank" rel="noopener noreferrer">` to the share URL.
     8. Error state shows the backend's `detail` message and a "Try again" button.
     9. Closing the dialog calls `shareableReviewStore.closeDialog`.
+   10. **Accessibility:** `jest-axe` assertion against the rendered dialog returns zero violations (focus-trap, aria-modal, accessible name, labelled controls).
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Modal pattern; reuse existing dialog primitives if present (verify via `components/common/`). The expiry date is parsed from `expires_at` and rendered with the same date formatter the inspector uses (find via grep on `toLocaleString`). The copy-link handler must use `navigator.clipboard.writeText`; add a fallback to `document.execCommand('copy')` on a selected text input if the Clipboard API is unavailable (some browser security contexts block it).
+- [ ] **Step 3: Implementation.** Modal pattern; reuse existing dialog primitives if present (verify via `components/common/`). The expiry date is parsed from `expires_at` and rendered with the same date formatter the inspector uses (find via grep on `toLocaleString`). The copy-link handler must use `navigator.clipboard.writeText`; add a fallback to `document.execCommand('copy')` on a selected text input if the Clipboard API is unavailable (some browser security contexts block it). Wire the dialog with `aria-modal="true"`, `role="dialog"`, an accessible label, initial-focus management on the primary action, and Esc-to-close — the axe assertion gates these.
 - [ ] **Step 4: Run to pass.**
-- [ ] **Step 5: Commit.** `feat(web/frontend): add SaveForReviewDialog with copy-link + expiry`.
+- [ ] **Step 5: Commit.** `feat(web/frontend): add SaveForReviewDialog with copy-link + expiry + axe-clean a11y`.
 
 ---
 
@@ -275,17 +285,18 @@ Full test list:
 
 **Files:** `hooks/useNarrativeMode.ts`, `hooks/useNarrativeMode.test.ts`.
 
-The hook returns `true` if any transform in the current pipeline has a catalog entry with `supports_narrative_summary === true`. Reads from the catalog store (already exists for Phase 7 catalog work — verify) and the current composition state.
+The hook returns `true` if any transform in the current pipeline has a catalog entry whose `capability_tags` array includes the string `"narrative-summary"`. Reads from the catalog store (already exists for Phase 7 catalog work — verify) and the current composition state. **No new wire field** — `capability_tags` is already on the catalog response per `web/catalog/service.py:333,345`. (Substitution applied 2026-05-19 per multi-reviewer adjudication B6.)
 
 - [ ] **Step 1: Failing tests.**
     1. Returns `false` when no nodes are present.
-    2. Returns `false` when no transform has `supports_narrative_summary=true` in the catalog.
-    3. Returns `true` when at least one node's plugin has the flag.
+    2. Returns `false` when no transform's `capability_tags` includes `"narrative-summary"`.
+    3. Returns `true` when at least one node's plugin has the tag.
     4. Returns `false` when the catalog has not loaded yet (defensive: better to default to the table preview than render an empty narrative).
     5. Re-evaluates when `compositionState.nodes` changes.
     6. Re-evaluates when the catalog updates (rare, but covered).
+    7. Tag check is exact-match — neither `"narrative-summaries"` nor `"Narrative-Summary"` matches; only `"narrative-summary"`. (Open-vocabulary discipline: tags are case-sensitive strings.)
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Use `useMemo` over `(compositionState.nodes, catalog.transforms)` to compute the boolean. Selector pattern from `sessionStore` reads.
+- [ ] **Step 3: Implementation.** Use `useMemo` over `(compositionState.nodes, catalog.transforms)` to compute the boolean. The check is `catalog.transforms.some(t => nodes.some(n => n.plugin_type === t.id) && t.capability_tags.includes("narrative-summary"))`. Selector pattern from `sessionStore` reads.
 - [ ] **Step 4: Run to pass.**
 - [ ] **Step 5: Commit.** `feat(web/frontend): add useNarrativeMode hook for result-rendering branch`.
 
@@ -295,17 +306,47 @@ The hook returns `true` if any transform in the current pipeline has a catalog e
 
 **Files:** `components/execution/NarrativeResults.tsx`, `components/execution/NarrativeResults.test.tsx`.
 
-Renders the narrative summary from the run output. The contract (per backend Task 8's ClassVar docstring) is that the opted-in transform's output schema includes a `summary` field. The component reads that field and renders it as Markdown (reusing `MarkdownRenderer` from `components/chat/`). When Phase 5b has shipped, the component additionally overlays Phase 5b's interpretation events for the current run — the interpretation overlay is additive (it surfaces user-affirmed interpretations alongside the raw narrative) and the component must render gracefully when no interpretation events are available (e.g., 5b not shipped, or the run produced none).
+Renders the narrative summary from the run output. The contract (per backend Task 8's per-plugin docstring; opt-in is declared via `capability_tags = ("narrative-summary",)` rather than a `ClassVar[bool]`) is that the opted-in transform's output schema includes a `summary` field. The component reads that field and renders it as Markdown (reusing `MarkdownRenderer` from `components/chat/`). When Phase 5b has shipped, the component additionally overlays Phase 5b's interpretation events for the current run — the interpretation overlay is additive (it surfaces user-affirmed interpretations alongside the raw narrative) and the component must render gracefully when no interpretation events are available (e.g., 5b not shipped, or the run produced none).
+
+**Run-filter (post-5b-merge — load-bearing).** Phase 5b's `interpretationEventsStore` keys events by **session_id only**, and `interpretation_events_table` has no `run_id` column. To prevent the overlay from over-counting stale resolutions from earlier runs in the same session, the component filters events by the active run's wall-clock window:
+
+```ts
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
+import { useExecutionStore } from "@/stores/executionStore";
+
+const eventsForRun = useInterpretationEventsStore((s) => s.pendingBySession[sessionId]);
+const currentRun = useExecutionStore((s) => s.currentRun);
+
+const overlayEvents = useMemo(() => {
+  if (!currentRun) return [];
+  // Filter to events resolved during the active run's window. The
+  // started_at / completed_at fields are on currentRun; if completed_at is
+  // null (run still in flight), use Date.now() as the upper bound so
+  // partial overlays stream in correctly.
+  const lo = new Date(currentRun.started_at).getTime();
+  const hi = currentRun.completed_at
+    ? new Date(currentRun.completed_at).getTime()
+    : Date.now();
+  return (eventsForRun ?? []).filter((e) => {
+    const t = new Date(e.resolved_at ?? e.created_at).getTime();
+    return t >= lo && t <= hi;
+  });
+}, [eventsForRun, currentRun]);
+```
+
+Do **not** fall back to a session-aggregate read. The store keys by `session_id`, so absent a filter the overlay would surface every interpretation ever resolved in this session — including resolutions from prior runs the reviewer is not looking at. The wall-clock filter is approximate (a slow `resolved_at` write could land outside the run window) but is the correct shape; tightening to an exact run-id requires a Phase 5b schema amendment that has been adjudicated out of scope.
 
 - [ ] **Step 1: Failing tests.**
     1. Renders the `summary` field from the run output as Markdown.
     2. Falls back to "No narrative available" when the field is missing or empty (graceful failure for opted-in-without-summary plugins, per backend Task 8's documented contract gap).
     3. Renders alongside a "Download full output" link to the existing artifact endpoint.
     4. Streams correctly when the run is still in progress (renders partial summary if available).
-    5. When Phase 5b interpretation events are present, the overlay renders them above the raw summary; when absent, only the raw summary renders.
-    6. Component does not crash when the interpretation-events store is empty / missing (Phase 5b not shipped).
+    5. When `interpretationEventsStore` has events whose `resolved_at` falls inside `currentRun.started_at..completed_at`, the overlay renders them above the raw summary.
+    6. When `interpretationEventsStore` has events from a PRIOR run (i.e. `resolved_at < currentRun.started_at`), the overlay does **not** render those — guards against the session-aggregate over-count failure mode.
+    7. When the run is in-flight (`completed_at == null`), the upper bound is treated as "now"; overlay surfaces events resolved during the in-flight window.
+    8. Component does not crash when the interpretation-events store is empty / missing (Phase 5b not shipped or no events yet).
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Reads the run output from `executionStore`. The summary extraction is: find the last output row that has a `summary` field; if multiple, concatenate with blank lines.
+- [ ] **Step 3: Implementation.** Reads the run output from `executionStore`. The summary extraction is: find the last output row that has a `summary` field; if multiple, concatenate with blank lines. The interpretation-overlay filter is the `useMemo` block above; import the store at `@/stores/interpretationEventsStore` (canonical name post-5b merge).
 - [ ] **Step 4: Run to pass.**
 - [ ] **Step 5: Commit.** `feat(web/frontend): add NarrativeResults rendering for batch-analytic transforms`.
 
@@ -315,7 +356,7 @@ Renders the narrative summary from the run output. The contract (per backend Tas
 
 **Files:** the existing results view in `components/execution/` (verify file path — likely `ProgressView.tsx` or a sibling), tests updated in place.
 
-- [ ] **Step 1: Failing test.** Add a test that, given a composition with `batch_classifier_metrics` and a catalog entry where `supports_narrative_summary=true`, the rendered output is `<NarrativeResults />` rather than the existing table preview.
+- [ ] **Step 1: Failing test.** Add a test that, given a composition with `batch_classifier_metrics` and a catalog entry where `capability_tags.includes("narrative-summary")`, the rendered output is `<NarrativeResults />` rather than the existing table preview.
 - [ ] **Step 2: Run to fail.**
 - [ ] **Step 3: Implementation.** Insert a single branch at the top of the results-rendering JSX:
 
@@ -335,10 +376,20 @@ return narrativeMode ? <NarrativeResults /> : <ExistingTablePreview />;
 
 The view fetches `GET /api/sessions/shared/{token}` and renders a read-only composition inspector. Reuse the existing `InspectorPanel` for the pipeline metadata + graph + spec views; mount it in read-only mode (add an `isReadOnly` prop to `InspectorPanel` if not present — verify in Task 8a below).
 
-**`AuditReadinessPanel` is session-store-aware.** The existing component reads from the Zustand session store (populated by the owner's session). Rendering it directly in the shared inspect view would require populating the session store from the shared payload — an isolation breach. Instead, implement a **separate read-only variant** `<SharedAuditReadinessPanel readOnlyState={...} />` that takes the readiness payload directly as a prop, with no store reads:
+**`AuditReadinessPanel` is session-store-aware.** The existing component reads from the Zustand session store (populated by the owner's session) **and additionally overrides the `llm_interpretations` row's rendering using `interpretationEventsStore` counts** (per `AuditReadinessPanel.tsx:474–490` post-5b merge). Rendering it directly in the shared inspect view would require populating both stores from the shared payload — an isolation breach. Instead, implement a **separate read-only variant** `<SharedAuditReadinessPanel readOnlyState={...} />` that takes the readiness payload directly as a prop, with no store reads.
+
+**Step 0 (prerequisite — `AuditReadinessRow` extraction).** Per multi-reviewer adjudication B4 (2026-05-19), there is no exported `<AuditReadinessRow />` component at the time of this plan: the existing `AuditReadinessPanel.tsx` renders rows inline (`rows.map((row) => <li>...</li>)`). Two viable options:
+
+- **(a) Extract first (preferred).** Add a new `components/audit/AuditReadinessRow.tsx` exporting a `<AuditReadinessRow row={row} />` component containing the existing inline row markup verbatim. Modify `AuditReadinessPanel.tsx` to call `<AuditReadinessRow />` in its `rows.map(...)`. Verify rendering identity via the existing Vitest suite for AuditReadinessPanel — no test changes required if extraction is markup-identity-preserving. The shared variant below then reuses the extracted component.
+- **(b) Inline-only.** Copy the row markup into `SharedAuditReadinessPanel` directly without extracting. Faster, but duplicates the row-rendering logic; future row-style changes would require touching two files.
+
+**Pick (a).** It removes the duplication and the cost is one preparatory commit. The plan from here assumes (a) has been applied.
 
 ```tsx
 // components/shared/SharedAuditReadinessPanel.tsx
+
+import type { AuditReadinessSnapshot, ReadinessRow } from "@/types/api";
+import { AuditReadinessRow } from "@/components/audit/AuditReadinessRow";
 
 interface SharedAuditReadinessPanelProps {
   /** Readiness payload from the SharedInspectResponse. */
@@ -347,18 +398,55 @@ interface SharedAuditReadinessPanelProps {
 
 export function SharedAuditReadinessPanel({ readOnlyState }: SharedAuditReadinessPanelProps) {
   // Renders the same <AuditReadinessRow /> leaf components as the owner's panel,
-  // but takes state as a prop instead of reading from sessionStore.
+  // but takes state as a prop instead of reading from sessionStore /
+  // interpretationEventsStore. All six rows render uniformly — the
+  // `llm_interpretations` row is populated server-side (per
+  // `web/audit_readiness/service.py:218–262`) and arrives in `rows` with the
+  // same shape as every other row. No per-row branch is needed for the shared
+  // view; the owner-side store-override is a richer-rendering convention, not
+  // a parity requirement.
   return (
     <section aria-label="Audit readiness">
-      {readOnlyState.checks.map((check) => (
-        <AuditReadinessRow key={check.id} check={check} />
+      {readOnlyState.rows.map((row: ReadinessRow) => (
+        <AuditReadinessRow key={row.id} row={row} />
       ))}
     </section>
   );
 }
 ```
 
-The existing `<AuditReadinessRow />` leaf components are reused as-is. The `AuditReadinessSnapshot` type is the Phase 2 wire-response model (imported from `types/api.ts`) — the same type carried on `SharedInspectResponse.audit_readiness`. Mount `<SharedAuditReadinessPanel readOnlyState={inspectResponse.audit_readiness} />` in the shared view.
+The `<AuditReadinessRow />` leaf component is the one extracted in Step 0 (preferred option (a)). Its prop is a single `row: ReadinessRow`, matching the type used inline in the pre-extraction `AuditReadinessPanel.tsx`. If Step 0 was skipped (option (b)), inline the row markup here instead of importing `AuditReadinessRow`. The `AuditReadinessSnapshot` type is the Phase 2 wire-response model (imported from `types/api.ts`) — the same type carried on `SharedInspectResponse.audit_readiness`. The merged-5b snapshot shape is:
+
+```ts
+// Mirrors web/audit_readiness/models.py post-5b merge.
+type ReadinessStatus = "ok" | "warning" | "error" | "not_applicable";
+type ReadinessRowId =
+  | "validation"
+  | "plugin_trust"
+  | "provenance"
+  | "retention"
+  | "llm_interpretations"   // populated server-side from interpretation_events_table
+  | "secrets";
+
+interface ReadinessRow {
+  id: ReadinessRowId;
+  label: string;
+  status: ReadinessStatus;
+  summary: string;
+  detail: string | null;
+  component_ids: readonly string[];
+}
+
+interface AuditReadinessSnapshot {
+  session_id: string;
+  composition_version: number;
+  checked_at: string;          // ISO datetime
+  rows: readonly ReadinessRow[];
+  validation_result: ValidationResult;
+}
+```
+
+Mount `<SharedAuditReadinessPanel readOnlyState={inspectResponse.audit_readiness} />` in the shared view. **Closed-enum invariant:** the backend snapshot model validator (per `web/audit_readiness/models.py:54–66`) requires all six `ReadinessRowId` values to be present in `rows`. The shared view does not need to handle missing rows — that condition is unreachable for a well-formed response. If the backend ever ships an incomplete snapshot, the upstream Pydantic validation will reject it before the wire shape leaves the server.
 
 The shareable-link recipient sees:
 1. A header: "Shared by {created_by_user_id} — expires {date}".
@@ -379,6 +467,7 @@ The composer chat panel is **not** rendered. The completion bar is **not** rende
     7. Does **not** render `<CompletionBar />` or the composer chat panel.
     8. Pipeline metadata fields are not editable (no `<input>` elements in the metadata block).
     9. **App.tsx routing branch:** when `window.location.hash === "#/shared/abc123"`, `App` renders `<SharedInspectView token="abc123" />` and does **not** render `<Layout>`. Conversely, when the hash is `"#/sessions/xyz"`, `App` renders `<Layout>` and does not render `SharedInspectView`. (Vitest: mock `window.location.hash` via `Object.defineProperty(window, 'location', ...)` or `jsdom` `window.location.assign`; render `<App />`; assert presence/absence of the respective roots.)
+   10. **Accessibility:** `jest-axe` assertion against the rendered `SharedInspectView` (in the success state, with a non-trivial snapshot in the payload) returns zero violations — landmark structure, heading hierarchy, labelled disclosure controls, accessible names on the "expires" and "shared by" metadata. The reviewer audience for this surface is explicitly named in design doc 09; a11y is a load-bearing acceptance criterion, not a nice-to-have.
 - [ ] **Step 2: Run to fail.**
 - [ ] **Step 3: Implementation.** `SharedInspectView` is a standalone container. **Do NOT use `useParams` — the app uses hash-router (`useHashRouter.ts`), not React-Router, and there is no `<Route>` component.** Read the token directly from `window.location.hash`:
 
@@ -390,20 +479,66 @@ const token = match?.[1] ?? "";
 ```
 
 Mounts `InspectorPanel readOnly` and `SharedAuditReadinessPanel readOnlyState={...}` (subtasks below).
-- [ ] **Step 3a:** If `InspectorPanel` does not accept `readOnly`, add the prop and propagate it via a `ReadOnlyContext` React context provider at the panel root. Editable subcomponents (form inputs, drag handles, drawer toggles, etc.) consume the context via `useReadOnly()` and render disabled / non-interactive variants when `readOnly === true`. Prefer this over enumerating editable subcomponents at the call site: a context guard is robust against future additions (a new editable surface added in a sibling phase automatically respects the read-only mode), whereas an enumeration is fragile (a missed subcomponent grants accidental edit access to the shared-inspect recipient). Add a Vitest test that mounts `InspectorPanel` with `readOnly={true}` and asserts no `<input>`, `<textarea>`, or interactive `<button>` (excluding navigation/disclosure controls) is rendered with `disabled !== true`. Mirror Phase 7's pattern if Phase 7 has shipped.
-- [ ] **Step 3b:** Implement `<SharedAuditReadinessPanel readOnlyState={AuditReadinessSnapshot} />` as specified in the introduction above. Do **not** mount the existing `<AuditReadinessPanel />` directly — that component reads from the session store and would require an isolation-breaking store population. The shared variant takes the payload as a prop; test it with:
+- [ ] **Step 3a:** If `InspectorPanel` does not accept `readOnly`, add the prop and propagate it via a `ReadOnlyContext` React context provider at the panel root. Editable subcomponents (form inputs, drag handles, drawer toggles, etc.) consume the context via `useReadOnly()` and render disabled / non-interactive variants when `readOnly === true`. Prefer this over enumerating editable subcomponents at the call site: a context guard is robust against future additions (a new editable surface added in a sibling phase automatically respects the read-only mode), whereas an enumeration is fragile (a missed subcomponent grants accidental edit access to the shared-inspect recipient).
+
+  **Vitest assertion (widened per multi-reviewer review).** Mount `InspectorPanel` with `readOnly={true}` and assert no element of the following types is rendered without an explicit `disabled`/`readOnly`/`aria-disabled` truthy attribute (excluding pure navigation/disclosure controls):
+
+  - `<input>` (any type)
+  - `<textarea>`
+  - `<select>`
+  - interactive `<button>` (excluding nav/disclosure controls — identify by `role="button"` plus the presence of a click handler or a non-disclosure semantic; a focusable `<summary>` element is allowed)
+  - any element with `contentEditable="true"`
+  - any element with `draggable="true"` (drag handles can mutate the composition graph)
+  - any element with `role="combobox"`, `role="listbox"`, `role="textbox"`, or `role="spinbutton"`
+
+  The widened assertion catches drag-to-reorder handles, custom combobox widgets, and contenteditable-driven inline edits that the original three-element check would miss. Mirror Phase 7's pattern if Phase 7 has shipped.
+- [ ] **Step 3b:** Implement `<SharedAuditReadinessPanel readOnlyState={AuditReadinessSnapshot} />` as specified in the introduction above. Do **not** mount the existing `<AuditReadinessPanel />` directly — it reads from `sessionStore` and `interpretationEventsStore`, both of which would require isolation-breaking population. The shared variant takes the payload as a prop; test it with:
 
 ```typescript
-it("renders audit readiness checks from prop without session store", () => {
+it("renders all six audit-readiness rows from prop without any store read", () => {
   const readOnlyState: AuditReadinessSnapshot = {
-    checks: [
-      { id: "c1", label: "Schema valid", status: "pass" },
-      { id: "c2", label: "Source configured", status: "pass" },
+    session_id: "00000000-0000-0000-0000-000000000001",
+    composition_version: 1,
+    checked_at: "2026-05-19T00:00:00Z",
+    validation_result: { is_valid: true, errors: [], warnings: [] },
+    rows: [
+      { id: "validation",         label: "Validation",          status: "ok",             summary: "All checks pass",   detail: null, component_ids: [] },
+      { id: "plugin_trust",       label: "Plugin trust",        status: "ok",             summary: "All plugins trusted", detail: null, component_ids: [] },
+      { id: "provenance",         label: "Provenance",          status: "ok",             summary: "Sources declared",  detail: null, component_ids: [] },
+      { id: "retention",          label: "Retention",           status: "ok",             summary: "Default retention", detail: null, component_ids: [] },
+      { id: "llm_interpretations",label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
+      { id: "secrets",            label: "Secrets",             status: "ok",             summary: "All resolved",      detail: null, component_ids: [] },
     ],
   };
   render(<SharedAuditReadinessPanel readOnlyState={readOnlyState} />);
-  expect(screen.getByText("Schema valid")).toBeInTheDocument();
-  expect(screen.getByText("Source configured")).toBeInTheDocument();
+  expect(screen.getByText("Validation")).toBeInTheDocument();
+  expect(screen.getByText("LLM interpretations")).toBeInTheDocument();
+  expect(screen.getByText("Secrets")).toBeInTheDocument();
+});
+
+it("renders llm_interpretations row from snapshot without reading interpretationEventsStore", () => {
+  // The owner-side AuditReadinessPanel overrides this row's display using
+  // interpretationEventsStore counts. The shared variant must NOT do that;
+  // it must render whatever the snapshot row carries. This guards against
+  // future refactors silently coupling the shared view to the store.
+  const readOnlyState: AuditReadinessSnapshot = {
+    session_id: "00000000-0000-0000-0000-000000000001",
+    composition_version: 1,
+    checked_at: "2026-05-19T00:00:00Z",
+    validation_result: { is_valid: true, errors: [], warnings: [] },
+    rows: [
+      // Snapshot says "warning — 2 pending review"; the shared view must
+      // render that, even though interpretationEventsStore is empty.
+      { id: "validation",         label: "Validation",          status: "ok",      summary: "All checks pass",          detail: null, component_ids: [] },
+      { id: "plugin_trust",       label: "Plugin trust",        status: "ok",      summary: "All plugins trusted",      detail: null, component_ids: [] },
+      { id: "provenance",         label: "Provenance",          status: "ok",      summary: "Sources declared",         detail: null, component_ids: [] },
+      { id: "retention",          label: "Retention",           status: "ok",      summary: "Default retention",        detail: null, component_ids: [] },
+      { id: "llm_interpretations",label: "LLM interpretations", status: "warning", summary: "2 pending review (3 resolved)", detail: null, component_ids: [] },
+      { id: "secrets",            label: "Secrets",             status: "ok",      summary: "All resolved",             detail: null, component_ids: [] },
+    ],
+  };
+  render(<SharedAuditReadinessPanel readOnlyState={readOnlyState} />);
+  expect(screen.getByText(/2 pending review/)).toBeInTheDocument();
 });
 ```
 - [ ] **Step 4: Wire the route in `App.tsx` as a top-level hash branch.**
@@ -462,7 +597,7 @@ it("renders audit readiness checks from prop without session store", () => {
 
 ## Task 9: Side-rail integration
 
-**Files:** the Phase 3 side-rail file (verify path — likely `components/composer/SideRail.tsx` or `components/inspector/InspectorPanel.tsx` depending on Phase 3's structure), tests updated in place.
+**Files:** the Phase 3 side-rail file (verify path — likely `components/composer/SideRail.tsx`; `components/inspector/InspectorPanel.tsx` is **not** present in this codebase), tests updated in place.
 
 - [ ] **Step 1: Failing test.** Render the side rail and assert `<CompletionBar />` is present in the expected position (below audit-readiness, above Catalog).
 - [ ] **Step 2: Run to fail.**
@@ -477,15 +612,24 @@ it("renders audit readiness checks from prop without session store", () => {
 
 ## Task 10: Remove the legacy Execute button (if it duplicates)
 
-**Files:** the existing Execute-button host (likely `InspectorPanel.tsx` or `ProgressView.tsx`), tests updated.
+**Files:** TBD — host file must be discovered (see Step 1a below; `components/inspector/InspectorPanel.tsx` does **not** exist in this codebase, contrary to earlier plan drafts — `components/inspector/` contains only `GraphView.tsx`, `RunOutputsPanel.tsx`, and `YamlView.tsx`).
 
 The design doc 09 explicitly says the completion bar **replaces** the previous single Execute treatment. The legacy button must come out — otherwise users see two Run buttons. **No backwards compatibility, per CLAUDE.md "No Legacy Code Policy".**
 
-- [ ] **Step 1: Failing test.** Render the composer view; assert the legacy Execute button is not present.
+- [ ] **Step 1a: Discovery (load-bearing — do this BEFORE Step 1).** Locate every current call site for `executionStore.execute(...)`:
+
+  ```bash
+  rg -n "executionStore\.execute\(" src/elspeth/web/frontend/src/
+  rg -n "useExecutionStore.*execute" src/elspeth/web/frontend/src/
+  ```
+
+  Enumerate every host — the Execute button, command-palette entries, keyboard shortcuts, custom-event handlers, etc. The commit message MUST include the full list so reviewers can confirm the removal is complete. **The Execute click handler is a verb, and other callers may share it; do not assume the button is the only consumer.** If callers other than the button exist, decide per-caller: keep (command palette, keyboard shortcut should keep the verb wired to `CompletionBar`'s handler), or remove (a duplicate button on another surface).
+
+- [ ] **Step 1: Failing test.** Render the composer view; assert the legacy Execute button is not present (asserted by its current `data-testid` or visible label; verify in Step 1a).
 - [ ] **Step 2: Run to fail.** (The test will fail because the legacy button is still there.)
-- [ ] **Step 3: Implementation.** Delete the legacy button JSX and any handlers that are no longer reachable. Verify the click path is fully owned by `CompletionBar.tsx`.
-- [ ] **Step 4: Run to pass.** All composer-view integration tests still pass; the CompletionBar handles execute.
-- [ ] **Step 5: Commit.** `refactor(web/frontend): remove legacy Execute button — CompletionBar owns the verb now`.
+- [ ] **Step 3: Implementation.** Delete the legacy button JSX from the host file discovered in Step 1a. Delete handlers that are no longer reachable (per the enumeration). Verify the click path is fully owned by `CompletionBar.tsx`; keep `executionStore.execute(...)` wired to other discovered callers (command palette, keyboard shortcut) — those continue to call into the verb, just via the new owner's handler.
+- [ ] **Step 4: Run to pass.** All composer-view integration tests still pass; the CompletionBar handles execute; command-palette + keyboard-shortcut tests for the verb still pass.
+- [ ] **Step 5: Commit.** `refactor(web/frontend): remove legacy Execute button in <discovered-host> — CompletionBar owns the verb now (other callers: <enumeration from Step 1a>)`.
 
 ---
 
@@ -544,7 +688,7 @@ The design doc 09 explicitly says the completion bar **replaces** the previous s
 | Risk | Mitigation |
 |---|---|
 | Three buttons look cluttered or users can't decide which to pick | Design doc 09 §"Layout and visual hierarchy" addresses this: lighter button styling, no primary emphasis, audit-readiness panel above carries priority signal. Per-button tooltip names the persona-typical use case. |
-| Narrative mode triggers when the plugin's output schema doesn't include `summary` | `NarrativeResults` falls back to "No narrative available" rather than crashing. The wire contract is pinned in `BaseTransform.supports_narrative_summary` docstring; opt-ins are reviewed at PR time. |
+| Narrative mode triggers when the plugin's output schema doesn't include `summary` | `NarrativeResults` falls back to "No narrative available" rather than crashing. The wire contract is pinned in each opted-in plugin's per-class docstring at the bootstrap-plugin site (where `capability_tags = ("narrative-summary",)` is declared); opt-ins are reviewed at PR time. |
 | Catalog has not loaded when `useNarrativeMode` runs | Returns `false` (safe default — table preview). No flash of incorrect rendering because the result view itself only renders after a run starts, by which time the catalog will have loaded. |
 | Recipient clicks a stale link | The 401 response shape ("link expired / invalid") is rendered with a clear "ask the sender for a fresh link" message. No leak of session existence. |
 | Recipient is unauthenticated | App detects `window.location.hash.startsWith("#/shared/")` before the auth check and stores the hash in `sessionStorage`; after login, the client-side router restores the hash so the recipient lands on `SharedInspectView`. The hash is not sent to the server. |
@@ -557,6 +701,32 @@ The design doc 09 explicitly says the completion bar **replaces** the previous s
 ---
 
 ## Review history
+
+**2026-05-19 — Multi-reviewer Go/No-Go panel applied (CONDITIONAL → GO)**
+
+Four reviewers (reality / architecture / quality / systems) returned CONDITIONAL GO. Frontend-side blockers resolved:
+
+- **B4 (`AuditReadinessRow` does not exist):** Task 8 now has a Step 0 prerequisite that extracts `AuditReadinessRow` from `AuditReadinessPanel.tsx` as a first commit (preferred option (a)), enabling reuse from `SharedAuditReadinessPanel`. Option (b) inline-only is documented as the fallback. Earlier same-day edit (which used `<AuditReadinessRow>` as if it existed) is now consistent with reality.
+- **B5 (`components/inspector/InspectorPanel.tsx` does not exist):** Task 10 rewritten with a Step 1a discovery step (`rg -n "executionStore\.execute\(" src/elspeth/web/frontend/src/`) and a caller-enumeration commit-message requirement. The File-structure list's `InspectorPanel.tsx` entry replaced with **TBD** + the discovery instruction. Task 9 sibling note also corrected.
+- **B6 (capability_tags substitution — frontend half):** Task 5 `useNarrativeMode` now branches on `capability_tags.includes("narrative-summary")` rather than `supports_narrative_summary === true`. `TransformPluginMetadata` extension dropped from Task 1 (the field is already on the wire). Goal/Sequencing/Wire-contracts/Tier-table/Risks/Sibling-work-preview/Wire-contracts-consumed-from-19a references all switched to capability_tags. Test 7 added asserting exact-string tag match (open-vocabulary discipline).
+
+Non-blocking recommended fixes also applied:
+
+- "Trust `rg`, not the line number" note added at the top of the file.
+- Task 8 Step 3a `ReadOnlyContext` Vitest assertion widened from `<input>`/`<textarea>`/`<button>` to also cover `<select>`, `contentEditable`, `draggable`, `role="combobox"`, `role="listbox"`, `role="textbox"`, `role="spinbutton"`. Catches drag-to-reorder handles, custom combobox widgets, and inline contenteditable edits.
+- Task 4 `SaveForReviewDialog` and Task 8 `SharedInspectView` gained `jest-axe` accessibility-clean acceptance criteria. The reviewer audience for the shared-inspect surface is named in design doc 09; a11y is a load-bearing acceptance criterion, not a nice-to-have.
+
+**2026-05-19 — Post-Phase-18 merge reconciliation**
+
+- Phase 18 (5b) merged to RC5.2 (commit `3dee19f8d`). Two data-shape errors in the pre-merge plan corrected:
+  1. **`AuditReadinessSnapshot.checks` → `rows`** in Task 8 SharedAuditReadinessPanel introduction and Step-3b test fixture. The actual merged-5b field is `rows: readonly ReadinessRow[]` (`web/audit_readiness/models.py:42–66`), populated server-side with all six closed-enum rows including `llm_interpretations`. The fixture was rewritten to include all six required rows with correct `ReadinessStatus` values (`"ok"`, not `"pass"`).
+  2. **`ReadinessRow` shape pinned** — the type now includes `id`, `label`, `status`, `summary`, `detail`, `component_ids` fields per the merged model. The fixture's prior 3-field stub would have failed pydantic-strict parse and the integration test would have been a false-positive.
+- Task 8 owner-vs-shared parity note added: the owner-side panel overrides the `llm_interpretations` row's display using `interpretationEventsStore` counts (`AuditReadinessPanel.tsx:474–490`). The shared variant must NOT do that override — it renders whatever the snapshot row carries. A second test was added that asserts the shared panel surfaces the snapshot's `summary` text even when the store is empty.
+- Task 6 (NarrativeResults) gained a load-bearing run-filter block. Without it, the implementer would silently fall back to a session-aggregate read on `interpretationEventsStore.pendingBySession[sessionId]`, which would over-count resolutions from earlier runs (the store keys by session_id only; the table has no `run_id` column). The filter is wall-clock: `created_at >= currentRun.started_at AND created_at <= (currentRun.completed_at ?? Date.now())`. Two new test cases added — prior-run events must NOT surface, in-flight runs must surface partial windows.
+- 19a sibling edits: Task 4 §"Post-Phase-18 merge fact" pins that the snapshot service already populates the `llm_interpretations` row server-side; Task 5 redesigned around frozen-at-mark-time `audit_readiness` in the blob (was: fresh fetch at resolve-time).
+- Validation review at `/home/john/.claude/plans/docs-composer-ux-redesign-2026-05-please-dazzling-dove.md` was wrong on one point — 5b *did* extend `AuditReadinessSnapshot` (added `llm_interpretations` to the closed enum). Phase 19's snapshot-extension work that the validation's Issue A verdict (b) had proposed is structurally pre-done by the merged 5b code. Phase 19's job collapses to: call the existing snapshot service at mark-time and freeze the result in the blob.
+
+
 
 **2026-05-18 — Path A adjudication applied (false-premise correction)**
 
@@ -582,7 +752,7 @@ The design doc 09 explicitly says the completion bar **replaces** the previous s
   - `SharedInspectResponse` gains `audit_readiness: AuditReadinessSnapshot` (reused verbatim from Phase 2) — Task 8 already consumes this field, so the type is now contract-compliant.
 - Narrative result rendering (Task 6) documents Phase 5b interpretation events as the post-run overlay; component must tolerate absent overlay when 5b is not yet shipped. Two new test cases added.
 - No verb-count changes (Task 3 already specified three buttons matching design doc 09); the 19a rewrite confirms three-verb model is normative.
-- `supports_narrative_summary` on the wire is unchanged (boolean); backend declares it as `ClassVar[bool]` on the plugin Protocol per 19a Task 8.
+- Narrative-summary opt-in rides the existing `capability_tags` open-vocabulary channel (per 19a Task 8, post-2026-05-19 simplification). No new wire field.
 
 **2026-05-15 — Review panel findings applied (pre-implementation)**
 

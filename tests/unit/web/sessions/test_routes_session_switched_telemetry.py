@@ -38,7 +38,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from elspeth.web.sessions.models import proposal_events_table
-from elspeth.web.sessions.telemetry import observed_value
+from elspeth.web.sessions.telemetry import _FakeCounter, observed_value
 
 
 def _patch_trust_mode(test_client: TestClient, session_id: str, **fields: object):
@@ -78,10 +78,13 @@ def test_route_emits_session_switched_on_mode_change(test_client: TestClient) ->
     assert observed_value(telemetry.session_switched_total) == 1
 
     # Attribute contract: ``from_mode`` / ``to_mode`` drawn from the
-    # per-session vocabulary (NOT ``guided`` / ``freeform``).
+    # per-session vocabulary (NOT ``guided`` / ``freeform``).  Narrow
+    # the type via isinstance against ``_FakeCounter`` rather than
+    # ``hasattr`` (CLAUDE.md unconditionally bans hasattr) — see the
+    # canonical pattern in ``test_telemetry_phase8.py``.
     counter = telemetry.session_switched_total
-    assert hasattr(counter, "calls"), "test must run against _FakeCounter (build_sessions_telemetry(meter=None))"
-    calls = counter.calls  # type: ignore[attr-defined]
+    assert isinstance(counter, _FakeCounter), "test must run against _FakeCounter (build_sessions_telemetry(meter=None))"
+    calls = counter.calls
     assert len(calls) == 1
     amount, attributes, _ctx = calls[0]
     assert amount == 1

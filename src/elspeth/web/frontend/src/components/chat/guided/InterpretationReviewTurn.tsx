@@ -27,61 +27,25 @@
 //     region, but the status announcement here is structural to the
 //     widget's own contract and must survive ChatPanel refactors.
 //
-// Wire contract:
-//
-//   - "Use my interpretation" → resolveEvent(sessionId, event.id,
-//     { choice: 'accepted_as_drafted' }).
-//   - "Change it" reveals a textarea pre-filled with event.llm_draft.
-//     Submit → resolveEvent(sessionId, event.id,
-//     { choice: 'amended', amended_value: <text> }).
-//   - "Stop reviewing interpretations this session" opens a ConfirmDialog
-//     with explicit session-scope copy; on confirm → optOut(sessionId).
-//
-// Error handling:
-//
-//   - The store's resolveEvent / optOut surface the underlying ApiError
-//     on failure.  The widget catches and routes:
-//       * status === 409  → "This interpretation was already resolved in
-//                            another tab — reload to see the latest"
-//                            (multi-tab TOCTOU; F-12).
-//       * status === 422  → surface the validation error detail.
-//       * any other status → generic "Could not resolve interpretation"
-//                            with the detail text.
-//
-// Client-side validation:
-//
-//   - Empty amendment → Submit disabled (no request issued).
-//   - Amendment exceeding INTERPRETATION_AMENDMENT_MAX_BYTES bytes
-//     (UTF-8) → client-side validation error before the request is
-//     issued.  The 8 KB cap mirrors the backend pydantic validator in
-//     contracts/composer_interpretation.py.
+// Behavioural state machine, error-mapping, and resolve/opt-out wiring are
+// shared with the freeform-mode counterpart (InterpretationReviewInlineMessage)
+// via the `useInterpretationResolver` hook in hooks/useInterpretationResolver.ts.
+// This component owns only its rendering, ARIA wiring, and focus management;
+// the wire/store logic and 8 KB byte cap live in the hook.
 // ============================================================================
 
-import { useEffect, useId, useRef, useState } from "react";
-import type {
-  ApiError,
-  CompositionState,
-} from "@/types/index";
+import { useEffect, useId, useRef } from "react";
+import type { CompositionState } from "@/types/index";
 import type { InterpretationEvent } from "@/types/interpretation";
-import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import {
+  INTERPRETATION_AMENDMENT_MAX_BYTES,
+  useInterpretationResolver,
+} from "@/hooks/useInterpretationResolver";
 
-/**
- * Maximum amendment length in UTF-8 bytes.  Mirrors the backend's
- * InterpretationResolveRequest.amended_value validator (see
- * contracts/composer_interpretation.py).  Encoding-byte length is the
- * correct unit: JavaScript .length counts UTF-16 code units, which
- * under-reports for non-BMP characters and over-reports relative to the
- * wire-side byte budget for ASCII.  We measure with TextEncoder so the
- * client-side check matches the server's evaluation exactly.
- */
-export const INTERPRETATION_AMENDMENT_MAX_BYTES = 8192;
-
-const TEXT_ENCODER = new TextEncoder();
-
-function byteLength(text: string): number {
-  return TEXT_ENCODER.encode(text).byteLength;
-}
+// Re-export the byte-cap constant so existing callers / tests that imported
+// it from this module continue to compile after the hook extraction.
+export { INTERPRETATION_AMENDMENT_MAX_BYTES };
 
 export interface InterpretationReviewTurnProps {
   /** The pending interpretation event to review. */
@@ -97,71 +61,30 @@ export interface InterpretationReviewTurnProps {
   onResolved?: (newState: CompositionState | null) => void;
 }
 
-/** Local error envelope — narrow enough to render without leaking ApiError shape. */
-interface DisplayedError {
-  /** Heading text shown above the body. */
-  heading: string;
-  /** Body text; may contain server-provided detail. */
-  body: string;
-}
-
-/**
- * Type guard: distinguishes ApiError (plain object thrown by parseResponse)
- * from arbitrary Error instances.  parseResponse throws a raw object literal
- * with a numeric `status` field; that's the signal we use here.  Falling
- * through to the generic branch is correct for AbortError or unexpected
- * runtime errors — we don't want to confuse "the network failed" with
- * "the server returned a structured 4xx".
- */
-function isApiError(err: unknown): err is ApiError {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "status" in err &&
-    typeof (err as { status: unknown }).status === "number"
-  );
-}
-
-function describeError(err: unknown): DisplayedError {
-  if (isApiError(err)) {
-    if (err.status === 409) {
-      // F-12 multi-tab TOCTOU: the event was already resolved on the
-      // server (typically by another browser tab on the same session).
-      return {
-        heading: "Already resolved",
-        body:
-          "This interpretation was already resolved in another tab — " +
-          "reload to see the latest.",
-      };
-    }
-    if (err.status === 422) {
-      return {
-        heading: "Invalid amendment",
-        body: err.detail || "The server rejected the amendment.",
-      };
-    }
-    return {
-      heading: "Could not resolve interpretation",
-      body: err.detail || `Server returned ${err.status}.`,
-    };
-  }
-  return {
-    heading: "Could not resolve interpretation",
-    body: "An unexpected error occurred.",
-  };
-}
-
 export function InterpretationReviewTurn({
   event,
   sessionId,
   onResolved,
 }: InterpretationReviewTurnProps) {
-  // Store actions.  Selecting individual actions (rather than the whole
-  // state) keeps re-renders scoped: this widget never reads pendingBySession
-  // / resolvedCountBySession / optedOutBySession directly — the parent's
-  // re-render on resolution will unmount it.
-  const resolveEvent = useInterpretationEventsStore((s) => s.resolveEvent);
-  const optOut = useInterpretationEventsStore((s) => s.optOut);
+  const {
+    mode,
+    amendText,
+    setAmendText,
+    resolveInFlight,
+    showOptOutConfirm,
+    displayedError,
+    amendByteLength,
+    amendIsTooLong,
+    submitDisabled,
+    primaryButtonsDisabled,
+    handleUseMine,
+    handleOpenAmend,
+    handleCancelAmend,
+    handleSubmitAmend,
+    handleRequestOptOut,
+    handleCancelOptOut,
+    handleConfirmOptOut,
+  } = useInterpretationResolver({ event, sessionId, onResolved });
 
   // useId scopes DOM IDs per-instance so multiple widgets coexisting in
   // GuidedHistory (or two open tabs of the same session in development)
@@ -172,31 +95,6 @@ export function InterpretationReviewTurn({
   const amendInputId = `${reactId}-amend`;
   const errorId = `${reactId}-error`;
 
-  // ── Local UI state ───────────────────────────────────────────────────────
-  // mode: which sub-view is showing.
-  //   "choose"   → two primary buttons (Use mine / Change it).
-  //   "amend"    → textarea + Submit / Cancel.
-  // Distinct flag from `inFlight` because the textarea must stay editable
-  // until the user clicks Submit; we don't conflate "showing the textarea"
-  // with "request in flight".
-  const [mode, setMode] = useState<"choose" | "amend">("choose");
-  // Amendment draft; initialised lazily on first transition to amend-mode
-  // so re-renders in choose-mode don't snapshot the LLM draft into local
-  // state until the user actually opts to edit.
-  const [amendText, setAmendText] = useState<string>("");
-  // In-flight guards.  Two separate booleans rather than one shared flag
-  // because the opt-out modal can be open while a resolve is pending and
-  // we want each surface's spinner / disabled state to track its own
-  // request.
-  const [resolveInFlight, setResolveInFlight] = useState(false);
-  const [optOutInFlight, setOptOutInFlight] = useState(false);
-  // Confirm-modal visibility for the session-scope opt-out.
-  const [showOptOutConfirm, setShowOptOutConfirm] = useState(false);
-  // Last error to display.  Cleared when the user starts another action.
-  const [displayedError, setDisplayedError] = useState<DisplayedError | null>(
-    null,
-  );
-
   // Refs for focus management.
   const useMineButtonRef = useRef<HTMLButtonElement | null>(null);
   const amendTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -205,6 +103,12 @@ export function InterpretationReviewTurn({
   // Focus on mount: the "Use my interpretation" button.  Mirrors
   // InlineSourceDisambiguationTurn's F-19 focus-handoff so keyboard
   // users don't tab from the top of the chat panel.
+  //
+  // This is a guided-mode-only contract: mounting the widget IS the AT
+  // user's entry to the surface.  The freeform-mode inline-message
+  // counterpart intentionally does NOT focus on mount because it lives
+  // inside the chat log and would yank focus from a user typing in the
+  // chat input below.
   useEffect(() => {
     useMineButtonRef.current?.focus();
     // Empty dep array: only fire on initial mount.  Toggling between
@@ -228,108 +132,8 @@ export function InterpretationReviewTurn({
     }
   }, [mode]);
 
-  // ── Derived state ────────────────────────────────────────────────────────
   const userTerm = event.user_term ?? "this term";
   const llmDraft = event.llm_draft ?? "";
-  const trimmedAmendText = amendText.trim();
-  const amendByteLength = byteLength(amendText);
-  const amendIsEmpty = trimmedAmendText.length === 0;
-  const amendIsTooLong = amendByteLength > INTERPRETATION_AMENDMENT_MAX_BYTES;
-  const submitDisabled = amendIsEmpty || amendIsTooLong || resolveInFlight;
-  const primaryButtonsDisabled = resolveInFlight || optOutInFlight;
-
-  // ── Handlers ─────────────────────────────────────────────────────────────
-
-  async function handleUseMine() {
-    if (primaryButtonsDisabled) return;
-    setDisplayedError(null);
-    setResolveInFlight(true);
-    try {
-      const { new_state } = await resolveEvent(sessionId, event.id, {
-        choice: "accepted_as_drafted",
-      });
-      onResolved?.(new_state);
-    } catch (err) {
-      setDisplayedError(describeError(err));
-    } finally {
-      setResolveInFlight(false);
-    }
-  }
-
-  function handleOpenAmend() {
-    if (primaryButtonsDisabled) return;
-    setDisplayedError(null);
-    setAmendText(llmDraft);
-    setMode("amend");
-  }
-
-  function handleCancelAmend() {
-    if (resolveInFlight) return;
-    setDisplayedError(null);
-    setMode("choose");
-  }
-
-  async function handleSubmitAmend() {
-    if (submitDisabled) return;
-    // Belt-and-suspenders: even if the Submit button is disabled, an
-    // Enter-key press in the textarea (or a test that bypasses pointer
-    // events) could route here with empty / too-long text.  Surface the
-    // client-side validation error and don't issue the request.
-    if (amendIsEmpty) {
-      setDisplayedError({
-        heading: "Invalid amendment",
-        body: "Amendment cannot be empty.",
-      });
-      return;
-    }
-    if (amendIsTooLong) {
-      setDisplayedError({
-        heading: "Amendment too long",
-        body:
-          `Amendment is ${amendByteLength} bytes; the maximum is ` +
-          `${INTERPRETATION_AMENDMENT_MAX_BYTES} bytes.`,
-      });
-      return;
-    }
-    setDisplayedError(null);
-    setResolveInFlight(true);
-    try {
-      const { new_state } = await resolveEvent(sessionId, event.id, {
-        choice: "amended",
-        amended_value: amendText,
-      });
-      onResolved?.(new_state);
-    } catch (err) {
-      setDisplayedError(describeError(err));
-    } finally {
-      setResolveInFlight(false);
-    }
-  }
-
-  function handleRequestOptOut() {
-    if (primaryButtonsDisabled) return;
-    setDisplayedError(null);
-    setShowOptOutConfirm(true);
-  }
-
-  function handleCancelOptOut() {
-    setShowOptOutConfirm(false);
-  }
-
-  async function handleConfirmOptOut() {
-    setShowOptOutConfirm(false);
-    setOptOutInFlight(true);
-    try {
-      await optOut(sessionId);
-      onResolved?.(null);
-    } catch (err) {
-      setDisplayedError(describeError(err));
-    } finally {
-      setOptOutInFlight(false);
-    }
-  }
-
-  // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <section
@@ -381,7 +185,7 @@ export function InterpretationReviewTurn({
             type="button"
             className="btn btn-primary guided-interpretation-review-accept-btn"
             aria-label={`Accept the LLM's interpretation of ${userTerm}`}
-            onClick={handleUseMine}
+            onClick={() => void handleUseMine()}
             disabled={primaryButtonsDisabled}
           >
             {resolveInFlight ? (
@@ -446,7 +250,7 @@ export function InterpretationReviewTurn({
             <button
               type="button"
               className="btn btn-primary guided-interpretation-review-submit-btn"
-              onClick={handleSubmitAmend}
+              onClick={() => void handleSubmitAmend()}
               disabled={submitDisabled}
             >
               {resolveInFlight ? (
@@ -494,7 +298,7 @@ export function InterpretationReviewTurn({
           confirmLabel="Stop reviewing for this session"
           cancelLabel="Keep reviewing"
           variant="default"
-          onConfirm={handleConfirmOptOut}
+          onConfirm={() => void handleConfirmOptOut()}
           onCancel={handleCancelOptOut}
         />
       )}

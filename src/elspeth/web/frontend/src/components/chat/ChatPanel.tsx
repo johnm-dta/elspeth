@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useCallback, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useComposer } from "@/hooks/useComposer";
 import { FOCUSABLE_SELECTOR } from "@/hooks/useFocusTrap";
 import {
@@ -25,6 +26,7 @@ import { GuidedTurn } from "./guided/GuidedTurn";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
 import { InlineSourceDisambiguationTurn } from "./InlineSourceDisambiguationTurn";
 import { InlineSourceFallbackPrompt } from "./InlineSourceFallbackPrompt";
+import { InterpretationReviewInlineMessage } from "./InterpretationReviewInlineMessage";
 import type {
   BlobMetadata,
   ChatMessage,
@@ -440,6 +442,48 @@ export function ChatPanel({
   const inlineSourceSummary = useInlineSourceStore((s) =>
     activeSessionId !== null ? s.summariesBySession[activeSessionId] ?? null : null,
   );
+
+  // ── Interpretation review pending events (Phase 5b Task 5) ────────────────
+  //
+  // Freeform-mode surfacing of LLM-interpretation review affordances.
+  // Guided mode renders these inside the GuidedTurn dispatch
+  // (InterpretationReviewTurn).  In freeform mode they appear inline in
+  // the chat message stream — one InterpretationReviewInlineMessage per
+  // pending event, ordered by created_at ascending so the oldest
+  // unresolved interpretation surfaces first.
+  //
+  // The dispatch predicate is structural: the store has at least one
+  // pending event for the active session AND the freeform branch is
+  // reached (the guided branches return early above).  We do NOT key off
+  // the proposal summary text here — interpretation events come from a
+  // separate wire route (POST /interpretations/resolve) and live in
+  // their own store; an inline_blob proposal whose summary lacks
+  // "I read" / "interpreted as" simply does not produce a pending
+  // interpretation event, so it cannot trigger this widget.  Task 5
+  // test 17 asserts this routing predicate's negative branch.
+  //
+  // Subscribe to the per-session pending map so a new pending event
+  // arriving via store.addPendingEvent / store.refreshAll triggers a
+  // re-render.  Reading via a stable selector that returns an empty
+  // record (rather than undefined) when the session has no entry yet
+  // avoids identity churn from `?? {}` on every render.
+  const pendingInterpretationEventsBySession = useInterpretationEventsStore(
+    (s) => s.pendingBySession,
+  );
+  const pendingInterpretationEvents = useMemo(() => {
+    if (activeSessionId === null) return [];
+    const map = pendingInterpretationEventsBySession[activeSessionId];
+    if (!map) return [];
+    // Sort by created_at ascending (ISO-8601 strings sort lexicographically
+    // in chronological order).  Stable order is important because the
+    // widget is rendered with the event id as the React key — re-sorts
+    // on each render would not remount the components, but the visual
+    // top-to-bottom order would shift if a new event arrived with an
+    // earlier created_at (which the wire contract permits but is rare).
+    return Object.values(map).sort((a, b) =>
+      a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
+    );
+  }, [activeSessionId, pendingInterpretationEventsBySession]);
 
   // Disambiguation re-fire guards (F-10 / F-11). Subscribed via the
   // store so the widget surface updates when a guard flips — without
@@ -1180,6 +1224,31 @@ export function ChatPanel({
             onEdit={handleEditInlineSource}
           />
         )}
+        {/*
+          Interpretation-review inline messages (Phase 5b Task 5).
+
+          Freeform-mode rendering of pending interpretation events.  One
+          message per event, in created_at-ascending order.  Lives inside
+          the chat-panel-messages region (role="log") so the messages
+          flow naturally with surrounding assistant turns; the inline
+          widget brings its own role="region" with a stable accessible
+          name so AT users can jump to it independently of the message
+          stream.
+
+          The guided-mode counterpart (InterpretationReviewTurn) is
+          dispatched by GuidedTurn higher up in the file's guided
+          branch; that branch returns early before reaching this
+          freeform body.  Both surfaces consume the same
+          interpretationEventsStore so a resolution on either side
+          updates the other automatically.
+        */}
+        {pendingInterpretationEvents.map((event) => (
+          <InterpretationReviewInlineMessage
+            key={event.id}
+            event={event}
+            sessionId={activeSessionId}
+          />
+        ))}
         {/*
           Inline-source disambiguation widgets (Phase 5a Task 4).
 

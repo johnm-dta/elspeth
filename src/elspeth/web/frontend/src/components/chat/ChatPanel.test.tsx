@@ -10,6 +10,7 @@ import {
 } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
 import { useComposer } from "@/hooks/useComposer";
 import { makeComposition } from "@/test/composerFixtures";
@@ -28,6 +29,7 @@ import type {
   TurnPayload,
   TurnRecord,
 } from "@/types/guided";
+import type { InterpretationEvent } from "@/types/interpretation";
 
 vi.mock("@/hooks/useComposer", () => ({
   useComposer: vi.fn(),
@@ -1792,5 +1794,285 @@ describe("ChatPanel inline-source fallback prompt", () => {
     expect(
       useInlineSourceStore.getState().isDismissed(sessionFixture.id),
     ).toBe(true);
+  });
+});
+
+// ── Interpretation review inline-message dispatch (Phase 5b Task 5) ──────────
+//
+// These tests cover ChatPanel's freeform-mode rendering of pending
+// interpretation events via the InterpretationReviewInlineMessage widget.
+// The widget itself is tested in InterpretationReviewInlineMessage.test.tsx;
+// here we assert the dispatch predicate:
+//
+//   * Freeform mode + pending event in pendingBySession → render one
+//     inline message per event, in created_at-ascending order.
+//   * Guided mode → do NOT render the inline message (the guided turn
+//     surface handles interpretation review via InterpretationReviewTurn).
+//   * Opt-out clears pendingBySession locally → no inline messages even
+//     if backend rows remain for audit.
+//   * Negative-case routing predicate: an `inline_blob` proposal whose
+//     summary does NOT contain "I read" / "interpreted as" routes to
+//     the standard InlineSourceCreatedTurn, NOT to this widget.  This
+//     pins the discriminator between the two surfaces so a future
+//     change to either does not silently widen the interpretation-
+//     review surface.
+
+describe("ChatPanel interpretation-review inline-message dispatch", () => {
+  const sessionFixture: Session = {
+    id: "session-interp",
+    title: "Interp session",
+    created_at: "2026-05-18T10:00:00Z",
+    updated_at: "2026-05-18T10:00:00Z",
+  };
+
+  function makeInterpretationEvent(
+    overrides: Partial<InterpretationEvent> = {},
+  ): InterpretationEvent {
+    return {
+      id: "evt-a",
+      session_id: "session-interp",
+      composition_state_id: "state-1",
+      affected_node_id: "node-1",
+      tool_call_id: "tool-1",
+      user_term: "cool",
+      llm_draft: "trendy",
+      accepted_value: null,
+      choice: "pending",
+      created_at: "2026-05-18T10:00:01Z",
+      resolved_at: null,
+      actor: "user:owner:u-1",
+      interpretation_source: "user_approved",
+      model_identifier: "anthropic/claude-opus-4-7",
+      model_version: "20260518",
+      provider: "anthropic",
+      composer_skill_hash: "deadbeef",
+      arguments_hash: null,
+      hash_domain_version: null,
+      runtime_model_identifier_at_resolve: null,
+      runtime_model_version_at_resolve: null,
+      resolved_prompt_template_hash: null,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    Element.prototype.scrollIntoView = vi.fn();
+    resetStore(useSessionStore);
+    resetStore(useInlineSourceStore);
+    resetStore(useInterpretationEventsStore);
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: null,
+    });
+  });
+
+  // Test 13: freeform mode + pending event → inline message rendered.
+  it("renders an inline interpretation message in freeform mode when a pending event exists", () => {
+    const event = makeInterpretationEvent();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [],
+    });
+    act(() => {
+      useInterpretationEventsStore
+        .getState()
+        .addPendingEvent(sessionFixture.id, event);
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.getByTestId("interpretation-review-inline-message"),
+    ).toBeInTheDocument();
+  });
+
+  // Test 14: guided mode → inline message NOT rendered (guided turn handles it).
+  it("does NOT render the inline message in guided mode (the guided turn handles it)", () => {
+    const event = makeInterpretationEvent();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_1_source",
+        history: [],
+        terminal: null,
+        chat_history: [],
+        chat_turn_seq: 0,
+      },
+      guidedNextTurn: {
+        type: "single_select",
+        step_index: 0,
+        payload: {
+          question: "Pick one",
+          options: [{ id: "a", label: "A", hint: null }],
+          allow_custom: false,
+        },
+      },
+    });
+    act(() => {
+      useInterpretationEventsStore
+        .getState()
+        .addPendingEvent(sessionFixture.id, event);
+    });
+
+    render(<ChatPanel />);
+
+    // The guided branch is rendered (no fall-through to the freeform body),
+    // so the inline-message widget is not in the DOM.
+    expect(
+      screen.queryByTestId("interpretation-review-inline-message"),
+    ).not.toBeInTheDocument();
+  });
+
+  // Test 15: two pending events → two inline messages in created_at-ascending order.
+  it("renders two inline messages in created_at-ascending order when two pending events exist", () => {
+    // Seed in reverse-chronological order to ensure the component sorts
+    // them (not just renders them in insertion order).
+    const eventLater = makeInterpretationEvent({
+      id: "evt-later",
+      user_term: "later-term",
+      created_at: "2026-05-18T11:00:00Z",
+    });
+    const eventEarlier = makeInterpretationEvent({
+      id: "evt-earlier",
+      user_term: "earlier-term",
+      created_at: "2026-05-18T10:00:00Z",
+    });
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [],
+    });
+    act(() => {
+      useInterpretationEventsStore
+        .getState()
+        .addPendingEvent(sessionFixture.id, eventLater);
+      useInterpretationEventsStore
+        .getState()
+        .addPendingEvent(sessionFixture.id, eventEarlier);
+    });
+
+    render(<ChatPanel />);
+
+    const widgets = screen.getAllByTestId(
+      "interpretation-review-inline-message",
+    );
+    expect(widgets).toHaveLength(2);
+    // The earlier-created event renders first (top-of-list).  Match by the
+    // user_term text inside each widget so the assertion does not depend on
+    // event-id ordering, which would be a fragile proxy.
+    expect(widgets[0].textContent).toMatch(/earlier-term/);
+    expect(widgets[1].textContent).toMatch(/later-term/);
+  });
+
+  // Test 16: after opt-out the pending map is cleared → no inline messages.
+  it("renders no inline messages after opt-out clears the pending map locally", async () => {
+    const event = makeInterpretationEvent();
+    // Mock the opt-out API call so the store action completes
+    // synchronously-as-far-as-the-store-is-concerned.
+    const optOutSpy = vi
+      .spyOn(apiClient, "optOutOfInterpretations")
+      .mockResolvedValue({
+        session_id: sessionFixture.id,
+        interpretation_review_disabled: true,
+        opted_out_at: "2026-05-18T12:00:00Z",
+      });
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [],
+    });
+    act(() => {
+      useInterpretationEventsStore
+        .getState()
+        .addPendingEvent(sessionFixture.id, event);
+    });
+
+    const { rerender } = render(<ChatPanel />);
+    expect(
+      screen.getByTestId("interpretation-review-inline-message"),
+    ).toBeInTheDocument();
+
+    // Drive the opt-out via the store action — same surface the widget's
+    // "Stop reviewing" confirm modal calls into.  The store clears
+    // pendingBySession[sessionId] on success.
+    await act(async () => {
+      await useInterpretationEventsStore.getState().optOut(sessionFixture.id);
+    });
+    rerender(<ChatPanel />);
+
+    expect(optOutSpy).toHaveBeenCalledWith(sessionFixture.id);
+    expect(
+      screen.queryByTestId("interpretation-review-inline-message"),
+    ).not.toBeInTheDocument();
+  });
+
+  // Test 17: negative-case routing predicate. An inline_blob proposal whose
+  // summary contains neither "I read" nor "interpreted as" routes to the
+  // standard InlineSourceCreatedTurn, NOT to this widget.  This pins the
+  // discriminator between the two surfaces: the interpretation-review
+  // widget keys off pendingInterpretationEvents (which is empty here),
+  // and the InlineSourceCreatedTurn keys off inlineSourceSummary (which
+  // we seed via the blob projection).
+  it("an inline_blob proposal with no interpretation-context summary routes to InlineSourceCreatedTurn, not the interpretation-review inline message", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: "blob-routing-1",
+      session_id: sessionFixture.id,
+      filename: "rows.csv",
+      mime_type: "text/csv",
+      size_bytes: 32,
+      content_hash: "hash-routing",
+      created_at: "2026-05-18T10:00:01Z",
+      created_by: "user",
+      source_description: null,
+      status: "ready",
+      // Provenance is llm_generated (not interpretation-related).  The
+      // resulting summary in the InlineSourceCreatedTurn body reads
+      // "Created a 5-row source from your input" — i.e., it does NOT
+      // contain "I read" or "interpreted as".
+      creation_modality: "llm_generated",
+      created_from_message_id: "msg-1",
+      creating_model_identifier: "claude-opus-4-7",
+      creating_model_version: "20260101",
+      creating_provider: "anthropic",
+      creating_composer_skill_hash: "skill-hash",
+      creating_arguments_hash: "args-hash",
+    });
+    (
+      apiClient.previewBlobContent as ReturnType<typeof vi.fn>
+    ).mockResolvedValue("a\nb\nc\nd\ne\nf");
+
+    const composition = makeComposition(1, {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: "blob-routing-1" },
+      },
+    });
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+    // NO pending interpretation event seeded.  An inline_blob proposal
+    // without interpretation context does NOT produce a pending
+    // interpretation event on the wire, so pendingBySession is empty.
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("inline-source-created-turn"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId("interpretation-review-inline-message"),
+    ).not.toBeInTheDocument();
   });
 });

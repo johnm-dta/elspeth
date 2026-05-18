@@ -119,6 +119,35 @@ describe("useNarrativeMode", () => {
     expect(result.current.narrativeMode).toBe(false);
   });
 
+  it("matches the tag string exact-case only", async () => {
+    // Plan §Task 5 test case 7: the narrative-summary opt-in is an
+    // exact-case string match against capability_tags. Neither the
+    // plural ("narrative-summaries") nor a mixed-case variant
+    // ("Narrative-Summary") should activate narrative mode — only
+    // the canonical "narrative-summary" tag does. This pins the
+    // contract: future maintainers who try to be "helpful" with a
+    // case-insensitive or fuzzy match break the open-vocabulary
+    // capability_tags discipline (ADR-022 D8).
+    _stubCatalog([
+      { name: "p1", capability_tags: ["narrative-summaries"] } as never,
+      { name: "p2", capability_tags: ["Narrative-Summary"] } as never,
+    ]);
+    _setComposition({
+      source: null,
+      nodes: [
+        { id: "n1", node_type: "transform", plugin: "p1", input: "src", on_success: null, on_error: null, options: {} },
+        { id: "n2", node_type: "transform", plugin: "p2", input: "n1", on_success: null, on_error: null, options: {} },
+      ],
+      edges: [],
+      outputs: [],
+      metadata: { name: "demo", description: "" },
+      version: 1,
+    });
+    const { result } = renderHook(() => useNarrativeMode());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.narrativeMode).toBe(false);
+  });
+
   it("caches the catalog across renders (does not re-fetch)", async () => {
     const transformsSpy = vi.spyOn(apiClient, "listTransforms").mockResolvedValue([TAGGED]);
     vi.spyOn(apiClient, "listSources").mockResolvedValue([]);

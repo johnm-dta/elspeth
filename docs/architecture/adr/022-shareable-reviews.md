@@ -83,6 +83,20 @@ The precedent for `hmac.compare_digest` at boundary verifiers is `core/payload_s
 * **Content-addressing completeness.** Freezing readiness into the blob means the `payload_digest` fingerprint covers the readiness panel too; `composer_completion_events_table.payload_digest` becomes an evidentially complete reference.
 * **Permission-boundary collapse.** `resolve_token` never calls the readiness service, so the reviewer-vs-owner permission question never arises at resolve time.
 
+### D4a. Pin `audit_readiness.checked_at` to `state_record.created_at`
+
+**Decision:** Inside `_build_snapshot` (`web/shareable_reviews/service.py:215`), the `audit_readiness.checked_at` field is **normalised** before the blob is canonical-JSON-serialised: it is overwritten with `state_record.created_at.isoformat()` rather than carrying the live `datetime.now()` that `ReadinessService.compute_snapshot` stamps on each call.
+
+**Why this pin is load-bearing for the content-addressing claim in D4:**
+
+* `ReadinessService.compute_snapshot` stamps a fresh `datetime.now()` UTC timestamp on every call — by design, because the readiness panel in normal UI flow describes "as of right now."
+* Without normalisation, the canonical-JSON bytes that feed `sha256(...)` would include a wall-clock timestamp that changes per call. Two `get_shareable_link` requests over an unchanged composition would produce **different** `payload_digest` values, breaking the content-addressing dedupe claim in D4 and undermining the evidential completeness claim in the Frozen-at-mark-time discipline note.
+* `state_record.created_at` is the semantically defensible pin. The readiness panel inside the blob describes "what readiness signal accompanied the state when it was committed," not "when was this readiness query run." That framing matches what a reviewer needs to see: the readiness signal at the moment the composition was marked, frozen alongside the composition itself.
+
+**Why this lives in the service, not in `ReadinessService`:** Bare `compute_snapshot` callers (the live UI panel, audit-readiness CLI) want the wall-clock timestamp. Only the share-mint path needs the pin. Pushing the normalisation up into `ReadinessService` would conflate "what time is it now" with "what time was the state committed," which is exactly the question this pin answers.
+
+**Consequence — what an auditor sees:** `composer_completion_events_table.payload_digest` is a stable fingerprint of the (composition + readiness) pair. Re-minting the same composition twice yields the same digest, the same payload-store blob (content-addressed dedupe), and the same audit row payload_digest. A divergence between two digests over what should be the same composition is evidence of a real change.
+
 ### D5. Token expiry only, no revocation in v1
 
 **Decision:** Tokens carry an `expires_at` field that the signer verifies. There is no per-token row in any database, no revoke endpoint, and no "invalidate all my tokens" affordance. Rotating the signing key invalidates **every** outstanding token immediately.

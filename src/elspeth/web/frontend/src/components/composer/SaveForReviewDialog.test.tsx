@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { axe, toHaveNoViolations } from "jest-axe";
 import { SaveForReviewDialog } from "./SaveForReviewDialog";
 import { useShareableReviewStore } from "@/stores/shareableReviewStore";
+
+expect.extend(toHaveNoViolations);
 
 const _validResponse = {
   token: "abc",
@@ -122,5 +125,23 @@ describe("SaveForReviewDialog", () => {
     render(<SaveForReviewDialog />);
     const input = screen.getByTestId("save-for-review-url-input") as HTMLInputElement;
     expect(input.readOnly).toBe(true);
+  });
+
+  // Plan line 276 (`docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md`)
+  // names jest-axe accessibility-clean assertion on SaveForReviewDialog as a
+  // load-bearing GO condition for Phase 6B (a11y was a multi-reviewer GO
+  // gate). The success state is the user-visible terminal state of the
+  // happy path — the share URL display, the Copy button, and the Close
+  // button must be accessible. axe-core inspects roles, labels, focus
+  // management, and contrast-of-context against the rendered DOM.
+  it("has no accessibility violations in the success state", async () => {
+    useShareableReviewStore.setState({
+      dialogOpen: true,
+      latestResponse: _validResponse,
+      sessionIdForResponse: "sess-1",
+    } as never);
+    const { container } = render(<SaveForReviewDialog />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 });

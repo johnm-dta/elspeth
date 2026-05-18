@@ -12,8 +12,6 @@ interface SideRailProps {
   validationBannerSlot?: ReactNode | null;
   graphMiniSlot?: ReactNode | null;
   catalogSlot?: ReactNode | null;
-  exportYamlSlot?: ReactNode | null;
-  executeButtonSlot?: ReactNode | null;
   completionBarSlot?: ReactNode | null;
 }
 
@@ -22,8 +20,6 @@ export function SideRail({
   validationBannerSlot = null,
   graphMiniSlot = null,
   catalogSlot = null,
-  exportYamlSlot = null,
-  executeButtonSlot = null,
   completionBarSlot = null,
 }: SideRailProps): JSX.Element {
   return (
@@ -39,12 +35,6 @@ export function SideRail({
       </div>
       <div data-testid="siderail-slot-catalog" className="side-rail-slot">
         {catalogSlot}
-      </div>
-      <div data-testid="siderail-slot-export-yaml" className="side-rail-slot">
-        {exportYamlSlot}
-      </div>
-      <div data-testid="siderail-slot-execute-button" className="side-rail-slot">
-        {executeButtonSlot}
       </div>
       <div data-testid="siderail-slot-completion-bar" className="side-rail-slot">
         {completionBarSlot}

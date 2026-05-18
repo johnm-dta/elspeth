@@ -40,18 +40,6 @@ describe("SideRail", () => {
     expect(screen.getByTestId("siderail-slot-catalog")).toBeInTheDocument();
   });
 
-  it("renders the export-yaml slot region", () => {
-    render(<SideRail />);
-    expect(screen.getByTestId("siderail-slot-export-yaml")).toBeInTheDocument();
-  });
-
-  it("renders the execute-button slot region", () => {
-    render(<SideRail />);
-    expect(
-      screen.getByTestId("siderail-slot-execute-button"),
-    ).toBeInTheDocument();
-  });
-
   it("renders the completion-bar slot region", () => {
     render(<SideRail />);
     expect(
@@ -59,18 +47,13 @@ describe("SideRail", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders content passed via the executeButton slot prop", () => {
-    render(<SideRail executeButtonSlot={<button>Run</button>} />);
-    expect(screen.getByRole("button", { name: /run/i })).toBeInTheDocument();
-  });
-
-  it("places executeButtonSlot content in the execute-button slot", () => {
+  it("renders content passed via the completionBar slot prop", () => {
     render(
       <SideRail
-        executeButtonSlot={<button type="button">Run pipeline</button>}
+        completionBarSlot={<button type="button">Run pipeline</button>}
       />,
     );
-    const slot = screen.getByTestId("siderail-slot-execute-button");
+    const slot = screen.getByTestId("siderail-slot-completion-bar");
     expect(
       within(slot).getByRole("button", { name: /run pipeline/i }),
     ).toBeInTheDocument();
@@ -79,5 +62,18 @@ describe("SideRail", () => {
   it("does not render the retired transitional inspector mount", () => {
     const { container } = render(<SideRail />);
     expect(container.querySelector("[class*='transitional']")).toBeNull();
+  });
+
+  it("no longer exposes the retired exportYaml / executeButton slot regions", () => {
+    // Phase 6B Tasks 9-10 retired the standalone ExportYaml + Execute
+    // button slots in favour of the consolidated CompletionBar slot.
+    // Per the No Legacy Code Policy (CLAUDE.md), the placeholder slots
+    // must not linger as dead `null`-pass-through DOM nodes. This test
+    // pins their absence so a future maintainer who restores the props
+    // is forced to confront whether the slot model has actually
+    // regressed.
+    render(<SideRail />);
+    expect(screen.queryByTestId("siderail-slot-export-yaml")).toBeNull();
+    expect(screen.queryByTestId("siderail-slot-execute-button")).toBeNull();
   });
 });

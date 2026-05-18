@@ -351,17 +351,12 @@ function App() {
                 graphMiniSlot={<GraphMiniView />}
                 catalogSlot={<CatalogButton />}
                 // Phase 6B Task 9 / Task 10: the three-button CompletionBar
-                // replaces the standalone ExportYamlButton + ExecuteButton
-                // in the side rail. CompletionBar internally renders both
-                // primitives so Phase 5b interpretation-gating and the
-                // YAML modal dispatch are preserved untouched. The two
-                // legacy slots are left null rather than removed because
-                // SideRail's component contract owns the slot shape;
-                // Phase 9 (or a follow-up cleanup) can retire the slots
-                // entirely once the side-rail mount surface is the only
-                // path for those affordances.
-                exportYamlSlot={null}
-                executeButtonSlot={null}
+                // is the single mount surface for Save-for-review, Run,
+                // and Copy-YAML. The standalone ExportYamlButton +
+                // ExecuteButton primitives that previously occupied
+                // dedicated slots are now rendered INSIDE CompletionBar;
+                // Phase 5b interpretation-gating and YAML modal dispatch
+                // are preserved untouched.
                 completionBarSlot={<CompletionBar />}
               />
             }

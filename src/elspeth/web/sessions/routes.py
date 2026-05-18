@@ -3570,13 +3570,20 @@ def create_session_router() -> APIRouter:
     ) -> ComposerPreferencesResponse:
         session = await _verify_session_ownership(session_id, user, request)
         service: SessionServiceProtocol = request.app.state.session_service
-        prefs = await service.update_composer_preferences(
+        # B2 (load-bearing): the service returns ``(prior, current)`` so
+        # Phase 8b's per-session ``composer.session.switched_total``
+        # counter can read ``from_mode=transition.prior.trust_mode``
+        # without a route-handler read-before-write (which would open a
+        # TOCTOU window — see plan §"Option not taken — read-before-write
+        # from the route handler"). The PATCH response shape is unchanged;
+        # we only project ``current`` into the response model.
+        transition = await service.update_composer_preferences(
             session.id,
             trust_mode=body.trust_mode,
             density_default=body.density_default,
             actor=f"user:{user.user_id}",
         )
-        return _composer_preferences_response(prefs)
+        return _composer_preferences_response(transition.current)
 
     @router.get(
         "/{session_id}/proposals",

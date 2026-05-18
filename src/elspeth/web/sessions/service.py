@@ -60,6 +60,7 @@ from elspeth.web.sessions.protocol import (
     ChatMessageWriterPrincipal,
     ComposerDensityDefault,
     ComposerSessionPreferencesRecord,
+    ComposerSessionPreferencesTransition,
     ComposerTrustMode,
     CompositionProposalRecord,
     CompositionStateData,
@@ -1546,13 +1547,50 @@ class SessionServiceImpl:
         trust_mode: ComposerTrustMode,
         density_default: ComposerDensityDefault,
         actor: str,
-    ) -> ComposerSessionPreferencesRecord:
-        """Update composer preferences and append the audit event first."""
+    ) -> ComposerSessionPreferencesTransition:
+        """Update composer preferences and append the audit event first.
+
+        Returns both the prior and current ``ComposerSessionPreferencesRecord``
+        wrapped in a ``ComposerSessionPreferencesTransition``. The prior
+        record is loaded **inside the same write transaction** as the
+        audit + state writes — no TOCTOU window between read and write.
+        Phase 8 plan §"Service signature precondition (B2 — load-bearing)"
+        explicitly rejects the route-handler read-before-write
+        alternative on these atomicity grounds.
+
+        Audit-primacy ordering: the ``trust_mode.changed`` row is
+        inserted before the ``sessions`` UPDATE. The audit payload now
+        carries ``prior_trust_mode`` (B1 — see the docstring on
+        ``proposal_events_table`` in ``sessions/models.py`` for the
+        full payload contract). Telemetry consumers reading
+        ``prior.trust_mode`` from this return value are guaranteed to
+        find the same value in the audit row, satisfying the
+        audit-primacy superset rule.
+        """
         now = self._now()
         sid = str(session_id)
 
-        def _sync() -> ComposerSessionPreferencesRecord:
+        def _sync() -> ComposerSessionPreferencesTransition:
             with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                # B2 (load-bearing): load the prior record inside the same
+                # transaction as the audit insert and the state update.
+                # A concurrent PATCH cannot interpose because the per-
+                # session write lock above serialises writes for this
+                # ``sid`` and the SELECT runs inside the same connection
+                # as the UPDATE.
+                prior_row = conn.execute(select(sessions_table).where(sessions_table.c.id == sid)).one()
+                prior_record = ComposerSessionPreferencesRecord(
+                    session_id=UUID(prior_row.id),
+                    trust_mode=prior_row.trust_mode,
+                    density_default=prior_row.density_default,
+                    updated_at=self._ensure_utc(prior_row.updated_at),
+                )
+                # Audit fires before state mutation per CLAUDE.md
+                # §"Telemetry and Logging" primacy rule. B1 (load-bearing):
+                # the payload now carries ``prior_trust_mode`` so a
+                # downstream telemetry counter emitting
+                # ``{from_mode, to_mode}`` attributes remains a strict
+                # subset of audit-recorded reality.
                 conn.execute(
                     insert(proposal_events_table).values(
                         id=str(uuid.uuid4()),
@@ -1562,6 +1600,7 @@ class SessionServiceImpl:
                         actor=actor,
                         payload={
                             "trust_mode": trust_mode,
+                            "prior_trust_mode": prior_record.trust_mode,
                             "density_default": density_default,
                         },
                         created_at=now,
@@ -1577,14 +1616,15 @@ class SessionServiceImpl:
                     )
                 )
                 row = conn.execute(select(sessions_table).where(sessions_table.c.id == sid)).one()
-                return ComposerSessionPreferencesRecord(
+                current_record = ComposerSessionPreferencesRecord(
                     session_id=UUID(row.id),
                     trust_mode=row.trust_mode,
                     density_default=row.density_default,
                     updated_at=self._ensure_utc(row.updated_at),
                 )
+                return ComposerSessionPreferencesTransition(prior=prior_record, current=current_record)
 
-        return cast(ComposerSessionPreferencesRecord, await self._run_sync(_sync))
+        return cast(ComposerSessionPreferencesTransition, await self._run_sync(_sync))
 
     async def create_composition_proposal(
         self,

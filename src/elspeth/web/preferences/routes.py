@@ -48,6 +48,15 @@ def create_preferences_router() -> APIRouter:
         # safe to spam, no write amplification.
         await rate_limiter.check(user.user_id)
         service: PreferencesService = request.app.state.preferences_service
-        return await service.update_composer_preferences(user.user_id, body)
+        # B2 (load-bearing): the service returns ``(prior, current)`` for
+        # code-shape symmetry with the per-session reshape. Per B2.b the
+        # account-level Phase 8 telemetry emit consumes only
+        # ``current.default_mode`` (post-state-only counters), so we
+        # discard ``prior`` here. The seam stays open for future
+        # promotion of account-level preferences into a Landscape emit;
+        # see the "Operational signal only" module-level comment in
+        # ``preferences/service.py`` for the future-promotion criterion.
+        transition = await service.update_composer_preferences(user.user_id, body)
+        return transition.current
 
     return router

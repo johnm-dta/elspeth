@@ -78,8 +78,14 @@ def test_get_for_user_with_row_returns_real_updated_at(service):
 
 def test_update_persists_and_round_trips(service):
     payload = UpdateComposerPreferencesRequest(default_mode="freeform")
+    # B2 (Phase 8a-2): service returns a transition wrapper; the
+    # caller reads ``.current`` for the post-write state. New users
+    # have no prior row — ``.prior`` is None (NOT a synthesised
+    # guided-default sentinel; that would fabricate state the system
+    # never wrote — see ComposerPreferencesTransition docstring).
     result = asyncio.run(service.update_composer_preferences("alice-update-persist", payload))
-    assert result.default_mode == "freeform"
+    assert result.prior is None
+    assert result.current.default_mode == "freeform"
     prefs = asyncio.run(service.get_composer_preferences("alice-update-persist"))
     assert prefs.default_mode == "freeform"
 
@@ -123,9 +129,11 @@ def test_empty_patch_on_no_row_does_not_insert(service, engine):
     result = asyncio.run(
         service.update_composer_preferences(user, UpdateComposerPreferencesRequest()),
     )
-    # Response is the default (matches GET no-row behaviour).
-    assert result.default_mode == "guided"
-    assert result.banner_dismissed_at is None
+    # Response is the default (matches GET no-row behaviour); prior is
+    # None because no row existed before the empty PATCH.
+    assert result.prior is None
+    assert result.current.default_mode == "guided"
+    assert result.current.banner_dismissed_at is None
 
     # And critically, no row was inserted.
     with engine.connect() as conn:
@@ -148,7 +156,11 @@ def test_empty_patch_on_existing_row_bumps_updated_at_only(service, engine):
 
     # Empty PATCH — must succeed, must NOT clobber default_mode.
     result = asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest()))
-    assert result.default_mode == "freeform"
+    assert result.current.default_mode == "freeform"
+    # Prior was the freeform row seeded above; empty PATCH bumps
+    # updated_at but the mode itself is preserved.
+    assert result.prior is not None
+    assert result.prior.default_mode == "freeform"
 
     with engine.connect() as conn:
         new_updated = conn.execute(select(user_preferences_table.c.updated_at).where(user_preferences_table.c.user_id == user)).scalar_one()
@@ -200,36 +212,75 @@ def test_corrupt_mode_read_via_public_api_raises(service):
 
 
 def test_patch_returns_written_values_not_a_reread(service):
-    """Finding 7: PATCH must NOT re-read the row after writing.
+    """Finding 7 (post-B2 form): PATCH must NOT re-read the row after
+    writing to build the response ``current``.
 
-    If ``update_composer_preferences`` were implemented as
-    ``write_row(); return await get_composer_preferences(user_id)``, then
+    Pre-B2 framing: if ``update_composer_preferences`` were implemented
+    as ``write_row(); return await get_composer_preferences(user_id)``,
     a pre-existing corrupt row would cause the post-write re-read to
     crash on the Tier-1 guard — even though the PATCH itself succeeded.
 
-    We verify the no-re-read contract by mutating the row's stored mode
-    to a value the guard would reject, performing a valid PATCH, and
-    confirming the response is the written value (not a guard-crash).
+    Post-B2 framing: the function loads ``prior`` from a SELECT inside
+    the same transaction (B2 atomicity), but ``current`` is still built
+    from the in-memory written values — no post-write re-read. We verify
+    the no-re-read contract by performing a PATCH against a valid row
+    and confirming the response carries the supplied value rather than
+    requiring a round-trip read.
 
-    The CHECK constraint normally forbids writing 'kiosk'; we bypass it
-    with PRAGMA ignore_check_constraints to simulate the legitimate
-    failure scenario (DB-shell write, schema drift, etc.).
+    The corrupt-prior interaction (corrupt stored value blocks the
+    PATCH via the Tier-1 guard on the ``prior`` load) is documented and
+    tested separately by ``test_corrupt_prior_blocks_patch_via_prior_load``
+    below — that's the new B2 invariant, and it intentionally reverses
+    the pre-B2 Finding-7 "PATCH succeeds despite corrupt stored value"
+    behaviour because B1's audit-payload extension cannot honestly
+    record ``prior_trust_mode`` from a corrupt value.
     """
     user = "alice-finding-7"
     # Seed a valid row first via the normal write path.
     asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
-    # Then mutate the stored mode to a corrupt value (CHECK bypass via
-    # PRAGMA — simulates the out-of-band corruption the guard exists to
-    # catch).
+
+    # Valid PATCH supplying the new mode against a NON-corrupt row.
+    # The response carries the written value with no post-write re-read.
+    result = asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="guided")))
+    assert result.current.default_mode == "guided"
+    # And prior is what we seeded above.
+    assert result.prior is not None
+    assert result.prior.default_mode == "freeform"
+
+
+def test_corrupt_prior_blocks_patch_via_prior_load(service):
+    """B2 (Phase 8a-2) invariant: a corrupt stored ``default_composer_mode``
+    blocks the PATCH because the prior load runs the Tier-1 guard.
+
+    This intentionally reverses the pre-B2 Finding-7 behaviour
+    (corrupt stored + valid PATCH body → PATCH succeeds). The reversal
+    is consistent with CLAUDE.md §"Three-Tier Trust Model" Tier-1
+    rule: "Bad data in the audit trail = crash immediately. No
+    coercion, no defaults, no silent recovery." B1's audit-payload
+    extension records ``prior_trust_mode``; recording a corrupt prior
+    or fabricating a default sentinel would put a state the system
+    never wrote into the audit-visible field.
+
+    Operationally: the project's recovery policy for corrupt
+    preference rows is "delete the row" (or "delete the DB" per
+    ``project_db_migration_policy``); the user-facing 500 from this
+    crash is the correct surface to alert the operator that the row
+    is corrupt.
+    """
+    user = "alice-corrupt-prior-blocks-patch"
+    # Seed a valid row.
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="freeform")))
+    # Corrupt the stored mode (CHECK bypass via PRAGMA).
     with service._engine.begin() as conn:
         conn.execute(text("PRAGMA ignore_check_constraints = ON"))
         conn.execute(text("UPDATE user_preferences SET default_composer_mode = 'kiosk' WHERE user_id = :uid").bindparams(uid=user))
         conn.execute(text("PRAGMA ignore_check_constraints = OFF"))
 
-    # Valid PATCH supplying the new mode: must succeed and return the
-    # written value rather than crashing on a re-read of the corrupt row.
-    result = asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="guided")))
-    assert result.default_mode == "guided"
+    # PATCH supplying a valid mode now crashes on the prior load.
+    with pytest.raises(CorruptPreferencesError, match="kiosk") as exc_info:
+        asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(default_mode="guided")))
+    assert exc_info.value.user_id == user
+    assert exc_info.value.bad_value == "kiosk"
 
 
 def test_corrupt_mode_blocks_partial_patch_that_does_not_set_mode(service):
@@ -243,12 +294,14 @@ def test_corrupt_mode_blocks_partial_patch_that_does_not_set_mode(service):
     the same named exception, with the same shape, so the application
     handler can branch on type for either read site.
 
-    Contrast with ``test_patch_returns_written_values_not_a_reread``:
-    that test confirms the PATCH succeeds when the caller SUPPLIES a
-    valid mode (the corrupt read is not exercised because we have a
-    new value to write). This test exercises the read path that IS hit
-    when the caller does NOT supply a mode and the upsert must consult
-    the existing row to know what mode to INSERT.
+    Contrast with ``test_corrupt_prior_blocks_patch_via_prior_load``
+    (post-B2): that test asserts the prior-load Tier-1 guard raises on
+    a corrupt row regardless of payload shape. This test reaches the
+    SAME guard via the partial-PATCH path (no ``default_mode`` supplied),
+    so under B2 the two tests collapse onto the same code path — both
+    crash on the prior load before reaching the ``existing_raw`` read.
+    The test is preserved for documentation of the partial-PATCH-with-
+    corrupt-row invariant.
     """
     user = "alice-partial-corrupt"
     # Seed a valid row.
@@ -273,6 +326,35 @@ def test_corrupt_mode_blocks_partial_patch_that_does_not_set_mode(service):
         )
     assert exc_info.value.user_id == user
     assert exc_info.value.bad_value == "kiosk"
+
+
+def test_account_level_update_signature_has_no_from_mode_kwarg():
+    """B2.b (Phase 8a-2) load-bearing scope narrowing.
+
+    The Phase 8 plan §"Account-level scope narrowing (B2.b — load-
+    bearing)" rules out a ``from_mode`` kwarg on the account-level
+    helper because the corresponding telemetry emit is post-state-only
+    (``composer.mode.opted_out_total`` / ``composer.mode.opted_in_total``
+    drop the ``from_mode`` attribute). The plan rejects promoting
+    account-level preferences to audit for Phase 8, so there is no
+    audit-recorded ``prior_default_mode`` for a telemetry ``from_mode``
+    to mirror — the superset rule holds vacuously when there is no
+    transition attribute on the counter.
+
+    This regression guard pins the signature so a future contributor
+    cannot quietly re-add ``from_mode`` without renegotiating the
+    architectural decision recorded in
+    ``preferences/service.py``'s "Operational signal only" comment.
+    """
+    import inspect
+
+    sig = inspect.signature(PreferencesService.update_composer_preferences)
+    assert "from_mode" not in sig.parameters, (
+        "PreferencesService.update_composer_preferences must not carry a 'from_mode' kwarg; "
+        "the account-level telemetry is post-state-only per Phase 8 B2.b. "
+        "Re-introducing this kwarg means promoting account-level preferences to audit "
+        "(see the 'Operational signal only' module-level comment for the future-promotion criterion)."
+    )
 
 
 def test_empty_user_id_rejected_by_check_constraint(engine):

@@ -27,6 +27,7 @@ drain). See ``sessions/service.py`` for the canonical usage pattern.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -42,6 +43,43 @@ from elspeth.web.preferences.models import (
     UpdateComposerPreferencesRequest,
 )
 from elspeth.web.sessions.models import user_preferences_table
+
+
+@dataclass(frozen=True, slots=True)
+class ComposerPreferencesTransition:
+    """Result of an account-level composer-preferences PATCH.
+
+    Carries the prior state (or ``None`` if no row existed before the
+    PATCH) and the current state. The prior load happens **inside the
+    same transaction** as the write, so there is no TOCTOU window — the
+    Phase 8 plan §"Service signature precondition (B2 — load-bearing)"
+    explicitly rejects the route-handler read-before-write alternative.
+
+    ``prior`` is ``None`` when no row existed before this PATCH.
+    Synthesising a ``ComposerPreferences(default_mode="guided", ...)``
+    sentinel here would fabricate a state the system never wrote, which
+    contradicts CLAUDE.md §"Three-Tier Trust Model" fabrication test
+    ("if the external system's behaviour changes and the field starts
+    appearing with a different value than what we inferred, will the
+    audit trail silently contain two contradictory sources of truth?").
+    Callers are expected to handle ``prior is None`` explicitly.
+
+    Per B2.b (load-bearing): the account-level Phase 8 telemetry
+    consumer reads only ``current.default_mode``. The symmetric
+    ``(prior, current)`` shape is preserved for code-shape consistency
+    with the per-session function and to leave the seam open if a
+    future phase wires account-level preferences into an execution
+    boundary (the future-promotion criterion documented in the
+    module-level "Operational signal only" comment).
+
+    Both fields hold immutable Pydantic models or ``None``; no
+    container fields, so no ``__post_init__`` deep-freeze guard is
+    required (CLAUDE.md §"Frozen Dataclass Immutability"; scalar /
+    model wrappers do not need guards).
+    """
+
+    prior: ComposerPreferences | None
+    current: ComposerPreferences
 
 
 class CorruptPreferencesError(RuntimeError):
@@ -155,19 +193,28 @@ class PreferencesService:
             updated_at=row.updated_at,
         )
 
-    async def update_composer_preferences(self, user_id: str, payload: UpdateComposerPreferencesRequest) -> ComposerPreferences:
+    async def update_composer_preferences(self, user_id: str, payload: UpdateComposerPreferencesRequest) -> ComposerPreferencesTransition:
         """Upsert the preferences row, touching only fields in ``payload``.
 
         Empty payloads are accepted as no-ops (the request succeeds; if a
         row already exists, only ``updated_at`` advances).
 
-        Returns the response model built directly from the written values
-        — no round-trip read. This prevents the corrupt-mode PATCH
-        lockout: a pre-existing corrupt ``default_mode`` row would crash
-        a re-read even when the PATCH write succeeded and supplied a
-        valid new mode. Since the values just written are validated
-        (Tier-3 boundary already ran on ``payload``) and trusted, the
-        Tier-1 guard is not re-run.
+        Returns a ``ComposerPreferencesTransition`` carrying both the
+        prior row state (or ``None`` when no row existed before the
+        PATCH) and the post-write state built directly from the written
+        values — no round-trip read for ``current``. This prevents the
+        corrupt-mode PATCH lockout: a pre-existing corrupt
+        ``default_mode`` row would crash a re-read even when the PATCH
+        write succeeded and supplied a valid new mode. Since the values
+        just written are validated (Tier-3 boundary already ran on
+        ``payload``) and trusted, the Tier-1 guard is not re-run on
+        ``current``.
+
+        ``transition.prior`` is loaded inside the same transaction as
+        the write (B2 — Phase 8 plan §"Service signature precondition")
+        — no TOCTOU window between read and write. ``prior is None``
+        when no row existed before this PATCH; the no-row-but-non-empty
+        PATCH path produces ``prior=None`` AND a new ``current`` row.
 
         telemetry: increments ``composer.preferences.patch_total`` with
         attributes describing whether the mode or banner field was touched
@@ -185,7 +232,7 @@ class PreferencesService:
         now = self._now()
         payload_is_empty = payload.default_mode is None and payload.banner_dismissed_at is None
 
-        def _sync() -> tuple[ComposerMode, datetime | None, bool]:
+        def _sync() -> tuple[ComposerMode, datetime | None, bool, ComposerPreferences | None]:
             """Returns (resolved_mode, resolved_banner_dismissed_at, wrote).
 
             Race window — TRACKED, not fixed in this commit. The
@@ -217,18 +264,28 @@ class PreferencesService:
             review).
             """
             with self._engine.begin() as conn:
+                # B2 (load-bearing): load the prior row inside the same
+                # transaction as the upsert. The result is `None` if no
+                # row exists for this user — synthesising a default
+                # sentinel here would fabricate state the system never
+                # wrote (see ComposerPreferencesTransition docstring and
+                # CLAUDE.md §"Three-Tier Trust Model" fabrication test).
+                prior_row = conn.execute(select(user_preferences_table).where(user_preferences_table.c.user_id == user_id)).first()
+                prior_prefs: ComposerPreferences | None
+                if prior_row is None:
+                    prior_prefs = None
+                else:
+                    prior_prefs = self._row_to_prefs(prior_row, user_id)
+
                 # Panel C2 guard: empty PATCH against a no-row user is a
                 # no-write no-op. Check existence BEFORE the upsert so we
-                # can skip the INSERT entirely. Benign race documented
-                # above: a concurrent writer interposing between this
-                # check and a downstream PATCH affects only response
-                # staleness, not DB integrity.
-                if payload_is_empty:
-                    exists = conn.execute(
-                        select(user_preferences_table.c.user_id).where(user_preferences_table.c.user_id == user_id)
-                    ).first()
-                    if exists is None:
-                        return _DEFAULT_MODE, None, False
+                # can skip the INSERT entirely. The B2 prior-load above
+                # already SELECTed the row; reuse that result to decide.
+                # Benign race documented above: a concurrent writer
+                # interposing between this check and a downstream PATCH
+                # affects only response staleness, not DB integrity.
+                if payload_is_empty and prior_row is None:
+                    return _DEFAULT_MODE, None, False, prior_prefs
 
                 # Determine the mode to insert (NOT NULL column). On
                 # conflict, only fields the caller set are updated.
@@ -284,9 +341,9 @@ class PreferencesService:
                 stmt = stmt.on_conflict_do_update(index_elements=["user_id"], set_=update_clause)
                 conn.execute(stmt)
 
-            return insert_mode, resolved_banner, True
+            return insert_mode, resolved_banner, True, prior_prefs
 
-        written_mode, written_banner, wrote = await run_sync_in_worker(_sync)
+        written_mode, written_banner, wrote, prior_prefs = await run_sync_in_worker(_sync)
         # Panel S1: operational telemetry only — no Landscape (user state,
         # not pipeline decision boundary). See module-level comment for
         # the no-Landscape rationale and the future-promote criterion.
@@ -298,7 +355,7 @@ class PreferencesService:
                 "wrote_row": wrote,
             },
         )
-        return ComposerPreferences(
+        current = ComposerPreferences(
             default_mode=written_mode,
             banner_dismissed_at=written_banner,
             # Panel U1 corollary: when the empty-PATCH guard short-circuits
@@ -307,3 +364,4 @@ class PreferencesService:
             # rather than a fabricated `now`.
             updated_at=now if wrote else None,
         )
+        return ComposerPreferencesTransition(prior=prior_prefs, current=current)

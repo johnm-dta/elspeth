@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_chec
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
-from elspeth.contracts.composer_interpretation import InterpretationChoice, InterpretationEventRecord
+from elspeth.contracts.composer_interpretation import (
+    InterpretationChoice,
+    InterpretationEventRecord,
+    InterpretationSource,
+)
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
 
@@ -756,12 +760,20 @@ class SessionServiceProtocol(Protocol):
         *,
         status: Literal["pending", "all"] = "all",
         composition_state_id: UUID | None = None,
+        sources: Sequence[InterpretationSource] | None = None,
     ) -> list[InterpretationEventRecord]:
         """Read-back of interpretation events for the session.
 
         Returns rows ordered by ``created_at, id``. ``status='pending'``
         filters to ``choice='pending'`` rows; ``status='all'`` returns
         every row.
+
+        ``sources``: when set, filters to rows whose
+        ``interpretation_source`` is in the supplied sequence. Used by
+        the opt-out audit-summary surface
+        (``GET /interpretations/opt_out_summary``) to retrieve only
+        ``auto_interpreted_opt_out`` and ``auto_interpreted_no_surfaces``
+        rows. ``None`` (default) imposes no source filter.
         """
         ...
 

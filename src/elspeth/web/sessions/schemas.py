@@ -657,6 +657,35 @@ class ListInterpretationEventsResponse(BaseModel):
     events: list[InterpretationEventResponse]
 
 
+class OptOutSummaryResponse(BaseModel):
+    """Response for GET /api/sessions/{id}/interpretations/opt_out_summary.
+
+    Per F-22 of the Phase 5b backend spec: after a session has opted out
+    of interpretation review, the composer-LLM continues to auto-bake
+    interpretations (now flagged as ``auto_interpreted_opt_out``) and may
+    also write ``auto_interpreted_no_surfaces`` rows when the rate cap is
+    exhausted. This route lets a user retroactively review every
+    auto-baked interpretation produced during the opted-out portion of
+    the session, closing the audit gap of "click opt-out once, dozens of
+    auto-interpretations accumulate invisibly."
+
+    Returns rows of both ``auto_interpreted_opt_out`` and
+    ``auto_interpreted_no_surfaces`` interpretation_source — the two
+    structural row shapes that represent auto-baked interpretations —
+    ordered by ``created_at``. ``user_approved`` rows are excluded; the
+    standard ``GET /interpretations`` route is the right surface for
+    those.
+
+    Envelope shape matches :class:`ListInterpretationEventsResponse` so
+    the two list routes have consistent wire ergonomics on the session
+    surface.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    events: list[InterpretationEventResponse]
+
+
 # Forward reference resolution
 MessageWithStateResponse.model_rebuild()
 ForkSessionResponse.model_rebuild()

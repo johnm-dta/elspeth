@@ -2090,17 +2090,23 @@ class SessionServiceImpl:
         *,
         status: Literal["pending", "all"] = "all",
         composition_state_id: UUID | None = None,
+        sources: Sequence[InterpretationSource] | None = None,
     ) -> list[InterpretationEventRecord]:
         """Read-back of interpretation events for the session.
 
-        Used by the audit-readiness panel (counts) and by the frontend on
-        reload (rehydrate pending review affordances).
+        Used by the audit-readiness panel (counts), by the frontend on
+        reload (rehydrate pending review affordances), and by the
+        opt-out audit-summary surface (``sources`` filter — F-22).
 
         Telemetry: NONE — composition-time user decisions are audit-primary;
         no ephemeral operational signal required.
         """
         sid = str(session_id)
         cs_id = str(composition_state_id) if composition_state_id is not None else None
+        # Materialise the source-value list once so the inner _sync closure
+        # uses primitive string values, not enum instances captured by
+        # closure (cheap; defensive against the iterable being a generator).
+        source_values: list[str] | None = [s.value for s in sources] if sources is not None else None
 
         def _sync() -> list[InterpretationEventRecord]:
             stmt = select(interpretation_events_table).where(interpretation_events_table.c.session_id == sid)
@@ -2108,6 +2114,8 @@ class SessionServiceImpl:
                 stmt = stmt.where(interpretation_events_table.c.choice == InterpretationChoice.PENDING.value)
             if cs_id is not None:
                 stmt = stmt.where(interpretation_events_table.c.composition_state_id == cs_id)
+            if source_values is not None:
+                stmt = stmt.where(interpretation_events_table.c.interpretation_source.in_(source_values))
             stmt = stmt.order_by(
                 interpretation_events_table.c.created_at,
                 interpretation_events_table.c.id,

@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { InlineRunResults } from "./InlineRunResults";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { _resetNarrativeModeCacheForTesting } from "@/hooks/useNarrativeMode";
+import * as apiClient from "@/api/client";
 
 vi.mock("@/components/execution/ProgressView", () => ({
   ProgressView: () => <div data-testid="progress-view-stub" />,
@@ -15,8 +17,24 @@ vi.mock("@/components/inspector/RunOutputsPanel", () => ({
   ),
 }));
 
+vi.mock("@/components/composer/NarrativeResults", () => ({
+  NarrativeResults: () => <div data-testid="narrative-results-stub" />,
+}));
+
 describe("InlineRunResults", () => {
   beforeEach(() => {
+    _resetNarrativeModeCacheForTesting();
+    vi.restoreAllMocks();
+    // Default: empty catalog so useNarrativeMode resolves to false unless
+    // a specific test overrides it. Without these stubs the hook would
+    // make a real fetch against the unconfigured test API client.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(apiClient, "listTransforms").mockResolvedValue([] as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(apiClient, "listSources").mockResolvedValue([] as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(apiClient, "listSinks").mockResolvedValue([] as any);
+    useSessionStore.setState({ compositionState: null } as never);
     useExecutionStore.setState({
       runs: [],
       activeRunId: null,
@@ -174,5 +192,99 @@ describe("InlineRunResults", () => {
     await waitFor(() => {
       expect(loadRuns).toHaveBeenCalledWith("sess-1");
     });
+  });
+
+  // ==========================================================================
+  // Phase 6B Task 7 — narrative-mode XOR dispatch (plan 19b:359, 19b:365).
+  //
+  // When a composition contains a plugin tagged "narrative-summary" in the
+  // catalog, the terminal-run output slot must render <NarrativeResults />
+  // *rather than* the existing tabular <RunOutputsPanel />. The two are
+  // mutually exclusive at the composition level — XOR, not stacked.
+  // ==========================================================================
+
+  it("renders NarrativeResults instead of RunOutputsPanel when a composition plugin has the narrative-summary tag (plan 19b:359, 19b:365)", async () => {
+    vi.spyOn(apiClient, "listTransforms").mockResolvedValue([
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { name: "batch_classifier_metrics", capability_tags: ["narrative-summary"] } as any,
+    ]);
+    useSessionStore.setState({
+      compositionState: {
+        source: null,
+        nodes: [
+          {
+            id: "n1",
+            node_type: "transform",
+            plugin: "batch_classifier_metrics",
+            input: "src",
+            on_success: null,
+            on_error: null,
+            options: {},
+          },
+        ],
+        edges: [],
+        outputs: [],
+        metadata: { name: "demo", description: "" },
+        version: 1,
+      },
+    } as never);
+    useExecutionStore.setState({
+      activeRunId: "run-narr",
+      progress: { status: "completed" } as never,
+      runs: [{ id: "run-narr", status: "completed" } as never],
+    } as never);
+
+    render(<InlineRunResults />);
+
+    // NarrativeResults must render…
+    await waitFor(() => {
+      expect(screen.getByTestId("narrative-results-stub")).toBeInTheDocument();
+    });
+    // …and the tabular RunOutputsPanel must NOT (XOR, not stacked).
+    expect(screen.queryByTestId("run-outputs-stub")).not.toBeInTheDocument();
+  });
+
+  it("renders RunOutputsPanel and not NarrativeResults when no composition plugin carries the narrative-summary tag", async () => {
+    vi.spyOn(apiClient, "listTransforms").mockResolvedValue([
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { name: "passthrough", capability_tags: [] } as any,
+    ]);
+    useSessionStore.setState({
+      compositionState: {
+        source: null,
+        nodes: [
+          {
+            id: "n1",
+            node_type: "transform",
+            plugin: "passthrough",
+            input: "src",
+            on_success: null,
+            on_error: null,
+            options: {},
+          },
+        ],
+        edges: [],
+        outputs: [],
+        metadata: { name: "demo", description: "" },
+        version: 1,
+      },
+    } as never);
+    useExecutionStore.setState({
+      activeRunId: "run-tabular",
+      progress: { status: "completed" } as never,
+      runs: [{ id: "run-tabular", status: "completed" } as never],
+    } as never);
+
+    render(<InlineRunResults />);
+
+    // Tabular RunOutputsPanel must render…
+    await waitFor(() => {
+      expect(screen.getByTestId("run-outputs-stub")).toHaveAttribute(
+        "data-run-id",
+        "run-tabular",
+      );
+    });
+    // …and NarrativeResults must NOT.
+    expect(screen.queryByTestId("narrative-results-stub")).not.toBeInTheDocument();
   });
 });

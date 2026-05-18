@@ -90,23 +90,20 @@ export function InlineRunResults(): JSX.Element | null {
 /**
  * NarrativeResultsBranch — Phase 6B Task 7 dispatcher.
  *
- * Switches between the tabular `RunOutputsPanel` (default) and the
- * narrative-mode `NarrativeResults` panel based on `useNarrativeMode`.
- * When narrative mode is active, the narrative panel renders ABOVE the
- * tabular outputs — the tabular surface is the source of truth for raw
- * outputs, and the narrative panel is a complementary explanatory layer
- * (per Phase 6A Task 8's `"narrative-summary"` capability tag semantics).
+ * XOR switch between the narrative-mode `NarrativeResults` panel and the
+ * default tabular `RunOutputsPanel`, based on `useNarrativeMode`. Per
+ * plan 19b:365 the literal pattern is
+ * `return narrativeMode ? <NarrativeResults /> : <ExistingTablePreview />`
+ * and per plan 19b:359 the rendered output is `<NarrativeResults />`
+ * **rather than** the existing table preview — the two views are
+ * mutually exclusive at the composition level, not stacked.
  *
  * Per plan §"Scope boundaries": narrative mode is binary at the
- * composition level. If any pipeline plugin opts in, the narrative panel
- * mounts; otherwise the existing tabular view stands alone.
+ * composition level. If any pipeline plugin carries the
+ * `"narrative-summary"` capability tag (per Phase 6A Task 8), the
+ * narrative panel renders; otherwise the existing tabular view renders.
  */
 function NarrativeResultsBranch({ runId }: { runId: string }): JSX.Element {
   const { narrativeMode } = useNarrativeMode();
-  return (
-    <>
-      {narrativeMode && <NarrativeResults />}
-      <RunOutputsPanel runId={runId} />
-    </>
-  );
+  return narrativeMode ? <NarrativeResults /> : <RunOutputsPanel runId={runId} />;
 }

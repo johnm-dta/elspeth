@@ -5,10 +5,8 @@ import { AuthGuard } from "./components/common/AuthGuard";
 import { AppHeader } from "./components/common/AppHeader";
 import { Layout } from "./components/common/Layout";
 import { SideRail } from "./components/sidebar/SideRail";
-import { ExecuteButton } from "./components/sidebar/ExecuteButton";
 import { GraphMiniView } from "./components/sidebar/GraphMiniView";
 import { GraphModal } from "./components/sidebar/GraphModal";
-import { ExportYamlButton } from "./components/sidebar/ExportYamlButton";
 import { ExportYamlModal } from "./components/sidebar/ExportYamlModal";
 import { CatalogButton } from "./components/sidebar/CatalogButton";
 import { CommandPalette } from "./components/common/CommandPalette";
@@ -30,6 +28,8 @@ import { useHashRouter } from "./hooks/useHashRouter";
 import { useSharedToken } from "./hooks/useSharedToken";
 import { useAuth } from "./hooks/useAuth";
 import { SharedInspectView } from "./components/shared/SharedInspectView";
+import { CompletionBar } from "./components/composer/CompletionBar";
+import { SaveForReviewDialog } from "./components/composer/SaveForReviewDialog";
 import { useSessionLifecycle } from "./hooks/useSession";
 import {
   OPEN_GRAPH_MODAL_EVENT,
@@ -350,9 +350,19 @@ function App() {
                 validationBannerSlot={<SideRailValidationBanner />}
                 graphMiniSlot={<GraphMiniView />}
                 catalogSlot={<CatalogButton />}
-                exportYamlSlot={<ExportYamlButton />}
-                executeButtonSlot={<ExecuteButton />}
-                completionBarSlot={null}
+                // Phase 6B Task 9 / Task 10: the three-button CompletionBar
+                // replaces the standalone ExportYamlButton + ExecuteButton
+                // in the side rail. CompletionBar internally renders both
+                // primitives so Phase 5b interpretation-gating and the
+                // YAML modal dispatch are preserved untouched. The two
+                // legacy slots are left null rather than removed because
+                // SideRail's component contract owns the slot shape;
+                // Phase 9 (or a follow-up cleanup) can retire the slots
+                // entirely once the side-rail mount surface is the only
+                // path for those affordances.
+                exportYamlSlot={null}
+                executeButtonSlot={null}
+                completionBarSlot={<CompletionBar />}
               />
             }
           />
@@ -361,6 +371,11 @@ function App() {
         {showSecrets && <SecretsPanel onClose={closeSecrets} />}
         <GraphModal />
         <ExportYamlModal />
+        {/* Phase 6B Task 4: mount the SaveForReviewDialog at app-root level so
+         *  CompletionBar's Save-for-review verb can open it regardless of
+         *  which view is currently focused. The dialog reads its state from
+         *  useShareableReviewStore; it renders null when dialogOpen=false. */}
+        <SaveForReviewDialog />
         <CatalogDrawer
           isOpen={catalogOpen}
           onClose={() => setCatalogOpen(false)}

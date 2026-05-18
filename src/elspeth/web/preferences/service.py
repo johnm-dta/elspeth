@@ -233,7 +233,7 @@ class PreferencesService:
         payload_is_empty = payload.default_mode is None and payload.banner_dismissed_at is None
 
         def _sync() -> tuple[ComposerMode, datetime | None, bool, ComposerPreferences | None]:
-            """Returns (resolved_mode, resolved_banner_dismissed_at, wrote).
+            """Returns (resolved_mode, resolved_banner_dismissed_at, wrote, prior_prefs).
 
             Race window — TRACKED, not fixed in this commit. The
             read-then-decide-to-upsert structure has a TOCTOU window:

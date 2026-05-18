@@ -282,6 +282,18 @@ def test_corrupt_prior_blocks_patch_via_prior_load(service):
     assert exc_info.value.user_id == user
     assert exc_info.value.bad_value == "kiosk"
 
+    # Atomicity invariant: the prior load raises BEFORE the upsert runs,
+    # so the stored row must still be the corrupt value — no partial write
+    # landed.  A future structural refactor that accidentally moves the
+    # prior load outside `engine.begin()` would regress this guarantee
+    # without breaking the exception-shape assertion above; the DB-state
+    # check is what catches that class of regression.
+    with service._engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT default_composer_mode FROM user_preferences WHERE user_id = :uid").bindparams(uid=user)
+        ).scalar_one()
+    assert stored == "kiosk", "B2 atomicity: corrupt-prior crash must NOT leave a partial write"
+
 
 def test_corrupt_mode_blocks_partial_patch_that_does_not_set_mode(service):
     """Tier-1 read guard parity (Phase 1A panel asymmetric-guard finding).

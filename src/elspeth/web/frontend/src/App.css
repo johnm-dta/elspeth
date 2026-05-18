@@ -3529,6 +3529,21 @@ summary:focus-visible {
   line-height: 1.4;
 }
 
+.template-card-sda {
+  margin-top: 0.5rem;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+.template-card-sda dt {
+  font-weight: 600;
+}
+.template-card-sda dd {
+  margin: 0;
+}
+
 /* ---------------------------------------------------------------------------
    ValidationResult Banner (inline styles migrated)
    --------------------------------------------------------------------------- */

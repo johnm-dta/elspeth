@@ -114,6 +114,51 @@ follow-up entries listed below.
   NOT gain a "redo tutorial" link (explicit non-feature in Phase 8
   scope boundaries — Phase 9 should preserve that constraint).
 
+### 4. Template card dynamic-source dispatch (Phase 5a wiring absent at Phase 8 gate)
+
+- **Class:** Probe-miss no-op (Phase 5a dynamic-source-from-chat dispatch for
+  template clicks not wired at the 2026-05-19 gate).
+- **Trigger:** Phase 8 Task 3 replaced generic template cards with six
+  audit-domain exemplars from README.md §"Example Use Cases". The new
+  `TemplateCardsProps.onSelectTemplate` callback was given a second argument
+  (`recommendedStartingPoint: ExampleUseCase["recommended_starting_point"]`)
+  so the caller can route `"dynamic_source_from_chat"` cards through Phase 5a's
+  inline-source creation path. At the Phase 8 gate, no dispatch function
+  exists that accepts a seed prompt and fires the inline-source creation
+  flow from a template click: Phase 5a's `InlineSourceCreatedTurn`,
+  `InlineSourceDisambiguationTurn`, and `InlineSourceFallbackPrompt`
+  components are shipped and wired for chat-turn rendering, but
+  `ChatPanel.handleSelectTemplate` only feeds the seed prompt into the
+  text input (`setInputText`). The `_recommendedStartingPoint` argument
+  is accepted and discarded.
+- **What's missing:** A dispatch branch in `ChatPanel.handleSelectTemplate`
+  (or a new hook) that, when `recommendedStartingPoint === "dynamic_source_from_chat"`,
+  calls the same path that wires a user-typed seed phrase into an
+  inline-source creation request rather than populating the text input.
+- **Affected files:**
+  - `src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx` —
+    `handleSelectTemplate` (the `_recommendedStartingPoint` discard comment
+    references this entry).
+  - `src/elspeth/web/frontend/src/components/chat/TemplateCards.tsx` —
+    the `onSelectTemplate` prop already carries the second argument; no
+    change needed here once the caller is wired.
+- **Closure path:**
+  1. Confirm the correct API call / store action that triggers an
+     inline-source creation from a chat message (the existing flow is
+     triggered by a user sending a message, not from a template click).
+  2. In `ChatPanel`, add a branch in `handleSelectTemplate`: if
+     `recommendedStartingPoint === "dynamic_source_from_chat"`, call
+     `sendMessage(seedPrompt)` (or the appropriate inline-source entry point)
+     rather than `setInputText(seedPrompt)`.
+  3. Remove the `_recommendedStartingPoint` discard comment and the
+     leading underscore.
+  4. Update `TemplateCards.test.tsx` and `ChatPanel.test.tsx` for the
+     new dispatch behaviour.
+- **Definition of done:** Clicking a `"dynamic_source_from_chat"` card fires
+  the same inline-source creation path as typing and sending the seed
+  prompt in the chat input. Cards with `"csv_upload"` or `"api_source"`
+  continue to populate the text input.
+
 ### 3. Decision 2 — `composer.tutorial.replayed_total` counter boundary question
 
 - **Class:** Decision deferral.

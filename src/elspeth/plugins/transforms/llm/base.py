@@ -1,7 +1,7 @@
 """LLM configuration model.
 
 Provides LLMConfig extending TransformDataConfig with LLM-specific fields:
-model, template, system_prompt, temperature, max_tokens, response_field,
+model, prompt_template, system_prompt, temperature, max_tokens, response_field,
 and pool configuration (flat fields assembled into PoolConfig).
 """
 
@@ -44,7 +44,7 @@ class LLMConfig(TransformDataConfig):
     LLM-specific fields:
     - provider: LLM provider ("azure" or "openrouter")
     - model: Model identifier (optional — Azure uses deployment_name instead)
-    - template: Jinja2 prompt template (required)
+    - prompt_template: Jinja2 prompt template (required)
     - system_prompt: Optional system message
     - temperature: Sampling temperature (default 0.0 for determinism)
     - max_tokens: Maximum response tokens
@@ -65,7 +65,7 @@ class LLMConfig(TransformDataConfig):
     queries: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = Field(
         None, description="Multi-query specs (None = single-query mode)"
     )
-    template: str = Field(..., description="Jinja2 prompt template")
+    prompt_template: str = Field(..., description="Jinja2 prompt template")
     system_prompt: str | None = Field(None, description="Optional system prompt")
     temperature: float = Field(0.0, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(None, gt=0, description="Maximum tokens in response")
@@ -73,7 +73,7 @@ class LLMConfig(TransformDataConfig):
 
     # File-based content with source paths for audit trail
     lookup: dict[str, Any] | None = Field(None, description="Lookup data loaded from YAML file")
-    template_source: str | None = Field(None, description="Template file path for audit (None if inline)")
+    prompt_template_source: str | None = Field(None, description="Prompt template file path for audit (None if inline)")
     lookup_source: str | None = Field(None, description="Lookup file path for audit (None if no lookup)")
     system_prompt_source: str | None = Field(None, description="System prompt file path for audit (None if inline)")
 
@@ -133,12 +133,12 @@ class LLMConfig(TransformDataConfig):
             raise ValueError(f"response_field must be a valid Python identifier, got {v!r}")
         return v
 
-    @field_validator("template")
+    @field_validator("prompt_template")
     @classmethod
-    def validate_template(cls, v: str) -> str:
-        """Validate template is non-empty and syntactically valid."""
+    def validate_prompt_template(cls, v: str) -> str:
+        """Validate prompt_template is non-empty and syntactically valid."""
         if not v or not v.strip():
-            raise ValueError("template cannot be empty")
+            raise ValueError("prompt_template cannot be empty")
         # Validate template syntax at config time
         try:
             PromptTemplate(v)
@@ -190,14 +190,14 @@ class LLMConfig(TransformDataConfig):
                             if "template" in item and item["template"]:
                                 extracted.update(extract_jinja2_fields(item["template"]))
                 # Also check the top-level template for row references
-                extracted.update(extract_jinja2_fields(self.template))
+                extracted.update(extract_jinja2_fields(self.prompt_template))
             else:
                 # Single-query mode: detect row references in the template
-                extracted = set(extract_jinja2_fields(self.template))
+                extracted = set(extract_jinja2_fields(self.prompt_template))
 
             if extracted:
                 raise ValueError(
-                    f"LLM template references row fields {sorted(extracted)} but "
+                    f"LLM prompt_template references row fields {sorted(extracted)} but "
                     f"required_input_fields is not declared.\n\n"
                     f"You must explicitly declare field requirements:\n"
                     f"  required_input_fields: {sorted(extracted)}  # Require these fields\n"

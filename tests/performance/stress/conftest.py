@@ -713,7 +713,7 @@ def make_azure_llm_config(
         "deployment_name": "gpt-4o",
         "endpoint": chaosllm_url,
         "api_key": "test-key",
-        "template": "Analyze: {{ row.text }}",
+        "prompt_template": "Analyze: {{ row.text }}",
         "system_prompt": "You are a helpful assistant.",
         "schema": DYNAMIC_SCHEMA,
         "pool_size": 4,
@@ -748,7 +748,7 @@ def make_openrouter_llm_config(
         "model": "anthropic/claude-3-opus",
         "base_url": f"{chaosllm_url}/v1",  # Append /v1 for ChaosLLM compatibility
         "api_key": "test-key",
-        "template": "Analyze: {{ row.text }}",
+        "prompt_template": "Analyze: {{ row.text }}",
         "system_prompt": "You are a helpful assistant.",
         "schema": DYNAMIC_SCHEMA,
         "pool_size": 4,
@@ -781,7 +781,7 @@ def make_azure_multi_query_config(
         "deployment_name": "gpt-4o",
         "endpoint": chaosllm_url,
         "api_key": "test-key",
-        "template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
+        "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "queries": {
             "cs1_diagnosis": {
@@ -846,7 +846,7 @@ def make_openrouter_multi_query_config(
         "model": "anthropic/claude-3-opus",
         "base_url": f"{chaosllm_url}/v1",  # Append /v1 for ChaosLLM compatibility
         "api_key": "test-key",
-        "template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
+        "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "queries": {
             "cs1_diagnosis": {

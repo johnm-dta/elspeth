@@ -431,7 +431,7 @@ class TestLLMJsonExplodeRegression:
                         "provider": "openrouter",
                         "model": "anthropic/claude-3.7-sonnet",
                         "api_key": "sk-test-key",
-                        "template": "Classify {{ row['response'] }}",
+                        "prompt_template": "Classify {{ row['response'] }}",
                         "temperature": 0,
                         "response_field": "llm_response",
                         "pool_size": 1,

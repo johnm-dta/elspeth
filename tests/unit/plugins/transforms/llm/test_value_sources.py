@@ -132,7 +132,7 @@ class TestWalkerBehaviour:
                 "api_key": "placeholder",
                 "model": "anthropic/claude-3.5-sonnet",
                 "base_url": "https://openrouter.ai/api/v1/",
-                "template": "Hello",
+                "prompt_template": "Hello",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
             }

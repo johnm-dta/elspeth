@@ -5456,7 +5456,7 @@ def _llm_options_with_api_key(api_key: Any) -> dict[str, Any]:
         "provider": "openrouter",
         "model": "openai/gpt-4o-mini",
         "api_key": api_key,
-        "template": "Classify the current row.",
+        "prompt_template": "Classify the current row.",
         "schema": {"mode": "observed"},
     }
 
@@ -7797,7 +7797,7 @@ class TestPrevalidatePluginOptions:
                 "provider": "openrouter",
                 "model": "openai/gpt-4o",
                 "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
-                "template": "Classify: {{text}}",
+                "prompt_template": "Classify: {{text}}",
                 "schema": {"mode": "observed"},
             },
         )

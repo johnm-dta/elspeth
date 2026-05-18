@@ -276,7 +276,7 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
         """The Sensitive marker on 'patch' collapses the dict to a string via
         the summarizer.  ``node_id`` is non-sensitive and passes through verbatim.
         """
-        raw_args = {"node_id": "t1", "patch": {"api_key": "secret-ref", "template": "prompt-text"}}
+        raw_args = {"node_id": "t1", "patch": {"api_key": "secret-ref", "prompt_template": "prompt-text"}}
         redacted = redact_tool_call_arguments(
             "patch_node_options",
             raw_args,

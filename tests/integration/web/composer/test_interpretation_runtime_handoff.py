@@ -257,7 +257,7 @@ async def test_runtime_handoff_cross_db_hash_anchored() -> None:
         plugin_name="llm",
         node_type=NodeType.TRANSFORM,
         plugin_version="1.0",
-        config={"template": resolved_template},
+        config={"prompt_template": resolved_template},
         schema_config=DYNAMIC_SCHEMA,
     )
     row = factory.data_flow.create_row(
@@ -358,7 +358,7 @@ async def test_runtime_handoff_none_hash_records_null() -> None:
         plugin_name="llm",
         node_type=NodeType.TRANSFORM,
         plugin_version="1.0",
-        config={"template": "plain template, no interpretation"},
+        config={"prompt_template": "plain template, no interpretation"},
         schema_config=DYNAMIC_SCHEMA,
     )
     row = factory.data_flow.create_row(

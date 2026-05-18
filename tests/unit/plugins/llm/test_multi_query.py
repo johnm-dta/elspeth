@@ -31,7 +31,7 @@ def _make_llm_config(**overrides: Any) -> dict[str, Any]:
         "deployment_name": "gpt-4o",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Evaluate: {{ row.text_content }}",
+        "prompt_template": "Evaluate: {{ row.text_content }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": [],

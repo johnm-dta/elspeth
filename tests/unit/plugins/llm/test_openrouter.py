@@ -103,7 +103,7 @@ def _openrouter_config(**overrides: Any) -> dict[str, Any]:
         "provider": "openrouter",
         "api_key": "sk-test-key",
         "model": "anthropic/claude-3-opus",
-        "template": "Analyze: {{ row.text }}",
+        "prompt_template": "Analyze: {{ row.text }}",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": [],
     }
@@ -120,7 +120,7 @@ class TestOpenRouterConfig:
             OpenRouterConfig.from_dict(
                 {
                     "model": "anthropic/claude-3-opus",
-                    "template": "Analyze: {{ row.text }}",
+                    "prompt_template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
                 }
@@ -132,7 +132,7 @@ class TestOpenRouterConfig:
             OpenRouterConfig.from_dict(
                 {
                     "api_key": "sk-test-key",
-                    "template": "Analyze: {{ row.text }}",
+                    "prompt_template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
                 }
@@ -156,7 +156,7 @@ class TestOpenRouterConfig:
                 {
                     "api_key": "sk-test-key",
                     "model": "anthropic/claude-3-opus",
-                    "template": "Analyze: {{ row.text }}",
+                    "prompt_template": "Analyze: {{ row.text }}",
                 }
             )  # Missing 'schema'
 
@@ -166,14 +166,14 @@ class TestOpenRouterConfig:
             {
                 "api_key": "sk-test-key",
                 "model": "anthropic/claude-3-opus",
-                "template": "Analyze: {{ row.text }}",
+                "prompt_template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
         )
         assert config.api_key == "sk-test-key"
         assert config.model == "anthropic/claude-3-opus"
-        assert config.template == "Analyze: {{ row.text }}"
+        assert config.prompt_template == "Analyze: {{ row.text }}"
 
     def test_config_default_values(self) -> None:
         """Config has sensible defaults."""
@@ -181,7 +181,7 @@ class TestOpenRouterConfig:
             {
                 "api_key": "sk-test-key",
                 "model": "anthropic/claude-3-opus",
-                "template": "Hello, {{ row.name }}!",
+                "prompt_template": "Hello, {{ row.name }}!",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
@@ -200,7 +200,7 @@ class TestOpenRouterConfig:
             {
                 "api_key": "sk-test-key",
                 "model": "openai/gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
                 "base_url": "https://custom.proxy.com/api/v1",
@@ -214,7 +214,7 @@ class TestOpenRouterConfig:
             {
                 "api_key": "sk-test-key",
                 "model": "openai/gpt-4",
-                "template": "{{ row.text }}",
+                "prompt_template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
                 "timeout_seconds": 120.0,
@@ -229,7 +229,7 @@ class TestOpenRouterConfig:
                 {
                     "api_key": "sk-test-key",
                     "model": "openai/gpt-4",
-                    "template": "{{ row.text }}",
+                    "prompt_template": "{{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
                     "timeout_seconds": 0.0,  # Must be > 0
@@ -257,17 +257,17 @@ class TestLLMTransformOpenRouterInit:
 
     def test_determinism_is_non_deterministic(self) -> None:
         """LLM transforms are marked as non-deterministic."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
         assert transform.determinism == Determinism.NON_DETERMINISTIC
 
     def test_transform_name_is_llm(self) -> None:
         """Unified LLMTransform has name 'llm'."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
         assert transform.name == "llm"
 
     def test_process_raises_not_implemented(self) -> None:
         """process() raises NotImplementedError directing to accept()."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
         factory = make_factory()
         ctx = make_context(run_id="test-run", landscape=factory.plugin_audit_writer())
 
@@ -281,7 +281,7 @@ class TestLLMTransformOpenRouterInit:
         collision check. This test verifies declared_output_fields is populated
         so TransformExecutor can enforce collision detection.
         """
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
 
         assert isinstance(transform.declared_output_fields, frozenset)
         assert len(transform.declared_output_fields) > 0
@@ -292,7 +292,7 @@ class TestLLMTransformOpenRouterInit:
         """Single-query raw LLM output is a string semantic value."""
         from elspeth.contracts.plugin_semantics import ContentKind, SemanticValueType, TextFraming
 
-        transform = LLMTransform(_openrouter_config(response_field="analysis", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(response_field="analysis", prompt_template="{{ row.text }}"))
 
         declaration = transform.output_semantics()
 
@@ -612,7 +612,7 @@ class TestLLMTransformOpenRouterPipelining:
         """System prompt is included when configured."""
         transform = LLMTransform(
             _openrouter_config(
-                template="{{ row.text }}",
+                prompt_template="{{ row.text }}",
                 system_prompt="You are a helpful assistant.",
             )
         )
@@ -671,7 +671,7 @@ class TestLLMTransformOpenRouterPipelining:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="{{ row.text }}",
+                prompt_template="{{ row.text }}",
                 response_field="analysis",
             )
         )
@@ -752,7 +752,7 @@ class TestLLMTransformOpenRouterPipelining:
 
     def test_connect_output_required_before_accept(self) -> None:
         """accept() raises RuntimeError if connect_output() not called."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
 
         token = make_token("row-1")
         ctx = make_context(
@@ -766,7 +766,7 @@ class TestLLMTransformOpenRouterPipelining:
 
     def test_connect_output_cannot_be_called_twice(self, collector: CollectorOutputPort, mock_factory: Mock) -> None:
         """connect_output() raises if called more than once."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -779,7 +779,7 @@ class TestLLMTransformOpenRouterPipelining:
 
     def test_close_is_noop_when_not_initialized(self) -> None:
         """close() does nothing when transform wasn't fully initialized."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
         transform.close()  # Should not raise
 
 
@@ -803,7 +803,7 @@ class TestLLMTransformOpenRouterIntegration:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="""
+                prompt_template="""
                     Analyze the following data:
                     Name: {{ row.name }}
                     Score: {{ row.score }}
@@ -849,7 +849,7 @@ class TestLLMTransformOpenRouterIntegration:
 
     def test_empty_usage_handled_gracefully(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Empty usage dict from API is handled."""
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -893,7 +893,7 @@ class TestLLMTransformOpenRouterIntegration:
         """
         from elspeth.plugins.infrastructure.clients.llm import NetworkError
 
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -923,7 +923,7 @@ class TestLLMTransformOpenRouterIntegration:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="{{ row.text }}",
+                prompt_template="{{ row.text }}",
                 timeout_seconds=120.0,
             )
         )
@@ -962,7 +962,7 @@ class TestLLMTransformOpenRouterIntegration:
         In the unified LLMTransform, the provider raises LLMClientError for
         empty choices, which the strategy catches as 'llm_call_failed'.
         """
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1009,7 +1009,7 @@ class TestLLMTransformOpenRouterIntegration:
         the provider raises ContentPolicyError which the strategy catches
         as a non-retryable 'llm_call_failed'.
         """
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1053,7 +1053,7 @@ class TestLLMTransformOpenRouterIntegration:
         In the unified LLMTransform, the provider raises LLMClientError for
         missing choices, which the strategy catches as 'llm_call_failed'.
         """
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1096,7 +1096,7 @@ class TestLLMTransformOpenRouterIntegration:
         In the unified LLMTransform, the provider raises LLMClientError for
         malformed response structure, which the strategy catches as 'llm_call_failed'.
         """
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1140,7 +1140,7 @@ class TestLLMTransformOpenRouterIntegration:
         In the unified LLMTransform, the provider raises LLMClientError for
         invalid JSON, which the strategy catches as 'llm_call_failed'.
         """
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1193,7 +1193,7 @@ class TestOpenRouterTemplateFeatures:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="Classify as {{ lookup.categories[0] }} or {{ lookup.categories[1] }}: {{ row.text }}",
+                prompt_template="Classify as {{ lookup.categories[0] }} or {{ lookup.categories[1] }}: {{ row.text }}",
                 lookup={"categories": ["positive", "negative"]},
             )
         )
@@ -1232,7 +1232,7 @@ class TestOpenRouterTemplateFeatures:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="Use tone: {{ lookup.tones[row.tone_id] }}. Message: {{ row.text }}",
+                prompt_template="Use tone: {{ lookup.tones[row.tone_id] }}. Message: {{ row.text }}",
                 lookup={"tones": {"formal": "professional", "casual": "friendly"}},
             )
         )
@@ -1269,7 +1269,7 @@ class TestOpenRouterTemplateFeatures:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="Categories: {{ lookup.cats }}. Input: {{ row.text }}",
+                prompt_template="Categories: {{ lookup.cats }}. Input: {{ row.text }}",
                 lookup={"cats": ["A", "B", "C"]},
             )
         )
@@ -1310,8 +1310,8 @@ class TestOpenRouterTemplateFeatures:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="Analyze: {{ row.text }}",
-                template_source="prompts/analysis.j2",
+                prompt_template="Analyze: {{ row.text }}",
+                prompt_template_source="prompts/analysis.j2",
             )
         )
         init_ctx = make_context(landscape=mock_factory)
@@ -1346,8 +1346,8 @@ class TestOpenRouterTemplateFeatures:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="{{ lookup.prompt_prefix }} {{ row.text }}",
-                template_source="prompts/prefixed.j2",
+                prompt_template="{{ lookup.prompt_prefix }} {{ row.text }}",
+                prompt_template_source="prompts/prefixed.j2",
                 lookup={"prompt_prefix": "Please analyze:"},
                 lookup_source="prompts/lookups.yaml",
             )
@@ -1397,7 +1397,7 @@ class TestOpenRouterTemplateFeatures:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="Simple: {{ row.text }}",
+                prompt_template="Simple: {{ row.text }}",
                 # No lookup configured
             )
         )
@@ -1438,7 +1438,7 @@ class TestOpenRouterTemplateFeatures:
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="""Classify into one of:
+                prompt_template="""Classify into one of:
 {% for cat in lookup.categories %}
 - {{ cat.name }}: {{ cat.description }}
 {% endfor %}
@@ -1485,8 +1485,8 @@ Text: {{ row.text }}""",
         transform = LLMTransform(
             _openrouter_config(
                 model="openai/gpt-4",
-                template="Missing: {{ row.required_field }}",
-                template_source="prompts/requires_field.j2",
+                prompt_template="Missing: {{ row.required_field }}",
+                prompt_template_source="prompts/requires_field.j2",
             )
         )
         init_ctx = make_context(landscape=mock_factory)
@@ -1533,7 +1533,7 @@ class TestOpenRouterConcurrency:
 
     def test_multiple_rows_processed_in_fifo_order(self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server) -> None:
         """Multiple rows are emitted in submission order (FIFO)."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1570,7 +1570,7 @@ class TestOpenRouterConcurrency:
 
     def test_on_start_captures_recorder(self, mock_factory: Mock) -> None:
         """on_start() captures factory reference for provider creation."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
 
         # Verify _recorder starts as None
         assert transform._recorder is None
@@ -1586,7 +1586,7 @@ class TestOpenRouterConcurrency:
 
     def test_close_clears_recorder(self, mock_factory: Mock, collector: CollectorOutputPort) -> None:
         """close() clears factory reference."""
-        transform = LLMTransform(_openrouter_config(template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1625,7 +1625,7 @@ class TestOpenRouterNanRejection:
         nan_body = '{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": NaN}, "model": "test"}'
         response = _create_mock_response(chaosllm_server, raw_body=nan_body, status_code=200, headers={"content-type": "application/json"})
 
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1657,7 +1657,7 @@ class TestOpenRouterNanRejection:
         inf_body = '{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1e309}, "model": "test"}'
         response = _create_mock_response(chaosllm_server, raw_body=inf_body, status_code=200, headers={"content-type": "application/json"})
 
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)
@@ -1718,7 +1718,7 @@ class TestOpenRouterMalformedUtf8:
             headers={"content-type": "application/json"},
         )
 
-        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", template="{{ row.text }}"))
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
         init_ctx = make_context(landscape=mock_factory)
         transform.on_start(init_ctx)
         transform.connect_output(collector, max_pending=10)

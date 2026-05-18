@@ -680,7 +680,7 @@ class TestValidatePipelineSemanticContracts:
                         "provider": "openrouter",
                         "api_key": "test-key",
                         "model": "openai/gpt-4o",
-                        "template": "Return three themes.",
+                        "prompt_template": "Return three themes.",
                         "response_field": "llm_response",
                         "schema": {"mode": "observed"},
                     },

@@ -21,7 +21,7 @@ class TestDatabaseSettings:
         from elspeth.core.config import DatabaseSettings
 
         settings = DatabaseSettings(
-            url="postgresql://user:pass@localhost/db",
+            url="postgresql://user:pass@localhost/db",  # secret-scan: allow-this-line
             pool_size=10,
         )
         assert settings.pool_size == 10
@@ -358,7 +358,7 @@ class TestLandscapeSettings:
         from elspeth.core.config import LandscapeSettings
 
         # This would fail with pathlib.Path which mangles // as UNC paths
-        pg_url = "postgresql://user:pass@localhost:5432/elspeth_audit"
+        pg_url = "postgresql://user:pass@localhost:5432/elspeth_audit"  # secret-scan: allow-this-line
         ls = LandscapeSettings(enabled=True, backend="postgresql", url=pg_url)
         assert ls.url == pg_url  # Preserved exactly
 
@@ -390,12 +390,12 @@ class TestLandscapeSettings:
         from elspeth.core.config import LandscapeSettings
 
         # Full DSN with credentials
-        pg_url = "postgresql://user:pass@localhost:5432/elspeth_audit"
+        pg_url = "postgresql://user:pass@localhost:5432/elspeth_audit"  # secret-scan: allow-this-line
         ls = LandscapeSettings(backend="postgresql", url=pg_url)
         assert ls.url == pg_url
 
         # With SSL mode parameter
-        pg_url_ssl = "postgresql://user:pass@db.example.com/audit?sslmode=require"
+        pg_url_ssl = "postgresql://user:pass@db.example.com/audit?sslmode=require"  # secret-scan: allow-this-line
         ls = LandscapeSettings(backend="postgresql", url=pg_url_ssl)
         assert ls.url == pg_url_ssl
 
@@ -423,7 +423,7 @@ class TestLandscapeSettings:
         from elspeth.core.config import LandscapeSettings
 
         with pytest.raises(ValidationError, match="requires URL scheme"):
-            LandscapeSettings(backend="sqlcipher", url="postgresql://user:pass@host/db")
+            LandscapeSettings(backend="sqlcipher", url="postgresql://user:pass@host/db")  # secret-scan: allow-this-line
 
     def test_sqlcipher_backend_valid(self) -> None:
         """backend='sqlcipher' with a SQLite URL is accepted."""
@@ -2728,7 +2728,7 @@ sinks:
 
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
 
-        url = "postgresql://user:secret_password@localhost:5432/mydb"
+        url = "postgresql://user:secret_password@localhost:5432/mydb"  # secret-scan: allow-this-line
         sanitized, fingerprint, had_password = _sanitize_dsn(url)
 
         assert "secret_password" not in sanitized
@@ -2758,7 +2758,7 @@ sinks:
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
         monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
 
-        url = "postgresql://user:secret@localhost/db"
+        url = "postgresql://user:secret@localhost/db"  # secret-scan: allow-this-line
 
         with pytest.raises(SecretFingerprintError) as exc_info:
             _sanitize_dsn(url, fail_if_no_key=True)
@@ -2771,7 +2771,7 @@ sinks:
 
         monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
 
-        url = "postgresql://user:secret@localhost/db"
+        url = "postgresql://user:secret@localhost/db"  # secret-scan: allow-this-line
         sanitized, fingerprint, had_password = _sanitize_dsn(url, fail_if_no_key=False)
 
         assert "secret" not in sanitized
@@ -2785,7 +2785,7 @@ sinks:
         monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
 
         config_dict = {
-            "landscape": {"url": "postgresql://user:mysecret@host/db"},
+            "landscape": {"url": "postgresql://user:mysecret@host/db"},  # secret-scan: allow-this-line
             "source": {"plugin": "csv", "options": {}},
             "sinks": {"output": {"plugin": "csv_sink"}},
         }
@@ -2805,7 +2805,7 @@ sinks:
         monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
 
         config_dict = {
-            "landscape": {"url": "postgresql://user:mysecret@host/db"},
+            "landscape": {"url": "postgresql://user:mysecret@host/db"},  # secret-scan: allow-this-line
             "source": {"plugin": "csv", "options": {}},
             "sinks": {"output": {"plugin": "csv_sink"}},
         }
@@ -2821,7 +2821,7 @@ sinks:
         from elspeth.core.config import SecretFingerprintError, _sanitize_dsn
 
         # JDBC-style URL — make_url() raises ArgumentError, but password is present
-        url = "jdbc:postgresql://user:secret@host/db"
+        url = "jdbc:postgresql://user:secret@host/db"  # secret-scan: allow-this-line
 
         with pytest.raises(SecretFingerprintError, match="credentials"):
             _sanitize_dsn(url)
@@ -3058,12 +3058,12 @@ class TestExpandTemplateFiles:
             _expand_template_files(config, settings_path)
 
     def test_expand_template_file_with_inline_raises(self, tmp_path: Path) -> None:
-        """Cannot specify both template and template_file."""
+        """Cannot specify both prompt_template and template_file."""
         from elspeth.core.config import TemplateFileError, _expand_template_files
 
         settings_path = tmp_path / "settings.yaml"
         config = {
-            "template": "inline template",
+            "prompt_template": "inline template",
             "template_file": "prompts/test.j2",
         }
 
@@ -3079,7 +3079,7 @@ class TestExpandTemplateFiles:
 
         settings_path = tmp_path / "settings.yaml"
         config = {
-            "template": "test",
+            "prompt_template": "test",
             "lookup_file": "bad.yaml",
         }
 
@@ -3104,9 +3104,9 @@ class TestExpandTemplateFiles:
 
         expanded = _expand_template_files(config, settings_path)
 
-        assert "template" in expanded
-        assert expanded["template"] == "Hello, {{ row.name }}!"
-        assert expanded["template_source"] == "prompts/test.j2"
+        assert "prompt_template" in expanded
+        assert expanded["prompt_template"] == "Hello, {{ row.name }}!"
+        assert expanded["prompt_template_source"] == "prompts/test.j2"
         assert "template_file" not in expanded  # Original key removed
 
     def test_expand_lookup_file_with_inline_raises(self, tmp_path: Path) -> None:
@@ -3115,7 +3115,7 @@ class TestExpandTemplateFiles:
 
         settings_path = tmp_path / "settings.yaml"
         config = {
-            "template": "test",
+            "prompt_template": "test",
             "lookup": {"existing": "data"},
             "lookup_file": "prompts/lookups.yaml",
         }
@@ -3135,7 +3135,7 @@ class TestExpandTemplateFiles:
         settings_path = tmp_path / "settings.yaml"
 
         config = {
-            "template": "{{ lookup.categories }}",
+            "prompt_template": "{{ lookup.categories }}",
             "lookup_file": "prompts/lookups.yaml",
         }
 
@@ -3164,8 +3164,8 @@ class TestExpandTemplateFiles:
 
         expanded = _expand_template_files(config, settings_path)
 
-        assert expanded["template"] == "Category: {{ lookup.cats[row.id] }}"
-        assert expanded["template_source"] == "prompts/classify.j2"
+        assert expanded["prompt_template"] == "Category: {{ lookup.cats[row.id] }}"
+        assert expanded["prompt_template_source"] == "prompts/classify.j2"
         assert expanded["lookup"] == {"cats": {0: "A", 1: "B"}}
         assert expanded["lookup_source"] == "prompts/lookups.yaml"
 
@@ -3175,7 +3175,7 @@ class TestExpandTemplateFiles:
 
         settings_path = tmp_path / "settings.yaml"
         config = {
-            "template": "test",
+            "prompt_template": "test",
             "system_prompt_file": "prompts/missing.txt",
         }
 
@@ -3188,7 +3188,7 @@ class TestExpandTemplateFiles:
 
         settings_path = tmp_path / "settings.yaml"
         config = {
-            "template": "test",
+            "prompt_template": "test",
             "system_prompt": "You are a helpful assistant.",
             "system_prompt_file": "prompts/system.txt",
         }
@@ -3208,7 +3208,7 @@ class TestExpandTemplateFiles:
         settings_path = tmp_path / "settings.yaml"
 
         config = {
-            "template": "Classify: {{ row.text }}",
+            "prompt_template": "Classify: {{ row.text }}",
             "system_prompt_file": "prompts/system.txt",
         }
 
@@ -3241,8 +3241,8 @@ class TestExpandTemplateFiles:
         expanded = _expand_template_files(config, settings_path)
 
         # Template expanded
-        assert expanded["template"] == "Classify: {{ row.text }}"
-        assert expanded["template_source"] == "prompts/classify.j2"
+        assert expanded["prompt_template"] == "Classify: {{ row.text }}"
+        assert expanded["prompt_template_source"] == "prompts/classify.j2"
         assert "template_file" not in expanded
 
         # Lookup expanded
@@ -3338,7 +3338,7 @@ class TestTemplateFilePathTraversal:
         config = {"template_file": "prompts/deep/nested/test.j2"}
 
         expanded = _expand_template_files(config, settings_path)
-        assert expanded["template"] == "Hello {{ row.name }}"
+        assert expanded["prompt_template"] == "Hello {{ row.name }}"
 
 
 class TestLoadSettingsWithRunMode:
@@ -3492,8 +3492,8 @@ transforms:
 
         # Check that files were expanded
         plugin_opts = settings.transforms[0].options
-        assert plugin_opts["template"] == "Hello {{ row.name }}"
-        assert plugin_opts["template_source"] == "prompts/test.j2"
+        assert plugin_opts["prompt_template"] == "Hello {{ row.name }}"
+        assert plugin_opts["prompt_template_source"] == "prompts/test.j2"
         assert plugin_opts["lookup"] == {"greetings": ["Hello"]}
         assert plugin_opts["lookup_source"] == "prompts/lookups.yaml"
 

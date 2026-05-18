@@ -331,7 +331,7 @@ class TestClassifyRecipe:
     def test_llm_node_wires_template_and_response_field(self) -> None:
         result = self._apply(label_field="urgency")
         llm = next(n for n in result["nodes"] if n["plugin"] == "llm")
-        assert llm["options"]["template"] == "Classify {{ row['subject'] }}"
+        assert llm["options"]["prompt_template"] == "Classify {{ row['subject'] }}"
         assert llm["options"]["response_field"] == "urgency"
 
     def test_output_is_jsonl(self) -> None:

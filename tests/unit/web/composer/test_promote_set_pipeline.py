@@ -428,7 +428,7 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
                 "id": "n1",
                 "node_type": "transform",
                 "input": "rows",
-                "options": {"template": _CANARY_NODE_OPT},
+                "options": {"prompt_template": _CANARY_NODE_OPT},
                 "routes": {"true": _CANARY_ROUTES},
                 "trigger": {"condition": _CANARY_TRIGGER},
             }

@@ -1039,7 +1039,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9f47e3ce2e151d1b"
+    source_file_hash: str | None = "sha256:3282a958a2d4c7d7"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1136,7 +1136,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
             "provider": "openrouter",
             "api_key": "probe-key",
             "model": "openai/gpt-4o",
-            "template": "{{ row.llm_probe_text }}",
+            "prompt_template": "{{ row.llm_probe_text }}",
             "schema": {"mode": "observed"},
             "required_input_fields": [],
         }
@@ -1224,8 +1224,8 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         # OpenRouterConfig requires model. So self._config.model is always non-empty.
         self._model = self._config.model
         self._template = PromptTemplate(
-            self._config.template,
-            template_source=self._config.template_source,
+            self._config.prompt_template,
+            template_source=self._config.prompt_template_source,
             lookup_data=self._config.lookup,
             lookup_source=self._config.lookup_source,
         )

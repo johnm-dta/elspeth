@@ -31,7 +31,7 @@ transforms:
       {"score": <number>, "rationale": "<explanation>"}
 
       '
-    template: 'Assess: {{ row.input_1 }}'
+    prompt_template: 'Assess: {{ row.input_1 }}'
     required_input_fields: []
     queries:
       cs1_diagnosis:

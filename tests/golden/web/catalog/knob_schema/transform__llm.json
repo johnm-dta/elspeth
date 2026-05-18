@@ -67,8 +67,8 @@
       {
         "description": "Jinja2 prompt template",
         "kind": "text",
-        "label": "Template",
-        "name": "template",
+        "label": "Prompt Template",
+        "name": "prompt_template",
         "nullable": false,
         "required": true,
         "visible_when": {
@@ -143,10 +143,10 @@
       },
       {
         "default": null,
-        "description": "Template file path for audit (None if inline)",
+        "description": "Prompt template file path for audit (None if inline)",
         "kind": "text",
-        "label": "Template Source",
-        "name": "template_source",
+        "label": "Prompt Template Source",
+        "name": "prompt_template_source",
         "nullable": true,
         "required": false,
         "visible_when": {
@@ -374,8 +374,8 @@
       {
         "description": "Jinja2 prompt template",
         "kind": "text",
-        "label": "Template",
-        "name": "template",
+        "label": "Prompt Template",
+        "name": "prompt_template",
         "nullable": false,
         "required": true,
         "visible_when": {
@@ -450,10 +450,10 @@
       },
       {
         "default": null,
-        "description": "Template file path for audit (None if inline)",
+        "description": "Prompt template file path for audit (None if inline)",
         "kind": "text",
-        "label": "Template Source",
-        "name": "template_source",
+        "label": "Prompt Template Source",
+        "name": "prompt_template_source",
         "nullable": true,
         "required": false,
         "visible_when": {

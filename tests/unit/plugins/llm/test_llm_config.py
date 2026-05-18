@@ -32,7 +32,7 @@ class TestLLMConfigBase:
         """model field is optional and defaults to None."""
         config = LLMConfig(
             provider="azure",
-            template="Classify: {{ text }}",
+            prompt_template="Classify: {{ text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -42,7 +42,7 @@ class TestLLMConfigBase:
         config = LLMConfig(
             provider="azure",
             model="gpt-4o",
-            template="Classify: {{ text }}",
+            prompt_template="Classify: {{ text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -53,7 +53,7 @@ class TestLLMConfigBase:
         with pytest.raises(ValidationError):
             LLMConfig(
                 provider="invalid_provider",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
             )
@@ -61,7 +61,7 @@ class TestLLMConfigBase:
     def test_provider_azure_accepted(self) -> None:
         config = LLMConfig(
             provider="azure",
-            template="hello {{ text }}",
+            prompt_template="hello {{ text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -70,7 +70,7 @@ class TestLLMConfigBase:
     def test_provider_openrouter_accepted(self) -> None:
         config = LLMConfig(
             provider="openrouter",
-            template="hello {{ text }}",
+            prompt_template="hello {{ text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -80,7 +80,7 @@ class TestLLMConfigBase:
         """queries is None when not provided (single-query mode)."""
         config = LLMConfig(
             provider="azure",
-            template="hello {{ text }}",
+            prompt_template="hello {{ text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -100,7 +100,7 @@ class TestLLMConfigResponseFieldValidation:
         with pytest.raises(ValidationError, match="response_field"):
             LLMConfig(
                 provider="azure",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 response_field="",
@@ -111,7 +111,7 @@ class TestLLMConfigResponseFieldValidation:
         with pytest.raises(ValidationError, match="response_field"):
             LLMConfig(
                 provider="azure",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 response_field="   ",
@@ -122,7 +122,7 @@ class TestLLMConfigResponseFieldValidation:
         with pytest.raises(ValidationError, match="response_field"):
             LLMConfig(
                 provider="azure",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 response_field="my-field",
@@ -132,7 +132,7 @@ class TestLLMConfigResponseFieldValidation:
         """Valid Python identifier response_field is accepted."""
         config = LLMConfig(
             provider="azure",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
             response_field="llm_output",
@@ -153,7 +153,7 @@ class TestAzureOpenAIConfig:
 
         with pytest.raises((ValidationError, ValueError)):
             AzureOpenAIConfig(  # type: ignore[call-arg]  # intentionally missing required args
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 # Missing deployment_name, endpoint, api_key
@@ -166,7 +166,7 @@ class TestAzureOpenAIConfig:
             deployment_name="gpt-4o-deploy",
             endpoint="https://test.openai.azure.com/",
             api_key="key",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
         )
@@ -180,7 +180,7 @@ class TestAzureOpenAIConfig:
             deployment_name="gpt-4o",
             endpoint="https://test.openai.azure.com/",
             api_key="key",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
             tracing={"provider": "langfuse", "public_key": "pk"},
@@ -198,7 +198,7 @@ class TestAzureOpenAIConfigTracing:
             "deployment_name": "gpt-4",
             "endpoint": "https://test.openai.azure.com",
             "api_key": "test-key",
-            "template": "Hello {{ row.name }}",
+            "prompt_template": "Hello {{ row.name }}",
             "schema": {"mode": "observed"},
             "required_input_fields": [],
         }
@@ -248,7 +248,7 @@ class TestOpenRouterConfigTracing:
             "provider": "openrouter",
             "model": "anthropic/claude-3-opus",
             "api_key": "test-key",
-            "template": "Hello {{ row.name }}",
+            "prompt_template": "Hello {{ row.name }}",
             "schema": {"mode": "observed"},
             "required_input_fields": [],
         }
@@ -286,7 +286,7 @@ class TestOpenRouterConfig:
         with pytest.raises((ValidationError, ValueError)):
             OpenRouterConfig(  # type: ignore[call-arg]  # intentionally missing model
                 api_key="key",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 # model not provided — should fail because OpenRouter needs it
@@ -298,7 +298,7 @@ class TestOpenRouterConfig:
         config = OpenRouterConfig(
             model="openai/gpt-4o",
             api_key="key",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
         )
@@ -531,7 +531,7 @@ class TestMultiQueryInputFieldsValidation:
             LLMConfig(
                 provider="openrouter",
                 model="test-model",
-                template="Static template",
+                prompt_template="Static template",
                 schema_config=_OBSERVED_SCHEMA,
                 queries={
                     "q1": {
@@ -546,7 +546,7 @@ class TestMultiQueryInputFieldsValidation:
             LLMConfig(
                 provider="openrouter",
                 model="test-model",
-                template="Static template",
+                prompt_template="Static template",
                 schema_config=_OBSERVED_SCHEMA,
                 queries=[
                     {
@@ -561,7 +561,7 @@ class TestMultiQueryInputFieldsValidation:
         config = LLMConfig(
             provider="openrouter",
             model="test-model",
-            template="Static template",
+            prompt_template="Static template",
             schema_config=_OBSERVED_SCHEMA,
             queries={
                 "q1": {
@@ -577,7 +577,7 @@ class TestMultiQueryInputFieldsValidation:
         config = LLMConfig(
             provider="openrouter",
             model="test-model",
-            template="Static template",
+            prompt_template="Static template",
             schema_config=_OBSERVED_SCHEMA,
             queries={
                 "q1": {

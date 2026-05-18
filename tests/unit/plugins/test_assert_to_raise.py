@@ -37,7 +37,7 @@ _LLM_AZURE_CONFIG = {
     "deployment_name": "test-deployment",
     "endpoint": "https://test.openai.azure.com",
     "api_key": "test-key",
-    "template": "Classify: {{ row.text }}",
+    "prompt_template": "Classify: {{ row.text }}",
     "schema": {"mode": "observed"},
     "required_input_fields": [],
 }

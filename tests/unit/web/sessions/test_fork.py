@@ -1056,6 +1056,64 @@ class TestForkEndpoint:
         assert len(sessions) == 1
 
     @pytest.mark.asyncio
+    async def test_fork_with_non_string_blob_ref_raises_audit_integrity_error_and_archives(self, tmp_path) -> None:
+        """Tier 1 anomaly: blob_ref must be the composer-written UUID string."""
+        app, service, blob_service = _make_fork_app(tmp_path)
+
+        session = await service.create_session("alice", "Original", "local")
+
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "options": {"blob_ref": 123, "path": "/data/x.csv"},
+                },
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+
+        current_state = await service.get_current_state(session.id)
+        assert current_state is not None
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Hello",
+            composition_state_id=current_state.id,
+            writer_principal="route_user_message",
+        )
+
+        await blob_service.create_blob(
+            session.id,
+            "data.csv",
+            b"a,b\n1,2",
+            "text/csv",
+        )
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        client = TestClient(app)
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            client.post(
+                f"/api/sessions/{session.id}/fork",
+                json={
+                    "from_message_id": str(msg.id),
+                    "new_message_content": "Hello edited",
+                },
+            )
+
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert "blob_ref" in message
+        assert "int" in message
+        assert "UUID string" in message
+        assert exc_info.value.__cause__ is None
+
+        sessions = await service.list_sessions("alice", "local")
+        assert len(sessions) == 1
+
+    @pytest.mark.asyncio
     async def test_fork_non_quota_blob_error_archives_session(self, tmp_path) -> None:
         """Non-quota blob failures during fork must archive the new session.
 

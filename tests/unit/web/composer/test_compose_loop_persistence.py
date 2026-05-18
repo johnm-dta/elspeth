@@ -233,27 +233,27 @@ async def test_step2_dispatches_one_persist_compose_turn_async_per_turn(
     composer_service_with_real_sessions: ComposerServiceImpl,
     fake_llm_two_tool_calls: Any,
     result_session_id: str,
-    sqlalchemy_event_listener: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One tool-call turn is committed by one persist_compose_turn_async call.
 
-    Phase 5b Task 5 follow-on adds a one-shot ``skill_markdown_history``
-    upsert (F-5c) that fires on the first compose-loop entry of a
-    service instance. That upsert opens one additional transaction (its
-    own BEGIN/COMMIT pair). To keep this test asserting the
-    "one-persist-call-per-turn" invariant, we prime the flag here so
-    the upsert is skipped — equivalent to running this test on a
-    service whose F-5c init has already executed in a prior compose
-    call.
+    The invariant is the service call boundary, not the incidental number
+    of SQLAlchemy transactions opened by adjacent preference or audit
+    bookkeeping.  Count the production persistence method directly so
+    legitimate neighbouring DB reads/writes do not make this test brittle.
     """
 
     sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
     _patch_auto_commit_preferences(monkeypatch, sessions_service)
-    # Mark the per-instance F-5c gate as already-satisfied so the
-    # transaction count reflects only the per-turn persist call.
-    composer_service_with_real_sessions._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
-    counts = sqlalchemy_event_listener(sessions_service._engine)  # type: ignore[attr-defined]
+    persist_calls = 0
+    original_persist = sessions_service.persist_compose_turn_async
+
+    async def _count_persist_call(*args: Any, **kwargs: Any) -> Any:
+        nonlocal persist_calls
+        persist_calls += 1
+        return await original_persist(*args, **kwargs)
+
+    monkeypatch.setattr(sessions_service, "persist_compose_turn_async", _count_persist_call)
 
     await _run_one_turn(
         composer_service_with_real_sessions,
@@ -261,9 +261,7 @@ async def test_step2_dispatches_one_persist_compose_turn_async_per_turn(
         session_id=result_session_id,
     )
 
-    assert counts["begin"] == 1
-    assert counts["commit"] == 1
-    assert counts["rollback"] == 0
+    assert persist_calls == 1
 
 
 @pytest.mark.asyncio

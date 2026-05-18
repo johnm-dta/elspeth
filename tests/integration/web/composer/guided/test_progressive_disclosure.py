@@ -130,6 +130,7 @@ def composer_freeform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     composer_service = ComposerServiceImpl(
         catalog=catalog,
         settings=settings,
+        sessions_service=session_service,
         session_engine=engine,
     )
 

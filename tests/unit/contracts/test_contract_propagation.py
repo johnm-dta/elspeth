@@ -738,3 +738,23 @@ class TestPropagateContractNonPrimitiveTypes:
                 output_row=output_row,
                 transform_adds_fields=True,
             )
+
+    def test_normalizer_typeerror_propagates(
+        self,
+        input_contract: SchemaContract,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Programmer TypeError from the normalizer is not mapped to object."""
+        from elspeth.contracts import contract_propagation as contract_propagation_module
+
+        def broken_normalizer(value: object) -> type:
+            raise TypeError("programmer bug in type normalization")
+
+        monkeypatch.setattr(contract_propagation_module, "normalize_type_for_contract", broken_normalizer)
+
+        with pytest.raises(TypeError, match="programmer bug in type normalization"):
+            propagate_contract(
+                input_contract=input_contract,
+                output_row={"id": 1, "payload": {"key": "value"}},
+                transform_adds_fields=True,
+            )

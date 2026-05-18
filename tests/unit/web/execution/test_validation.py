@@ -10,7 +10,7 @@ W18 fix: Only typed exceptions are caught — no bare except Exception.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -82,17 +82,28 @@ def _make_output(
     )
 
 
+_MAKE_STATE_DEFAULT_SOURCE = object()
+
+
 def _make_state(
-    source_options: dict[str, Any] | None = None,
+    source_options: dict[str, Any] | None | object = _MAKE_STATE_DEFAULT_SOURCE,
     nodes: tuple[NodeSpec, ...] | None = None,
     outputs: tuple[OutputSpec, ...] | None = None,
 ) -> CompositionState:
     """Build a CompositionState with sensible defaults for validation tests.
 
-    When source_options is not None, a SourceSpec is created with those options.
-    When source_options is None, source is set to None.
+    Default: a state with a placeholder source so callers bypass the
+    ``validate_pipeline`` empty-pipeline short-circuit (which returns the
+    structured ``empty_pipeline`` outcome before any of the steps these
+    tests exercise via mocks). Pass ``source_options=None`` explicitly to
+    test the empty-source path; pass a dict to customise source options.
     """
-    source = _make_source(source_options) if source_options is not None else None
+    if source_options is _MAKE_STATE_DEFAULT_SOURCE:
+        source = _make_source({})
+    elif source_options is None:
+        source = None
+    else:
+        source = _make_source(cast(dict[str, Any], source_options))
     return CompositionState(
         source=source,
         nodes=nodes or (),
@@ -118,6 +129,72 @@ def _make_settings(data_dir: str = "/tmp/test_data") -> WebSettings:
 def _check(result, name: str):
     """Look up a validation check by name, not position."""
     return next(c for c in result.checks if c.name == name)
+
+
+class TestValidatePipelineEmptyComposition:
+    """Empty-composition short-circuit at the top of validate_pipeline.
+
+    A CompositionState with no source, transforms, or outputs cannot be
+    assembled into ElspethSettings — pydantic would otherwise emit a raw
+    "2 validation errors for ElspethSettings: source/sinks Field required"
+    stack trace leaking the internal model name to a user-facing UI. The
+    short-circuit replaces that with a structured ``empty_pipeline`` error.
+
+    Surface that exercises this path: a guided session immediately after
+    ``exit_to_freeform`` (the wire response sets composition_state to a
+    version-bumped state with source=null nodes=[] outputs=[]).
+    """
+
+    def test_empty_pipeline_returns_structured_error(self) -> None:
+        state = _make_state(source_options=None)
+        settings = _make_settings()
+
+        result = validate_pipeline(state, settings, MagicMock())
+
+        assert result.is_valid is False
+        assert len(result.errors) == 1
+        err = result.errors[0]
+        assert err.error_code == "empty_pipeline"
+        # The user-facing message MUST NOT contain pydantic internals.
+        assert "ElspethSettings" not in err.message
+        assert "Field required" not in err.message
+        assert err.suggestion is not None
+
+    def test_empty_pipeline_skips_pydantic_invocation(self) -> None:
+        """The short-circuit returns before any of the engine code paths
+        the mocks would intercept — confirms we are NOT relying on
+        ``load_settings_from_yaml_string`` raising PydanticValidationError
+        to detect this case."""
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            state = _make_state(source_options=None)
+            settings = _make_settings()
+            result = validate_pipeline(state, settings, MagicMock())
+
+        assert result.is_valid is False
+        assert result.errors[0].error_code == "empty_pipeline"
+        mock_load.assert_not_called()
+
+    def test_source_alone_bypasses_empty_check(self) -> None:
+        """A source without outputs is not 'empty' — the user has
+        started composing. Let normal validation flag the missing sink."""
+        state = _make_state()  # default: source set, nodes/outputs empty
+        settings = _make_settings()
+
+        # Mock heavily so we only exercise the early-return branch.
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string"),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_inst,
+        ):
+            mock_inst.side_effect = PluginNotFoundError("placeholder")
+            mock_yaml = MagicMock()
+            mock_yaml.generate_yaml.return_value = "source:\n  plugin: csv"
+            result = validate_pipeline(state, settings, mock_yaml)
+
+        # Result must be is_valid=False (because plugin instantiation fails
+        # via the mock), but the error must NOT be the empty_pipeline code —
+        # the short-circuit must NOT trigger when source is present.
+        assert result.is_valid is False
+        assert all(err.error_code != "empty_pipeline" for err in result.errors)
 
 
 class TestValidatePipelinePathAllowlist:
@@ -2608,7 +2685,17 @@ class TestEdgeContractFailureFormatting:
         )
         mock_graph.validate_edge_compatibility.side_effect = edge_exc
 
-        state = _make_state()
+        # source_options=None: the test exercises the rich-suggestion fall-back
+        # path (``_edge_patch_target_for_node_id`` returns
+        # ``_node_schema_patch_target`` when the targets dict is empty), so
+        # the state must have no source. The default ``_make_state()`` now
+        # adds a placeholder source to bypass the ``empty_pipeline``
+        # short-circuit at the top of ``validate_pipeline``; that source
+        # would populate the targets dict and route the lookup through
+        # ``_unmapped_schema_patch_target`` instead — emitting a
+        # ``get_pipeline_state`` suggestion rather than the expected
+        # ``patch_node_options`` one.
+        state = _make_state(source_options=None, nodes=(_make_node(),))
         settings = _make_settings()
         result = validate_pipeline(state, settings, mock_yaml_gen)
 

@@ -24,6 +24,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import * as api from "@/api/client";
 import type { ApiError } from "@/types/index";
 import { YamlDisplay } from "./YamlDisplay";
+import { hasCompositionContent } from "@/utils/compositionState";
 
 interface YamlFetchError {
   title: string;
@@ -74,9 +75,10 @@ export function YamlView() {
 
   // Fetch YAML from the backend whenever composition state version changes
   const version = compositionState?.version ?? null;
+  const hasPipelineContent = hasCompositionContent(compositionState);
 
   useEffect(() => {
-    if (!activeSessionId || version === null) {
+    if (!activeSessionId || version === null || !hasPipelineContent) {
       setYaml(null);
       setYamlError(null);
       setIsLoading(false);
@@ -107,7 +109,7 @@ export function YamlView() {
     return () => {
       cancelled = true;
     };
-  }, [activeSessionId, version]);
+  }, [activeSessionId, version, hasPipelineContent]);
 
   const pendingYamlProposal = pendingYamlProposals[0] ?? null;
   const pendingYamlProposalIsBusy =
@@ -149,7 +151,7 @@ export function YamlView() {
     );
 
   // Empty state
-  if (!compositionState || version === null) {
+  if (!compositionState || version === null || !hasPipelineContent) {
     return (
       <div className="empty-state">
         YAML will appear here once your pipeline has components.

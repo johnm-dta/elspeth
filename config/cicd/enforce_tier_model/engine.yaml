@@ -50,12 +50,6 @@ per_file_rules:
   reason: Protocol dispatch for batch-aware transforms and re-raise guards
   expires: null
   max_hits: 3
-- pattern: engine/orchestrator/types.py
-  rules:
-  - R5
-  reason: Construction-time immutability enforcement for RunResult and AggregationFlushResult
-  expires: null
-  max_hits: 1
 - pattern: engine/processor.py
   rules:
   - R5
@@ -80,30 +74,12 @@ per_file_rules:
   expires: null
   max_hits: 2
 allow_hits:
-- key: engine/dependency_resolver.py:R5:_load_depends_on:fp=f936e7a8efffb70d
-  owner: architecture
-  reason: 'Tier 3 boundary: raw operator-authored YAML for cycle detection must be a mapping before key
-    access proceeds.'
-  safety: Raises ValueError with file path and observed top-level type on malformed input; no coercion
-  expires: null
 - key: engine/dependency_resolver.py:R1:_load_depends_on:fp=0ecc84f5b6b35d41
   owner: architecture
   reason: 'Tier 3 boundary: depends_on is optional in operator-authored YAML, so .get() preserves the
     explicit no-dependencies default for cycle detection.'
   safety: Missing depends_on yields []; malformed present values are still validated immediately by subsequent
     type checks
-  expires: null
-- key: engine/dependency_resolver.py:R5:_load_depends_on:fp=264c3e80726cfebb
-  owner: architecture
-  reason: 'Tier 3 validation: depends_on from raw operator YAML must be a list before entry-level validation
-    and contract normalization run.'
-  safety: Raises ValueError with file path and observed type on malformed input; no coercion
-  expires: null
-- key: engine/dependency_resolver.py:R5:_load_depends_on:fp=e35844f983fac115
-  owner: architecture
-  reason: 'Tier 3 validation: each depends_on entry from raw operator YAML must be a mapping before DependencyConfig.model_validate()
-    can enforce the schema.'
-  safety: Raises ValueError with entry index and observed type on malformed input; no coercion
   expires: null
 - key: engine/coalesce_executor.py:R5:CoalesceExecutor:_execute_merge:fp=0f05412d6f31e065
   owner: architecture
@@ -130,18 +106,21 @@ allow_hits:
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=8ae24dda2209d609
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates sink.write() returns SinkWriteResult, not a bare ArtifactDescriptor\
     \ or other type"
   safety: Crashes immediately with PluginContractViolation identifying the buggy sink plugin
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=333193edcab82132
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates plugin return type to crash with PluginContractViolation\
     \ instead of opaque AttributeError"
   safety: Crashes immediately with clear error identifying the buggy sink plugin
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=6bf4f058589b3c6f
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates failsink.write() returns SinkWriteResult, crashing with\
     \ PluginContractViolation identifying the buggy failsink plugin instead of propagating an opaque AttributeError\
     \ from the downstream artifact access"
@@ -150,6 +129,7 @@ allow_hits:
   expires: null
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=00755313e7e139d5
   owner: bugfix
+  pattern: plugin-contract-offensive-guard
   reason: "Offensive isinstance \u2014 validates the artifact attached to the failsink's SinkWriteResult\
     \ is an ArtifactDescriptor, crashing with PluginContractViolation identifying the buggy failsink plugin\
     \ instead of propagating an opaque AttributeError from later artifact_path access"
@@ -255,6 +235,7 @@ allow_hits:
   expires: null
 - key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=28abc6a4bd80595e
   owner: bugfix
+  pattern: audit-record-fallback
   reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity
     rejected by stable_hash. Coercion at the source/quarantine boundary is the one
     Tier-3 location where canonical hashing must accept non-canonical floats. The

@@ -1,15 +1,6 @@
 per_file_rules:
 - pattern: plugins/sources/*
   rules:
-  - R1
-  - R2
-  - R4
-  - R6
-  - R9
-  reason: Source plugins ingest external data (Tier 3) - all defensive patterns legitimate
-  expires: null
-- pattern: plugins/sources/*
-  rules:
   - R5
   reason: Type discrimination for schema inference and config parsing at Tier 3 boundary
   expires: null
@@ -157,6 +148,171 @@ per_file_rules:
   expires: null
   max_hits: 2
 allow_hits:
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=f307dc45ae044308
+  owner: source-boundary
+  reason: Azure blob CSV bytes are Tier 3 input; UnicodeDecodeError is converted into an audited parse validation error and optional quarantine row.
+  safety: Catches only decode failure from external blob bytes, records ctx validation evidence, yields quarantine unless discard, then stops loading the blob.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=a8b64136ebd5eaf7
+  owner: source-boundary
+  reason: Azure blob CSV header discovery reads Tier 3 input; StopIteration means an empty file contains no header row.
+  safety: Records an audited parse validation error with blob preview metadata and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=9e1e09f95ac09c28
+  owner: source-boundary
+  reason: Azure blob CSV header parsing reads Tier 3 input; csv.Error represents malformed external CSV syntax.
+  safety: Records parse validation evidence, yields quarantine unless discard, and returns before any untrusted rows are emitted.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=ccd03e650f386ee7
+  owner: source-boundary
+  reason: Headerless Azure blob CSV peeks at Tier 3 input; StopIteration means the blob is empty and has no data row to infer columns from.
+  safety: Empty input produces no rows; no fabricated schema or synthetic data is emitted.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=a7ca3aae0502794a
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; StopIteration is the normal end-of-file signal.
+  safety: Loop exits cleanly only on EOF after already-recorded row-level validation decisions.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=96102dae936f8fb2
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=41fde2a974b278ce
+  owner: source-boundary
+  reason: Azure blob JSON bytes are Tier 3 input; UnicodeDecodeError is an external file parse failure.
+  safety: Records file-level parse validation evidence and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=b8b353bc5dc1b63e
+  owner: source-boundary
+  reason: Azure blob JSON parsing handles Tier 3 input; JSONDecodeError and non-finite ValueError are malformed external content.
+  safety: Records file-level parse validation evidence and yields quarantine unless discard before returning.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=53b80f3a0e775853
+  owner: source-boundary
+  reason: Azure blob JSONL line parsing handles Tier 3 input; JSONDecodeError and non-finite ValueError are malformed external rows.
+  safety: Records line-level parse validation evidence and yields quarantine unless discard, then continues to the next independent line.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=20dee7daf05393c2
+  owner: source-boundary
+  reason: Azure blob JSONL streaming decodes Tier 3 input; UnicodeDecodeError is an external parse failure.
+  safety: Records parse validation evidence with line metadata and yields quarantine unless discard before returning.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=a1447191dee0f430
+  owner: source-boundary
+  reason: Azure blob JSON/JSONL rows are Tier 3 input; ValueError from field normalization means the external row is not a JSON object with usable fields.
+  safety: Records field-normalization validation evidence and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=c4388d250890bb37
+  owner: source-boundary
+  reason: Azure blob source schema validation handles Tier 3 rows; ValidationError means external row data violates the configured source schema.
+  safety: Records schema validation evidence and yields quarantine unless discard; programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=796b2d93d8a8f4e5
+  owner: source-boundary
+  reason: Local CSV file opening decodes Tier 3 file bytes; UnicodeDecodeError is an external parse failure.
+  safety: Records parse validation evidence with file path and encoding, yields quarantine unless discard, and stops loading.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=d778e9583acaeeca
+  owner: source-boundary
+  reason: Local CSV row reading decodes Tier 3 file bytes; UnicodeDecodeError is an external parse failure after open.
+  safety: Records parse validation evidence with file path and encoding, yields quarantine unless discard, and stops loading.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=3b694d45d0095035
+  owner: source-boundary
+  reason: CSV skip_rows parsing reads Tier 3 input; csv.Error means malformed preamble content may corrupt parser state.
+  safety: Records parse validation evidence, yields quarantine unless discard, and returns before trusting subsequent rows.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=ed62dbcfc78d59a7
+  owner: source-boundary
+  reason: CSV header discovery reads Tier 3 input; StopIteration means skip_rows consumed all content before a header.
+  safety: Records an audited parse validation error when skip_rows caused exhaustion, otherwise emits no fabricated row.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=35c103acdd192641
+  owner: source-boundary
+  reason: CSV header parsing reads Tier 3 input; csv.Error means malformed external CSV syntax.
+  safety: Records parse validation evidence, yields quarantine unless discard, and returns before emitting rows.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=af77e8691179fe8c
+  owner: source-boundary
+  reason: CSV row iteration reads Tier 3 input; StopIteration is the normal end-of-file signal.
+  safety: Loop exits cleanly only after prior rows have gone through parse and schema validation paths.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=679cbe6fa233bfe0
+  owner: source-boundary
+  reason: CSV row iteration reads Tier 3 input; csv.Error can leave parser state untrustworthy.
+  safety: Records parse validation evidence, yields quarantine unless discard, and returns to avoid silent data loss.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=2dc9ca206a93bf80
+  owner: source-boundary
+  reason: CSV source schema validation handles Tier 3 rows; ValidationError means external row data violates the configured source schema.
+  safety: Records schema validation evidence and yields quarantine unless discard; programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R1:DataverseSource:_normalize_row_fields:fp=bda9358e61cd3c2c
+  owner: source-boundary
+  reason: Dataverse rows are Tier 3 and may be sparse; fields absent from the first-row mapping must be normalized individually.
+  safety: Unmapped fields are normalized with normalize_field_name(), trigger field-resolution rebuild, and still pass through schema validation.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R1:DataverseSource:load:fp=7555c055e0c45509
+  owner: source-boundary
+  reason: FetchXML is Tier 3 source configuration; the entity name attribute is optional in parsed XML and must be checked explicitly.
+  safety: Missing entity name raises RuntimeError before any Dataverse request is made; no fallback entity is fabricated.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=81aa8f5fbf5f8e29
+  owner: source-boundary
+  reason: Dataverse formatted-value stripping handles Tier 3 API rows; ValueError means external metadata would collide with real fields.
+  safety: Records validation evidence and yields quarantine unless discard; the row is not emitted as valid.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=88dfa7954bbaa41a
+  owner: source-boundary
+  reason: Dataverse field normalization handles Tier 3 API rows; ValueError means an external field name cannot be normalized safely.
+  safety: Records field-normalization validation evidence and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=0cfffa58cc323ca7
+  owner: source-boundary
+  reason: Dataverse source schema validation handles Tier 3 API rows; ValidationError means external row data violates the configured schema.
+  safety: Records schema validation evidence and yields quarantine unless discard; programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=a8e14c58a4cab14b
+  owner: source-boundary
+  reason: JSONL line parsing handles Tier 3 file input; JSONDecodeError and non-finite ValueError are malformed external rows.
+  safety: Records line-level parse validation evidence and yields quarantine unless discard, then continues to the next independent line.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=fb2abf155b90eecd
+  owner: source-boundary
+  reason: JSONL streaming decodes Tier 3 file input; UnicodeDecodeError is an external parse failure.
+  safety: Records parse validation evidence with line metadata and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_json_array:fp=54c67ba7465b9864
+  owner: source-boundary
+  reason: JSON array parsing handles Tier 3 file input; JSONDecodeError and non-finite ValueError are malformed external content.
+  safety: Records file-level parse validation evidence, yields quarantine unless discard, and returns before row validation.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_json_array:fp=363ed66e5c41003a
+  owner: source-boundary
+  reason: JSON array loading decodes Tier 3 file input; UnicodeDecodeError is an external parse failure.
+  safety: Records file-level parse validation evidence, yields quarantine unless discard, and returns.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=26e79c8cb1ebc863
+  owner: source-boundary
+  reason: JSON source row normalization handles Tier 3 rows; ValueError means the external row is not an object with usable fields.
+  safety: Records validation evidence and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=a0cc10c5bfe75497
+  owner: source-boundary
+  reason: JSON source schema validation handles Tier 3 rows; ValidationError means external row data violates the configured schema.
+  safety: Records schema validation evidence and yields quarantine unless discard; programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/text_source.py:R6:TextSource:load:fp=d5cb0b6468b6d9a0
+  owner: source-boundary
+  reason: Text source line streaming decodes Tier 3 file input; UnicodeDecodeError is an external parse failure.
+  safety: Records parse validation evidence with file path and line metadata and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/text_source.py:R6:TextSource:_validate_and_yield:fp=197cc257c3f897c6
+  owner: source-boundary
+  reason: Text source schema validation handles Tier 3 rows; ValidationError means external row data violates the configured schema.
+  safety: Records schema validation evidence and yields quarantine unless discard; programmer errors still propagate.
+  expires: '2026-08-17'
 - key: plugins/infrastructure/schema_factory.py:R6:_find_non_finite_value_path:fp=b5937945437c8045
   owner: bugfix
   reason: TypeError from np.isfinite on non-numeric dtypes (e.g., string arrays) is
@@ -165,25 +321,11 @@ allow_hits:
   expires: '2026-07-02'
 - key: plugins/infrastructure/manager.py:R4:PluginManager:register:fp=0e88b71c015f8aa0
   owner: bugfix
+  pattern: rollback-preserves-primary-error
   reason: Rollback protection — catch any rollback failure so secondary exception
     doesn't bury original diagnostic
   safety: Logs rollback error then re-raises the original exception unchanged
   expires: null
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_execute_request:fp=89f5749a5c05003a
-  owner: architecture
-  reason: httpx Client.get() method call - dispatched based on HTTP method
-  safety: This is the actual external HTTP call, not a defensive dict access
-  expires: '2026-07-02'
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:get_ssrf_safe:fp=bf32cd6693b31b20
-  owner: architecture
-  reason: httpx Client.get() method call - ephemeral client for TLS/SNI isolation
-  safety: This is the actual external HTTP call with IP pinning
-  expires: '2026-07-02'
-- key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_follow_redirects_safe:fp=fbc6b3aca998f23c
-  owner: architecture
-  reason: httpx Client.get() method call — ephemeral client per redirect hop for TLS
-    isolation
-  safety: This is the actual external HTTP call, not a defensive dict access
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_follow_redirects_safe:fp=10ab112db646388f
   owner: architecture
   reason: HTTP redirect Location header — external system boundary, header may be
@@ -195,47 +337,11 @@ allow_hits:
     is genuinely optional with empty-string default
   safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
   expires: '2026-07-02'
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:validate_output_target:fp=e908c260f2d4641a
-  owner: feature
-  reason: Display header mapping - fields not in map keep original name (transform-added
-    fields)
-  safety: Intentional fallback to original field name, not bug hiding
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_open_file:fp=8c83b27dcbe3a2b0
-  owner: feature
-  reason: Intentional fallback - reverse mapping may not contain all fields (transform-added)
-  safety: Falls back to original field name - correct behavior for fields not in source
-- key: plugins/sinks/csv_sink.py:R1:CSVSink:_get_field_names_and_display:fp=d555aa9d034e84f7
-  owner: feature
-  reason: Intentional fallback - display mapping may not contain all fields (transform-added)
-  safety: Falls back to normalized field name - correct behavior for fields not in
-    source
-- key: plugins/sinks/json_sink.py:R1:JSONSink:validate_output_target:fp=49df15c4ae67af78
-  owner: feature
-  reason: Display header mapping - fields not in map keep original name (transform-added
-    fields)
-  safety: Intentional fallback to original field name, not bug hiding
 - key: plugins/infrastructure/discovery.py:R9:_discover_in_file:fp=0acd1690c04355a2
   owner: architecture
   reason: sys.modules.pop cleanup on import failure — module may not be registered
     yet
   safety: Legitimate cleanup pattern in error path
-  expires: '2026-07-02'
-- key: plugins/transforms/field_mapper.py:R8:FieldMapperConfig:_reject_duplicate_targets:fp=b4e1d7dd3320b8f6
-  owner: bugfix
-  reason: setdefault used for grouping sources-by-target to detect duplicate target
-    field names
-  safety: Grouping is deterministic; ValueError raised if duplicates found — prevents
-    silent data loss
-  expires: '2026-07-17'
-- key: plugins/sources/field_normalization.py:R8:check_normalization_collisions:fp=5d89837a5521627f
-  owner: architecture
-  reason: setdefault for lazy initialization
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-07-02'
-- key: plugins/sources/field_normalization.py:R8:check_mapping_collisions:fp=a1371511b3dee8c6
-  owner: architecture
-  reason: setdefault for lazy initialization
-  safety: Code reviewed - legitimate pattern
   expires: '2026-07-02'
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=4b8cc1b6067415ff
   owner: bugfix
@@ -247,6 +353,7 @@ allow_hits:
   expires: '2026-07-17'
 - key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=5ce04fa54ab80b94
   owner: bugfix
+  pattern: union-dispatch
   reason: Nominal discriminated-union dispatch — retryable_error is PluginRetryableError
     | CapacityError and only CapacityError carries a status_code. isinstance narrows
     the union so the status_code field is only populated when it exists, rather than
@@ -256,6 +363,7 @@ allow_hits:
   expires: null
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_single:fp=71e586ef9fbea49d
   owner: bugfix
+  pattern: retry-orchestration
   reason: CapacityError is one arm of the retryable-error control flow — caught so
     the worker can release the semaphore, throttle, and retry within the capacity-retry
     budget. This is explicit retry orchestration, not silent swallowing.
@@ -458,35 +566,6 @@ allow_hits:
   safety: Unknown provider raises ValueError at config validation time with list of
     available providers; no silent data loss
   expires: null
-- key: plugins/infrastructure/clients/retrieval/chroma.py:R5:ChromaSearchProvider:_parse_and_build_chunks:fp=0501625b5c6d2fa4
-  owner: bugfix
-  reason: Tier 3 boundary type check — ChromaDB SDK may return non-string documents
-    from corrupt index; isinstance guards pipeline from non-string content
-  safety: Non-string documents are skipped (continue); only validated str content
-    enters pipeline as Tier 2
-  expires: null
-- key: plugins/infrastructure/clients/retrieval/chroma.py:R5:ChromaSearchProvider:_parse_and_build_chunks:fp=34bff7cdd231006f
-  owner: bugfix
-  reason: Tier 3 boundary — isinstance(distance, bool) guard before isinstance(distance,
-    (int, float)) because Python's isinstance(True, int) is True
-  safety: Non-numeric distance crashes with RetrievalError (infrastructure corruption);
-    does not suppress or coerce
-  expires: null
-- key: plugins/infrastructure/clients/retrieval/chroma.py:R5:ChromaSearchProvider:_parse_and_build_chunks:fp=7b48bc51e1899ab3
-  owner: bugfix
-  reason: Tier 3 boundary — isinstance(distance, (int, float)) validates ChromaDB
-    distance values are numeric before arithmetic
-  safety: Non-numeric distance crashes with RetrievalError (infrastructure corruption);
-    does not suppress or coerce
-  expires: null
-- key: plugins/transforms/rag/config.py:R5:RAGRetrievalConfig:coerce_schema_config:fp=4a027df2f322fde0
-  owner: feature
-  reason: Pydantic before-validator at config boundary — isinstance(dict) needed to
-    distinguish raw dict (from YAML/direct construction) from already-parsed SchemaConfig;
-    same pattern as config_base.py R5 exemption
-  safety: Non-dict values pass through unchanged; dict values validated by SchemaConfig.from_dict
-    which raises on invalid input
-  expires: null
 - key: plugins/transforms/rag/config.py:R1:RAGRetrievalConfig:validate_provider_config:fp=bb927661731d8cb8
   owner: feature
   reason: Provider lookup — dict.get() with explicit None check and meaningful ValueError;
@@ -507,21 +586,9 @@ allow_hits:
     be absent on malformed items
   safety: Captured in skipped_items for audit; no data corruption
   expires: null
-- key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=83c83b73ebf0ae32
-  owner: bugfix
-  reason: Tier 3 boundary type validation — isinstance(raw_score, bool) guards against
-    Python bool-is-int before arithmetic
-  safety: Invalid score type causes item to be skipped and recorded in skipped_items
-    as "invalid_score_type"
-  expires: null
-- key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=cdec26776f3d3d1a
-  owner: bugfix
-  reason: Tier 3 boundary type validation — rejects non-numeric score types (string,
-    list, dict) before math.isfinite
-  safety: Invalid score type causes item to be skipped and recorded; no crash
-  expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=d3ae8b449f567803
   owner: bugfix
+  pattern: tier3-boundary-validator
   reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid
     score type
   safety: Captured in skipped_items for audit; no data corruption
@@ -544,15 +611,9 @@ allow_hits:
     content
   safety: Captured in skipped_items as "empty_content" for audit; no data corruption
   expires: null
-- key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=8580abf2a8e29566
-  owner: bugfix
-  reason: Tier 3 boundary type validation — rejects non-string content before passing
-    to RetrievalChunk(content=str)
-  safety: Invalid content type causes item to be skipped and recorded in skipped_items
-    as "invalid_content_type"
-  expires: null
 - key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:_parse_response:fp=423ca2aea34a9f56
   owner: bugfix
+  pattern: tier3-boundary-validator
   reason: Azure AI Search API Tier 3 — item.get("id") in skipped item record for invalid
     content type
   safety: Captured in skipped_items for audit; no data corruption
@@ -567,19 +628,6 @@ allow_hits:
   owner: feature
   reason: Azure AI Search API Tier 3 — @search.documentId fallback in source ID chain
   safety: No fabricated IDs; items without source_id skipped and recorded
-  expires: null
-- key: plugins/infrastructure/clients/retrieval/azure_search.py:R5:AzureSearchProvider:_parse_response:fp=20401d74976291b8
-  owner: feature
-  reason: Azure AI Search API response metadata coercion at Tier 3 boundary — isinstance
-    check converts non-primitive types to str for JSON serializability
-  safety: Non-serializable types coerced to str; RetrievalChunk validates metadata
-    JSON-serializability at construction
-  expires: null
-- key: plugins/infrastructure/clients/retrieval/azure_search.py:R1:AzureSearchProvider:check_readiness:fp=359a58efc9b7911a
-  owner: feature
-  reason: httpx.get() method call for Azure Search $count endpoint — false positive
-    from R1 rule matching .get( syntax
-  safety: This is the actual HTTP call, not a defensive dict access
   expires: null
 - key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=384b4135dd2e54b8
   owner: feature
@@ -619,6 +667,7 @@ allow_hits:
   expires: null
 - key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=f8441bff114d7133
   owner: bugfix
+  pattern: external-boundary-validator
   reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
     values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
     rows instead of crashing the batch
@@ -627,6 +676,7 @@ allow_hits:
   expires: null
 - key: plugins/infrastructure/discovery.py:R6:discover_plugins_in_directory:fp=17b3c58c5cf147b9
   owner: bugfix
+  pattern: external-dependency-optional
   reason: Optional extras (e.g. chromadb for [rag]) are external dependencies — ImportError
     is expected when not installed
   safety: Only catches ImportError/ModuleNotFoundError; logs warning with file name

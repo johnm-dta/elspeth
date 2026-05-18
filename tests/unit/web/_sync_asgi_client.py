@@ -16,9 +16,15 @@ class SyncASGITestClient:
 
     __test__ = False
 
-    def __init__(self, app: Any, *, raise_server_exceptions: bool = True) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        raise_server_exceptions: bool = True,
+        transport_app: Any | None = None,
+    ) -> None:
         self.app = app
-        self._app = app
+        self._app = transport_app or app
         self._raise_server_exceptions = raise_server_exceptions
         self.cookies = Cookies()
 

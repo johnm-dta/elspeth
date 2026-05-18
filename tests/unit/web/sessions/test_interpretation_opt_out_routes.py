@@ -26,7 +26,9 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 
 from elspeth.web.sessions.models import (
@@ -35,6 +37,17 @@ from elspeth.web.sessions.models import (
     sessions_table,
 )
 from tests.unit.web.conftest import _make_session
+
+
+async def _post(test_client: TestClient, url: str) -> Response:
+    async with AsyncClient(
+        transport=ASGITransport(app=test_client.app),
+        base_url="http://test",
+        cookies=test_client.cookies,
+    ) as client:
+        response = await client.post(url)
+        test_client.cookies.update(response.cookies)
+        return response
 
 
 def _seed_session(test_client: TestClient, *, user_id: str = "alice") -> UUID:
@@ -49,7 +62,8 @@ def _seed_session(test_client: TestClient, *, user_id: str = "alice") -> UUID:
 # --------------------------------------------------------------------------- #
 
 
-def test_14_opt_out_flips_session_flag_and_writes_interpretation_event_row(
+@pytest.mark.asyncio
+async def test_14_opt_out_flips_session_flag_and_writes_interpretation_event_row(
     test_client: TestClient,
 ) -> None:
     """Spec test 1 (numbered 14 in the combined spec):
@@ -62,7 +76,7 @@ def test_14_opt_out_flips_session_flag_and_writes_interpretation_event_row(
     """
     session_id = _seed_session(test_client)
 
-    response = test_client.post(f"/api/sessions/{session_id}/interpretations/opt_out")
+    response = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -101,7 +115,8 @@ def test_14_opt_out_flips_session_flag_and_writes_interpretation_event_row(
 # --------------------------------------------------------------------------- #
 
 
-def test_15_opt_out_is_idempotent_first_timestamp_authoritative(
+@pytest.mark.asyncio
+async def test_15_opt_out_is_idempotent_first_timestamp_authoritative(
     test_client: TestClient,
 ) -> None:
     """Spec test 2 (numbered 15):
@@ -112,11 +127,11 @@ def test_15_opt_out_is_idempotent_first_timestamp_authoritative(
     """
     session_id = _seed_session(test_client)
 
-    first = test_client.post(f"/api/sessions/{session_id}/interpretations/opt_out")
+    first = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
     assert first.status_code == 200, first.text
     first_timestamp = first.json()["opted_out_at"]
 
-    second = test_client.post(f"/api/sessions/{session_id}/interpretations/opt_out")
+    second = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
     assert second.status_code == 200, second.text
     second_timestamp = second.json()["opted_out_at"]
 
@@ -136,7 +151,8 @@ def test_15_opt_out_is_idempotent_first_timestamp_authoritative(
 # --------------------------------------------------------------------------- #
 
 
-def test_16_after_opt_out_sessions_flag_is_readable_by_compose_loop_path(
+@pytest.mark.asyncio
+async def test_16_after_opt_out_sessions_flag_is_readable_by_compose_loop_path(
     test_client: TestClient,
 ) -> None:
     """Spec test 3 (numbered 16):
@@ -154,7 +170,7 @@ def test_16_after_opt_out_sessions_flag_is_readable_by_compose_loop_path(
     """
     session_id = _seed_session(test_client)
 
-    response = test_client.post(f"/api/sessions/{session_id}/interpretations/opt_out")
+    response = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
     assert response.status_code == 200, response.text
 
     with test_client.app.state.phase3_engine.begin() as conn:
@@ -167,7 +183,8 @@ def test_16_after_opt_out_sessions_flag_is_readable_by_compose_loop_path(
 # --------------------------------------------------------------------------- #
 
 
-def test_17_idor_opt_out_on_other_users_session_returns_404(
+@pytest.mark.asyncio
+async def test_17_idor_opt_out_on_other_users_session_returns_404(
     test_client: TestClient,
 ) -> None:
     """Spec test 4 (numbered 17):
@@ -177,7 +194,7 @@ def test_17_idor_opt_out_on_other_users_session_returns_404(
     """
     session_id = _seed_session(test_client, user_id="bob")
 
-    response = test_client.post(f"/api/sessions/{session_id}/interpretations/opt_out")
+    response = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
 
     assert response.status_code == 404, response.text
 

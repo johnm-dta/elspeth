@@ -38,7 +38,6 @@ import pytest
 import structlog
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
 from sqlalchemy import Connection, insert
 from sqlalchemy.pool import StaticPool
 
@@ -54,6 +53,7 @@ from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 @pytest.fixture
@@ -99,7 +99,7 @@ def _make_session(
 
 @pytest.fixture
 def test_client(tmp_path: Path) -> TestClient:
-    """FastAPI ``TestClient`` with app state exposing ``sessions_service``."""
+    """Sync ASGI test client with app state exposing ``sessions_service``."""
 
     eng = create_session_engine(
         "sqlite:///:memory:",

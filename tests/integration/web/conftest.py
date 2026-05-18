@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Event, Thread
 from uuid import UUID, uuid4
 
+import anyio
 import pytest
 import structlog
+from asgi_lifespan import LifespanManager
 from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
 from sqlalchemy import Connection, event, insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
@@ -42,6 +46,7 @@ from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
 def _make_session(
@@ -155,8 +160,8 @@ def session_with_composer_state(session_with_pending_compose_request: dict[str, 
 #
 # These fixtures stand up the full ELSPETH web app via ``create_app`` so the
 # audit-readiness routes exercise the real validate_pipeline / scoped secret
-# resolver / sessions paths.  ``TestClient`` as a context manager runs the
-# FastAPI lifespan so ``app.state.execution_service`` and
+# resolver / sessions paths.  ``_lifespan_test_client`` runs the FastAPI
+# lifespan so ``app.state.execution_service`` and
 # ``app.state.readiness_service`` are constructed.
 #
 # Auth is bypassed by overriding ``get_current_user``: the auth provider is
@@ -213,6 +218,63 @@ def _build_audit_readiness_app(
         app.dependency_overrides[get_current_user] = _mock_user
 
     return app
+
+
+@contextmanager
+def _lifespan_test_client(app: FastAPI) -> Iterator[TestClient]:
+    """Run FastAPI lifespan without Starlette's portal-sensitive TestClient."""
+
+    ready: Queue[LifespanManager | BaseException] = Queue(maxsize=1)
+    finished: Queue[BaseException | None] = Queue(maxsize=1)
+    stop = Event()
+    ready_sent = False
+
+    async def _run_lifespan() -> None:
+        nonlocal ready_sent
+        try:
+            async with LifespanManager(app) as manager:
+                ready.put(manager)
+                ready_sent = True
+                while not stop.is_set():
+                    await anyio.sleep(0.05)
+        except BaseException as exc:
+            if not ready_sent:
+                ready.put(exc)
+                ready_sent = True
+            finished.put(exc)
+        else:
+            finished.put(None)
+
+    def _thread_target() -> None:
+        anyio.run(_run_lifespan)
+
+    thread = Thread(target=_thread_target, name="audit-readiness-lifespan", daemon=True)
+    thread.start()
+    try:
+        started = ready.get(timeout=10)
+    except Empty as exc:
+        stop.set()
+        thread.join(timeout=5)
+        raise TimeoutError("FastAPI lifespan did not start within 10 seconds") from exc
+
+    if isinstance(started, BaseException):
+        thread.join(timeout=5)
+        raise started
+
+    try:
+        with TestClient(app, transport_app=started.app) as client:
+            yield client
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        if thread.is_alive():
+            raise TimeoutError("FastAPI lifespan did not shut down within 10 seconds")
+        try:
+            error = finished.get_nowait()
+        except Empty:
+            error = None
+        if error is not None:
+            raise error
 
 
 def _passthrough_composition_state(data_dir: Path) -> CompositionState:
@@ -362,7 +424,7 @@ def _seed_session_without_state(
 def audit_readiness_test_client(tmp_path: Path) -> Iterator[TestClient]:
     """Full app with audit-readiness routes wired; auth bypassed to ``alice``."""
     app = _build_audit_readiness_app(tmp_path, authed_user_id=_TEST_AUTHED_USER_ID)
-    with TestClient(app) as client:
+    with _lifespan_test_client(app) as client:
         yield client
 
 
@@ -411,7 +473,7 @@ def audit_readiness_client_anonymous(tmp_path: Path) -> Iterator[TestClient]:
     the full auth surface.
     """
     app = _build_audit_readiness_app(tmp_path, authed_user_id=None)
-    with TestClient(app) as client:
+    with _lifespan_test_client(app) as client:
         yield client
 
 

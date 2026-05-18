@@ -24,10 +24,11 @@ import hashlib
 import json
 import sys
 from calendar import monthrange
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 
@@ -36,14 +37,11 @@ import yaml
 # =============================================================================
 
 
-def _add_one_month(today: date) -> date:
-    """Return a date one month after today, clamped to month length."""
-    if today.month == 12:
-        year = today.year + 1
-        month = 1
-    else:
-        year = today.year
-        month = today.month + 1
+def _add_months(today: date, months: int) -> date:
+    """Return a date months after today, clamped to month length."""
+    month_index = today.month - 1 + months
+    year = today.year + month_index // 12
+    month = month_index % 12 + 1
     day = min(today.day, monthrange(year, month)[1])
     return date(year, month, day)
 
@@ -75,7 +73,7 @@ class Finding:
             "owner": "<your-name>",
             "reason": "<explain why this is at a trust boundary>",
             "safety": "<explain how failures are handled>",
-            "expires": _add_one_month(today).isoformat(),
+            "expires": _add_months(today, 3).isoformat(),
         }
 
 
@@ -88,6 +86,7 @@ class AllowlistEntry:
     reason: str
     safety: str
     expires: date | None
+    pattern: str | None = None
     matched: bool = field(default=False, compare=False)
     source_file: str = field(default="", compare=False)
 
@@ -114,6 +113,15 @@ class PerFileRule:
         return fnmatch.fnmatch(file_path, self.pattern)
 
 
+@dataclass(frozen=True)
+class AllowlistBudgetViolation:
+    """A loaded allowlist count exceeded a configured ratchet ceiling."""
+
+    category: str
+    current: int
+    max_allowed: int
+
+
 @dataclass
 class Allowlist:
     """Parsed allowlist configuration."""
@@ -122,6 +130,12 @@ class Allowlist:
     per_file_rules: list[PerFileRule] = field(default_factory=list)
     fail_on_stale: bool = True
     fail_on_expired: bool = True
+    max_allow_hits: int | None = None
+    max_per_file_rules: int | None = None
+    max_total_entries: int | None = None
+    max_permanent_allow_hits: int | None = None
+    max_permanent_per_file_rules: int | None = None
+    max_permanent_total_entries: int | None = None
 
     def match(self, finding: Finding) -> AllowlistEntry | PerFileRule | None:
         """Check if a finding is covered by an allowlist entry or per-file rule.
@@ -162,6 +176,26 @@ class Allowlist:
     def get_exceeded_file_rules(self) -> list[PerFileRule]:
         """Return per-file rules where matched_count exceeds max_hits."""
         return [r for r in self.per_file_rules if r.max_hits is not None and r.matched_count > r.max_hits]
+
+    def get_budget_violations(self) -> list[AllowlistBudgetViolation]:
+        """Return configured allowlist-count budget overruns."""
+        total_entries = len(self.entries) + len(self.per_file_rules)
+        permanent_allow_hits = sum(1 for entry in self.entries if entry.expires is None)
+        permanent_per_file_rules = sum(1 for rule in self.per_file_rules if rule.expires is None)
+        permanent_total_entries = permanent_allow_hits + permanent_per_file_rules
+        checks = (
+            ("allow_hits", len(self.entries), self.max_allow_hits),
+            ("per_file_rules", len(self.per_file_rules), self.max_per_file_rules),
+            ("total_entries", total_entries, self.max_total_entries),
+            ("permanent_allow_hits", permanent_allow_hits, self.max_permanent_allow_hits),
+            ("permanent_per_file_rules", permanent_per_file_rules, self.max_permanent_per_file_rules),
+            ("permanent_total_entries", permanent_total_entries, self.max_permanent_total_entries),
+        )
+        return [
+            AllowlistBudgetViolation(category=category, current=current, max_allowed=max_allowed)
+            for category, current, max_allowed in checks
+            if max_allowed is not None and current > max_allowed
+        ]
 
 
 # =============================================================================
@@ -292,13 +326,159 @@ def _find_type_checking_lines(tree: ast.Module) -> set[int]:
 class TierModelVisitor(ast.NodeVisitor):
     """AST visitor that detects bug-hiding patterns."""
 
+    _FASTAPI_ROUTE_METHODS: ClassVar[frozenset[str]] = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "websocket"})
+    _R1_HTTP_GET_MODULES: ClassVar[frozenset[str]] = frozenset({"httpx"})
+    _R1_HTTP_CLIENT_CONSTRUCTORS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "aiohttp.ClientSession",
+            "httpx.AsyncClient",
+            "httpx.Client",
+        }
+    )
+    _R1_QUEUE_CONSTRUCTORS: ClassVar[frozenset[str]] = frozenset({"asyncio.Queue"})
+    # CLOSED LIST: audited R5b boundary-normalization helpers from
+    # docs/audit/2026-05-19-cicd-allowlist-audit.md and findings/fp-analyst.md.
+    # Do not replace this with a broad ``web/**`` or ``plugins/**`` glob; new
+    # contexts need their own audit evidence and regression tests.
+    _R5_NAMED_BOUNDARY_CONTEXTS: ClassVar[dict[str, frozenset[str]]] = {
+        "engine/dependency_resolver.py": frozenset({"_load_depends_on"}),
+        "plugins/infrastructure/clients/retrieval/azure_search.py": frozenset({"_parse_response"}),
+        "plugins/infrastructure/clients/retrieval/chroma.py": frozenset({"_parse_and_build_chunks"}),
+        "plugins/transforms/azure/prompt_shield.py": frozenset({"_analyze_prompt"}),
+        "web/app.py": frozenset({"_settings_from_env"}),
+        "web/auth/local.py": frozenset({"_required_visible_string_claim"}),
+        "web/auth/oidc.py": frozenset(
+            {
+                "_get_jwk_algorithm",
+                "_get_token_algorithm",
+                "_validate_discovery_document",
+                "_validate_jwks_document",
+                "get_user_info",
+                "optional_profile_claim",
+            }
+        ),
+        "web/composer/_semantic_validator.py": frozenset({"_is_config_probe_exception"}),
+        "web/composer/audit.py": frozenset(
+            {
+                "_normalize_audit_payload",
+                "_result_to_audit_payload",
+                "begin_dispatch",
+                "begin_dispatch_or_arg_error",
+                "build_canonicalization_sentinel",
+                "canonicalize_pydantic_cause",
+            }
+        ),
+        "web/composer/guided/protocol.py": frozenset({"validate_payload"}),
+        "web/composer/recipes.py": frozenset({"_coerce_slot"}),
+        "web/composer/redaction.py": frozenset(
+            {
+                "_apply",
+                "_count_sensitive",
+                "_has_sensitive",
+                "_is_descendable",
+                "_redact_via_policy",
+                "_redact_via_schema",
+                "_walk_type",
+                "provider",
+                "walk_model_schema",
+            }
+        ),
+        "web/composer/service.py": frozenset(
+            {
+                "_cached_runtime_preflight",
+                "_compose_loop",
+                "_first_response_message",
+                "_json_safe_provider_artifact",
+                "_litellm_completion_supports_param",
+                "_matching_interpretation_placeholder_count",
+                "_optional_ancestor_present",
+                "_provider_cost_from_response",
+                "_provider_details_payload",
+                "_reasoning_metadata_from_response",
+                "_response_field",
+                "_safe_provider_request_id",
+                "_safe_response_model",
+                "_supports_anthropic_prompt_cache_markers",
+                "_token_usage_from_response",
+                "_try_apply_freeform_recipe_intent",
+                "_validate_advisor_arguments",
+            }
+        ),
+        "web/composer/source_inspection.py": frozenset({"_facts_from_objects", "_inspect_json", "_inspect_jsonl"}),
+        "web/composer/state.py": frozenset(
+            {
+                "_coalesce_branch_connections",
+                "_coalesce_branch_names",
+                "_declared_input_fields_option",
+                "_is_config_probe_exception",
+                "_is_static_contract_probe_exception",
+                "_serialize_branches",
+                "_validate_web_scrape_abuse_contact_not_reserved",
+                "from_dict",
+            }
+        ),
+        "web/execution/fanout_guard.py": frozenset(
+            {
+                "_count_csv_source_rows",
+                "_count_json_source_rows",
+                "_credential_ref",
+                "_provider_calls_per_row",
+                "_remote_source_limit",
+                "_source_path",
+                "_string_option",
+            }
+        ),
+        "web/execution/preflight.py": frozenset({"resolve_runtime_yaml_paths"}),
+        "web/execution/routes.py": frozenset({"_run_integrity_http"}),
+        "web/execution/schemas.py": frozenset({"_enforce_data_type"}),
+        "web/execution/service.py": frozenset({"_on_pipeline_done", "_run_pipeline", "_sanitize_error_for_client"}),
+        "web/execution/validation.py": frozenset(
+            {
+                "_collect_secret_refs",
+                "_find_identity_node_advisories",
+                "_infer_component_type_from_plugin_error",
+                "_mask_pending_interpretation_placeholders_for_authoring_preflight",
+                "validate_pipeline",
+            }
+        ),
+        "web/sessions/_auto_title.py": frozenset({"_auto_title_exception_class", "maybe_auto_title_session"}),
+        "web/sessions/routes.py": frozenset(
+            {
+                "_composer_persisted_validation",
+                "_dispatch_guided_respond",
+                "_extract_runtime_model_snapshot",
+                "_state_data_from_composer_state",
+            }
+        ),
+        "web/sessions/service.py": frozenset({"_patch_llm_transform_prompt", "_unwrap_envelope"}),
+        "web/sessions/telemetry.py": frozenset({"observed_value"}),
+    }
+
     def __init__(self, file_path: str, source_lines: list[str]) -> None:
         self.file_path = file_path
         self.source_lines = source_lines
         self.findings: list[Finding] = []
         self.symbol_stack: list[str] = []
+        self.class_stack: list[ast.ClassDef] = []
+        self.function_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.path_stack: list[str] = []
+        self.node_stack: list[ast.AST] = []
         self._decorator_lines: set[int] = set()  # Track lines that are decorators
+        self._import_aliases: dict[str, str] = {}
+
+    def visit(self, node: ast.AST) -> Any:
+        """Visit a node while retaining ancestor context for receiver-shape checks."""
+        self.node_stack.append(node)
+        try:
+            return super().visit(node)
+        finally:
+            self.node_stack.pop()
+
+    def _ancestor_node(self, depth: int) -> ast.AST | None:
+        """Return an ancestor where depth=1 is parent of the current node."""
+        if depth < 1 or len(self.node_stack) <= depth:
+            return None
+        return self.node_stack[-(depth + 1)]
 
     def _get_code_snippet(self, lineno: int) -> str:
         """Get the source line for a given line number."""
@@ -334,10 +514,27 @@ class TierModelVisitor(ast.NodeVisitor):
             )
         )
 
+    def visit_Import(self, node: ast.Import) -> None:
+        """Track import aliases used by receiver-type heuristics."""
+        for alias in node.names:
+            root_name = alias.name.split(".", 1)[0]
+            self._import_aliases[alias.asname or root_name] = alias.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Track from-import aliases used by receiver-type heuristics."""
+        if node.module is None:
+            return
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            self._import_aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Track class context."""
         self.symbol_stack.append(node.name)
+        self.class_stack.append(node)
         self.generic_visit(node)
+        self.class_stack.pop()
         self.symbol_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -346,7 +543,9 @@ class TierModelVisitor(ast.NodeVisitor):
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
+        self.function_stack.append(node)
         self.generic_visit(node)
+        self.function_stack.pop()
         self.symbol_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
@@ -355,7 +554,9 @@ class TierModelVisitor(ast.NodeVisitor):
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
+        self.function_stack.append(node)
         self.generic_visit(node)
+        self.function_stack.pop()
         self.symbol_stack.pop()
 
     def _is_default_return_value(self, value: ast.expr | None) -> bool:
@@ -391,16 +592,22 @@ class TierModelVisitor(ast.NodeVisitor):
         1. Decorator context: @router.get("/path") is a route decorator
         2. URL-like first arg: client.get("https://...") is an HTTP method
         3. ChromaDB keywords: collection.get(ids=[...]) is SDK retrieval
+        4. Receiver type: httpx module/client and asyncio.Queue receivers are
+           transport/queue APIs, not dicts
 
-        Note: f-string URLs (client.get(f"/api/{id}")) are NOT filtered
-        because we cannot statically determine their runtime value.
-        These must be allowlisted if they are legitimate HTTP calls.
+        Note: f-string URLs on unknown receivers are NOT filtered because we
+        cannot statically determine their runtime value. They must be tied to a
+        known transport receiver before this rule suppresses them.
         """
         # Heuristic 1: Decorator context
         if node.lineno in self._decorator_lines:
             return True
 
-        # Heuristic 2: URL-like first argument
+        # Heuristic 2: Known module/client/queue receiver type.
+        if self._is_known_non_dict_get_receiver(node):
+            return True
+
+        # Heuristic 3: URL-like first argument
         if node.args:
             first_arg = node.args[0]
             if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
@@ -408,13 +615,217 @@ class TierModelVisitor(ast.NodeVisitor):
                 if val.startswith(("/", "http://", "https://")):
                     return True
 
-        # Heuristic 3: ChromaDB-specific keywords
+        # Heuristic 4: ChromaDB-specific keywords
         # IMPORTANT: Only include keywords that are unambiguous to ChromaDB/vector DBs.
         # Generic pagination keywords (limit, offset) are NOT included because they
         # collide with SQLAlchemy, Django ORM, and other common patterns.
         chromadb_keywords = {"ids", "include", "where"}
         call_keywords = {kw.arg for kw in node.keywords if kw.arg is not None}
         return bool(call_keywords & chromadb_keywords)
+
+    def _qualified_import_name(self, expr: ast.expr) -> str | None:
+        if isinstance(expr, ast.Name):
+            return self._import_aliases.get(expr.id)
+        if isinstance(expr, ast.Attribute):
+            base = self._qualified_import_name(expr.value)
+            if base is None:
+                return None
+            return f"{base}.{expr.attr}"
+        return None
+
+    def _call_constructs_known_non_dict_get_receiver(self, call: ast.Call) -> bool:
+        constructor = self._qualified_import_name(call.func)
+        if constructor is None:
+            return False
+        return constructor in self._R1_HTTP_CLIENT_CONSTRUCTORS or constructor in self._R1_QUEUE_CONSTRUCTORS
+
+    def _target_matches_receiver(self, target: ast.expr, receiver: ast.expr) -> bool:
+        if isinstance(target, ast.Name) and isinstance(receiver, ast.Name):
+            return target.id == receiver.id
+        if isinstance(target, ast.Attribute) and isinstance(receiver, ast.Attribute):
+            return (
+                target.attr == receiver.attr
+                and isinstance(target.value, ast.Name)
+                and isinstance(receiver.value, ast.Name)
+                and target.value.id == receiver.value.id
+            )
+        return False
+
+    def _walk_scope_nodes(self, node: ast.AST) -> Iterator[ast.AST]:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            yield child
+            yield from self._walk_scope_nodes(child)
+
+    def _receiver_assigned_known_type_before(self, scope: ast.AST, receiver: ast.expr, lineno: int) -> bool:
+        known: bool | None = None
+        for child in self._walk_scope_nodes(scope):
+            if getattr(child, "lineno", lineno) >= lineno:
+                continue
+            if isinstance(child, ast.Assign):
+                value_is_known = isinstance(child.value, ast.Call) and self._call_constructs_known_non_dict_get_receiver(child.value)
+                for target in child.targets:
+                    if self._target_matches_receiver(target, receiver):
+                        known = value_is_known
+            elif isinstance(child, ast.AnnAssign):
+                value_is_known = isinstance(child.value, ast.Call) and self._call_constructs_known_non_dict_get_receiver(child.value)
+                if self._target_matches_receiver(child.target, receiver):
+                    known = value_is_known
+            elif isinstance(child, (ast.With, ast.AsyncWith)):
+                for item in child.items:
+                    if item.optional_vars is None:
+                        continue
+                    value_is_known = isinstance(item.context_expr, ast.Call) and self._call_constructs_known_non_dict_get_receiver(
+                        item.context_expr
+                    )
+                    if self._target_matches_receiver(item.optional_vars, receiver):
+                        known = value_is_known
+        return known is True
+
+    def _current_class_init_assigns_known_type(self, receiver: ast.expr) -> bool:
+        current_class = self._current_class()
+        if current_class is None or not isinstance(receiver, ast.Attribute):
+            return False
+        if not isinstance(receiver.value, ast.Name) or receiver.value.id != "self":
+            return False
+        for stmt in current_class.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
+                return self._receiver_assigned_known_type_before(stmt, receiver, lineno=10**9)
+        return False
+
+    def _is_known_non_dict_get_receiver(self, node: ast.Call) -> bool:
+        if not isinstance(node.func, ast.Attribute):
+            return False
+        receiver = node.func.value
+        receiver_module = self._qualified_import_name(receiver)
+        if receiver_module in self._R1_HTTP_GET_MODULES:
+            return True
+        current_function = self._current_function()
+        if current_function is not None and self._receiver_assigned_known_type_before(current_function, receiver, node.lineno):
+            return True
+        return self._current_class_init_assigns_known_type(receiver)
+
+    def _decorator_leaf_name(self, decorator: ast.expr) -> str | None:
+        """Return the called/decorated symbol leaf name for decorator classification."""
+        expr = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if isinstance(expr, ast.Name):
+            return expr.id
+        if isinstance(expr, ast.Attribute):
+            return expr.attr
+        return None
+
+    def _constant_keyword_value(self, node: ast.Call, keyword_name: str) -> object:
+        for keyword in node.keywords:
+            if keyword.arg == keyword_name and isinstance(keyword.value, ast.Constant):
+                return keyword.value.value
+        return None
+
+    def _current_function(self) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        return self.function_stack[-1] if self.function_stack else None
+
+    def _current_class(self) -> ast.ClassDef | None:
+        return self.class_stack[-1] if self.class_stack else None
+
+    def _current_class_is_frozen_dataclass(self) -> bool:
+        current_class = self._current_class()
+        if current_class is None:
+            return False
+        for decorator in current_class.decorator_list:
+            if self._decorator_leaf_name(decorator) != "dataclass":
+                continue
+            if isinstance(decorator, ast.Call) and self._constant_keyword_value(decorator, "frozen") is True:
+                return True
+        return False
+
+    def _post_init_self_field_aliases_before(self, lineno: int) -> set[str]:
+        current_function = self._current_function()
+        if current_function is None or current_function.name != "__post_init__":
+            return set()
+        aliases: set[str] = set()
+        for stmt in current_function.body:
+            if stmt.lineno >= lineno:
+                continue
+            target: ast.expr | None = None
+            value: ast.expr | None = None
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                value = stmt.value
+            elif isinstance(stmt, ast.AnnAssign):
+                target = stmt.target
+                value = stmt.value
+            if not (
+                isinstance(target, ast.Name)
+                and isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name)
+                and value.value.id == "self"
+            ):
+                continue
+            aliases.add(target.id)
+        return aliases
+
+    def _is_self_field_isinstance(self, node: ast.Call) -> bool:
+        if not node.args:
+            return False
+        target = node.args[0]
+        if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == "self":
+            return True
+        return isinstance(target, ast.Name) and target.id in self._post_init_self_field_aliases_before(node.lineno)
+
+    def _is_tier1_frozen_dataclass_post_init_guard(self, node: ast.Call) -> bool:
+        current_function = self._current_function()
+        if current_function is None or current_function.name != "__post_init__":
+            return False
+        return self._current_class_is_frozen_dataclass() and self._is_self_field_isinstance(node)
+
+    def _is_pydantic_before_validator(self) -> bool:
+        current_function = self._current_function()
+        if current_function is None:
+            return False
+        for decorator in current_function.decorator_list:
+            name = self._decorator_leaf_name(decorator)
+            if not isinstance(decorator, ast.Call):
+                continue
+            if name in {"field_validator", "model_validator"}:
+                return self._constant_keyword_value(decorator, "mode") == "before"
+            if name == "validator":
+                return self._constant_keyword_value(decorator, "pre") is True
+        return False
+
+    def _is_fastapi_route_handler(self) -> bool:
+        if not self.file_path.startswith("web/"):
+            return False
+        current_function = self._current_function()
+        if current_function is None:
+            return False
+        return any(self._decorator_leaf_name(decorator) in self._FASTAPI_ROUTE_METHODS for decorator in current_function.decorator_list)
+
+    def _is_named_tier3_boundary_context(self) -> bool:
+        current_function = self._current_function()
+        if current_function is None:
+            return False
+        return current_function.name in self._R5_NAMED_BOUNDARY_CONTEXTS.get(self.file_path, frozenset())
+
+    def _is_allowed_r5_context(self, node: ast.Call) -> bool:
+        """Return True for R5a/R5b contexts where isinstance is the desired guard."""
+        return (
+            self._is_tier1_frozen_dataclass_post_init_guard(node)
+            or self._is_pydantic_before_validator()
+            or self._is_fastapi_route_handler()
+            or self._is_named_tier3_boundary_context()
+        )
+
+    def _is_immediate_setdefault_grouping_call(self, node: ast.Call) -> bool:
+        """Return True for setdefault(...).append/extend(...) grouping idioms."""
+        parent = self._ancestor_node(1)
+        grandparent = self._ancestor_node(2)
+        return (
+            isinstance(parent, ast.Attribute)
+            and parent.value is node
+            and parent.attr in {"append", "extend"}
+            and isinstance(grandparent, ast.Call)
+            and grandparent.func is parent
+        )
 
     def visit_Call(self, node: ast.Call) -> None:
         """Detect R1 (dict.get), R2 (getattr), R3 (hasattr), R5 (isinstance), R8/R9 defaults."""
@@ -427,7 +838,11 @@ class TierModelVisitor(ast.NodeVisitor):
             )
 
         # R8: dict.setdefault() - mutating default on missing key
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault":
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "setdefault"
+            and not self._is_immediate_setdefault_grouping_call(node)
+        ):
             self._add_finding(
                 "R8",
                 node,
@@ -460,7 +875,7 @@ class TierModelVisitor(ast.NodeVisitor):
             )
 
         # R5: isinstance() - runtime type checks can mask contract violations
-        if isinstance(node.func, ast.Name) and node.func.id == "isinstance":
+        if isinstance(node.func, ast.Name) and node.func.id == "isinstance" and not self._is_allowed_r5_context(node):
             self._add_finding(
                 "R5",
                 node,
@@ -1220,6 +1635,23 @@ def render_dump_edges_dot(
 
 _BANNED_RULES = frozenset(rule_id for rule_id, rule_def in RULES.items() if rule_def.get("banned"))
 _ALL_RULE_IDS = frozenset(RULES.keys())
+_ALLOWLIST_PATTERN_TAGS = frozenset(
+    {
+        "audit-record-fallback",
+        "display-fallback",
+        "external-boundary-validator",
+        "external-dependency-optional",
+        "ordered-fallback",
+        "plugin-contract-offensive-guard",
+        "post-init-offensive-guard",
+        "post-point-of-no-return-recovery",
+        "rollback-preserves-primary-error",
+        "retry-orchestration",
+        "tier3-boundary-validator",
+        "tier3-narrow-catch",
+        "union-dispatch",
+    }
+)
 
 # Directories that are always excluded from scanning — vendored/third-party code
 # that happens to contain .py files but is not part of the ELSPETH codebase.
@@ -1262,14 +1694,37 @@ def _parse_allow_hits(data: dict[str, Any], source_file: str = "") -> list[Allow
                     f"Warning: Invalid date format for expires: {expires_str}",
                     file=sys.stderr,
                 )
+        pattern = item.get("pattern")
+        if pattern is not None:
+            if not isinstance(pattern, str) or not pattern:
+                print(
+                    f"Error: allow_hits entry has invalid pattern tag{source_ctx}: {pattern!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if pattern not in _ALLOWLIST_PATTERN_TAGS:
+                print(
+                    f"Error: allow_hits entry has unknown pattern tag{source_ctx}: {pattern!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        owner = item.get("owner", "unknown")
+        if owner == "bugfix" and expires_date is None and pattern is None:
+            print(
+                f"Error: owner=bugfix allow_hits entry must define expires or pattern{source_ctx}: {key}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         entries.append(
             AllowlistEntry(
                 key=item["key"],
-                owner=item.get("owner", "unknown"),
+                owner=owner,
                 reason=item.get("reason", ""),
                 safety=item.get("safety", ""),
                 expires=expires_date,
+                pattern=pattern,
                 source_file=source_file,
             )
         )
@@ -1335,6 +1790,49 @@ def _parse_per_file_rules(data: dict[str, Any], source_file: str = "") -> list[P
     return per_file_rules
 
 
+def _parse_allowlist_budget(defaults: dict[str, Any], source_file: str = "") -> dict[str, int | None]:
+    """Parse optional allowlist-count ratchet ceilings from defaults."""
+    raw_budget = defaults.get("allowlist_budget", {})
+    source_ctx = f" in {source_file}" if source_file else ""
+    if raw_budget is None:
+        raw_budget = {}
+    if not isinstance(raw_budget, dict):
+        print(
+            f"Error: allowlist_budget must be a mapping{source_ctx}: {raw_budget!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    parsed: dict[str, int | None] = {
+        "max_allow_hits": None,
+        "max_per_file_rules": None,
+        "max_total_entries": None,
+        "max_permanent_allow_hits": None,
+        "max_permanent_per_file_rules": None,
+        "max_permanent_total_entries": None,
+    }
+    for key in parsed:
+        raw_value = raw_budget.get(key)
+        if raw_value is None:
+            continue
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            print(
+                f"Error: allowlist_budget.{key} must be a non-negative integer{source_ctx}: {raw_value!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if value < 0:
+            print(
+                f"Error: allowlist_budget.{key} must be non-negative{source_ctx}: {raw_value!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        parsed[key] = value
+    return parsed
+
+
 def _load_yaml_file(path: Path) -> dict[str, Any]:
     """Load and return a YAML file as a dict, exiting on parse error."""
     try:
@@ -1362,6 +1860,7 @@ def load_allowlist_from_directory(directory: Path) -> Allowlist:
         defaults = defaults_data.get("defaults", {})
     else:
         defaults = {}
+    budget = _parse_allowlist_budget(defaults, source_file="_defaults.yaml")
 
     # Glob all YAML files except _defaults.yaml, sorted by filename
     yaml_files = sorted(f for f in directory.glob("*.yaml") if f.name != "_defaults.yaml")
@@ -1379,6 +1878,12 @@ def load_allowlist_from_directory(directory: Path) -> Allowlist:
         per_file_rules=all_per_file_rules,
         fail_on_stale=defaults.get("fail_on_stale", True),
         fail_on_expired=defaults.get("fail_on_expired", True),
+        max_allow_hits=budget["max_allow_hits"],
+        max_per_file_rules=budget["max_per_file_rules"],
+        max_total_entries=budget["max_total_entries"],
+        max_permanent_allow_hits=budget["max_permanent_allow_hits"],
+        max_permanent_per_file_rules=budget["max_permanent_per_file_rules"],
+        max_permanent_total_entries=budget["max_permanent_total_entries"],
     )
 
 
@@ -1392,12 +1897,19 @@ def load_allowlist(path: Path) -> Allowlist:
 
     data = _load_yaml_file(path)
     defaults = data.get("defaults", {})
+    budget = _parse_allowlist_budget(defaults, source_file=path.name)
 
     return Allowlist(
         entries=_parse_allow_hits(data),
         per_file_rules=_parse_per_file_rules(data),
         fail_on_stale=defaults.get("fail_on_stale", True),
         fail_on_expired=defaults.get("fail_on_expired", True),
+        max_allow_hits=budget["max_allow_hits"],
+        max_per_file_rules=budget["max_per_file_rules"],
+        max_total_entries=budget["max_total_entries"],
+        max_permanent_allow_hits=budget["max_permanent_allow_hits"],
+        max_permanent_per_file_rules=budget["max_permanent_per_file_rules"],
+        max_permanent_total_entries=budget["max_permanent_total_entries"],
     )
 
 
@@ -1464,6 +1976,7 @@ def report_json(
     unused_file_rules: list[PerFileRule] | None = None,
     layer_warnings: list[Finding] | None = None,
     exceeded_file_rules: list[PerFileRule] | None = None,
+    budget_violations: list[AllowlistBudgetViolation] | None = None,
 ) -> str:
     """Generate JSON report."""
     result: dict[str, Any] = {
@@ -1494,6 +2007,10 @@ def report_json(
         result["exceeded_file_rules"] = [
             {"pattern": r.pattern, "rules": r.rules, "matched": r.matched_count, "max_hits": r.max_hits, "reason": r.reason}
             for r in exceeded_file_rules
+        ]
+    if budget_violations:
+        result["allowlist_budget_violations"] = [
+            {"category": v.category, "current": v.current, "max_allowed": v.max_allowed} for v in budget_violations
         ]
     if layer_warnings:
         result["layer_warnings"] = [
@@ -1757,16 +2274,32 @@ def run_check(args: argparse.Namespace) -> int:
         expired_file_rules = allowlist.get_expired_file_rules() if allowlist.fail_on_expired else []
         unused_file_rules = allowlist.get_unused_file_rules() if allowlist.fail_on_stale else []
         exceeded_file_rules = allowlist.get_exceeded_file_rules()
+    budget_violations = allowlist.get_budget_violations()
 
     # Report results
     # Include unused_file_rules in error condition - stale per-file rules should fail
     # the same way stale explicit entries do when fail_on_stale is enabled
-    has_errors = bool(violations or stale_entries or expired_entries or expired_file_rules or unused_file_rules or exceeded_file_rules)
+    has_errors = bool(
+        violations
+        or stale_entries
+        or expired_entries
+        or expired_file_rules
+        or unused_file_rules
+        or exceeded_file_rules
+        or budget_violations
+    )
 
     if args.format == "json":
         print(
             report_json(
-                violations, stale_entries, expired_entries, expired_file_rules, unused_file_rules, layer_warnings, exceeded_file_rules
+                violations,
+                stale_entries,
+                expired_entries,
+                expired_file_rules,
+                unused_file_rules,
+                layer_warnings,
+                exceeded_file_rules,
+                budget_violations,
             )
         )
     else:
@@ -1835,6 +2368,16 @@ def run_check(args: argparse.Namespace) -> int:
                 print(f"  Rules: {r.rules}")
                 print(f"  Matched: {r.matched_count} (max_hits: {r.max_hits})")
                 print(f"  Reason: {r.reason}")
+
+        if budget_violations:
+            print(f"\n{'=' * 60}")
+            print(f"ALLOWLIST BUDGET EXCEEDED: {len(budget_violations)}")
+            print("(Allowlist counts exceeded configured ratchet ceilings - delete entries or update the budget deliberately)")
+            print("=" * 60)
+            for v in budget_violations:
+                print(f"\n  Category: {v.category}")
+                print(f"  Current: {v.current}")
+                print(f"  Max allowed: {v.max_allowed}")
 
         if has_errors:
             print(f"\n{'=' * 60}")

@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import tempfile
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 from scripts.cicd.enforce_tier_model import (
@@ -30,6 +32,7 @@ from scripts.cicd.enforce_tier_model import (
     _suggest_module_file,
     format_stale_entry_text,
     load_allowlist,
+    report_json,
     run_check,
     scan_file,
 )
@@ -190,12 +193,11 @@ class TestR1FalsePositiveFiltering:
         r1_findings = [f for f in findings if f.rule_id == "R1"]
         assert len(r1_findings) == 0, "client.get() with URL path should not be flagged"
 
-    def test_fstring_url_still_flagged(self) -> None:
-        """client.get(f"/api/{id}") SHOULD still be flagged (documents limitation).
+    def test_unknown_receiver_fstring_url_still_flagged(self) -> None:
+        """client.get(f"/api/{id}") SHOULD still be flagged for unknown receivers.
 
-        This test documents a known limitation: f-strings are not string literals
-        in the AST, so we cannot determine if the argument is a URL. The heuristic
-        errs on the side of flagging, requiring an allowlist entry if needed.
+        F-string URLs are safe to suppress only when the receiver is known to be
+        an HTTP client. Unknown receivers may still be dict-like objects.
         """
         source = dedent("""
             def fetch_user(client, user_id):
@@ -204,7 +206,69 @@ class TestR1FalsePositiveFiltering:
         findings = parse_and_visit(source)
 
         r1_findings = [f for f in findings if f.rule_id == "R1"]
-        assert len(r1_findings) == 1, "f-string URLs cannot be detected as URLs - must be flagged"
+        assert len(r1_findings) == 1, "f-string URLs on unknown receivers must be flagged"
+
+    def test_httpx_async_client_get_with_variable_url_not_flagged(self) -> None:
+        """httpx.AsyncClient.get(variable_url) is HTTP transport, not dict access."""
+        source = dedent("""
+            import httpx
+
+            async def fetch_jwks(issuer):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    discovery_url = f"{issuer}/.well-known/openid-configuration"
+                    response = await client.get(discovery_url)
+                    return response.json()
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "httpx.AsyncClient.get() should not be flagged"
+
+    def test_httpx_module_get_with_variable_url_not_flagged(self) -> None:
+        """httpx.get(variable_url) is module-level HTTP transport, not dict access."""
+        source = dedent("""
+            import httpx
+
+            def check_readiness(count_url):
+                response = httpx.get(count_url, timeout=10.0)
+                return response.status_code
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "httpx.get() should not be flagged"
+
+    def test_asyncio_queue_get_not_flagged(self) -> None:
+        """asyncio.Queue.get() is an awaitable queue API, not dict access."""
+        source = dedent("""
+            import asyncio
+
+            async def wait_for_event():
+                queue = asyncio.Queue()
+                event = await queue.get()
+                return event
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "asyncio.Queue.get() should not be flagged"
+
+    def test_httpx_client_instance_attribute_get_not_flagged(self) -> None:
+        """self._client.get() is HTTP transport when __init__ constructs httpx.Client."""
+        source = dedent("""
+            import httpx
+
+            class AuditedHTTPClient:
+                def __init__(self):
+                    self._client = httpx.Client()
+
+                def fetch(self, url):
+                    return self._client.get(url, timeout=10.0)
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "self._client.get() backed by httpx.Client should not be flagged"
 
     def test_collection_get_with_ids_kwarg_not_flagged(self) -> None:
         """collection.get(ids=[...]) should NOT be flagged.
@@ -272,6 +336,103 @@ class TestR1FalsePositiveFiltering:
 
         r1_findings = [f for f in findings if f.rule_id == "R1"]
         assert len(r1_findings) == 1, "Ambiguous get() must be flagged"
+
+
+class TestR1SourceRegressions:
+    """Source-level regressions for known R1 allowlist burn-downs."""
+
+    def test_landscape_exporter_iter_records_has_no_r1_findings(self) -> None:
+        findings = scan_file(
+            Path("src/elspeth/core/landscape/exporter.py"),
+            Path("src/elspeth"),
+        )
+
+        r1_findings = [
+            finding for finding in findings if finding.rule_id == "R1" and finding.symbol_context == ("LandscapeExporter", "_iter_records")
+        ]
+        assert r1_findings == []
+
+    def test_sink_display_mapping_call_sites_have_no_r1_findings(self) -> None:
+        findings = [
+            *scan_file(
+                Path("src/elspeth/plugins/sinks/csv_sink.py"),
+                Path("src/elspeth"),
+            ),
+            *scan_file(
+                Path("src/elspeth/plugins/sinks/json_sink.py"),
+                Path("src/elspeth"),
+            ),
+        ]
+
+        target_contexts = {
+            ("CSVSink", "validate_output_target"),
+            ("CSVSink", "_open_file"),
+            ("CSVSink", "_get_field_names_and_display"),
+            ("JSONSink", "validate_output_target"),
+        }
+        r1_findings = [finding for finding in findings if finding.rule_id == "R1" and finding.symbol_context in target_contexts]
+        assert r1_findings == []
+
+    def test_session_fork_blob_rewrite_call_sites_have_no_r1_findings(self) -> None:
+        findings = scan_file(
+            Path("src/elspeth/web/sessions/routes.py"),
+            Path("src/elspeth"),
+        )
+
+        r1_findings = [
+            finding
+            for finding in findings
+            if finding.rule_id == "R1" and finding.symbol_context == ("create_session_router", "fork_from_message")
+        ]
+        assert r1_findings == []
+
+    def test_source_boundary_non_r5_findings_are_site_allowlisted(self) -> None:
+        allowlist = load_allowlist(Path("config/cicd/enforce_tier_model"))
+
+        blanket_source_rules = [
+            rule
+            for rule in allowlist.per_file_rules
+            if rule.pattern == "plugins/sources/*" and {"R1", "R2", "R4", "R6", "R9"} & set(rule.rules)
+        ]
+        assert blanket_source_rules == []
+
+        source_files = [
+            Path("src/elspeth/plugins/sources/azure_blob_source.py"),
+            Path("src/elspeth/plugins/sources/csv_source.py"),
+            Path("src/elspeth/plugins/sources/dataverse.py"),
+            Path("src/elspeth/plugins/sources/json_source.py"),
+            Path("src/elspeth/plugins/sources/text_source.py"),
+        ]
+        findings = [
+            finding
+            for source_file in source_files
+            for finding in scan_file(source_file, Path("src/elspeth"))
+            if finding.rule_id in {"R1", "R2", "R4", "R6", "R9"}
+        ]
+        allowed_keys = {entry.key for entry in allowlist.entries}
+
+        missing_keys = [finding.canonical_key for finding in findings if finding.canonical_key not in allowed_keys]
+        assert missing_keys == []
+
+    def test_grouping_setdefault_call_sites_have_no_r8_findings(self) -> None:
+        findings = [
+            *scan_file(
+                Path("src/elspeth/plugins/transforms/field_mapper.py"),
+                Path("src/elspeth"),
+            ),
+            *scan_file(
+                Path("src/elspeth/plugins/sources/field_normalization.py"),
+                Path("src/elspeth"),
+            ),
+        ]
+
+        target_contexts = {
+            ("FieldMapperConfig", "_reject_duplicate_targets"),
+            ("check_normalization_collisions",),
+            ("check_mapping_collisions",),
+        }
+        r8_findings = [finding for finding in findings if finding.rule_id == "R8" and finding.symbol_context in target_contexts]
+        assert r8_findings == []
 
 
 # =============================================================================
@@ -452,6 +613,236 @@ class TestR4BroadExcept:
 
         r4_findings = [f for f in findings if f.rule_id == "R4"]
         assert len(r4_findings) == 1
+
+
+# =============================================================================
+# R8: setdefault() detection
+# =============================================================================
+
+
+class TestR8Setdefault:
+    """Tests for R8: setdefault() detection."""
+
+    def test_ignores_immediate_append_grouping_idiom(self) -> None:
+        """setdefault(k, []).append(v) constructs a grouping bucket."""
+        source = dedent("""
+            def group(items):
+                buckets = {}
+                for item in items:
+                    buckets.setdefault(item.key, []).append(item)
+                return buckets
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert r8_findings == []
+
+    def test_ignores_immediate_extend_grouping_idiom(self) -> None:
+        """setdefault(k, []).extend(values) constructs a grouping bucket."""
+        source = dedent("""
+            def group(items):
+                buckets = {}
+                for key, values in items:
+                    buckets.setdefault(key, []).extend(values)
+                return buckets
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert r8_findings == []
+
+    def test_flags_setdefault_assigned_for_later_use(self) -> None:
+        """setdefault() remains flagged when it returns a value used later."""
+        source = dedent("""
+            def process(key):
+                cache = {}
+                bucket = cache.setdefault(key, [])
+                return bucket
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert len(r8_findings) == 1
+
+    def test_flags_setdefault_subscript_mutation(self) -> None:
+        """setdefault()[name] mutation is not the narrow append/extend grouping idiom."""
+        source = dedent("""
+            def subscribe(run_id, queue, state):
+                subscribers = {}
+                subscribers.setdefault(run_id, {})[queue] = state
+                return subscribers
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert len(r8_findings) == 1
+
+
+# =============================================================================
+# R5: isinstance() lattice classification
+# =============================================================================
+
+
+class TestR5IsinstanceClassification:
+    """Tests for R5: isinstance() should only flag Tier-2 defensive checks."""
+
+    @staticmethod
+    def _r5_findings(source: str, filename: str = "test.py") -> list[Finding]:
+        findings = parse_and_visit(source, filename=filename)
+        return [f for f in findings if f.rule_id == "R5"]
+
+    def test_regular_isinstance_still_flagged(self) -> None:
+        """Ordinary isinstance() remains R5c and should be flagged."""
+        source = dedent("""
+            def process(value):
+                if isinstance(value, str):
+                    return value.strip()
+                return value
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_frozen_dataclass_post_init_self_field_guard_not_flagged(self) -> None:
+        """Frozen dataclass __post_init__ self-field guards are Tier-1 offensive guards."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True, slots=True)
+            class TokenInfo:
+                row_id: str
+
+                def __post_init__(self) -> None:
+                    if not isinstance(self.row_id, str):
+                        raise TypeError("row_id must be str")
+        """)
+
+        assert self._r5_findings(source) == []
+
+    def test_frozen_dataclass_post_init_non_self_value_still_flagged(self) -> None:
+        """The post-init exclusion is limited to self.<field> invariant guards."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True)
+            class TokenInfo:
+                row_id: str
+
+                def __post_init__(self) -> None:
+                    value = object()
+                    if isinstance(value, str):
+                        raise TypeError("unexpected value")
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_frozen_dataclass_post_init_self_field_alias_not_flagged(self) -> None:
+        """A local alias of self.<field> in frozen __post_init__ is still an invariant guard."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True)
+            class ExampleBundle:
+                args: tuple[object, ...]
+
+                def __post_init__(self) -> None:
+                    value = self.args
+                    if isinstance(value, list):
+                        object.__setattr__(self, "args", tuple(value))
+        """)
+
+        assert self._r5_findings(source) == []
+
+    def test_frozen_dataclass_post_init_later_self_field_alias_still_flagged(self) -> None:
+        """Only aliases assigned before the isinstance() call count as self-field guards."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass(frozen=True)
+            class ExampleBundle:
+                args: tuple[object, ...]
+
+                def __post_init__(self) -> None:
+                    if isinstance(value, list):
+                        object.__setattr__(self, "args", tuple(value))
+                    value = self.args
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_non_frozen_dataclass_post_init_self_field_still_flagged(self) -> None:
+        """Mutable dataclasses are not part of the Tier-1 frozen-DTO guard exclusion."""
+        source = dedent("""
+            from dataclasses import dataclass
+
+            @dataclass
+            class TokenInfo:
+                row_id: str
+
+                def __post_init__(self) -> None:
+                    if not isinstance(self.row_id, str):
+                        raise TypeError("row_id must be str")
+        """)
+
+        assert len(self._r5_findings(source)) == 1
+
+    def test_pydantic_before_validator_boundary_not_flagged(self) -> None:
+        """Pydantic before validators consume Tier-3 input and may use isinstance."""
+        source = dedent("""
+            from pydantic import BaseModel, field_validator
+
+            class RunEvent(BaseModel):
+                payload: object
+
+                @field_validator("payload", mode="before")
+                @classmethod
+                def _validate_payload(cls, value):
+                    if not isinstance(value, dict):
+                        raise ValueError("payload must be an object")
+                    return value
+        """)
+
+        assert self._r5_findings(source, filename="web/execution/schemas.py") == []
+
+    def test_fastapi_route_handler_boundary_not_flagged(self) -> None:
+        """FastAPI route handlers are Tier-3 request boundaries."""
+        source = dedent("""
+            from fastapi import APIRouter
+
+            router = APIRouter()
+
+            @router.post("/sessions")
+            async def create_session(payload):
+                if not isinstance(payload, dict):
+                    raise ValueError("payload must be an object")
+                return payload
+        """)
+
+        assert self._r5_findings(source, filename="web/sessions/routes.py") == []
+
+    def test_named_tier3_boundary_helper_not_flagged(self) -> None:
+        """Closed-list boundary helper contexts can validate external provider payloads."""
+        source = dedent("""
+            from collections.abc import Mapping
+
+            def _token_usage_from_response(response):
+                usage = getattr(response, "usage", None)
+                if isinstance(usage, Mapping):
+                    return usage
+                return None
+        """)
+
+        assert self._r5_findings(source, filename="web/composer/service.py") == []
+
+    def test_unlisted_web_helper_still_flagged(self) -> None:
+        """The boundary-helper split must not suppress arbitrary web helpers."""
+        source = dedent("""
+            def ordinary_helper(value):
+                if isinstance(value, str):
+                    return value.strip()
+                return value
+        """)
+
+        assert len(self._r5_findings(source, filename="web/composer/service.py")) == 1
 
 
 # =============================================================================
@@ -1305,6 +1696,86 @@ class TestBannedRuleKeyValidation:
         assert entries[0].key == "core/events.py:R1:SomeClass:fp=abc123"
 
 
+class TestAllowHitPatternTags:
+    """Tests for allow_hit pattern tag schema validation."""
+
+    def test_valid_pattern_tag_is_preserved(self) -> None:
+        """A valid pattern tag is parsed into the AllowlistEntry."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Type object display fallback",
+                    "safety": "Used only in error message text",
+                    "pattern": "display-fallback",
+                }
+            ]
+        }
+
+        entries = _parse_allow_hits(data)
+
+        assert entries[0].pattern == "display-fallback"
+
+    def test_unknown_pattern_tag_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Pattern tags must come from the closed project vocabulary."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Type object display fallback",
+                    "safety": "Used only in error message text",
+                    "pattern": "whatever-this-is",
+                }
+            ]
+        }
+
+        with pytest.raises(SystemExit) as exc_info:
+            _parse_allow_hits(data)
+
+        assert exc_info.value.code == 1
+        assert "unknown pattern tag" in capsys.readouterr().err
+
+    def test_permanent_bugfix_entry_requires_pattern(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """owner=bugfix entries need expires or a pattern tag."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Type object display fallback",
+                    "safety": "Used only in error message text",
+                    "expires": None,
+                }
+            ]
+        }
+
+        with pytest.raises(SystemExit) as exc_info:
+            _parse_allow_hits(data)
+
+        assert exc_info.value.code == 1
+        assert "owner=bugfix" in capsys.readouterr().err
+
+    def test_bugfix_entry_with_expiry_does_not_require_pattern(self) -> None:
+        """Bounded bugfix entries may rely on expiry instead of a permanent pattern."""
+        data = {
+            "allow_hits": [
+                {
+                    "key": "contracts/data.py:R6:_get_allow_inf_nan:fp=abc123",
+                    "owner": "bugfix",
+                    "reason": "Temporary narrow TypeError catch",
+                    "safety": "Only catches TypeError from vars()",
+                    "expires": "2099-01-01",
+                }
+            ]
+        }
+
+        entries = _parse_allow_hits(data)
+
+        assert entries[0].pattern is None
+
+
 class TestMaxHitsParseError:
     """Tests for elspeth-cdeeeccde3: int(raw_max_hits) should give contextual error."""
 
@@ -1463,3 +1934,256 @@ class TestExceededFileRulesPreCommitMode:
         # In pre-commit mode, exceeded max_hits should NOT cause failure
         result = run_check(args)
         assert result == 0, "pre-commit mode should suppress exceeded_file_rules"
+
+
+# =============================================================================
+# Allowlist budget ratchet
+# =============================================================================
+
+
+class TestAllowlistBudgetRatchet:
+    """Tests for hard allowlist-count budget ratchets."""
+
+    def test_suggested_allowlist_entry_uses_quarterly_expiry(self) -> None:
+        """New suggested allowlist entries default to a quarterly review window."""
+        finding = Finding(
+            rule_id="R1",
+            file_path="core/events.py",
+            line=10,
+            col=0,
+            symbol_context=("EventBus", "emit"),
+            fingerprint="aaa",
+            code_snippet="payload.get('event')",
+            message="test",
+        )
+
+        suggested = finding.suggested_allowlist_entry()
+        expires = datetime.strptime(suggested["expires"], "%Y-%m-%d").replace(tzinfo=UTC).date()
+
+        assert expires >= datetime.now(UTC).date() + timedelta(days=80)
+
+    def test_load_directory_reads_budget_defaults(self, temp_dir: Path) -> None:
+        """Directory defaults may define hard allowlist count ceilings."""
+        allowlist_dir = temp_dir / "allowlist"
+        allowlist_dir.mkdir()
+        (allowlist_dir / "_defaults.yaml").write_text(
+            dedent("""\
+            version: 1
+            defaults:
+              fail_on_stale: true
+              fail_on_expired: true
+              allowlist_budget:
+                max_allow_hits: 3
+                max_per_file_rules: 1
+                max_total_entries: 4
+                max_permanent_allow_hits: 2
+                max_permanent_per_file_rules: 0
+                max_permanent_total_entries: 2
+            """)
+        )
+
+        allowlist = load_allowlist(allowlist_dir)
+
+        assert allowlist.max_allow_hits == 3
+        assert allowlist.max_per_file_rules == 1
+        assert allowlist.max_total_entries == 4
+        assert allowlist.max_permanent_allow_hits == 2
+        assert allowlist.max_permanent_per_file_rules == 0
+        assert allowlist.max_permanent_total_entries == 2
+
+    def test_no_budget_defaults_to_no_budget_violations(self) -> None:
+        """Existing callers without budget config keep current behavior."""
+        allowlist = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=aaa",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                )
+            ]
+        )
+
+        assert allowlist.get_budget_violations() == []
+
+    def test_budget_violation_reports_allow_hits_per_file_and_total(self) -> None:
+        """Each configured ceiling reports its own over-budget category."""
+        allowlist = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=aaa",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                ),
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=bbb",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                ),
+            ],
+            per_file_rules=[
+                PerFileRule(pattern="core/config.py", rules=["R1"], reason="test", expires=None),
+                PerFileRule(pattern="core/canonical.py", rules=["R5"], reason="test", expires=None),
+            ],
+            max_allow_hits=1,
+            max_per_file_rules=1,
+            max_total_entries=3,
+        )
+
+        violations = allowlist.get_budget_violations()
+
+        assert [(v.category, v.current, v.max_allowed) for v in violations] == [
+            ("allow_hits", 2, 1),
+            ("per_file_rules", 2, 1),
+            ("total_entries", 4, 3),
+        ]
+
+    def test_budget_violation_reports_permanent_entries(self) -> None:
+        """Permanent expires:null entries have their own ratchet categories."""
+        bounded_expiry = datetime(2099, 1, 1, tzinfo=UTC).date()
+        allowlist = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=aaa",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                ),
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=bbb",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=bounded_expiry,
+                ),
+            ],
+            per_file_rules=[
+                PerFileRule(pattern="core/config.py", rules=["R1"], reason="test", expires=None),
+                PerFileRule(pattern="core/canonical.py", rules=["R5"], reason="test", expires=bounded_expiry),
+            ],
+            max_permanent_allow_hits=0,
+            max_permanent_per_file_rules=0,
+            max_permanent_total_entries=0,
+        )
+
+        violations = allowlist.get_budget_violations()
+
+        assert [(v.category, v.current, v.max_allowed) for v in violations] == [
+            ("permanent_allow_hits", 1, 0),
+            ("permanent_per_file_rules", 1, 0),
+            ("permanent_total_entries", 2, 0),
+        ]
+
+    def test_report_json_includes_budget_violations(self) -> None:
+        """JSON report exposes budget overruns for CI annotations."""
+        payload = json.loads(
+            report_json(
+                violations=[],
+                stale_entries=[],
+                expired_entries=[],
+                budget_violations=[
+                    SimpleNamespace(category="allow_hits", current=2, max_allowed=1),
+                ],
+            )
+        )
+
+        assert payload["allowlist_budget_violations"] == [
+            {"category": "allow_hits", "current": 2, "max_allowed": 1},
+        ]
+
+    def test_run_check_fails_when_budget_exceeded(
+        self,
+        temp_dir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Full check fails when the loaded allowlist exceeds configured budget."""
+        src_dir = temp_dir / "src"
+        src_dir.mkdir()
+        (src_dir / "example.py").write_text("def ok():\n    return 1\n")
+
+        allowlist_dir = temp_dir / "allowlist"
+        allowlist_dir.mkdir()
+        (allowlist_dir / "_defaults.yaml").write_text(
+            dedent("""\
+            version: 1
+            defaults:
+              fail_on_stale: false
+              fail_on_expired: false
+              allowlist_budget:
+                max_allow_hits: 0
+            """)
+        )
+        (allowlist_dir / "core.yaml").write_text(
+            dedent("""\
+            allow_hits:
+              - key: "core/events.py:R1:EventBus:emit:fp=aaa"
+                owner: test
+                reason: test
+                safety: test
+            """)
+        )
+
+        args = argparse.Namespace(
+            root=src_dir,
+            allowlist=allowlist_dir,
+            exclude=[],
+            format="text",
+            files=[],
+        )
+
+        assert run_check(args) == 1
+        captured = capsys.readouterr()
+        assert "ALLOWLIST BUDGET EXCEEDED" in captured.out
+        assert "allow_hits" in captured.out
+
+    def test_run_check_fails_when_permanent_budget_exceeded(
+        self,
+        temp_dir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Full check fails when permanent exemptions exceed configured budget."""
+        src_dir = temp_dir / "src"
+        src_dir.mkdir()
+        (src_dir / "example.py").write_text("def ok():\n    return 1\n")
+
+        allowlist_dir = temp_dir / "allowlist"
+        allowlist_dir.mkdir()
+        (allowlist_dir / "_defaults.yaml").write_text(
+            dedent("""\
+            version: 1
+            defaults:
+              fail_on_stale: false
+              fail_on_expired: false
+              allowlist_budget:
+                max_permanent_allow_hits: 0
+            """)
+        )
+        (allowlist_dir / "core.yaml").write_text(
+            dedent("""\
+            allow_hits:
+              - key: "core/events.py:R1:EventBus:emit:fp=aaa"
+                owner: test
+                reason: test
+                safety: test
+                expires: null
+            """)
+        )
+
+        args = argparse.Namespace(
+            root=src_dir,
+            allowlist=allowlist_dir,
+            exclude=[],
+            format="text",
+            files=[],
+        )
+
+        assert run_check(args) == 1
+        captured = capsys.readouterr()
+        assert "ALLOWLIST BUDGET EXCEEDED" in captured.out
+        assert "permanent_allow_hits" in captured.out

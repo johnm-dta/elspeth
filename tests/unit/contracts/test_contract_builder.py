@@ -462,6 +462,22 @@ class TestContractBuilderEdgeCases:
         assert types["metadata"] is object
         assert types["scores"] is object
 
+    def test_normalizer_typeerror_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Programmer TypeError from the normalizer is not mapped to object."""
+        from elspeth.contracts import contract_builder as contract_builder_module
+        from elspeth.contracts.contract_builder import ContractBuilder
+
+        def broken_normalizer(value: object) -> type:
+            raise TypeError("programmer bug in type normalization")
+
+        monkeypatch.setattr(contract_builder_module, "normalize_type_for_contract", broken_normalizer)
+
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        builder = ContractBuilder(contract)
+
+        with pytest.raises(TypeError, match="programmer bug in type normalization"):
+            builder.process_first_row({"payload": {"key": "value"}}, {"payload": "payload"})
+
     def test_flexible_with_dict_extra_field(self) -> None:
         """FLEXIBLE mode handles dict extras from JSON sources.
 

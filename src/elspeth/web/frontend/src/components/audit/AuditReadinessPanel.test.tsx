@@ -6,6 +6,8 @@ import { AuditReadinessPanel } from "./AuditReadinessPanel";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore, getInitialState } from "../../stores/auditReadinessStore";
 import { useExecutionStore } from "../../stores/executionStore";
+import { useInlineSourceStore } from "@/stores/inlineSourceStore";
+import { resetStore } from "@/test/store-helpers";
 import * as api from "../../api/auditReadiness";
 import type { AuditReadinessSnapshot, ValidationResult } from "../../types/api";
 import { makeComposition, makeAbortablePromise } from "@/test/composerFixtures";
@@ -129,6 +131,7 @@ describe("AuditReadinessPanel", () => {
     // extensions automatically.
     useAuditReadinessStore.setState(getInitialState());
     useExecutionStore.setState({ validationResult: null } as never);
+    resetStore(useInlineSourceStore);
     vi.clearAllMocks();
   });
 
@@ -673,6 +676,58 @@ describe("AuditReadinessPanel", () => {
     // useState(false), anyActionable is false (all-green), and showExpanded = false.
     expect(screen.getByText("Validation")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Audit ready/i })).not.toBeInTheDocument();
+  });
+
+  it("renders inline-content-hashed provenance row when the source is inline_blob-backed (Phase 5a.7)", async () => {
+    // Seed an inline-source summary so the panel's projection branch fires.
+    useInlineSourceStore.getState().setSummary(SESSION_ID, {
+      blobId: "blob-uuid",
+      filename: "chat.csv",
+      mimeType: "text/csv",
+      contentPreview: "url\nhttps://finance.gov.au",
+      rowCount: 1,
+      contentHash: "abc123def456789",
+      provenance: "verbatim",
+    });
+    // Snapshot must be actionable so the panel auto-expands and the
+    // provenance row is in the DOM (collapsed mode hides the row list).
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    // The override replaces the backend-supplied summary text on the
+    // provenance row with "Inline content hashed (SHA-256: <prefix>…)".
+    expect(
+      await screen.findByText(/inline content hashed/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/abc123def456/)).toBeInTheDocument();
+    // And the backend summary string for that row is NOT shown — we
+    // replaced it, not appended to it.
+    expect(
+      screen.queryByText(/identity passthrough detected/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the default backend-supplied provenance summary when no inline source is bound (Phase 5a.7)", async () => {
+    // No inline source seeded — store returns null for getSummary(SESSION_ID).
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) =>
+        makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+
+    render(<AuditReadinessPanel />);
+
+    // Default backend-supplied summary IS rendered; the inline override
+    // is NOT applied.
+    expect(
+      await screen.findByText(/identity passthrough detected/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/inline content hashed/i),
+    ).not.toBeInTheDocument();
   });
 
   it("auto-collapses when a subsequent refetch returns all-green (no sticky expansion)", async () => {

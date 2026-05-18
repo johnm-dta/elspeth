@@ -16,6 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
 import { useExecutionStore } from "../../stores/executionStore";
+import { useInlineSourceStore } from "../../stores/inlineSourceStore";
 import { relativeTime } from "../../utils/time";
 import type {
   AuditReadinessSnapshot,
@@ -116,6 +117,17 @@ export function AuditReadinessPanel() {
   );
   const loadSnapshot = useAuditReadinessStore((s) => s.loadSnapshot);
   const setValidationResult = useExecutionStore((s) => s.setValidationResult);
+
+  // Phase 5a Task 7: when an inline_blob source is bound to the active
+  // composition, the Provenance row's summary text is replaced with an
+  // "Inline content hashed (SHA-256: <prefix>…)" line. The `provenance`
+  // discriminant is a PROJECTION of the server-recorded `creation_modality`
+  // (Task 2.5), not a frontend computation — the override here only
+  // changes the displayed text. Status/heading/clickability still come
+  // from the backend-supplied row.
+  const inlineSummary = useInlineSourceStore((s) =>
+    activeSessionId ? s.getSummary(activeSessionId) : null,
+  );
 
   const hasCompositionContent =
     !!compositionState &&
@@ -318,6 +330,16 @@ export function AuditReadinessPanel() {
             const { glyph, aria } = statusGlyph(row.status);
             const heading = row.label || rowHeading(row.id);
             const clickable = isActionable(row.status);
+            // Phase 5a Task 7: inline-source provenance override. The
+            // backend `summary` is replaced (not appended to) with a
+            // hash-prefix line when an inline_blob source is bound. The
+            // 12-char prefix is a display convenience; the full hash
+            // stays in the Tier-1 audit trail (Landscape) — this row is
+            // a UI affordance, not the legal record.
+            const summaryText =
+              row.id === "provenance" && inlineSummary !== null
+                ? `Inline content hashed (SHA-256: ${inlineSummary.contentHash.slice(0, 12)}…)`
+                : row.summary;
             return (
               <li
                 key={row.id}
@@ -337,7 +359,7 @@ export function AuditReadinessPanel() {
                     </span>
                     <span className="sr-only">{aria}.</span>
                     <span className="audit-readiness-row-label">{heading}</span>
-                    <span className="audit-readiness-row-summary">{row.summary}</span>
+                    <span className="audit-readiness-row-summary">{summaryText}</span>
                   </button>
                 ) : (
                   <div
@@ -353,7 +375,7 @@ export function AuditReadinessPanel() {
                     </span>
                     <span className="sr-only">{aria}.</span>
                     <span className="audit-readiness-row-label">{heading}</span>
-                    <span className="audit-readiness-row-summary">{row.summary}</span>
+                    <span className="audit-readiness-row-summary">{summaryText}</span>
                   </div>
                 )}
               </li>

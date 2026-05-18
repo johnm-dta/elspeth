@@ -37,15 +37,19 @@
 // ============================================================================
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { ReactNode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../App";
 import * as api from "../api/client";
+import * as auditReadinessApi from "../api/auditReadiness";
 import { useSessionStore } from "../stores/sessionStore";
 import { useAuthStore } from "../stores/authStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
+import { useAuditReadinessStore, getInitialState as getAuditReadinessInitialState } from "@/stores/auditReadinessStore";
 import { resetStore } from "@/test/store-helpers";
 import type {
+  AuditReadinessSnapshot,
   BlobMetadata,
   CompositionState,
   MessageWithStateResponse,
@@ -63,8 +67,14 @@ vi.mock("../components/common/AppHeader", () => ({
   AppHeader: () => <div data-testid="app-header-stub" />,
 }));
 
+// SideRail itself is stubbed (we don't render the catalog/execute/graph
+// affordances for this test), but the audit-readiness slot is forwarded
+// so the real AuditReadinessPanel mounts and assertion (g) can reach
+// the inline-source provenance row.
 vi.mock("../components/sidebar/SideRail", () => ({
-  SideRail: () => <div data-testid="side-rail-stub" />,
+  SideRail: ({ auditReadinessSlot }: { auditReadinessSlot?: ReactNode }) => (
+    <div data-testid="side-rail-stub">{auditReadinessSlot}</div>
+  ),
 }));
 
 vi.mock("../components/sidebar/GraphModal", () => ({
@@ -79,9 +89,10 @@ vi.mock("../components/catalog/CatalogDrawer", () => ({
   CatalogDrawer: () => null,
 }));
 
-vi.mock("../components/audit/AuditReadinessPanel", () => ({
-  AuditReadinessPanel: () => <div data-testid="audit-readiness-stub" />,
-}));
+// AuditReadinessPanel is intentionally NOT stubbed — Phase 5a Task 7
+// wires the inline-source provenance row, and assertion (g) below
+// exercises the real panel to verify the full projection chain
+// (compositionState → inlineSourceStore → AuditReadinessPanel).
 
 vi.mock("../components/recovery/RecoveryPanel", () => ({
   RecoveryPanel: () => null,
@@ -133,6 +144,15 @@ vi.mock("../hooks/useAuth", () => ({
 // Module-scope vi.mock provides the default-safe values; individual
 // tests override `sendMessage` and the blob fetchers via vi.spyOn so the
 // scenario-specific wire shapes stay co-located with the assertions.
+
+// The audit-readiness panel auto-fetches when compositionState has content
+// and there is no version-matching cached snapshot. We mock the API so the
+// panel populates its snapshot store and reaches the row-rendering branch
+// where Task 7's inline-source override is applied (assertion (g) below).
+vi.mock("../api/auditReadiness", () => ({
+  fetchAuditReadiness: vi.fn(),
+  fetchAuditReadinessExplain: vi.fn(),
+}));
 
 vi.mock("../api/client", () => ({
   fetchSystemStatus: vi.fn().mockResolvedValue({
@@ -239,6 +259,40 @@ function makeBlobMetadata(
 }
 
 /**
+ * AuditReadinessSnapshot shaped for version 2 of the composition (the
+ * version that carries the inline_blob source). The provenance row's
+ * backend-supplied summary is overridden by the panel when an inline
+ * source is bound — (g) below verifies that override.
+ *
+ * One row is set to `warning` so the panel auto-expands (anyActionable
+ * branch) and the provenance row is in the DOM. Without an actionable
+ * row the panel collapses to its single "Audit ready" summary and the
+ * inline-content-hashed text is hidden until the user expands.
+ */
+function makeAuditReadinessSnapshotV2(): AuditReadinessSnapshot {
+  return {
+    session_id: SESSION_ID,
+    composition_version: 2,
+    checked_at: "2026-05-18T00:00:02Z",
+    rows: [
+      { id: "validation", label: "Validation", status: "ok", summary: "All checks pass", detail: null, component_ids: [] },
+      { id: "plugin_trust", label: "Plugin trust", status: "warning", summary: "One Tier 3 plugin", detail: "web_scrape is Tier 3.", component_ids: ["web_scrape"] },
+      { id: "provenance", label: "Provenance", status: "ok", summary: "Complete lineage", detail: null, component_ids: [] },
+      { id: "retention", label: "Retention", status: "not_applicable", summary: "System retention: 90 days", detail: null, component_ids: [] },
+      { id: "llm_interpretations", label: "LLM interpretations", status: "not_applicable", summary: "No LLM transforms", detail: null, component_ids: [] },
+      { id: "secrets", label: "Secrets", status: "not_applicable", summary: "No secrets", detail: null, component_ids: [] },
+    ],
+    validation_result: {
+      is_valid: true,
+      checks: [],
+      errors: [],
+      warnings: [],
+      semantic_contracts: [],
+    },
+  };
+}
+
+/**
  * MessageWithStateResponse shaped to mirror what the composer returns
  * after a successful `set_pipeline` tool-call: the user-facing
  * assistant message + the new composition state carrying an
@@ -271,6 +325,16 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
     Element.prototype.scrollIntoView = vi.fn();
     resetStore(useSessionStore);
     resetStore(useInlineSourceStore);
+    // The audit-readiness store is hand-shaped (not a generic factory),
+    // so its canonical reset is the exported getInitialState() — same
+    // pattern AuditReadinessPanel.test.tsx uses.
+    useAuditReadinessStore.setState(getAuditReadinessInitialState());
+    // Auto-fetch returns a v2-shaped snapshot for the inline-source
+    // composition. The panel's projection branch will then override the
+    // provenance row's summary with the SHA-256 prefix (Task 7).
+    vi.mocked(auditReadinessApi.fetchAuditReadiness).mockResolvedValue(
+      makeAuditReadinessSnapshotV2(),
+    );
     // Seed authStore so useSessionLifecycle's auth gate passes — mirrors
     // the App.test.tsx pattern (the useAuth() mock above only covers
     // hook consumers; the lifecycle reads useAuthStore directly).
@@ -402,13 +466,15 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
     expect(summary?.mimeType).toBe("text/csv");
     expect(summary?.contentHash).toBe("sha256-abc123def456");
 
-    // (g) DEFERRED to Phase 5a Task 7 — the AuditReadinessPanel does not
-    //     surface inline-source provenance today. Re-enable below when
-    //     Task 7 wires the row.
-    //
-    //   expect(
-    //     screen.getByRole("row", { name: /provenance/i }),
-    //   ).toHaveTextContent(/verbatim/i);
+    // (g) Audit-readiness panel Provenance row reflects the inline source.
+    // The panel auto-fetches once compositionState.version === 2 (the
+    // version carrying the inline_blob source) and the projection effect
+    // populates inlineSourceStore.summary. The provenance row's summary
+    // is then overridden to display the SHA-256 prefix.
+    await waitFor(() => {
+      expect(screen.getByText(/inline content hashed/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/sha256-abc12/)).toBeInTheDocument();
   });
 
   it("llm_generated path — canonical demo prompt, widget renders WITH Edit button", async () => {
@@ -448,6 +514,14 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
     expect(summary?.provenance).toBe("llm-generated");
     expect(summary?.blobId).toBe(BLOB_ID);
 
-    // (g) DEFERRED — see Task 6 spec; re-enabled by Task 7.
+    // (g) Audit-readiness panel Provenance row reflects the inline source.
+    // The integration fixture reuses the same blob `content_hash` for both
+    // creation modalities; only the `provenance` discriminant differs,
+    // and the row override depends on inlineSummary being non-null —
+    // both paths display the same hash-prefix line.
+    await waitFor(() => {
+      expect(screen.getByText(/inline content hashed/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/sha256-abc12/)).toBeInTheDocument();
   });
 });

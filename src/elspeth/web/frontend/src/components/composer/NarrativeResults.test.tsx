@@ -1,12 +1,67 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { NarrativeResults } from "./NarrativeResults";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { resetStore } from "@/test/store-helpers";
 import type { InterpretationEvent } from "@/types/interpretation";
-import type { Run } from "@/types/index";
+import type {
+  Run,
+  RunOutputArtifact,
+  RunOutputArtifactPreview,
+  RunOutputsResponse,
+} from "@/types/index";
+import {
+  downloadRunOutputContent,
+  fetchRunOutputPreview,
+  fetchRunOutputs,
+} from "@/api/client";
+
+vi.mock("@/api/client", async () => {
+  const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
+  return {
+    ...actual,
+    fetchRunOutputs: vi.fn(),
+    fetchRunOutputPreview: vi.fn(),
+    downloadRunOutputContent: vi.fn(),
+  };
+});
+
+function fileArtifact(overrides: Partial<RunOutputArtifact> = {}): RunOutputArtifact {
+  return {
+    artifact_id: "art-1",
+    sink_node_id: "results",
+    artifact_type: "file",
+    path_or_uri: "file:///data/outputs/results.jsonl",
+    content_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    size_bytes: 1024,
+    created_at: "2026-05-19T10:04:00Z",
+    exists_now: true,
+    downloadable: true,
+    ...overrides,
+  };
+}
+
+function outputsResponse(artifacts: RunOutputArtifact[]): RunOutputsResponse {
+  return {
+    run_id: "run-1",
+    landscape_run_id: "run-1",
+    artifacts,
+  };
+}
+
+function jsonlPreview(rows: Array<Record<string, unknown>>, overrides: Partial<RunOutputArtifactPreview> = {}): RunOutputArtifactPreview {
+  return {
+    artifact_id: "art-1",
+    content_type: "jsonl",
+    preview_text: rows.map((r) => JSON.stringify(r)).join("\n"),
+    truncated: false,
+    total_size_bytes: 256,
+    row_count_preview: rows.length,
+    ...overrides,
+  };
+}
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -59,6 +114,7 @@ describe("NarrativeResults", () => {
     // Reset execution-store run state so a prior test's runs/activeRunId
     // don't bleed into the next test's narrative-overlay derivation.
     useExecutionStore.setState({ runs: [], activeRunId: null } as never);
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -238,5 +294,191 @@ describe("NarrativeResults", () => {
     expect(
       screen.queryByTestId("narrative-overlay-event-evt-before-start"),
     ).toBeNull();
+  });
+
+  // ── FIX-D: AC1 Markdown / AC3 Download / AC4 live-summary extraction ───────
+  // Plan 19b lines 309 (Markdown rendering), 342 ("Download full output"
+  // link), 349 (find-last-output-row-with-summary live extraction).
+
+  it("AC1: renders the summary string as Markdown when supplied as summaryOverride", () => {
+    render(<NarrativeResults summaryOverride="The pipeline produced **bold** results and reached _F1=0.87_." />);
+    // MarkdownRenderer surfaces inline emphasis as <strong>/<em>. We assert
+    // structural Markdown rendering (not raw text) — matching the
+    // MarkdownRenderer.test.tsx convention of asserting on element tagName.
+    const bold = screen.getByText("bold");
+    expect(bold.tagName).toBe("STRONG");
+    const em = screen.getByText("F1=0.87");
+    expect(em.tagName).toBe("EM");
+  });
+
+  it("AC1: renders Markdown headings and code in the summary", () => {
+    render(<NarrativeResults summaryOverride={"## Verdict\n\nUse `set_source` to retry."} />);
+    const heading = screen.getByRole("heading", { level: 2 });
+    expect(heading).toHaveTextContent("Verdict");
+    const code = screen.getByText("set_source");
+    expect(code.tagName).toBe("CODE");
+  });
+
+  it("AC3: renders a 'Download full output' affordance with the load-bearing test id when a terminal run has a downloadable file artifact", async () => {
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+    } as never);
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      outputsResponse([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonlPreview([{ score: 0.87 }]),
+    );
+
+    render(<NarrativeResults />);
+
+    const link = await screen.findByTestId("narrative-results-download-link");
+    expect(link).toBeInTheDocument();
+    // The backend `/content` endpoint requires `Authorization: Bearer`
+    // (api/client.ts:877-883) — a plain <a href> would 401 on top-level
+    // navigation. The shipped pattern (RunOutputsPanel:126-138) uses a
+    // button that triggers an authenticated fetch + object-URL download.
+    expect(link.tagName).toBe("BUTTON");
+  });
+
+  it("AC3: clicking 'Download full output' invokes downloadRunOutputContent against the chosen artifact", async () => {
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+    } as never);
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      outputsResponse([fileArtifact({ artifact_id: "art-chosen" })]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonlPreview([{ score: 0.87 }]),
+    );
+    const blob = new Blob(["bytes"], { type: "application/octet-stream" });
+    (downloadRunOutputContent as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: blob,
+      filename: "results.jsonl",
+    });
+    const createSpy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:mock");
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+    render(<NarrativeResults />);
+
+    const link = await screen.findByTestId("narrative-results-download-link");
+    fireEvent.click(link);
+
+    await waitFor(() =>
+      expect(downloadRunOutputContent).toHaveBeenCalledWith("run-1", "art-chosen"),
+    );
+    expect(createSpy).toHaveBeenCalledWith(blob);
+
+    createSpy.mockRestore();
+    revokeSpy.mockRestore();
+  });
+
+  it("AC3: hides the download affordance when no terminal run is active (no activeRunId)", () => {
+    // No activeRunId — store remains at default (null).
+    render(<NarrativeResults />);
+    expect(screen.queryByTestId("narrative-results-download-link")).toBeNull();
+  });
+
+  it("AC3: hides the download affordance when the run manifest has no file artifacts", async () => {
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+    } as never);
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      outputsResponse([]),
+    );
+
+    render(<NarrativeResults />);
+
+    // Wait for the manifest fetch to settle, then assert absence.
+    await waitFor(() => expect(fetchRunOutputs).toHaveBeenCalledWith("run-1"));
+    expect(screen.queryByTestId("narrative-results-download-link")).toBeNull();
+  });
+
+  it("AC4: live mode extracts the summary from the last output row whose `summary` field is non-empty (JSONL preview)", async () => {
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+    } as never);
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      outputsResponse([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonlPreview([
+        { score: 0.65 },
+        { summary: "Earlier partial summary." },
+        { score: 0.87, summary: "Final verdict: classifier converged at F1=0.87." },
+      ]),
+    );
+
+    render(<NarrativeResults />);
+
+    // Plan 19b:349 — "find the last output row that has a `summary` field;
+    // if multiple, concatenate with blank lines." With two `summary`-bearing
+    // rows the rendered surface concatenates them in document order.
+    const surface = await screen.findByTestId("narrative-results-summary");
+    expect(surface).toHaveTextContent("Earlier partial summary.");
+    expect(surface).toHaveTextContent(
+      "Final verdict: classifier converged at F1=0.87.",
+    );
+    expect(screen.queryByTestId("narrative-results-no-summary")).toBeNull();
+  });
+
+  it("AC4: live mode renders the no-summary placeholder when no output row carries a `summary` field", async () => {
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+    } as never);
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      outputsResponse([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonlPreview([{ score: 0.65 }, { score: 0.87 }]),
+    );
+
+    render(<NarrativeResults />);
+
+    await waitFor(() =>
+      expect(fetchRunOutputPreview).toHaveBeenCalledWith("run-1", "art-1"),
+    );
+    // The narrative renderer settled and saw no `summary` field — render
+    // the documented no-summary placeholder rather than fabricating text.
+    expect(
+      await screen.findByTestId("narrative-results-no-summary"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("narrative-results-summary")).toBeNull();
+  });
+
+  it("AC4: summaryOverride takes precedence over live extraction (read-only inspect-view contract)", async () => {
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+    } as never);
+    // If live extraction were not gated on summaryOverride === undefined,
+    // this preview's "live summary" would clobber the override. The
+    // SharedInspectView contract is: when a frozen blob supplies the
+    // summary, the live execution-store path must not race against it.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      outputsResponse([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonlPreview([{ summary: "live-extracted summary" }]),
+    );
+
+    render(<NarrativeResults summaryOverride="frozen-blob summary" />);
+
+    expect(
+      screen.getByTestId("narrative-results-summary"),
+    ).toHaveTextContent("frozen-blob summary");
+    // Live extraction must not be initiated when the override is supplied.
+    expect(fetchRunOutputs).not.toHaveBeenCalled();
   });
 });

@@ -9,9 +9,11 @@
  * **Layer 1 (primary): plugin-provided `summary` field.** The transform's
  * output schema must include a `summary` field, pinned by Phase 6A
  * Task 8's `capability_tags = ("narrative-summary",)`. The narrative
- * panel surfaces this string verbatim. Live mode reads from the active
- * run's summary; the read-only inspect view (Task 8) supplies
- * `summaryOverride` from the frozen blob.
+ * panel surfaces this string verbatim (rendered as Markdown via the
+ * reused `MarkdownRenderer` from `components/chat/`). The read-only
+ * inspect view (Task 8) supplies `summaryOverride` from the frozen blob;
+ * live mode fetches the run's outputs manifest and walks the previews of
+ * file artifacts, extracting `summary` values per plan 19b:349.
  *
  * **Layer 2 (additive overlay): Phase 5b interpretation events.** When
  * the `interpretationEventsStore` projection has resolved events for the
@@ -54,12 +56,30 @@
  * placeholder rather than fabricating content. The existing tabular
  * `RunOutputsPanel` remains the source of truth for raw outputs;
  * narrative mode is a complementary surface.
+ *
+ * **Download affordance (plan 19b:342).** Alongside the narrative
+ * summary, the panel exposes a "Download full output" affordance against
+ * the active run's first downloadable file artifact. The backend
+ * `/content` endpoint requires `Authorization: Bearer` (api/client.ts
+ * lines 877-883) so the affordance is a button that invokes
+ * `downloadRunOutputContent` and triggers a synthetic anchor — not a
+ * plain `<a href>`, which would 401 on top-level navigation. The
+ * testid (`narrative-results-download-link`) is preserved from the
+ * plan's wording for cross-document grep continuity.
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+import {
+  downloadRunOutputContent,
+  fetchRunOutputPreview,
+  fetchRunOutputs,
+} from "@/api/client";
+import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import type { RunOutputArtifact } from "@/types/index";
 
 interface NarrativeResultsProps {
   /** If supplied, narrative pulls the summary from this run output rather
@@ -69,6 +89,102 @@ interface NarrativeResultsProps {
   summaryOverride?: string | null;
 }
 
+/** Pick the first file artifact whose `downloadable` flag is not
+ *  explicitly false. ``downloadable === undefined`` means a pre-rollout
+ *  backend; api/client docstring at types/index.ts:715-720 documents the
+ *  "missing → caller treats as optimistic show-the-button" semantic.
+ *  Returns null when no candidate exists. */
+function pickDownloadableFileArtifact(
+  artifacts: ReadonlyArray<RunOutputArtifact>,
+): RunOutputArtifact | null {
+  for (const a of artifacts) {
+    if (a.artifact_type !== "file") continue;
+    if (a.downloadable === false) continue;
+    return a;
+  }
+  return null;
+}
+
+/** Walk every row in a JSONL or JSON preview, return the rows whose
+ *  ``summary`` field is a non-empty string. Plan 19b:349 — "find the last
+ *  output row that has a `summary` field; if multiple, concatenate with
+ *  blank lines." The preview content is Tier-3 external data (parsed from
+ *  bytes the backend serialized to disk) so this is the coerce-and-record
+ *  boundary: malformed JSON lines are skipped rather than crashing.
+ *  CSV / binary / text content types carry no row-shaped `summary` field
+ *  and are skipped entirely (they would require column-name discovery and
+ *  full-text parsing the plan does not specify). */
+function extractSummariesFromPreviewText(
+  text: string,
+  contentType: string,
+): string[] {
+  const summaries: string[] = [];
+  if (contentType === "jsonl") {
+    for (const rawLine of text.split("\n")) {
+      const line = rawLine.trim();
+      if (line === "") continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        // Tier-3 boundary: a malformed line is recorded as absence, not
+        // a crash. Skip and continue.
+        continue;
+      }
+      if (typeof parsed !== "object" || parsed === null) continue;
+      const candidate = (parsed as Record<string, unknown>).summary;
+      if (typeof candidate === "string" && candidate.length > 0) {
+        summaries.push(candidate);
+      }
+    }
+  } else if (contentType === "json") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return [];
+    }
+    if (Array.isArray(parsed)) {
+      for (const row of parsed) {
+        if (typeof row !== "object" || row === null) continue;
+        const candidate = (row as Record<string, unknown>).summary;
+        if (typeof candidate === "string" && candidate.length > 0) {
+          summaries.push(candidate);
+        }
+      }
+    } else if (typeof parsed === "object" && parsed !== null) {
+      const candidate = (parsed as Record<string, unknown>).summary;
+      if (typeof candidate === "string" && candidate.length > 0) {
+        summaries.push(candidate);
+      }
+    }
+  }
+  return summaries;
+}
+
+interface LiveOutputsState {
+  /** First downloadable file artifact (for the Download affordance). */
+  downloadArtifact: RunOutputArtifact | null;
+  /** Concatenated non-empty `summary` strings extracted from the previews
+   *  of every file artifact in the manifest. ``null`` until the fetch
+   *  settles; empty-string when settled-with-no-summaries. */
+  extractedSummary: string | null;
+}
+
+function triggerBrowserDownload(data: Blob, filename: string): void {
+  // Mirrors the RunOutputsPanel:58-67 helper. The /content endpoint
+  // requires Authorization: Bearer, so we fetch-then-object-URL rather
+  // than rendering an <a href>.
+  const url = URL.createObjectURL(data);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
 export function NarrativeResults({ summaryOverride }: NarrativeResultsProps = {}): JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const optedOutBySession = useInterpretationEventsStore((s) => s.optedOutBySession);
@@ -76,13 +192,83 @@ export function NarrativeResults({ summaryOverride }: NarrativeResultsProps = {}
   const activeRunId = useExecutionStore((s) => s.activeRunId);
   const runs = useExecutionStore((s) => s.runs);
 
-  // Layer 1: locate the summary string. ``summaryOverride === undefined``
-  // means live mode; the live `executionStore` does not yet aggregate a
-  // narrative-summary field — surface the placeholder in that case. A
-  // future iteration can wire a dedicated summary extractor through the
-  // run-results store; the contract here (component prop + placeholder)
-  // is stable.
-  const summary = summaryOverride !== undefined ? summaryOverride : null;
+  // Live-mode outputs: fetched only when summaryOverride is undefined AND
+  // an activeRunId is set. The fetch loads the manifest, then for each
+  // file artifact the bounded-preview endpoint, then walks rows looking
+  // for a `summary` field per plan 19b:349.
+  const [liveOutputs, setLiveOutputs] = useState<LiveOutputsState | null>(null);
+
+  useEffect(() => {
+    // When the inspect-view passes summaryOverride, skip the live fetch
+    // entirely — the frozen blob is the source of truth and a parallel
+    // fetch would only introduce a race the AC4-precedence test guards
+    // against.
+    if (summaryOverride !== undefined) return;
+    if (activeRunId === null) {
+      setLiveOutputs(null);
+      return;
+    }
+
+    const runId = activeRunId;
+    let cancelled = false;
+
+    (async () => {
+      // Tier-3 boundary: an unhealthy backend or in-flight run can return
+      // 4xx/5xx here. The narrative surface degrades to the placeholder
+      // rather than crashing the panel; the existing RunOutputsPanel
+      // remains the canonical surface for output-fetch error reporting.
+      let artifacts: ReadonlyArray<RunOutputArtifact>;
+      try {
+        const manifest = await fetchRunOutputs(runId);
+        artifacts = manifest.artifacts;
+      } catch {
+        if (cancelled) return;
+        setLiveOutputs({ downloadArtifact: null, extractedSummary: "" });
+        return;
+      }
+
+      const downloadArtifact = pickDownloadableFileArtifact(artifacts);
+
+      const summaries: string[] = [];
+      for (const artifact of artifacts) {
+        if (artifact.artifact_type !== "file") continue;
+        try {
+          const preview = await fetchRunOutputPreview(runId, artifact.artifact_id);
+          summaries.push(
+            ...extractSummariesFromPreviewText(
+              preview.preview_text,
+              preview.content_type,
+            ),
+          );
+        } catch {
+          // A purge-race or content-type mismatch on one artifact must
+          // not abort summary extraction for the rest of the manifest.
+          continue;
+        }
+      }
+
+      if (cancelled) return;
+      setLiveOutputs({
+        downloadArtifact,
+        extractedSummary: summaries.join("\n\n"),
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [summaryOverride, activeRunId]);
+
+  // Layer 1: locate the summary string. Precedence: explicit override
+  // (frozen-blob inspect view) → live-extracted concatenation → null.
+  // ``summaryOverride === null`` is "explicitly no summary"; ``""`` is
+  // empty; both surface the placeholder via the truthy gate below.
+  const summary: string | null =
+    summaryOverride !== undefined
+      ? summaryOverride
+      : liveOutputs !== null && liveOutputs.extractedSummary !== ""
+        ? liveOutputs.extractedSummary
+        : null;
 
   // Layer 2: opt-out indicator from the interpretation events store.
   // Persists session-wide once flipped; the per-event list below adds
@@ -120,6 +306,31 @@ export function NarrativeResults({ summaryOverride }: NarrativeResultsProps = {}
     });
   }, [activeSessionId, activeRunId, runs, resolvedBySession]);
 
+  // Download affordance source: when the frozen-blob inspect view (Task 8)
+  // mounts NarrativeResults, there is no live executionStore run to fetch
+  // outputs from — the affordance is suppressed. Live mode surfaces the
+  // first downloadable file artifact from the just-fetched manifest.
+  const downloadArtifact: RunOutputArtifact | null =
+    summaryOverride !== undefined
+      ? null
+      : (liveOutputs?.downloadArtifact ?? null);
+
+  const handleDownload = async (): Promise<void> => {
+    if (downloadArtifact === null) return;
+    if (activeRunId === null) return;
+    try {
+      const { data, filename } = await downloadRunOutputContent(
+        activeRunId,
+        downloadArtifact.artifact_id,
+      );
+      triggerBrowserDownload(data, filename);
+    } catch {
+      // Download failures are surfaced by the canonical RunOutputsPanel
+      // banner; the narrative affordance is a complementary entry point,
+      // not an error-reporting surface.
+    }
+  };
+
   return (
     <section
       className="narrative-results"
@@ -128,11 +339,25 @@ export function NarrativeResults({ summaryOverride }: NarrativeResultsProps = {}
     >
       <h3>Pipeline summary</h3>
       {summary !== null && summary !== "" ? (
-        <p data-testid="narrative-results-summary">{summary}</p>
+        <div data-testid="narrative-results-summary">
+          <MarkdownRenderer content={summary} />
+        </div>
       ) : (
         <p data-testid="narrative-results-no-summary" className="narrative-results-empty">
           No narrative summary available for this run. The tagged plugin's
           output did not include a <code>summary</code> field.
+        </p>
+      )}
+
+      {downloadArtifact !== null && (
+        <p className="narrative-results-download">
+          <button
+            type="button"
+            data-testid="narrative-results-download-link"
+            onClick={() => void handleDownload()}
+          >
+            Download full output
+          </button>
         </p>
       )}
 

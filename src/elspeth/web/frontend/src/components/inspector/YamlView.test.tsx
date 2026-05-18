@@ -13,11 +13,18 @@ function makeState(version = 1) {
   return {
     id: "state-1",
     version,
-    source: null,
+    source: { plugin: "text", options: { content: "hello" } },
     nodes: [],
     edges: [],
     outputs: [],
     metadata: { name: "test", description: "" },
+  };
+}
+
+function makeMetadataOnlyState(version = 1) {
+  return {
+    ...makeState(version),
+    source: null,
   };
 }
 
@@ -61,6 +68,25 @@ describe("YamlView", () => {
     expect(
       screen.getByText("YAML will appear here once your pipeline has components."),
     ).toBeInTheDocument();
+  });
+
+  it("does not fetch YAML for a metadata-only guided exit state", async () => {
+    const { fetchYaml } = await import("@/api/client");
+    vi.mocked(fetchYaml).mockResolvedValue({
+      yaml: "source:\n  plugin: text\n",
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: makeMetadataOnlyState(),
+    });
+
+    render(<YamlView />);
+
+    expect(
+      screen.getByText("YAML will appear here once your pipeline has components."),
+    ).toBeInTheDocument();
+    expect(fetchYaml).not.toHaveBeenCalled();
   });
 
   it("shows a validation-blocked alert when YAML export returns 409", async () => {

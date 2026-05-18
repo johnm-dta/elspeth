@@ -10,6 +10,15 @@ import type { Session } from "../types/api";
 const SESSION_A = "00000000-0000-0000-0000-000000000001";
 const SESSION_B = "00000000-0000-0000-0000-000000000002";
 
+function compositionWithSource(version: number) {
+  return {
+    version,
+    source: { plugin: "text", options: { content: "hello" } },
+    nodes: [],
+    outputs: [],
+  };
+}
+
 describe("subscriptions — auditReadiness clearSession on session removal", () => {
   beforeEach(() => {
     _resetSubscriptionsForTesting();
@@ -231,7 +240,7 @@ describe("auto-validate on composition-state version change", () => {
 
     useSessionStore.setState({
       activeSessionId: "sess-1",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
 
     await waitFor(() =>
@@ -239,10 +248,31 @@ describe("auto-validate on composition-state version change", () => {
     );
 
     useSessionStore.setState({
-      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(2) as never,
     } as never);
 
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not auto-validate a metadata-only guided exit state", async () => {
+    const validate = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({ validate } as never);
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: {
+        version: 1,
+        source: null,
+        nodes: [],
+        outputs: [],
+      } as never,
+    } as never);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(validate).not.toHaveBeenCalled();
   });
 
   it("does not fire when version is unchanged (reference change only)", async () => {
@@ -250,14 +280,14 @@ describe("auto-validate on composition-state version change", () => {
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(5) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 5 }),
     );
 
     useSessionStore.setState({
-      compositionState: { version: 5, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(5) as never,
     } as never);
     await act(async () => {
       await Promise.resolve();
@@ -271,7 +301,7 @@ describe("auto-validate on composition-state version change", () => {
     useExecutionStore.setState({ validate, isExecuting: true } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 9, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(9) as never,
     } as never);
 
     await act(async () => {
@@ -287,7 +317,7 @@ describe("auto-validate on composition-state version change", () => {
     useSessionStore.setState({ activeSessionId: null } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
 
     await act(async () => {
@@ -309,12 +339,12 @@ describe("auto-validate on composition-state version change", () => {
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
 
     useSessionStore.setState({
-      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(2) as never,
     } as never);
 
     expect(validate).toHaveBeenCalledTimes(1);
@@ -330,7 +360,7 @@ describe("auto-validate on composition-state version change", () => {
 
     useSessionStore.setState({
       activeSessionId: "sess-A",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-A", { expectedVersion: 1 }),
@@ -338,7 +368,7 @@ describe("auto-validate on composition-state version change", () => {
 
     useSessionStore.setState({
       activeSessionId: "sess-B",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-B", { expectedVersion: 1 }),
@@ -354,7 +384,7 @@ describe("auto-validate on composition-state version change", () => {
 
     useSessionStore.setState({
       activeSessionId: "sess-1",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
 
@@ -365,7 +395,7 @@ describe("auto-validate on composition-state version change", () => {
     useSessionStore.setState({ activeSessionId: null } as never);
     useSessionStore.setState({
       activeSessionId: "sess-1",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
 
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
@@ -391,7 +421,7 @@ describe("auto-validate on composition-state version change", () => {
 
     useSessionStore.setState({
       activeSessionId: "sess-1",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
 
@@ -400,7 +430,7 @@ describe("auto-validate on composition-state version change", () => {
     // under the fix, cache is empty and validate fires again; under the bug,
     // cache holds 1 and the subscription short-circuits.
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
 
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
@@ -435,7 +465,7 @@ describe("auto-validate on composition-state version change", () => {
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-A", { expectedVersion: 1 }),
@@ -484,7 +514,7 @@ describe("auto-validate on composition-state version change", () => {
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-A", { expectedVersion: 1 }),
@@ -546,7 +576,7 @@ describe("auto-validate guard respects progress.status === 'running' (Fix A)", (
     // Bug: only checks isExecuting (false) → validate fires.
     // Fix: also checks progress?.status === "running" → validate suppressed.
     useSessionStore.setState({
-      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(2) as never,
     } as never);
 
     await act(async () => {
@@ -563,7 +593,7 @@ describe("auto-validate guard respects progress.status === 'running' (Fix A)", (
     // time. pendingValidateTarget was set to version 2 by the blocked
     // subscription fire above, so fireValidateLoop will run with target 2.
     useSessionStore.setState({
-      compositionState: { version: 2, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(2) as never,
     } as never);
 
     await waitFor(() => expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 2 }));
@@ -599,7 +629,7 @@ describe("lastValidatedVersionBySession cleared when session is removed (Fix B)"
 
     // Seed the cache: trigger the initial auto-validate for sess-1 / version 1.
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 1 }),
@@ -614,7 +644,7 @@ describe("lastValidatedVersionBySession cleared when session is removed (Fix B)"
     useSessionStore.setState({
       sessions: [{ id: "sess-1", title: "x" } as never],
       activeSessionId: "sess-1",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
 
     // With the fix, cache was cleared at removal → validate fires again.
@@ -658,7 +688,7 @@ describe("per-user state resets on auth identity change (Fix C)", () => {
 
     // Seed the cache: trigger the initial auto-validate for user-a / sess-1 / version 1.
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 1 }),
@@ -673,7 +703,7 @@ describe("per-user state resets on auth identity change (Fix C)", () => {
     // Re-fire compositionState (new object ref) to trigger the auto-validate
     // subscription. The session and version are unchanged.
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
 
     await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
@@ -710,7 +740,7 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: compositionWithSource(1) as never,
     } as never);
     await waitFor(() =>
       expect(validate).toHaveBeenCalledWith("sess-1", { expectedVersion: 1 }),

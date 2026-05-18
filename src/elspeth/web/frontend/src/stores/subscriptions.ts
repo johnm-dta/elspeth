@@ -9,6 +9,7 @@ import { useExecutionStore } from "./executionStore";
 import { useAuditReadinessStore } from "./auditReadinessStore";
 import { useAuthStore } from "./authStore";
 import type { ValidationResult } from "@/types/index";
+import { hasCompositionContent } from "@/utils/compositionState";
 
 let previousVersion: number | null = null;
 let previousSessionIds: Set<string> = new Set();
@@ -187,6 +188,7 @@ export function initStoreSubscriptions(): void {
     const sessionId = state.activeSessionId;
     const version = state.compositionState?.version ?? null;
     if (!sessionId || version === null) return;
+    if (!hasCompositionContent(state.compositionState)) return;
     if (lastValidatedVersionBySession.get(sessionId) === version) return;
     const exec = useExecutionStore.getState();
     if (exec.isExecuting || exec.progress?.status === "running") return;

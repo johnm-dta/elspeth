@@ -372,6 +372,45 @@ class TestExecuteEndpoint:
         assert detail["semantic_contracts"][0]["from_id"] == "scrape"
         assert detail["semantic_contracts"][0]["requirement_code"] == "line_explode.source_field.line_framed_text"
 
+    @pytest.mark.asyncio
+    async def test_execute_returns_422_for_unresolved_interpretation_placeholder(self) -> None:
+        """F-17 / F-21: unresolved interpretation placeholder maps to 422 with structured payload.
+
+        The route handler MUST sit ABOVE the ``except
+        ExecuteRequestValidationError`` (which maps to 400) and the bare
+        ``except ValueError`` (which maps to 404) so the structured 422
+        payload reaches the frontend.  A regression that demoted this
+        catch order would leak the placeholder error as a generic 404 or
+        400 and lose the (node_id, term) list the frontend banner uses.
+        """
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+
+        exc = UnresolvedInterpretationPlaceholderError(
+            placeholders=(("rate_node", "cool"), ("summarise_node", "important")),
+        )
+
+        svc = MagicMock()
+        svc.execute = AsyncMock(side_effect=exc)
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/sessions/{uuid4()}/execute")
+        assert resp.status_code == 422
+        body = resp.json()
+        detail = body["detail"]
+        assert detail["kind"] == "interpretation_placeholder_unresolved"
+        # Message names every unresolved site so the operator sees them
+        # without needing to expand the banner.
+        assert "{{interpretation:cool}}" in detail["message"]
+        assert "rate_node" in detail["message"]
+        assert "{{interpretation:important}}" in detail["message"]
+        assert "summarise_node" in detail["message"]
+        # Structured placeholder list — the frontend renders per-site
+        # entries from this without parsing the message string.
+        assert detail["placeholders"] == [
+            {"node_id": "rate_node", "term": "cool"},
+            {"node_id": "summarise_node", "term": "important"},
+        ]
+
 
 class TestRunDiagnosticsEndpoint:
     """GET/POST /api/runs/{run_id}/diagnostics."""

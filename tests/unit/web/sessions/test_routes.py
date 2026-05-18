@@ -1358,6 +1358,16 @@ class TestIDORCoverageDrift:
             "post_guided_reenter",
             "post_guided_respond",
             "post_guided_chat",
+            # Phase 5b Task 6 / Task 7: interpretation event HTTP surface
+            # (resolve / list) and opt-out endpoints, added in
+            # ``sessions/routes.py`` and gated through
+            # ``verify_session_ownership`` like every other session-scoped
+            # route. Inventory updated alongside this drift-guard so the
+            # IDOR audit reflects the production handler set.
+            "resolve_interpretation",
+            "list_interpretations",
+            "opt_out_of_interpretations",
+            "opt_out_summary",
         }
     )
 

@@ -233,6 +233,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
         session_service=session_service,
         yaml_generator=yaml_generator_module,
+        telemetry=app.state.sessions_telemetry,
         blob_service=app.state.blob_service,
         secret_service=app.state.scoped_secret_resolver,
     )
@@ -509,10 +510,18 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     session_engine = create_session_engine(session_db_url)
     initialize_session_schema(session_engine)
 
+    # Build the sessions-telemetry container ONCE per process and share it
+    # across every consumer (SessionServiceImpl, ExecutionServiceImpl, and
+    # any future surface). The counters are intentionally process-scoped —
+    # one Counter per metric, not one per consumer — so OTel aggregates by
+    # attribute set instead of by injection site.
+    sessions_telemetry = build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer"))
+    app.state.sessions_telemetry = sessions_telemetry
+
     session_service = SessionServiceImpl(
         session_engine,
         data_dir=settings.data_dir,
-        telemetry=build_sessions_telemetry(meter=metrics.get_meter("elspeth.web.composer")),
+        telemetry=sessions_telemetry,
         log=structlog.get_logger("sessions"),
     )
     app.state.session_service = session_service

@@ -19,7 +19,7 @@ import os
 import re
 import tempfile
 import threading
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -6850,6 +6850,54 @@ def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> 
         for match in _INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
             unresolved[match.group(1).strip()] = None
     return list(unresolved.keys())
+
+
+def _detect_unresolved_interpretation_placeholders_typed(
+    nodes: Sequence[NodeSpec],
+) -> list[tuple[str, str]]:
+    """Return (node_id, term) tuples for every unresolved ``{{interpretation:…}}`` placeholder.
+
+    F-17 runtime detector — typed sibling of
+    :func:`_detect_unresolved_interpretation_placeholders` that operates
+    directly on ``CompositionState.nodes`` (a ``Sequence[NodeSpec]``).
+    The dict-shaped helper above filters on ``node.get("kind") == "llm"``
+    because it walks the runtime YAML/pipeline dict shape where transforms
+    carry a ``kind`` discriminator; ``NodeSpec`` has no ``kind`` field —
+    LLM transforms are identified by ``node.plugin == "llm"`` (mirrors the
+    per-tool boundary check in :func:`_assert_affected_llm_node`).
+    Substituting ``kind`` here would match nothing and silently fail open,
+    which is why this sibling exists rather than a single polymorphic
+    helper.
+
+    Each unresolved placeholder produces exactly one tuple per
+    ``(node_id, term)`` pair, deduplicated within a node by insertion
+    order so a repeated placeholder in one prompt template does not
+    inflate telemetry / error surface area.  Cross-node duplicates ARE
+    preserved (the same ``term`` on two different nodes is two distinct
+    unresolved sites).
+
+    The return type is a ``list`` (not a ``tuple``) to match the
+    dict-shaped sibling and the spec at
+    ``docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md`` §F-17
+    (``list[str]`` of terms, lifted to ``list[tuple[str, str]]`` here
+    because the typed call site needs the ``node_id`` for both the
+    telemetry attribute and the user-actionable error message).
+    """
+    unresolved: list[tuple[str, str]] = []
+    for node in nodes:
+        if node.plugin != "llm":
+            continue
+        prompt_template = node.options.get("prompt_template")
+        if not isinstance(prompt_template, str):
+            continue
+        seen_in_node: dict[str, None] = {}
+        for match in _INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
+            term = match.group(1).strip()
+            if term in seen_in_node:
+                continue
+            seen_in_node[term] = None
+            unresolved.append((node.id, term))
+    return unresolved
 
 
 # Rate-cap discriminant codes carried on ``ToolArgumentError.code`` so the

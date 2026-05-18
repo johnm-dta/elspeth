@@ -57,6 +57,7 @@ from elspeth.web.composer.tools import (
     _assert_affected_llm_node,
     _check_interpretation_rate_limits,
     _detect_unresolved_interpretation_placeholders,
+    _detect_unresolved_interpretation_placeholders_typed,
     _handle_request_interpretation_review,
     _utc_day_start,
     get_tool_definitions,
@@ -707,6 +708,198 @@ def test_detect_unresolved_placeholder_empty_when_resolved() -> None:
         },
     }
     assert _detect_unresolved_interpretation_placeholders(nodes) == []
+
+
+# --------------------------------------------------------------------------- #
+# F-17 typed sibling detector — operates on Sequence[NodeSpec]
+# --------------------------------------------------------------------------- #
+#
+# The typed sibling identifies LLM transforms by ``node.plugin == "llm"``,
+# NOT by ``node.kind`` (NodeSpec has no ``kind`` field — it uses
+# ``node_type`` for the transform/gate/aggregation/coalesce discriminator
+# and ``plugin`` for the LLM-vs-other discriminator).  These tests
+# exercise the typed shape directly so a regression that filters on the
+# wrong attribute is caught here, not silently swallowed at runtime.
+
+
+def _make_llm_node(
+    *,
+    node_id: str,
+    prompt_template: str | None,
+    plugin: str | None = "llm",
+) -> NodeSpec:
+    """Construct a minimal NodeSpec for the typed detector tests.
+
+    Required NodeSpec fields are populated with placeholder values
+    (``input="in"``, ``on_success="out"``).  The detector only inspects
+    ``plugin`` and ``options.prompt_template`` so the rest is filler.
+    """
+    options: dict[str, Any] = {}
+    if prompt_template is not None:
+        options["prompt_template"] = prompt_template
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin=plugin,
+        input="in",
+        on_success="out",
+        on_error=None,
+        options=options,
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def test_typed_detector_returns_empty_when_no_llm_nodes() -> None:
+    """No LLM nodes → []."""
+    nodes = (
+        _make_llm_node(
+            node_id="filter_node",
+            plugin="row_filter",
+            prompt_template="{{interpretation:cool}} unused — not an LLM node",
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == []
+
+
+def test_typed_detector_returns_empty_for_llm_node_without_placeholder() -> None:
+    """LLM node whose prompt_template has no placeholder → []."""
+    nodes = (
+        _make_llm_node(
+            node_id="rate_node",
+            prompt_template="Rate how cool this row is (cool = visually appealing).",
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == []
+
+
+def test_typed_detector_returns_single_pair_for_one_placeholder() -> None:
+    """LLM node with one placeholder → one (node_id, term) tuple."""
+    nodes = (
+        _make_llm_node(
+            node_id="rate_node",
+            prompt_template="Rate how {{interpretation:cool}} this row is.",
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == [
+        ("rate_node", "cool"),
+    ]
+
+
+def test_typed_detector_returns_two_pairs_for_two_placeholders() -> None:
+    """LLM node with two distinct placeholders → two tuples preserving order."""
+    nodes = (
+        _make_llm_node(
+            node_id="rate_node",
+            prompt_template=("Rate {{interpretation:cool}} and {{interpretation:important}} aspects."),
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == [
+        ("rate_node", "cool"),
+        ("rate_node", "important"),
+    ]
+
+
+def test_typed_detector_skips_non_llm_node_with_placeholder_text() -> None:
+    """Non-LLM nodes are skipped even if their text contains a placeholder.
+
+    Discriminates the predicate: a node with ``plugin="row_filter"``
+    must NOT be inspected for placeholders.  A regression that copied
+    the dict-shape helper's ``node.get("kind") == "llm"`` predicate
+    onto NodeSpec would skip ALL nodes (NodeSpec has no ``kind``) and
+    silently fail open — this test would still pass.  The matching
+    positive case is ``test_typed_detector_predicate_uses_plugin_attribute``
+    below.
+    """
+    nodes = (
+        _make_llm_node(
+            node_id="filter_node",
+            plugin="row_filter",
+            prompt_template="{{interpretation:cool}} — should be ignored",
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == []
+
+
+def test_typed_detector_predicate_uses_plugin_attribute() -> None:
+    """An LLM transform identified by ``plugin == "llm"`` IS inspected.
+
+    Paired with ``test_typed_detector_skips_non_llm_node_with_placeholder_text``
+    to discriminate the predicate: this test fails if the implementation
+    filters on a non-existent ``kind`` field instead of ``plugin``.
+    """
+    nodes = (
+        _make_llm_node(
+            node_id="rate_node",
+            plugin="llm",
+            prompt_template="Rate {{interpretation:cool}} aspects.",
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == [
+        ("rate_node", "cool"),
+    ]
+
+
+def test_typed_detector_tolerates_whitespace_in_placeholder() -> None:
+    """``{{ interpretation : cool }}`` with internal whitespace matches; term is stripped."""
+    nodes = (
+        _make_llm_node(
+            node_id="rate_node",
+            prompt_template="Rate {{ interpretation : cool }} aspects.",
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == [
+        ("rate_node", "cool"),
+    ]
+
+
+def test_typed_detector_skips_node_with_no_prompt_template() -> None:
+    """LLM node lacking ``prompt_template`` in options → []."""
+    nodes = (_make_llm_node(node_id="rate_node", prompt_template=None),)
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == []
+
+
+def test_typed_detector_deduplicates_within_a_node() -> None:
+    """The same placeholder appearing twice in one prompt → one tuple, not two.
+
+    Within-node dedup keeps telemetry and the user-actionable error
+    free of duplicate sites for what is structurally a single
+    unresolved placeholder.  Cross-node duplicates ARE preserved (two
+    different nodes carrying the same term are two distinct sites);
+    that case is covered by
+    ``test_typed_detector_preserves_cross_node_duplicates``.
+    """
+    nodes = (
+        _make_llm_node(
+            node_id="rate_node",
+            prompt_template=("Rate {{interpretation:cool}} aspects. Be sure to consider {{interpretation:cool}} carefully."),
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == [
+        ("rate_node", "cool"),
+    ]
+
+
+def test_typed_detector_preserves_cross_node_duplicates() -> None:
+    """The same term on two different LLM nodes yields two distinct tuples."""
+    nodes = (
+        _make_llm_node(
+            node_id="rate_node",
+            prompt_template="Rate {{interpretation:cool}} aspects.",
+        ),
+        _make_llm_node(
+            node_id="summarise_node",
+            prompt_template="Summarise {{interpretation:cool}} signals.",
+        ),
+    )
+    assert _detect_unresolved_interpretation_placeholders_typed(nodes) == [
+        ("rate_node", "cool"),
+        ("summarise_node", "cool"),
+    ]
 
 
 # --------------------------------------------------------------------------- #

@@ -800,7 +800,7 @@ allow_hits:
   safety: Type dispatch only selects richer error formatting; all GraphValidationError cases still append a failed validation
     check and surface to the caller.
   expires: null
-- key: web/app.py:R1:create_app:fp=1e76a4285a414975  # fp rotated 2026-05-16 (was 88307d5d1c848839) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (WEB_CONCURRENCY env var) (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
+- key: web/app.py:R1:create_app:fp=f6bb76584a1d56cd  # fp rotated 2026-05-16 (was 88307d5d1c848839) \u2014 Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (WEB_CONCURRENCY env var) (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware) (re-rotated 2026-05-18 for F-17/F-21 — sessions_telemetry block + ExecutionServiceImpl telemetry kwarg added inside create_app/lifespan; was 1e76a4285a414975)
   owner: web-app
   reason: "Tier 3 \u2014 os.environ.get() for optional WEB_CONCURRENCY env var"
   safety: Defaults to "1" when absent
@@ -1295,7 +1295,7 @@ allow_hits:
   reason: "Tier 3 \u2014 isinstance check on pipeline_yaml argument type"
   safety: Raises TypeError with diagnostic; no silent default
   expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=257c9c5cad0f7b4a  # fp rotated 2026-05-16 (was b70a21188e4a6164) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware)
+- key: web/app.py:R2:create_app:_request_id:fp=34279d80c3f5fff9  # fp rotated 2026-05-16 (was b70a21188e4a6164) — Phase 1A added 2 ImportFroms upstream; pattern + safety unchanged (re-rotated 2026-05-17 for Phase 2A.5 — 2 audit_readiness ImportFroms + ReadinessService block in lifespan) (re-rotated 2026-05-18 for Phase 5b.0.5 — 3 starlette ImportFroms added: BaseHTTPMiddleware + Request/Response aliases for _BodySizeLimitMiddleware) (re-rotated 2026-05-18 for F-17/F-21 — sessions_telemetry block + ExecutionServiceImpl telemetry kwarg added inside create_app/lifespan; was 257c9c5cad0f7b4a)
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
 
@@ -1446,83 +1446,97 @@ allow_hits:
   reason: "Offensive programming \u2014 isinstance enforces event_type/data type correspondence at construction time"
   safety: Raises ValueError on mismatch; belt-and-suspenders with before-validator
   expires: null
-- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=4486e02baecf252d
+- key: web/execution/service.py:R5:_sanitize_error_for_client:fp=30ba4b5ab512ef53
   owner: web-execution
-  reason: "Security boundary \u2014 isinstance dispatches SecretResolutionError to safe message (no secret name leakage)"
+  reason: "Security boundary \u2014 isinstance dispatches SecretResolutionError to safe message (no secret name leakage).\
+    \ Fingerprint shifted from 4486e02baecf252d by the F-17/F-21 pre-execute placeholder gate adding ImportFroms above this\
+    \ block in web/execution/service.py (telemetry container + UnresolvedInterpretationPlaceholderError + tools detector)."
   safety: Type dispatch for sanitization, not error suppression
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=981e2ceefd468842
+- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=a1f5bb8ebb43976b
   owner: web-execution
   reason: Session may never have called execute(), so no lock exists in _session_locks. Cleanup is called on every session
-    delete regardless. Matches ProgressBroadcaster.cleanup_run() pattern.
+    delete regardless. Matches ProgressBroadcaster.cleanup_run() pattern. Fingerprint shifted from 981e2ceefd468842 by the
+    F-17/F-21 pre-execute placeholder gate ImportFroms.
   safety: Missing key means session was never executed against; no cleanup needed
   expires: null
-- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=ea064c190d972e82
+- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=ffe2194b4bd4f84e
   owner: web-execution
-  reason: Session lock map creates per-session lock lazily on first execution
+  reason: Session lock map creates per-session lock lazily on first execution. Fingerprint shifted from ea064c190d972e82
+    by the F-17/F-21 pre-execute placeholder gate ImportFroms.
   safety: Mutation is thread-safe; setdefault is atomic for dict
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=1814e5926bbae2eb
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=68b344bdf02449d6
   owner: web-execution
-  reason: "Optional keys in user-authored config \u2014 source options key may be absent"
+  reason: "Optional keys in user-authored config \u2014 source options key may be absent. Fingerprint shifted from 1814e5926bbae2eb\
+    \ by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=0fae5de7cc15744d
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=70cf420b819bbc72
   owner: web-execution
-  reason: "Optional keys in user-authored config \u2014 source options key may be absent"
+  reason: "Optional keys in user-authored config \u2014 source options key may be absent. Fingerprint shifted from 0fae5de7cc15744d\
+    \ by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=05fc7c19c92be15e
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=ed7ecdc38bee892b
   owner: web-execution
-  reason: "Optional keys in user-authored config \u2014 source options key may be absent"
+  reason: "Optional keys in user-authored config \u2014 source options key may be absent. Fingerprint shifted from 05fc7c19c92be15e\
+    \ by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=80a37adc15cccfe9
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=428c9718322d53ea
   owner: web-execution
-  reason: Idempotent shutdown-event cleanup on failure path
+  reason: Idempotent shutdown-event cleanup on failure path. Fingerprint shifted from 80a37adc15cccfe9 by the F-17/F-21
+    pre-execute placeholder gate ImportFroms.
   safety: Pop is idempotent; except BaseException handler cleans up before re-raise
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=b031613c4c5e30c1
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=e006dd2d27d3d449
   owner: web-execution
   reason: "Best-effort run status cleanup on setup failure \u2014 must not mask original exception. Narrowed from `except\
     \ Exception` to `(SQLAlchemyError, OSError)` per canonical pattern b8ba2214/127417cb so programmer bugs in update_run_status\
-    \ propagate. Logs exc_class only (no str(exc)) to avoid SQLAlchemy `__cause__` chains exposing DB URLs/credentials."
+    \ propagate. Logs exc_class only (no str(exc)) to avoid SQLAlchemy `__cause__` chains exposing DB URLs/credentials.\
+    \ Fingerprint shifted from b031613c4c5e30c1 by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Logged with slog.error; original exception always re-raised
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=4b30168a2d2ed662
+- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=888bf9a58b0bd233
   owner: web-execution
-  reason: Check for live shutdown event before fallback handling
+  reason: Check for live shutdown event before fallback handling. Fingerprint shifted from 4b30168a2d2ed662 by the F-17/F-21
+    pre-execute placeholder gate ImportFroms.
   safety: Returns None if absent; no silent default
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=5236108f6efbcdde
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=0be535ff323489b2
   owner: web-execution
-  reason: "Tier 3 \u2014 config from YAML deserialization may be non-dict"
+  reason: "Tier 3 \u2014 config from YAML deserialization may be non-dict. Fingerprint shifted from 5236108f6efbcdde by\
+    \ the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Raises TypeError if not dict; no silent default
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=7866f83f247b03ca
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=dbdef7455198b0e4
   owner: web-execution
-  reason: "Scope-to-audit-source mapping \u2014 .get() on explicit mapping dict with crash-on-unknown guard"
+  reason: "Scope-to-audit-source mapping \u2014 .get() on explicit mapping dict with crash-on-unknown guard. Fingerprint\
+    \ shifted from 7866f83f247b03ca by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Unknown scope raises ValueError immediately; no silent default
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=09eebfd4cd7b2bbd
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=75c1f1833ad7c80c
   owner: web-execution
-  reason: Progress broadcasting via call_soon_threadsafe raises RuntimeError when event loop is closed during shutdown
+  reason: Progress broadcasting via call_soon_threadsafe raises RuntimeError when event loop is closed during shutdown.
+    Fingerprint shifted from 09eebfd4cd7b2bbd by the F-17/F-21 pre-execute placeholder gate ImportFroms.
   safety: Only RuntimeError caught (narrowed from bare Exception); logged with canonical exc_class; pipeline continues
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=266193e08add405b
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=e409ec7bd7d1dc27
   owner: web-execution
-  reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation
+  reason: GracefulShutdownError is an expected control-flow signal from orchestrator cancellation. Fingerprint shifted from
+    266193e08add405b by the F-17/F-21 pre-execute placeholder gate ImportFroms.
   safety: Classified as cancelled; separated from BaseException failure path
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=7eee4ffbb251ed6b
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_run_pipeline:fp=829f02764f9c1fad
   owner: web-execution
   reason: "Signal-exception classification (KeyboardInterrupt/SystemExit) inside the BaseException recovery block \u2014 programmer\
     \ signals must propagate; only normal exceptions are classified to the failed path and routed through the post-completion\
-    \ run-state probe."
+    \ run-state probe. Fingerprint shifted from 7eee4ffbb251ed6b by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: KeyboardInterrupt/SystemExit re-raised by the surrounding handler; non-signal exceptions become operator-visible
     structured failures
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=73f0527874b3b0ef
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=8f81977d810d0f31
   owner: web-execution
   reason: "elspeth-879f6de6bd post-completion run-state probe \u2014 catches (SQLAlchemyError, OSError) only, so transient\
     \ audit-system degradation (DB hiccup, filesystem race) on the get_run() read does not mask the original post-completion\
@@ -1531,33 +1545,38 @@ allow_hits:
     \ audit-data corruption and MUST crash immediately per CLAUDE.md tier model rather than be silently absorbed. Fingerprint\
     \ shifted from c6a02ba63e915cd4 when the catch tuple was narrowed from (SQLAlchemyError, OSError, ValueError) to (SQLAlchemyError,\
     \ OSError); previous fingerprint shift was af4245407c3c4a91 \u2192 c6a02ba63e915cd4 by the I-4 audit-primacy fix that\
-    \ removed the post-terminal-exception slog block above this handler."
+    \ removed the post-terminal-exception slog block above this handler; current rotation 73f0527874b3b0ef \u2192 8f81977d810d0f31\
+    \ by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Falls through to best-effort failed-status update on absorbed exceptions; ValueError surfaces Tier-1 audit corruption
     as required; programmer bugs (TypeError/AttributeError/RuntimeError) propagate
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=4ca07d4fcd4cc2a6
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=e61d4ed5e592b346
   owner: web-execution
   reason: Canonical narrow-catch pattern (commits b8ba2214 / 127417cb) for the status update inside the BaseException recovery
     handler. Fingerprint shifted from 7edaa7aa890d4d12 by the I-4 audit-primacy fix that removed the post-terminal-exception
-    slog block above this handler.
+    slog block above this handler; current rotation 4ca07d4fcd4cc2a6 \u2192 e61d4ed5e592b346 by the F-17/F-21 pre-execute
+    placeholder gate ImportFroms.
   safety: Catches (SQLAlchemyError, OSError) from update_run_status so transient DB or filesystem failures do not mask the
     original pipeline exception; programmer bugs (TypeError, AttributeError, RuntimeError) propagate
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=51e796e5d8999941
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=307334b10bbd48e2
   owner: web-execution
-  reason: Final shutdown-event cleanup is intentionally idempotent
+  reason: Final shutdown-event cleanup is intentionally idempotent. Fingerprint shifted from 51e796e5d8999941 by the F-17/F-21
+    pre-execute placeholder gate ImportFroms.
   safety: Pop is idempotent
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=4023de852eb0f269
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=5855132218c78471
   owner: web-execution
-  reason: "Blob finalization before terminal broadcast \u2014 failure must not mask run outcome"
+  reason: "Blob finalization before terminal broadcast \u2014 failure must not mask run outcome. Fingerprint shifted from\
+    \ 4023de852eb0f269 by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: _FINALIZE_SUPPRESSED covers blob-domain exceptions (OSError, SQLAlchemyError, BlobNotFoundError, BlobQuotaExceededError,
     BlobStateError); RuntimeError deliberately excluded (too broad); programmer bugs propagate; partial failures logged from
     structured result
   expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=19d74b552fc39dd4
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_on_pipeline_done:fp=6629de3e74360d70
   owner: web-execution
-  reason: "Last-resort safety net \u2014 isinstance check excludes KeyboardInterrupt/SystemExit from diagnostic logging"
+  reason: "Last-resort safety net \u2014 isinstance check excludes KeyboardInterrupt/SystemExit from diagnostic logging.\
+    \ Fingerprint shifted from 19d74b552fc39dd4 by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: Only suppresses signal exceptions; all other exceptions logged as last-resort diagnostic
   expires: null
 - key: web/composer/state.py:R5:_is_static_contract_probe_exception:fp=50c677dd72339245
@@ -2153,12 +2172,13 @@ allow_hits:
     \ key is a documented optional configuration, not an error."
   safety: Returns None when key is absent; reserved-domain check only fires when the operator explicitly set abuse_contact.
   expires: null
-- key: web/execution/service.py:R4:ExecutionServiceImpl:_run_pipeline:fp=cbe49e832b2214aa
+- key: web/execution/service.py:R4:ExecutionServiceImpl:_run_pipeline:fp=6ceba8f54b58a3a7
   owner: web-execution
   reason: "Best-effort failure-sample enrichment \u2014 Tier-1 audit DB read via load_top_failure_samples may raise on malformed\
     \ audit JSON or transient DB error. Degrading to bare error message is preferable to losing the run-status persistence\
     \ (which is the more important failure-mode invariant). Audit-DB anomalies remain observable via the slog warning per\
-    \ the audit-system-failure exemption in CLAUDE.md logging-telemetry-policy."
+    \ the audit-system-failure exemption in CLAUDE.md logging-telemetry-policy. Fingerprint shifted from cbe49e832b2214aa\
+    \ by the F-17/F-21 pre-execute placeholder gate ImportFroms."
   safety: samples_text falls back to empty string; the failed-requires-error invariant is still satisfied via the structural
     failure message; slog.warning emits exc_info for forensic visibility.
   expires: null

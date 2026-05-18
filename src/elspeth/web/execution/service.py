@@ -44,6 +44,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import CompositionState
+from elspeth.web.composer.tools import _detect_unresolved_interpretation_placeholders_typed
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.errors import (
@@ -51,6 +52,7 @@ from elspeth.web.execution.errors import (
     MalformedBlobRefError,
     PathAllowlistViolationError,
     SemanticContractViolationError,
+    UnresolvedInterpretationPlaceholderError,
 )
 from elspeth.web.execution.failure_samples import format_failure_samples, load_top_failure_samples
 from elspeth.web.execution.fanout_guard import (
@@ -82,6 +84,7 @@ from elspeth.web.sessions.protocol import (
     SessionRunStatus,
     SessionServiceProtocol,
 )  # B1: canonical definition
+from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 slog = structlog.get_logger()
 
@@ -250,6 +253,7 @@ class ExecutionServiceImpl:
         settings: WebSettings,
         session_service: SessionServiceProtocol,
         yaml_generator: YamlGenerator,
+        telemetry: _SessionsTelemetry,
         blob_service: BlobServiceProtocol | None = None,
         secret_service: WebSecretResolver | None = None,
     ) -> None:
@@ -258,6 +262,7 @@ class ExecutionServiceImpl:
         self._settings = settings
         self._session_service = session_service
         self._yaml_generator = yaml_generator
+        self._telemetry = telemetry
         self._blob_service = blob_service
         self._secret_service = secret_service
         # AC #17: No run_repository — all Run CRUD delegates to SessionService
@@ -422,6 +427,36 @@ class ExecutionServiceImpl:
             raise SemanticContractViolationError(
                 entries=semantic_errors,
                 contracts=semantic_contracts,
+            )
+
+        # F-17 / F-21 (Phase 5b Task 5 follow-on) — unresolved interpretation
+        # placeholder gate. Runs AFTER semantic-contract validation (the
+        # placeholder isn't a contract violation; the LLM transform's
+        # prompt_template is still a string) and BEFORE the path allowlist /
+        # YAML generation (we fail fast so the placeholder never reaches the
+        # runtime engine that would substitute the literal string into the
+        # LLM call). Operational telemetry counter emitted with (node_id,
+        # term) per unresolved site — explicitly NOT the prompt_template
+        # value (may carry user-supplied content / PII).
+        #
+        # Operates under the operator-acknowledged assumption that 18a Task 0
+        # (empirical LLM gate ≥ 8/10 staging runs emit
+        # {{interpretation:<term>}}) passes; this detector is the
+        # runtime-safety net catching cases where the LLM under-fires.
+        unresolved_placeholders = _detect_unresolved_interpretation_placeholders_typed(
+            composition_state.nodes,
+        )
+        if unresolved_placeholders:
+            for node_id, term in unresolved_placeholders:
+                self._telemetry.interpretation_placeholder_unresolved_at_runtime_total.add(
+                    1,
+                    attributes={
+                        "node_id": node_id,
+                        "term": term,
+                    },
+                )
+            raise UnresolvedInterpretationPlaceholderError(
+                placeholders=tuple(unresolved_placeholders),
             )
 
         # Path allowlist check — defense-in-depth. The validate endpoint also

@@ -54,6 +54,7 @@ from elspeth.web.sessions.protocol import (
     RunAlreadyActiveError,
     SessionRunStatus,
 )
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 # ── Fixtures ───────────────────────────────────────────────────────────
 
@@ -226,6 +227,7 @@ def service(
         settings=mock_settings,
         session_service=mock_session_service,
         yaml_generator=mock_yaml_generator,
+        telemetry=build_sessions_telemetry(),
     )
     # Patch _call_async for tests that call _run_pipeline directly (sync).
     # The real _call_async uses asyncio.run_coroutine_threadsafe which needs
@@ -2931,6 +2933,7 @@ class TestB8AsyncBridging:
             settings=mock_settings,
             session_service=mock_session_service,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
         )
         mock_future = MagicMock()
         mock_future.result.return_value = "test_result"
@@ -2959,6 +2962,7 @@ class TestB8AsyncBridging:
             settings=mock_settings,
             session_service=mock_session_service,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
         )
         mock_future = MagicMock()
         mock_future.result.side_effect = ValueError("db error")
@@ -2985,6 +2989,7 @@ class TestB8AsyncBridging:
             settings=mock_settings,
             session_service=mock_session_service,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
         )
         mock_future = MagicMock()
         mock_future.result.side_effect = concurrent.futures.TimeoutError()
@@ -3015,6 +3020,7 @@ class TestAsyncShutdown:
             settings=mock_settings,
             session_service=mock_session_service,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
         )
 
         run_id = str(uuid4())
@@ -3127,6 +3133,7 @@ class TestVerifyRunOwnership:
             settings=settings,
             session_service=session_svc,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
         )
         return svc, session_svc
 
@@ -3469,6 +3476,184 @@ class TestExecuteSemanticContractViolation:
         assert isinstance(run_id, UUID)
 
 
+# ── F-17 / F-21: Unresolved Interpretation Placeholder Gate ─────────────
+
+
+class TestExecuteUnresolvedInterpretationPlaceholderGate:
+    """``/execute`` must refuse to run an LLM transform whose prompt_template
+    still carries ``{{interpretation:<term>}}`` placeholders (F-17 / F-21 —
+    Phase 5b Task 5 follow-on).
+
+    Operates under the operator-acknowledged assumption that 18a Task 0
+    (empirical LLM gate ≥ 8/10 staging runs emit
+    ``{{interpretation:<term>}}``) passes; this gate is the runtime-safety
+    net catching cases where the LLM under-fires.
+    """
+
+    @staticmethod
+    def _set_unresolved_placeholder_state(
+        mock_session_service: MagicMock,
+        *,
+        term: str = "cool",
+        node_id: str = "rate_node",
+    ) -> None:
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "rate_in",
+            "options": {"path": "blobs/rows.csv"},
+            "on_validation_failure": "discard",
+        }
+        state.nodes = [
+            {
+                "id": node_id,
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rate_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "prompt_template": f"Rate {{{{interpretation:{term}}}}} aspects.",
+                    "model": "test-model",
+                },
+            }
+        ]
+        state.edges = None
+        state.outputs = [
+            {
+                "name": "results",
+                "plugin": "json",
+                "options": {"path": "outputs/scored.json", "format": "json"},
+                "on_write_failure": "discard",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_unresolved_placeholder_before_creating_run(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """F-17: an unresolved placeholder blocks execution and raises a typed error.
+
+        The detector runs AFTER semantic-contract validation and BEFORE
+        path-allowlist / YAML generation, so the gate fires before any
+        ``Run`` row is created in the sessions DB.
+        """
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        self._set_unresolved_placeholder_state(mock_session_service)
+
+        with pytest.raises(UnresolvedInterpretationPlaceholderError) as excinfo:
+            await service.execute(session_id=uuid4())
+
+        # The typed payload carries (node_id, term) — no prompt_template.
+        assert excinfo.value.placeholders == (("rate_node", "cool"),)
+
+        # The actionable message names both the term and the node so the
+        # frontend banner / MCP error renderer can echo it directly.
+        assert "{{interpretation:cool}}" in str(excinfo.value)
+        assert "rate_node" in str(excinfo.value)
+
+        # No Run was created (fail-fast before run record persistence).
+        mock_session_service.create_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_emits_telemetry_per_unresolved_site(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """F-21: each unresolved (node_id, term) site emits one counter increment.
+
+        Attributes MUST be exactly ``{"node_id": ..., "term": ...}`` and
+        MUST NOT include the prompt_template value (which may carry
+        user-supplied content — operational telemetry must be PII-clean).
+        """
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+        from elspeth.web.sessions.telemetry import _FakeCounter
+
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        self._set_unresolved_placeholder_state(mock_session_service)
+
+        with pytest.raises(UnresolvedInterpretationPlaceholderError):
+            await service.execute(session_id=uuid4())
+
+        counter = service._telemetry.interpretation_placeholder_unresolved_at_runtime_total
+        # Test fixture uses fake counters — type-narrow to access ``calls``.
+        assert isinstance(counter, _FakeCounter)
+        assert len(counter.calls) == 1
+        amount, attrs, _context = counter.calls[0]
+        assert amount == 1
+        assert attrs == {"node_id": "rate_node", "term": "cool"}
+        # Explicit negative assertion: the prompt_template value must
+        # never appear in telemetry attributes (the whole point of
+        # surfacing term+node_id separately is to keep PII out).
+        assert attrs is not None
+        assert "prompt_template" not in attrs
+
+    @pytest.mark.asyncio
+    async def test_execute_passes_when_placeholder_resolved(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """An LLM transform whose prompt_template has no placeholder runs normally.
+
+        Negative-space test: confirms the gate does not fire spuriously
+        when the compose loop did its job and the placeholder was
+        replaced by a concrete term via the interpretation_events
+        resolve flow.
+        """
+        from elspeth.web.sessions.telemetry import _FakeCounter
+
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "rate_in",
+            "options": {"path": "blobs/rows.csv"},
+            "on_validation_failure": "discard",
+        }
+        state.nodes = [
+            {
+                "id": "rate_node",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rate_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    # Placeholder resolved — no ``{{interpretation:…}}`` text.
+                    "prompt_template": "Rate visually-appealing aspects.",
+                    "model": "test-model",
+                },
+            }
+        ]
+        state.edges = None
+        state.outputs = [
+            {
+                "name": "results",
+                "plugin": "json",
+                "options": {"path": "outputs/scored.json", "format": "json"},
+                "on_write_failure": "discard",
+            }
+        ]
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=uuid4())
+
+        assert isinstance(run_id, UUID)
+        # Counter was NOT incremented.
+        counter = service._telemetry.interpretation_placeholder_unresolved_at_runtime_total
+        assert isinstance(counter, _FakeCounter)
+        assert counter.calls == []
+
+
 # ── Relative Path Resolution ──────────────────────────────────────────
 
 
@@ -3696,6 +3881,7 @@ class TestFinalizeOutputBlobsCatchWidening:
             settings=mock_settings,
             session_service=mock_session_service,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
             blob_service=blob_service,
         )
         call_async, loop = _make_strict_call_async()
@@ -3825,6 +4011,7 @@ class TestTerminalOrderingInvariant:
             settings=mock_settings,
             session_service=mock_session_service,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
             blob_service=blob_service,
         )
         _real_loop = asyncio.new_event_loop()
@@ -3902,6 +4089,7 @@ class TestTerminalOrderingInvariant:
             settings=mock_settings,
             session_service=mock_session_service,
             yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
         )
         _real_loop = asyncio.new_event_loop()
         try:

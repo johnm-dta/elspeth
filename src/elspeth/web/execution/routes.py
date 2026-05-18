@@ -34,7 +34,12 @@ from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
-from elspeth.web.execution.errors import BlobSourcePathMismatchError, ExecuteRequestValidationError, SemanticContractViolationError
+from elspeth.web.execution.errors import (
+    BlobSourcePathMismatchError,
+    ExecuteRequestValidationError,
+    SemanticContractViolationError,
+    UnresolvedInterpretationPlaceholderError,
+)
 from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
@@ -547,6 +552,25 @@ def create_execution_router() -> APIRouter:
                         }
                         for contract in exc.contracts
                     ],
+                },
+            ) from exc
+        except UnresolvedInterpretationPlaceholderError as exc:
+            # F-17 / F-21 (Phase 5b Task 5 follow-on). Structured 422 with
+            # the (node_id, term) pairs so the frontend banner can list
+            # every unresolved site without parsing the message string.
+            # 422 mirrors the SemanticContractViolationError precedent
+            # above — the request was syntactically valid but the
+            # composition state is not yet executable until the operator
+            # resolves the surfaced placeholders. Placement: above the
+            # ``except ExecuteRequestValidationError`` (which maps to 400)
+            # and the bare ``except ValueError`` (which maps to 404) so
+            # this 422 path is reached for the specific exception type.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "kind": "interpretation_placeholder_unresolved",
+                    "message": str(exc),
+                    "placeholders": [{"node_id": node_id, "term": term} for node_id, term in exc.placeholders],
                 },
             ) from exc
         except ExecuteRequestValidationError as exc:

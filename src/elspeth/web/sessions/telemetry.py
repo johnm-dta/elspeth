@@ -22,14 +22,30 @@ would force a structural lie.
 ``web/sessions/telemetry.py`` because ``SessionServiceImpl`` owns
 the persistence counters. The OTel metric strings remain
 ``composer.audit.*`` because operators consume them as part of the
-composer-progress surface, but metric naming does not justify an
-import from ``web/sessions/service.py`` up into ``web/composer``.
-Composer code may import the sessions-owned container or receive it
-from app wiring; sessions code must not import composer-owned modules.
+composer-progress surface — naming reflects the dashboard/consumer
+view, not the import direction.
+
+Import direction is unrestricted within the L3 application layer.
+Both composer code AND sessions code may import this container, and
+sessions code may import composer-owned helpers (e.g. the
+``record_*`` emit helpers in ``web/composer/telemetry_phase8.py``).
+An earlier draft of this docstring said "sessions code must not
+import composer-owned modules"; that prohibition was a forward-
+looking aspiration that never matched codebase reality (there are
+31+ pre-existing ``from elspeth.web.composer.*`` imports across
+``src/elspeth/web/sessions/``). The Phase 8b-1b cohort emits made
+the dead-letter rule visibly inconsistent, so it has been retired.
+The practical constraint is the tier-model layer rule
+(``contracts/`` → ``core/`` → ``engine/`` → ``plugins/`` + L3
+application). Inside L3, composer / sessions / audit_readiness /
+preferences / etc. may import each other freely as long as imports
+flow within L3 and respect the contract-layer boundaries above.
+
 Phase 2 (redaction counters) and Phase 3 (compose-loop counters) may
 extend this container only if ownership still belongs to the sessions
 persistence surface; otherwise those phases add composer-owned
-telemetry separately.
+telemetry separately (a naming/discoverability convention, not an
+import-direction rule).
 """
 
 from __future__ import annotations

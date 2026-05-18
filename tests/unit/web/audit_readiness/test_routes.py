@@ -159,3 +159,129 @@ def test_snapshot_composition_state_not_found_does_not_emit_fetch_failure() -> N
     assert response.status_code == 404
     # Counter unchanged: not-found is not fetch-failed.
     assert observed_value(app.state.sessions_telemetry.audit_fetch_failure_total) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 Sub-task 7f — explain endpoint exception-path coverage
+#
+# The explain endpoint has two try/except Exception blocks: one wrapping
+# ``get_current_state`` (state-load failure) and one wrapping
+# ``state_from_record`` + ``build_narrative`` (state-construction
+# failure). Both fire ``record_audit_fetch_failure`` and re-raise.  The
+# snapshot endpoint's three tests above pin the pattern; these two pin
+# the explain endpoint's variants explicitly because the explain handler
+# was added as a separate route and a regression that broke either
+# explain-handler emit would not be caught by the snapshot tests.
+# --------------------------------------------------------------------------- #
+
+
+class _ExplodingOnGetCurrentStateSessionService:
+    """Drives the first explain-handler try/except — get_current_state raises."""
+
+    async def get_session(self, session_id: UUID) -> SessionRecord:
+        return SessionRecord(
+            id=session_id,
+            user_id="alice",
+            auth_provider_type="local",
+            title="Test",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+    async def get_current_state(self, session_id: UUID):
+        raise LookupError("get_current_state exploded")
+
+
+class _ExplodingOnStateFromRecordSessionService:
+    """Drives the second explain-handler try/except — get_current_state
+    returns a sentinel that state_from_record cannot parse, raising
+    inside the narrative-build block.
+    """
+
+    async def get_session(self, session_id: UUID) -> SessionRecord:
+        return SessionRecord(
+            id=session_id,
+            user_id="alice",
+            auth_provider_type="local",
+            title="Test",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+    async def get_current_state(self, session_id: UUID):
+        # Return a sentinel that state_from_record will reject.  The
+        # explain handler does NOT validate the record shape; it goes
+        # straight from the non-None record into state_from_record,
+        # which raises on the unexpected type.
+        return object()
+
+
+def _explain_app(session_service: object) -> FastAPI:
+    """Builds a fresh FastAPI app wired for the explain-handler tests.
+
+    Mirrors ``_client()`` above but injects the supplied session-service
+    so each test can exercise its specific failure mode.  Q10
+    function-scoped isolation: each call builds a fresh telemetry
+    container so counter observations don't bleed between tests.
+    """
+    app = FastAPI()
+
+    async def _mock_user() -> UserIdentity:
+        return UserIdentity(user_id="alice", username="alice")
+
+    app.dependency_overrides[get_current_user] = _mock_user
+    app.state.settings = WebSettings(
+        composer_max_composition_turns=15,
+        composer_max_discovery_turns=10,
+        composer_timeout_seconds=85.0,
+        composer_rate_limit_per_minute=100,
+        shareable_link_signing_key=b"\x00" * 32,
+    )
+    app.state.session_service = session_service
+    app.state.readiness_service = _ExplodingReadinessService()
+    app.state.rate_limiter = ComposerRateLimiter(limit=100)
+    app.state.sessions_telemetry = build_sessions_telemetry()
+    app.include_router(create_audit_readiness_router())
+    return app
+
+
+@pytest.mark.skipif(
+    not _PHASE_2C_AUDIT_READINESS_MOUNTED,
+    reason="Phase 2C audit-readiness endpoint not mounted; Sub-task 7f is a documented no-op per Task 0 probe.",
+)
+def test_explain_get_current_state_failure_emits_audit_fetch_failure_counter() -> None:
+    """Phase 8 Sub-task 7f — explain handler, first try/except path.
+
+    When ``get_current_state`` raises (e.g. database error mid-read),
+    the explain handler must emit ``composer.audit.fetch_failure_total``
+    and re-raise so the failure stays observable. Mirror of the snapshot
+    test above for the explain endpoint's first exception path.
+    """
+    app = _explain_app(_ExplodingOnGetCurrentStateSessionService())
+    with TestClient(app) as client, pytest.raises(LookupError, match="get_current_state exploded"):
+        client.get(f"/api/sessions/{_SESSION_ID}/audit-readiness/explain")
+    assert observed_value(app.state.sessions_telemetry.audit_fetch_failure_total) == 1
+
+
+@pytest.mark.skipif(
+    not _PHASE_2C_AUDIT_READINESS_MOUNTED,
+    reason="Phase 2C audit-readiness endpoint not mounted; Sub-task 7f is a documented no-op per Task 0 probe.",
+)
+def test_explain_state_construction_failure_emits_audit_fetch_failure_counter() -> None:
+    """Phase 8 Sub-task 7f — explain handler, second try/except path.
+
+    When ``state_from_record`` raises mid-narrative-build (e.g. the
+    record shape unexpectedly fails to convert), the explain handler
+    must emit ``composer.audit.fetch_failure_total`` and re-raise.
+    Distinct from the first path because regression in either exception
+    branch would not be caught by the other test.
+    """
+    app = _explain_app(_ExplodingOnStateFromRecordSessionService())
+    # state_from_record raises AttributeError when handed a sentinel that
+    # is not a SessionRecord shape (it accesses .metadata_ on the input).
+    # This is the realistic failure mode for a corrupt record returned
+    # by get_current_state; the route's second try/except catches the
+    # AttributeError, emits the counter, and re-raises.
+    with TestClient(app) as client, pytest.raises(AttributeError, match="metadata_"):
+        client.get(f"/api/sessions/{_SESSION_ID}/audit-readiness/explain")
+    assert observed_value(app.state.sessions_telemetry.audit_fetch_failure_total) == 1

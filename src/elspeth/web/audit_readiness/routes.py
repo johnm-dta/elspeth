@@ -129,6 +129,10 @@ def create_audit_readiness_router() -> APIRouter:
                 ),
             )
         except Exception:
+            # ``telemetry`` is already bound (and annotated) from the first
+            # except block above; re-annotating in the same function scope
+            # would trigger mypy's no-redef rule.  Plain reassignment is
+            # correct here.
             telemetry = request.app.state.sessions_telemetry
             record_audit_fetch_failure(telemetry)
             raise

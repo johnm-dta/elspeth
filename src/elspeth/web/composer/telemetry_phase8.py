@@ -1,9 +1,21 @@
 """Phase 8 emit helpers for composer mode and tutorial telemetry.
 
 Wraps the ``_SessionsTelemetry`` counter container; helpers are pure
-functions and call-sites pass the container in. Composer imports this
-module; sessions code must not (ownership-vs-metric rule per
-``sessions/telemetry.py``).
+functions and call-sites pass the container in.
+
+Import direction is not restricted: both composer code AND sessions
+code may import these helpers. The pre-Phase-8 docstrings on
+``sessions/telemetry.py`` and an earlier draft of this module said
+"sessions code must not import composer-owned modules"; that
+prohibition was a forward-looking aspiration that never matched
+codebase reality (there are 31+ pre-existing ``from
+elspeth.web.composer.*`` imports across ``src/elspeth/web/sessions/``).
+The Phase 8b-1b cohort emit at ``sessions/service.py`` made the
+dead-letter rule visibly inconsistent, so it has been retired. The
+practical constraint is the tier-model layer rule (all three of
+composer, sessions, audit_readiness are L3 application code; they
+may import each other freely as long as imports flow within L3 and
+respect the contract layer boundaries above).
 
 Trust tier: Tier 2 throughout; inputs are Literal-typed; runtime guards
 are offensive.

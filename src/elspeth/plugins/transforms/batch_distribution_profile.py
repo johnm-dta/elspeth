@@ -93,14 +93,23 @@ class BatchDistributionProfile(BaseTransform):
     group when ``group_by`` is configured. ``None`` values are treated as
     missing data. NaN and infinity are type-valid but operation-unsafe, so they
     are excluded from statistics and reported separately.
+
+    Phase 6A B6 — opts into Phase 6B's narrative-mode result rendering via
+    ``capability_tags = ("narrative-summary",)``. The frontend reads this tag
+    on the catalog response and, when set, renders the run result as a
+    narrative panel (consuming any Phase 5b interpretation events as an
+    overlay) rather than the default tabular preview. The wire contract for
+    the tag is: the transform's output schema must include a ``summary`` field
+    that the narrative renderer surfaces.
     """
 
     name = "batch_distribution_profile"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:33c43e9bd9059cbc"
+    source_file_hash: str | None = "sha256:4bd99532931573f2"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
+    capability_tags: tuple[str, ...] = ("narrative-summary",)
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

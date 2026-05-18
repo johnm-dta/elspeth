@@ -45,11 +45,13 @@ import type {
   SchemaFormPayload,
   ProposeChainPayload,
 } from "@/types/guided";
+import type { InterpretationEvent } from "@/types/interpretation";
 import { SingleSelectTurn } from "./SingleSelectTurn";
 import { InspectAndConfirmTurn } from "./InspectAndConfirmTurn";
 import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { SchemaFormTurn } from "./SchemaFormTurn";
 import { ProposeChainTurn } from "./ProposeChainTurn";
+import { InterpretationReviewTurn } from "./InterpretationReviewTurn";
 
 interface GuidedTurnProps {
   turn: TurnPayload;
@@ -111,15 +113,22 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           disabled={disabled}
         />
       );
-    case "interpretation_review":
-      // Phase 5b — the InterpretationReviewTurn widget is implemented in
-      // Task 4 of 18b-phase-5b-frontend.md.  Until then, surfacing this turn
-      // type is a backend/frontend phase-skew condition: throw with a
-      // diagnostic message rather than rendering nothing.  Task 4 replaces
-      // this branch with the real <InterpretationReviewTurn /> render.
-      throw new Error(
-        "GuidedTurn: interpretation_review widget not yet implemented (Phase 5b Task 4 pending)",
+    case "interpretation_review": {
+      // Phase 5b Task 4 — the interpretation-review widget owns its own
+      // wire submission (POST resolve / POST opt_out), not the guided
+      // /respond round-trip the other widget surfaces feed.  The event
+      // payload IS the turn payload (the backend includes the
+      // InterpretationEvent verbatim so the widget can render without a
+      // follow-up GET).  We extract sessionId from event.session_id —
+      // it's an authoritative server-emitted Tier-1 field.
+      const event = turn.payload as InterpretationEvent;
+      return (
+        <InterpretationReviewTurn
+          event={event}
+          sessionId={event.session_id}
+        />
       );
+    }
     default: {
       // Exhaustiveness check: if a new TurnType is added to guided.ts without
       // a matching case here, TypeScript will report a compile error on this

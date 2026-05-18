@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import tempfile
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 from scripts.cicd.enforce_tier_model import (
@@ -30,6 +32,7 @@ from scripts.cicd.enforce_tier_model import (
     _suggest_module_file,
     format_stale_entry_text,
     load_allowlist,
+    report_json,
     run_check,
     scan_file,
 )
@@ -1851,3 +1854,149 @@ class TestExceededFileRulesPreCommitMode:
         # In pre-commit mode, exceeded max_hits should NOT cause failure
         result = run_check(args)
         assert result == 0, "pre-commit mode should suppress exceeded_file_rules"
+
+
+# =============================================================================
+# Allowlist budget ratchet
+# =============================================================================
+
+
+class TestAllowlistBudgetRatchet:
+    """Tests for hard allowlist-count budget ratchets."""
+
+    def test_load_directory_reads_budget_defaults(self, temp_dir: Path) -> None:
+        """Directory defaults may define hard allowlist count ceilings."""
+        allowlist_dir = temp_dir / "allowlist"
+        allowlist_dir.mkdir()
+        (allowlist_dir / "_defaults.yaml").write_text(
+            dedent("""\
+            version: 1
+            defaults:
+              fail_on_stale: true
+              fail_on_expired: true
+              allowlist_budget:
+                max_allow_hits: 3
+                max_per_file_rules: 1
+                max_total_entries: 4
+            """)
+        )
+
+        allowlist = load_allowlist(allowlist_dir)
+
+        assert allowlist.max_allow_hits == 3
+        assert allowlist.max_per_file_rules == 1
+        assert allowlist.max_total_entries == 4
+
+    def test_no_budget_defaults_to_no_budget_violations(self) -> None:
+        """Existing callers without budget config keep current behavior."""
+        allowlist = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=aaa",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                )
+            ]
+        )
+
+        assert allowlist.get_budget_violations() == []
+
+    def test_budget_violation_reports_allow_hits_per_file_and_total(self) -> None:
+        """Each configured ceiling reports its own over-budget category."""
+        allowlist = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=aaa",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                ),
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=bbb",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                ),
+            ],
+            per_file_rules=[
+                PerFileRule(pattern="core/config.py", rules=["R1"], reason="test", expires=None),
+                PerFileRule(pattern="core/canonical.py", rules=["R5"], reason="test", expires=None),
+            ],
+            max_allow_hits=1,
+            max_per_file_rules=1,
+            max_total_entries=3,
+        )
+
+        violations = allowlist.get_budget_violations()
+
+        assert [(v.category, v.current, v.max_allowed) for v in violations] == [
+            ("allow_hits", 2, 1),
+            ("per_file_rules", 2, 1),
+            ("total_entries", 4, 3),
+        ]
+
+    def test_report_json_includes_budget_violations(self) -> None:
+        """JSON report exposes budget overruns for CI annotations."""
+        payload = json.loads(
+            report_json(
+                violations=[],
+                stale_entries=[],
+                expired_entries=[],
+                budget_violations=[
+                    SimpleNamespace(category="allow_hits", current=2, max_allowed=1),
+                ],
+            )
+        )
+
+        assert payload["allowlist_budget_violations"] == [
+            {"category": "allow_hits", "current": 2, "max_allowed": 1},
+        ]
+
+    def test_run_check_fails_when_budget_exceeded(
+        self,
+        temp_dir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Full check fails when the loaded allowlist exceeds configured budget."""
+        src_dir = temp_dir / "src"
+        src_dir.mkdir()
+        (src_dir / "example.py").write_text("def ok():\n    return 1\n")
+
+        allowlist_dir = temp_dir / "allowlist"
+        allowlist_dir.mkdir()
+        (allowlist_dir / "_defaults.yaml").write_text(
+            dedent("""\
+            version: 1
+            defaults:
+              fail_on_stale: false
+              fail_on_expired: false
+              allowlist_budget:
+                max_allow_hits: 0
+            """)
+        )
+        (allowlist_dir / "core.yaml").write_text(
+            dedent("""\
+            allow_hits:
+              - key: "core/events.py:R1:EventBus:emit:fp=aaa"
+                owner: test
+                reason: test
+                safety: test
+            """)
+        )
+
+        args = argparse.Namespace(
+            root=src_dir,
+            allowlist=allowlist_dir,
+            exclude=[],
+            format="text",
+            files=[],
+        )
+
+        assert run_check(args) == 1
+        captured = capsys.readouterr()
+        assert "ALLOWLIST BUDGET EXCEEDED" in captured.out
+        assert "allow_hits" in captured.out

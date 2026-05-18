@@ -115,6 +115,15 @@ class PerFileRule:
         return fnmatch.fnmatch(file_path, self.pattern)
 
 
+@dataclass(frozen=True)
+class AllowlistBudgetViolation:
+    """A loaded allowlist count exceeded a configured ratchet ceiling."""
+
+    category: str
+    current: int
+    max_allowed: int
+
+
 @dataclass
 class Allowlist:
     """Parsed allowlist configuration."""
@@ -123,6 +132,9 @@ class Allowlist:
     per_file_rules: list[PerFileRule] = field(default_factory=list)
     fail_on_stale: bool = True
     fail_on_expired: bool = True
+    max_allow_hits: int | None = None
+    max_per_file_rules: int | None = None
+    max_total_entries: int | None = None
 
     def match(self, finding: Finding) -> AllowlistEntry | PerFileRule | None:
         """Check if a finding is covered by an allowlist entry or per-file rule.
@@ -163,6 +175,20 @@ class Allowlist:
     def get_exceeded_file_rules(self) -> list[PerFileRule]:
         """Return per-file rules where matched_count exceeds max_hits."""
         return [r for r in self.per_file_rules if r.max_hits is not None and r.matched_count > r.max_hits]
+
+    def get_budget_violations(self) -> list[AllowlistBudgetViolation]:
+        """Return configured allowlist-count budget overruns."""
+        total_entries = len(self.entries) + len(self.per_file_rules)
+        checks = (
+            ("allow_hits", len(self.entries), self.max_allow_hits),
+            ("per_file_rules", len(self.per_file_rules), self.max_per_file_rules),
+            ("total_entries", total_entries, self.max_total_entries),
+        )
+        return [
+            AllowlistBudgetViolation(category=category, current=current, max_allowed=max_allowed)
+            for category, current, max_allowed in checks
+            if max_allowed is not None and current > max_allowed
+        ]
 
 
 # =============================================================================
@@ -1717,6 +1743,46 @@ def _parse_per_file_rules(data: dict[str, Any], source_file: str = "") -> list[P
     return per_file_rules
 
 
+def _parse_allowlist_budget(defaults: dict[str, Any], source_file: str = "") -> dict[str, int | None]:
+    """Parse optional allowlist-count ratchet ceilings from defaults."""
+    raw_budget = defaults.get("allowlist_budget", {})
+    source_ctx = f" in {source_file}" if source_file else ""
+    if raw_budget is None:
+        raw_budget = {}
+    if not isinstance(raw_budget, dict):
+        print(
+            f"Error: allowlist_budget must be a mapping{source_ctx}: {raw_budget!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    parsed: dict[str, int | None] = {
+        "max_allow_hits": None,
+        "max_per_file_rules": None,
+        "max_total_entries": None,
+    }
+    for key in parsed:
+        raw_value = raw_budget.get(key)
+        if raw_value is None:
+            continue
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            print(
+                f"Error: allowlist_budget.{key} must be a non-negative integer{source_ctx}: {raw_value!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if value < 0:
+            print(
+                f"Error: allowlist_budget.{key} must be non-negative{source_ctx}: {raw_value!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        parsed[key] = value
+    return parsed
+
+
 def _load_yaml_file(path: Path) -> dict[str, Any]:
     """Load and return a YAML file as a dict, exiting on parse error."""
     try:
@@ -1744,6 +1810,7 @@ def load_allowlist_from_directory(directory: Path) -> Allowlist:
         defaults = defaults_data.get("defaults", {})
     else:
         defaults = {}
+    budget = _parse_allowlist_budget(defaults, source_file="_defaults.yaml")
 
     # Glob all YAML files except _defaults.yaml, sorted by filename
     yaml_files = sorted(f for f in directory.glob("*.yaml") if f.name != "_defaults.yaml")
@@ -1761,6 +1828,9 @@ def load_allowlist_from_directory(directory: Path) -> Allowlist:
         per_file_rules=all_per_file_rules,
         fail_on_stale=defaults.get("fail_on_stale", True),
         fail_on_expired=defaults.get("fail_on_expired", True),
+        max_allow_hits=budget["max_allow_hits"],
+        max_per_file_rules=budget["max_per_file_rules"],
+        max_total_entries=budget["max_total_entries"],
     )
 
 
@@ -1774,12 +1844,16 @@ def load_allowlist(path: Path) -> Allowlist:
 
     data = _load_yaml_file(path)
     defaults = data.get("defaults", {})
+    budget = _parse_allowlist_budget(defaults, source_file=path.name)
 
     return Allowlist(
         entries=_parse_allow_hits(data),
         per_file_rules=_parse_per_file_rules(data),
         fail_on_stale=defaults.get("fail_on_stale", True),
         fail_on_expired=defaults.get("fail_on_expired", True),
+        max_allow_hits=budget["max_allow_hits"],
+        max_per_file_rules=budget["max_per_file_rules"],
+        max_total_entries=budget["max_total_entries"],
     )
 
 
@@ -1846,6 +1920,7 @@ def report_json(
     unused_file_rules: list[PerFileRule] | None = None,
     layer_warnings: list[Finding] | None = None,
     exceeded_file_rules: list[PerFileRule] | None = None,
+    budget_violations: list[AllowlistBudgetViolation] | None = None,
 ) -> str:
     """Generate JSON report."""
     result: dict[str, Any] = {
@@ -1876,6 +1951,10 @@ def report_json(
         result["exceeded_file_rules"] = [
             {"pattern": r.pattern, "rules": r.rules, "matched": r.matched_count, "max_hits": r.max_hits, "reason": r.reason}
             for r in exceeded_file_rules
+        ]
+    if budget_violations:
+        result["allowlist_budget_violations"] = [
+            {"category": v.category, "current": v.current, "max_allowed": v.max_allowed} for v in budget_violations
         ]
     if layer_warnings:
         result["layer_warnings"] = [
@@ -2139,16 +2218,32 @@ def run_check(args: argparse.Namespace) -> int:
         expired_file_rules = allowlist.get_expired_file_rules() if allowlist.fail_on_expired else []
         unused_file_rules = allowlist.get_unused_file_rules() if allowlist.fail_on_stale else []
         exceeded_file_rules = allowlist.get_exceeded_file_rules()
+    budget_violations = allowlist.get_budget_violations()
 
     # Report results
     # Include unused_file_rules in error condition - stale per-file rules should fail
     # the same way stale explicit entries do when fail_on_stale is enabled
-    has_errors = bool(violations or stale_entries or expired_entries or expired_file_rules or unused_file_rules or exceeded_file_rules)
+    has_errors = bool(
+        violations
+        or stale_entries
+        or expired_entries
+        or expired_file_rules
+        or unused_file_rules
+        or exceeded_file_rules
+        or budget_violations
+    )
 
     if args.format == "json":
         print(
             report_json(
-                violations, stale_entries, expired_entries, expired_file_rules, unused_file_rules, layer_warnings, exceeded_file_rules
+                violations,
+                stale_entries,
+                expired_entries,
+                expired_file_rules,
+                unused_file_rules,
+                layer_warnings,
+                exceeded_file_rules,
+                budget_violations,
             )
         )
     else:
@@ -2217,6 +2312,16 @@ def run_check(args: argparse.Namespace) -> int:
                 print(f"  Rules: {r.rules}")
                 print(f"  Matched: {r.matched_count} (max_hits: {r.max_hits})")
                 print(f"  Reason: {r.reason}")
+
+        if budget_violations:
+            print(f"\n{'=' * 60}")
+            print(f"ALLOWLIST BUDGET EXCEEDED: {len(budget_violations)}")
+            print("(Allowlist counts exceeded configured ratchet ceilings - delete entries or update the budget deliberately)")
+            print("=" * 60)
+            for v in budget_violations:
+                print(f"\n  Category: {v.category}")
+                print(f"  Current: {v.current}")
+                print(f"  Max allowed: {v.max_allowed}")
 
         if has_errors:
             print(f"\n{'=' * 60}")

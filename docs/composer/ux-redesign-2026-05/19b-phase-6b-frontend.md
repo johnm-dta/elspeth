@@ -702,6 +702,60 @@ The design doc 09 explicitly says the completion bar **replaces** the previous s
 
 ## Review history
 
+**2026-05-19 — Implementation pass (Tasks 1-12 landed)**
+
+All 12 frontend tasks implemented in 10 commits on branch
+`feat/composer-phase-6-completion-gestures`:
+
+1. API client + types (8 tests) — `api/shareableReviews.ts`,
+   types/api.ts extension.
+2. `shareableReviewStore` (7 tests).
+3. `CompletionBar` three-button component (7 tests) — reuses
+   `ExecuteButton` + `ExportYamlButton` for Phase 5b interpretation-
+   gating + YAML modal dispatch preservation.
+4. `SaveForReviewDialog` with copy-to-clipboard + retry + clipboard
+   fallback (8 tests).
+5. `useNarrativeMode` hook + module-level catalog cache (7 tests).
+6. `NarrativeResults` with overlay model + opt-out indicator (7 tests).
+   Simplified vs plan: the live executionStore doesn't yet aggregate
+   a narrative-summary field; v1 surfaces a placeholder in live mode
+   and reads from `summaryOverride` (Task 8 path). Phase 5b
+   interpretation-event overlay is opt-out-flag-only because
+   `interpretationEventsStore` does not expose a resolved-event list;
+   a future store extension can surface the full list inline without
+   changing this component's prop surface.
+7. `InlineRunResults` wiring with the `NarrativeResultsBranch`
+   dispatcher rendering narrative ABOVE the tabular outputs.
+8. `useSharedToken` hook (10 tests) + `useHashRouter` shared-route
+   guards (no regressions in 17 existing tests) + `SharedInspectView`
+   component (6 tests).
+9. + 10. CompletionBar mounted in SideRail's `completionBarSlot`;
+   `executeButtonSlot` + `exportYamlSlot` retired to `null` (the verbs
+   now live inside CompletionBar). SaveForReviewDialog mounted at
+   app-root for cross-view availability.
+11. Cross-cutting integration test (4 tests) covering end-to-end
+   click → dialog → success → copy → close; 409 error path; disabled-
+   button no-op; cross-session staleness clear.
+12. Documentation: this Review history entry +
+    `docs/guides/sharing-pipelines.md` extended with the "Frontend
+    surfaces (post-Phase-6B)" section.
+
+End-of-6B gate: full vitest run = **1040 tests pass** (was 976 baseline;
++64 new). Typecheck clean. No regressions in any existing test file.
+
+The shared-route hash format (`#/shared/{token}`) required extending
+the hash router which previously only knew `#/{sessionId}` /
+`#/{sessionId}/{verb}`. The extension is two guards (in `parseHash`
+and in the session-change subscription) that short-circuit when the
+hash starts with `#/shared/`; the SharedInspectView owns the URL for
+its lifecycle.
+
+Implementation surfaces deferred (not blocking demo):
+
+* Per-token revocation UI — no backend support in v1; Phase 9.
+* Reviewer "approve / request changes" surface — read-only only.
+* Email-this-link UI — copy-to-clipboard is the v1 affordance.
+
 **2026-05-19 — Multi-reviewer Go/No-Go panel applied (CONDITIONAL → GO)**
 
 Four reviewers (reality / architecture / quality / systems) returned CONDITIONAL GO. Frontend-side blockers resolved:

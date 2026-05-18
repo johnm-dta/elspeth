@@ -1134,6 +1134,67 @@ Backend wire contracts that 19b consumes:
 
 ## Review history
 
+**2026-05-19 — Implementation pass (Tasks 1-10 landed)**
+
+All 10 backend tasks implemented in 9 commits on branch
+`feat/composer-phase-6-completion-gestures`:
+
+1. `composer_completion_events_table` schema + append-only triggers +
+   `SESSION_SCHEMA_EPOCH` 3→4 + 13 tests.
+2. `WebSettings.shareable_link_signing_key` + lifetime + 8 tests +
+   29-file test-suite bulk update for the new required kwarg.
+3. `ShareTokenSigner` HMAC-SHA256 primitive + 12 tests covering
+   tamper / wrong-key / expired / version-mismatch / `compare_digest`
+   spy.
+4. Three Pydantic response models + 8 tests + `_BlobShape` TypedDict.
+5. `ShareableReviewService` with audit-first ordering + frozen-at-mark
+   audit_readiness + 11 tests covering happy-path, gates, audit-first
+   ordering proof, idempotent re-mint, frozen-snapshot, tampered
+   token, expired token, blob expiry, and the read-side no-call proof
+   for `compute_snapshot`.
+6. Three FastAPI routes + `app.py` wiring + 14 integration tests
+   covering all 13 plan-specified cases. Tier-model fingerprint
+   rotation for 9 app.py entries.
+7. YAML-export audit event extension on existing `/state/yaml` route
+   + 2 integration tests + 54 tier-model fingerprint rotations on
+   `sessions/routes.py`.
+8. `capability_tags = ("narrative-summary",)` on the bootstrap pair
+   (`BatchClassifierMetrics`, `BatchDistributionProfile`) + 3 tests +
+   plugin source_file_hash updates.
+9. (deleted per B6 — catalog already serializes the tag).
+10. ADR-022 + `docs/guides/sharing-pipelines.md` runbook.
+
+Pre-existing test failures observed but NOT caused by this work
+(filed as filigree observations elspeth-obs-8c8d680f04,
+elspeth-obs-3169788dea, elspeth-obs-1c6f6b1988):
+* 8 failures in `test_interpretation_events_routes.py` —
+  state_from_record finds None metadata_ (Phase 5b territory).
+* 1 failure in `test_compose_loop_persistence` test_step2.
+* 6 failures in `test_progressive_disclosure.py` — sessions_service
+  not wired (Phase 5b integration fixture issue).
+
+Pinning normalisation that deviated from literal plan text: the
+`audit_readiness.checked_at` field is pinned to
+`state_record.created_at` rather than live `datetime.now()` when
+embedding into the snapshot blob. Without this, two re-mints over an
+unchanged composition would produce different blob digests. The
+deviation is documented in the service module docstring, ADR-022 D4,
+and the runbook.
+
+Independently mergeable per plan §"Sequencing with Phase 3"
+recommendation ("ship 6A in its own merge, then ship 6B after Phase 3
+has merged"). Phase 3 has already shipped (verified at 2026-05-19);
+Phase 6B is unblocked.
+
+End-of-6A gate: 63 / 63 dedicated tests green; mypy / ruff /
+enforce_tier_model / check_contracts / enforce_frozen_annotations /
+enforce_plugin_hashes all clean.
+
+Operator actions required before deploy (documented in §"OPERATOR ACTION
+REQUIRED" at the top of this file):
+* Generate `shareable_link_signing_key` via `openssl rand -base64 32`.
+* Delete staging sessions DB (epoch bump 3→4).
+
 **2026-05-19 — Multi-reviewer Go/No-Go panel applied (CONDITIONAL → GO)**
 
 Four reviewers (reality / architecture / quality / systems) returned CONDITIONAL GO with nine blockers. All nine resolved in-document:

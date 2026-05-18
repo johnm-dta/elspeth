@@ -264,6 +264,42 @@ Ask the sender to re-mint and resend.
 
 The payload store has reaped the blob. Ask the sender to re-mint.
 
+## Frontend surfaces (post-Phase-6B)
+
+The user-facing entry points landed by Phase 6B:
+
+* **Completion bar** — `components/composer/CompletionBar.tsx`. Mounted
+  in the side rail's `completionBarSlot`. Three co-equal verbs: Save
+  for review, Run pipeline, Export YAML. The Save-for-review button is
+  client-side-disabled when the composition's validation is invalid or
+  has not run; the backend would also 409 on submission, but the
+  client preview is friendlier.
+* **Save-for-review dialog** —
+  `components/composer/SaveForReviewDialog.tsx`. Mounted at app-root so
+  the verb can open it from any focused view. Three observable states:
+  spinner (in-flight), error banner (with Try-again button), or
+  success panel (share URL + copy-to-clipboard + Open-in-new-tab link
+  + expiry timestamp). The share URL is the absolute form
+  `${location.origin}/#/shared/{token}` — the backend returns the
+  path-only suffix and the frontend prepends `location.origin`.
+* **Shared inspect view** — `components/shared/SharedInspectView.tsx`.
+  Mounted at app-root by a top-level branch in `App.tsx` when the URL
+  hash matches `#/shared/{token}`. Renders read-only: pipeline
+  metadata, the six-row audit-readiness panel served verbatim from the
+  frozen blob, and the rendered YAML. The composer chat panel, run
+  controls, and edit affordances are deliberately absent.
+* **Narrative results panel** —
+  `components/composer/NarrativeResults.tsx`, conditionally rendered
+  by `InlineRunResults` when `useNarrativeMode().narrativeMode` is
+  true. Surfaces the plugin-emitted `summary` field; the tabular
+  `RunOutputsPanel` remains visible alongside.
+
+The hash-router extension (`useSharedToken` + `useHashRouter` guards)
+ensures the shared-route URL is preserved across the entire shared-view
+lifecycle. The session router will not mutate the hash while
+`#/shared/*` is live; navigating away (via the "Return to my
+workspace" link) returns control to the regular session router.
+
 ## References
 
 * ADR: [docs/architecture/adr/022-shareable-reviews.md](../architecture/adr/022-shareable-reviews.md)

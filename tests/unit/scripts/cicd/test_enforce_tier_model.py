@@ -411,6 +411,26 @@ class TestR1SourceRegressions:
         missing_keys = [finding.canonical_key for finding in findings if finding.canonical_key not in allowed_keys]
         assert missing_keys == []
 
+    def test_grouping_setdefault_call_sites_have_no_r8_findings(self) -> None:
+        findings = [
+            *scan_file(
+                Path("src/elspeth/plugins/transforms/field_mapper.py"),
+                Path("src/elspeth"),
+            ),
+            *scan_file(
+                Path("src/elspeth/plugins/sources/field_normalization.py"),
+                Path("src/elspeth"),
+            ),
+        ]
+
+        target_contexts = {
+            ("FieldMapperConfig", "_reject_duplicate_targets"),
+            ("check_normalization_collisions",),
+            ("check_mapping_collisions",),
+        }
+        r8_findings = [finding for finding in findings if finding.rule_id == "R8" and finding.symbol_context in target_contexts]
+        assert r8_findings == []
+
 
 # =============================================================================
 # R2: getattr() detection
@@ -590,6 +610,69 @@ class TestR4BroadExcept:
 
         r4_findings = [f for f in findings if f.rule_id == "R4"]
         assert len(r4_findings) == 1
+
+
+# =============================================================================
+# R8: setdefault() detection
+# =============================================================================
+
+
+class TestR8Setdefault:
+    """Tests for R8: setdefault() detection."""
+
+    def test_ignores_immediate_append_grouping_idiom(self) -> None:
+        """setdefault(k, []).append(v) constructs a grouping bucket."""
+        source = dedent("""
+            def group(items):
+                buckets = {}
+                for item in items:
+                    buckets.setdefault(item.key, []).append(item)
+                return buckets
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert r8_findings == []
+
+    def test_ignores_immediate_extend_grouping_idiom(self) -> None:
+        """setdefault(k, []).extend(values) constructs a grouping bucket."""
+        source = dedent("""
+            def group(items):
+                buckets = {}
+                for key, values in items:
+                    buckets.setdefault(key, []).extend(values)
+                return buckets
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert r8_findings == []
+
+    def test_flags_setdefault_assigned_for_later_use(self) -> None:
+        """setdefault() remains flagged when it returns a value used later."""
+        source = dedent("""
+            def process(key):
+                cache = {}
+                bucket = cache.setdefault(key, [])
+                return bucket
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert len(r8_findings) == 1
+
+    def test_flags_setdefault_subscript_mutation(self) -> None:
+        """setdefault()[name] mutation is not the narrow append/extend grouping idiom."""
+        source = dedent("""
+            def subscribe(run_id, queue, state):
+                subscribers = {}
+                subscribers.setdefault(run_id, {})[queue] = state
+                return subscribers
+        """)
+        findings = parse_and_visit(source)
+
+        r8_findings = [f for f in findings if f.rule_id == "R8"]
+        assert len(r8_findings) == 1
 
 
 # =============================================================================

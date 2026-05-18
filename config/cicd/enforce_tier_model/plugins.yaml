@@ -342,23 +342,6 @@ allow_hits:
     yet
   safety: Legitimate cleanup pattern in error path
   expires: '2026-07-02'
-- key: plugins/transforms/field_mapper.py:R8:FieldMapperConfig:_reject_duplicate_targets:fp=b4e1d7dd3320b8f6
-  owner: bugfix
-  reason: setdefault used for grouping sources-by-target to detect duplicate target
-    field names
-  safety: Grouping is deterministic; ValueError raised if duplicates found — prevents
-    silent data loss
-  expires: '2026-07-17'
-- key: plugins/sources/field_normalization.py:R8:check_normalization_collisions:fp=5d89837a5521627f
-  owner: architecture
-  reason: setdefault for lazy initialization
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-07-02'
-- key: plugins/sources/field_normalization.py:R8:check_mapping_collisions:fp=a1371511b3dee8c6
-  owner: architecture
-  reason: setdefault for lazy initialization
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-07-02'
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=4b8cc1b6067415ff
   owner: bugfix
   reason: Thread pool may be shut down concurrently during submit(); RuntimeError

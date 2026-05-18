@@ -429,8 +429,23 @@ class TierModelVisitor(ast.NodeVisitor):
         self.class_stack: list[ast.ClassDef] = []
         self.function_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.path_stack: list[str] = []
+        self.node_stack: list[ast.AST] = []
         self._decorator_lines: set[int] = set()  # Track lines that are decorators
         self._import_aliases: dict[str, str] = {}
+
+    def visit(self, node: ast.AST) -> Any:
+        """Visit a node while retaining ancestor context for receiver-shape checks."""
+        self.node_stack.append(node)
+        try:
+            return super().visit(node)
+        finally:
+            self.node_stack.pop()
+
+    def _ancestor_node(self, depth: int) -> ast.AST | None:
+        """Return an ancestor where depth=1 is parent of the current node."""
+        if depth < 1 or len(self.node_stack) <= depth:
+            return None
+        return self.node_stack[-(depth + 1)]
 
     def _get_code_snippet(self, lineno: int) -> str:
         """Get the source line for a given line number."""
@@ -767,6 +782,18 @@ class TierModelVisitor(ast.NodeVisitor):
             or self._is_named_tier3_boundary_context()
         )
 
+    def _is_immediate_setdefault_grouping_call(self, node: ast.Call) -> bool:
+        """Return True for setdefault(...).append/extend(...) grouping idioms."""
+        parent = self._ancestor_node(1)
+        grandparent = self._ancestor_node(2)
+        return (
+            isinstance(parent, ast.Attribute)
+            and parent.value is node
+            and parent.attr in {"append", "extend"}
+            and isinstance(grandparent, ast.Call)
+            and grandparent.func is parent
+        )
+
     def visit_Call(self, node: ast.Call) -> None:
         """Detect R1 (dict.get), R2 (getattr), R3 (hasattr), R5 (isinstance), R8/R9 defaults."""
         # R1: dict.get() - Call(func=Attribute(attr="get"))
@@ -778,7 +805,11 @@ class TierModelVisitor(ast.NodeVisitor):
             )
 
         # R8: dict.setdefault() - mutating default on missing key
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault":
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "setdefault"
+            and not self._is_immediate_setdefault_grouping_call(node)
+        ):
             self._add_finding(
                 "R8",
                 node,

@@ -15,6 +15,7 @@ Fixtures live in ``tests/integration/web/conftest.py``:
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -24,6 +25,7 @@ from sqlalchemy import select
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.sessions.models import composer_completion_events_table
+from elspeth.web.shareable_reviews.signer import ShareTokenPayload
 
 # ── POST /mark-ready-for-review ─────────────────────────────────────────
 
@@ -187,6 +189,62 @@ def test_get_shared_inspect_tampered_token_returns_401(
     tampered = token[:-2] + ("aa" if token[-2:] != "aa" else "bb")
     response = client.get(f"/api/sessions/shared/{tampered}")
     assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid or expired share token"}
+
+
+def test_get_shared_inspect_expired_token_returns_401(
+    audit_readiness_client_with_state: tuple[TestClient, UUID],
+) -> None:
+    """Token verifies cryptographically but is past its ``expires_at`` → 401.
+
+    Mechanism: mint a real token via the route, decode its payload using the
+    production signer, re-sign an identical payload with ``expires_at`` in the
+    past. The resulting token is signature-valid against the live signing key
+    AND structurally indistinguishable from a normally-minted token that has
+    aged past its lifetime — exactly what the route must reject with 401.
+
+    Exercises the full route-stack exception-translation path: the route
+    calls ``service.resolve_token`` → ``signer.verify`` raises
+    ``InvalidToken("token expired")`` → route maps to 401 with the same body
+    shape as the tampered-token case (the error string is intentionally
+    indistinguishable to a probing attacker, per the signer docstring).
+
+    Phase 6A backend plan line 19a:966 mandates this coverage. Without it,
+    a future broadening of the route's ``except InvalidToken`` clause (e.g.
+    catching a wider exception) would silently regress an expired-token 401
+    into a 500 with no test failure — the unit-level signer/service tests
+    would still pass.
+
+    The frozen-pydantic-WebSettings instance precludes the in-place lifetime
+    mutation used by the corresponding unit test
+    (``test_resolve_token_rejects_expired_token``), which uses a ``MagicMock``
+    settings object. Re-signing with the production signer is the equivalent
+    end-state and keeps the wire format identical to a naturally-expired
+    token.
+    """
+    client, session_id = audit_readiness_client_with_state
+    real_token = _mint_token(client, session_id)
+    service = client.app.state.shareable_review_service
+    signer = service._signer
+    # Verify the real token to extract the live payload fields, then re-sign
+    # an otherwise-identical payload with expires_at in the past. Using
+    # ``created_at`` 1h ago + ``expires_at`` 1s ago mirrors the relative
+    # ordering of a token that aged out under its normal lifetime.
+    payload = signer.verify(real_token)
+    expired_payload = ShareTokenPayload(
+        version=payload.version,
+        session_id=payload.session_id,
+        state_id=payload.state_id,
+        created_at=datetime.now(UTC) - timedelta(hours=1),
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        nonce_hex=payload.nonce_hex,
+        payload_digest=payload.payload_digest,
+        created_by_user_id=payload.created_by_user_id,
+    )
+    expired_token = signer.sign(expired_payload)
+    response = client.get(f"/api/sessions/shared/{expired_token}")
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid or expired share token"}
 
 
 def test_get_shared_inspect_blob_expired_returns_404(

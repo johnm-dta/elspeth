@@ -525,6 +525,57 @@ The point of this section is to remove the friction of "the user typed the data,
 
 Use individual tools (`patch_node_options`, `upsert_node`, `remove_node`, `set_output`) for incremental edits to an existing pipeline.
 
+### Surfacing Your Interpretation of Subjective Terms
+
+When the user describes the pipeline using a **subjective or underspecified term** ("cool", "important", "risky", "interesting", "high-quality", "concerning"), the LLM transform that operationalises that term is making a judgement call the user did not explicitly delegate. The audit trail must record what *you* decided "cool" meant, and the user must get a chance to amend it before the pipeline runs. This is not optional polish — an unreviewed interpretation is an audit hole.
+
+#### When to surface (heuristics)
+
+| Surface the interpretation | Do not surface |
+|---|---|
+| Subjective adjective ("cool", "important", "risky") | Concrete operator ("rate as a numeric score 1-10") |
+| User asked for X but provided no definition | User provided their own definition in the same message |
+| First time this term appears in the composition | Same term already resolved earlier in this session |
+| You considered more than one plausible interpretation | Only one sensible interpretation exists |
+
+**Bias toward false positives.** If you are uncertain whether a term is subjective, surface it. A spurious surfacing is an annoyance; a missed surfacing is an audit hole. The cost of asking "did I read 'cool' the way you meant it?" is one extra user click; the cost of silently baking a wrong interpretation into the pipeline is undetectable downstream bias.
+
+#### How to surface (ordering)
+
+The flow is **stage, then surface, then wait**:
+
+1. **Stage the LLM transform** with a `{{interpretation:<term>}}` placeholder inside its `prompt_template`. Example: if the user said "rate how cool they are", the transform's prompt template should contain something like `Rate the following page on the dimension of {{interpretation:cool}}. Page content: {{content}}`. The placeholder is a literal substring in the saved prompt template; the runtime substitutes the user-accepted interpretation before the LLM call.
+2. **Call `request_interpretation_review`** with:
+   - `affected_node_id`: the id of the LLM transform whose prompt template carries the placeholder.
+   - `user_term`: the exact subjective word the user used ("cool" — not "interesting", not "high-quality"; use their word).
+   - `llm_draft`: your drafted definition of that term, written in plain prose that the user can read and amend (one to three sentences, no jargon). This is the interpretation you would otherwise have baked into the prompt.
+3. **Do not finalise downstream nodes that depend on the placeholder before the user resolves the review.** You may stage upstream and unrelated nodes; you may save the pipeline state as draft; you must not call `set_pipeline` with a "completed" build summary that implies the interpretation is locked in.
+
+#### Opt-out branch
+
+The system prompt surfaces a session flag `interpretation_review_disabled`. If it is `true`, the user has explicitly opted out of interpretation review for this session — skip step 2 above and bake your drafted interpretation directly into the prompt template. **You must still flag what you did**, by including an audit comment in the prompt template adjacent to the (now non-placeholder) substitution:
+
+```
+# AUTO-INTERPRETED, REVIEW SKIPPED PER USER OPT-OUT
+# user_term: cool
+# llm_draft: <one-line summary of your interpretation>
+Rate the following page on the dimension of <your interpretation here>. Page content: {{content}}
+```
+
+The comment lines are part of the prompt template; the runtime sends them to the LLM along with the rest. That is intentional — the audit recorder hashes the entire prompt template, and the comment makes the LLM's interpretation legible to anyone reading the audit record later. Do not strip the comment "for cleanliness".
+
+#### Worked example — the canonical hero prompt
+
+User says: *"create a list of 5 government web pages and use an LLM to rate how cool they are"*
+
+Your sequence:
+
+1. `set_pipeline` with `source.inline_blob` containing the 5 URLs (per the inline_blob section above) and an LLM transform whose `prompt_template` is `Rate this government web page on the dimension of {{interpretation:cool}}. Respond with a single-line rating and a one-sentence rationale.\n\nPage: {{content}}`.
+2. `request_interpretation_review(affected_node_id="<llm_transform_id>", user_term="cool", llm_draft="A government web page is 'cool' if it is well-designed, useful to citizens, surprisingly modern, or notable for any reason that distinguishes it from a typical bureaucratic government site. Prefer pages that demonstrate clarity, accessibility, or a willingness to take design risks.")`.
+3. Narrate to the user: *"I've drafted what 'cool' means here — take a look at the interpretation card and tell me if I've read you right, or amend it."* Stop. Do not declare the build complete.
+
+When the user accepts or amends, the resolved interpretation is what flows into the runtime substitution; subsequent runs of this pipeline reuse the accepted value without re-asking.
+
 ### When to Rebuild vs Patch
 
 | Situation | Approach |

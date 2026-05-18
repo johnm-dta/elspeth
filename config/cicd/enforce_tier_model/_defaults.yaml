@@ -6,3 +6,9 @@ defaults:
     max_allow_hits: 392
     max_per_file_rules: 92
     max_total_entries: 484
+    # Permanent exemptions must be renewed or deliberately re-ratcheted during
+    # quarterly allowlist review. New suggested entries default to a bounded
+    # three-month expiry window instead of expires: null.
+    max_permanent_allow_hits: 324
+    max_permanent_per_file_rules: 92
+    max_permanent_total_entries: 416

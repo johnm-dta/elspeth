@@ -37,14 +37,11 @@ import yaml
 # =============================================================================
 
 
-def _add_one_month(today: date) -> date:
-    """Return a date one month after today, clamped to month length."""
-    if today.month == 12:
-        year = today.year + 1
-        month = 1
-    else:
-        year = today.year
-        month = today.month + 1
+def _add_months(today: date, months: int) -> date:
+    """Return a date months after today, clamped to month length."""
+    month_index = today.month - 1 + months
+    year = today.year + month_index // 12
+    month = month_index % 12 + 1
     day = min(today.day, monthrange(year, month)[1])
     return date(year, month, day)
 
@@ -76,7 +73,7 @@ class Finding:
             "owner": "<your-name>",
             "reason": "<explain why this is at a trust boundary>",
             "safety": "<explain how failures are handled>",
-            "expires": _add_one_month(today).isoformat(),
+            "expires": _add_months(today, 3).isoformat(),
         }
 
 
@@ -135,6 +132,9 @@ class Allowlist:
     max_allow_hits: int | None = None
     max_per_file_rules: int | None = None
     max_total_entries: int | None = None
+    max_permanent_allow_hits: int | None = None
+    max_permanent_per_file_rules: int | None = None
+    max_permanent_total_entries: int | None = None
 
     def match(self, finding: Finding) -> AllowlistEntry | PerFileRule | None:
         """Check if a finding is covered by an allowlist entry or per-file rule.
@@ -179,10 +179,16 @@ class Allowlist:
     def get_budget_violations(self) -> list[AllowlistBudgetViolation]:
         """Return configured allowlist-count budget overruns."""
         total_entries = len(self.entries) + len(self.per_file_rules)
+        permanent_allow_hits = sum(1 for entry in self.entries if entry.expires is None)
+        permanent_per_file_rules = sum(1 for rule in self.per_file_rules if rule.expires is None)
+        permanent_total_entries = permanent_allow_hits + permanent_per_file_rules
         checks = (
             ("allow_hits", len(self.entries), self.max_allow_hits),
             ("per_file_rules", len(self.per_file_rules), self.max_per_file_rules),
             ("total_entries", total_entries, self.max_total_entries),
+            ("permanent_allow_hits", permanent_allow_hits, self.max_permanent_allow_hits),
+            ("permanent_per_file_rules", permanent_per_file_rules, self.max_permanent_per_file_rules),
+            ("permanent_total_entries", permanent_total_entries, self.max_permanent_total_entries),
         )
         return [
             AllowlistBudgetViolation(category=category, current=current, max_allowed=max_allowed)
@@ -1760,6 +1766,9 @@ def _parse_allowlist_budget(defaults: dict[str, Any], source_file: str = "") -> 
         "max_allow_hits": None,
         "max_per_file_rules": None,
         "max_total_entries": None,
+        "max_permanent_allow_hits": None,
+        "max_permanent_per_file_rules": None,
+        "max_permanent_total_entries": None,
     }
     for key in parsed:
         raw_value = raw_budget.get(key)
@@ -1831,6 +1840,9 @@ def load_allowlist_from_directory(directory: Path) -> Allowlist:
         max_allow_hits=budget["max_allow_hits"],
         max_per_file_rules=budget["max_per_file_rules"],
         max_total_entries=budget["max_total_entries"],
+        max_permanent_allow_hits=budget["max_permanent_allow_hits"],
+        max_permanent_per_file_rules=budget["max_permanent_per_file_rules"],
+        max_permanent_total_entries=budget["max_permanent_total_entries"],
     )
 
 
@@ -1854,6 +1866,9 @@ def load_allowlist(path: Path) -> Allowlist:
         max_allow_hits=budget["max_allow_hits"],
         max_per_file_rules=budget["max_per_file_rules"],
         max_total_entries=budget["max_total_entries"],
+        max_permanent_allow_hits=budget["max_permanent_allow_hits"],
+        max_permanent_per_file_rules=budget["max_permanent_per_file_rules"],
+        max_permanent_total_entries=budget["max_permanent_total_entries"],
     )
 
 

@@ -1864,6 +1864,24 @@ class TestExceededFileRulesPreCommitMode:
 class TestAllowlistBudgetRatchet:
     """Tests for hard allowlist-count budget ratchets."""
 
+    def test_suggested_allowlist_entry_uses_quarterly_expiry(self) -> None:
+        """New suggested allowlist entries default to a quarterly review window."""
+        finding = Finding(
+            rule_id="R1",
+            file_path="core/events.py",
+            line=10,
+            col=0,
+            symbol_context=("EventBus", "emit"),
+            fingerprint="aaa",
+            code_snippet="payload.get('event')",
+            message="test",
+        )
+
+        suggested = finding.suggested_allowlist_entry()
+        expires = datetime.strptime(suggested["expires"], "%Y-%m-%d").replace(tzinfo=UTC).date()
+
+        assert expires >= datetime.now(UTC).date() + timedelta(days=80)
+
     def test_load_directory_reads_budget_defaults(self, temp_dir: Path) -> None:
         """Directory defaults may define hard allowlist count ceilings."""
         allowlist_dir = temp_dir / "allowlist"
@@ -1878,6 +1896,9 @@ class TestAllowlistBudgetRatchet:
                 max_allow_hits: 3
                 max_per_file_rules: 1
                 max_total_entries: 4
+                max_permanent_allow_hits: 2
+                max_permanent_per_file_rules: 0
+                max_permanent_total_entries: 2
             """)
         )
 
@@ -1886,6 +1907,9 @@ class TestAllowlistBudgetRatchet:
         assert allowlist.max_allow_hits == 3
         assert allowlist.max_per_file_rules == 1
         assert allowlist.max_total_entries == 4
+        assert allowlist.max_permanent_allow_hits == 2
+        assert allowlist.max_permanent_per_file_rules == 0
+        assert allowlist.max_permanent_total_entries == 2
 
     def test_no_budget_defaults_to_no_budget_violations(self) -> None:
         """Existing callers without budget config keep current behavior."""
@@ -1937,6 +1961,43 @@ class TestAllowlistBudgetRatchet:
             ("allow_hits", 2, 1),
             ("per_file_rules", 2, 1),
             ("total_entries", 4, 3),
+        ]
+
+    def test_budget_violation_reports_permanent_entries(self) -> None:
+        """Permanent expires:null entries have their own ratchet categories."""
+        bounded_expiry = datetime(2099, 1, 1, tzinfo=UTC).date()
+        allowlist = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=aaa",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=None,
+                ),
+                AllowlistEntry(
+                    key="core/events.py:R1:EventBus:emit:fp=bbb",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=bounded_expiry,
+                ),
+            ],
+            per_file_rules=[
+                PerFileRule(pattern="core/config.py", rules=["R1"], reason="test", expires=None),
+                PerFileRule(pattern="core/canonical.py", rules=["R5"], reason="test", expires=bounded_expiry),
+            ],
+            max_permanent_allow_hits=0,
+            max_permanent_per_file_rules=0,
+            max_permanent_total_entries=0,
+        )
+
+        violations = allowlist.get_budget_violations()
+
+        assert [(v.category, v.current, v.max_allowed) for v in violations] == [
+            ("permanent_allow_hits", 1, 0),
+            ("permanent_per_file_rules", 1, 0),
+            ("permanent_total_entries", 2, 0),
         ]
 
     def test_report_json_includes_budget_violations(self) -> None:
@@ -2000,3 +2061,49 @@ class TestAllowlistBudgetRatchet:
         captured = capsys.readouterr()
         assert "ALLOWLIST BUDGET EXCEEDED" in captured.out
         assert "allow_hits" in captured.out
+
+    def test_run_check_fails_when_permanent_budget_exceeded(
+        self,
+        temp_dir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Full check fails when permanent exemptions exceed configured budget."""
+        src_dir = temp_dir / "src"
+        src_dir.mkdir()
+        (src_dir / "example.py").write_text("def ok():\n    return 1\n")
+
+        allowlist_dir = temp_dir / "allowlist"
+        allowlist_dir.mkdir()
+        (allowlist_dir / "_defaults.yaml").write_text(
+            dedent("""\
+            version: 1
+            defaults:
+              fail_on_stale: false
+              fail_on_expired: false
+              allowlist_budget:
+                max_permanent_allow_hits: 0
+            """)
+        )
+        (allowlist_dir / "core.yaml").write_text(
+            dedent("""\
+            allow_hits:
+              - key: "core/events.py:R1:EventBus:emit:fp=aaa"
+                owner: test
+                reason: test
+                safety: test
+                expires: null
+            """)
+        )
+
+        args = argparse.Namespace(
+            root=src_dir,
+            allowlist=allowlist_dir,
+            exclude=[],
+            format="text",
+            files=[],
+        )
+
+        assert run_check(args) == 1
+        captured = capsys.readouterr()
+        assert "ALLOWLIST BUDGET EXCEEDED" in captured.out
+        assert "permanent_allow_hits" in captured.out

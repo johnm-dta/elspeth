@@ -66,11 +66,7 @@ import { ReadOnlyProvider } from "@/contexts/ReadOnlyContext";
 import { SharedAuditReadinessPanel } from "./SharedAuditReadinessPanel";
 import { YamlDisplay } from "@/components/inspector/YamlDisplay";
 import { GraphMiniView } from "@/components/sidebar/GraphMiniView";
-import type {
-  ApiError,
-  CompositionState,
-  SharedInspectResponse,
-} from "@/types/api";
+import type { ApiError, SharedInspectResponse } from "@/types/api";
 
 interface SharedInspectViewProps {
   token: string;
@@ -122,37 +118,13 @@ function _returnToWorkspaceUrl(): string {
   return `${window.location.origin}${window.location.pathname}`;
 }
 
-/**
- * Validate and narrow the wire `composition_snapshot` (typed as
- * `Record<string, unknown>` on the response) into a `CompositionState`
- * shape that GraphMiniView's MiniSvg can read. This is a Tier-1
- * inbound boundary — the snapshot was canonicalised at mark-time, so
- * any shape drift is a system bug (audit-blob serializer changed
- * without updating the consumer). We assert offensively rather than
- * silently coerce.
- */
-function _narrowCompositionSnapshot(
-  snapshot: Record<string, unknown>,
-): CompositionState {
-  const nodes = (snapshot as { nodes?: unknown }).nodes;
-  const outputs = (snapshot as { outputs?: unknown }).outputs;
-  if (!Array.isArray(nodes)) {
-    throw new Error(
-      "shared composition_snapshot is missing `nodes` array — wire shape drift",
-    );
-  }
-  if (!Array.isArray(outputs)) {
-    throw new Error(
-      "shared composition_snapshot is missing `outputs` array — wire shape drift",
-    );
-  }
-  // MiniSvg reads only .source (truthiness), .nodes.length, and
-  // .outputs.length — fields validated above. The cast is safe because
-  // the upstream invariant (set_pipeline.py / shareable-reviews
-  // serializer) writes a strict CompositionState shape; this boundary
-  // catches drift before the renderer sees an invalid object.
-  return snapshot as unknown as CompositionState;
-}
+// FIX-K (2026-05-19): the previous `_narrowCompositionSnapshot` helper
+// validated `composition_snapshot.nodes` / `.outputs` at the renderer.
+// That validation now lives at the wire boundary in
+// `validateSharedInspectResponse` (api/shareableReviews.ts) — per-field
+// per-shape, with `composition_snapshot` typed as `CompositionState`
+// directly (plan 19b:100-101). The renderer is no longer the
+// trust-boundary check, so the narrow helper was deleted as redundant.
 
 export function SharedInspectView({ token }: SharedInspectViewProps): JSX.Element {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
@@ -209,21 +181,12 @@ export function SharedInspectView({ token }: SharedInspectViewProps): JSX.Elemen
   }
 
   const { response } = state;
-  const pipelineName =
-    typeof response.pipeline_metadata.name === "string"
-      ? response.pipeline_metadata.name
-      : "Untitled pipeline";
-  const pipelineDescription =
-    typeof response.pipeline_metadata.description === "string"
-      ? response.pipeline_metadata.description
-      : "";
-
-  // Narrow the frozen composition snapshot from the wire (typed as
-  // Record<string, unknown>) to the CompositionState shape MiniSvg
-  // reads. Done at the boundary — any drift crashes loudly here.
-  const frozenComposition = _narrowCompositionSnapshot(
-    response.composition_snapshot,
-  );
+  // pipeline_metadata is now typed `PipelineMetadata` with `name` /
+  // `description` as `string | null`. Render an empty string when the
+  // owner left the description blank; surface "Untitled pipeline" for a
+  // null name.
+  const pipelineName = response.pipeline_metadata.name ?? "Untitled pipeline";
+  const pipelineDescription = response.pipeline_metadata.description ?? "";
 
   return (
     <ReadOnlyProvider value={true}>
@@ -258,7 +221,7 @@ export function SharedInspectView({ token }: SharedInspectViewProps): JSX.Elemen
           data-testid="shared-inspect-graph"
         >
           <h2>Pipeline structure</h2>
-          <GraphMiniView compositionStateOverride={frozenComposition} />
+          <GraphMiniView compositionStateOverride={response.composition_snapshot} />
         </section>
 
         <section

@@ -18,11 +18,13 @@
  */
 import type {
   ApiError,
-  AuditReadinessSnapshot,
+  CompositionState,
   MarkReadyForReviewResponse,
+  PipelineMetadata,
   ShareableLinkResponse,
   SharedInspectResponse,
 } from "../types/api";
+import { validateAuditReadinessSnapshot } from "./auditReadiness";
 import { authHeaders, parseResponse } from "./client";
 
 function unexpectedShape(status: number, where: string): ApiError {
@@ -36,21 +38,45 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isAuditReadinessSnapshot(value: unknown): value is AuditReadinessSnapshot {
-  // The audit_readiness sub-object is the Phase 2 AuditReadinessSnapshot
-  // verbatim. Full shape validation lives in api/auditReadiness.ts; here we
-  // do the minimum sanity check (top-level keys present + rows is an array)
-  // because re-validating the entire six-row panel on every shared-inspect
-  // GET would duplicate that logic. The route layer's response_model has
-  // already validated server-side; the runtime check here catches obvious
-  // wire-level corruption.
+// FIX-K (2026-05-19): tighten the Tier-3 → Tier-1 trust boundary.
+//
+// The previous implementation deferred audit_readiness validation to the
+// renderer ("Full shape validation lives in api/auditReadiness.ts; here
+// we do the minimum sanity check") which never invoked that validator at
+// this path. A wire-corrupted `rows: [null]` or `rows: [{garbage: 1}]`
+// would reach the panel renderer and produce `undefined` cells. Likewise,
+// `pipeline_metadata` and `composition_snapshot` were validated only as
+// `isRecord(...)` — no per-field guarantees — even though the backend
+// Pydantic responses (PipelineMetadataResponse / CompositionStateResponse
+// at src/elspeth/web/shareable_reviews/models.py:97-179) are strict.
+//
+// Resolution per plan 19b:100-101: type both as their canonical front-end
+// shapes (`PipelineMetadata`, `CompositionState`) and validate the shape
+// at the wire boundary, not the renderer.
+
+function isPipelineMetadata(value: unknown): value is PipelineMetadata {
   return (
     isRecord(value) &&
-    typeof value.session_id === "string" &&
-    typeof value.composition_version === "number" &&
-    typeof value.checked_at === "string" &&
-    Array.isArray(value.rows)
+    (typeof value.name === "string" || value.name === null) &&
+    (typeof value.description === "string" || value.description === null)
   );
+}
+
+function isCompositionSnapshot(value: unknown): value is CompositionState {
+  // Wire shape: CompositionState.to_dict() emits {version, metadata,
+  // source, nodes, edges, outputs} — the runtime-only `id` and
+  // `validation_*` fields on the front-end `CompositionState` interface
+  // are absent on this wire payload (see SharedInspectResponse's type
+  // docstring for the wire-vs-runtime caveat). We validate only the
+  // fields the wire actually carries.
+  if (!isRecord(value)) return false;
+  if (typeof value.version !== "number") return false;
+  if (!isPipelineMetadata(value.metadata)) return false;
+  if (value.source !== null && !isRecord(value.source)) return false;
+  if (!Array.isArray(value.nodes)) return false;
+  if (!Array.isArray(value.edges)) return false;
+  if (!Array.isArray(value.outputs)) return false;
+  return true;
 }
 
 function validateMarkReadyResponse(body: unknown, status: number): MarkReadyForReviewResponse {
@@ -96,14 +122,23 @@ function validateSharedInspectResponse(body: unknown, status: number): SharedIns
     !isRecord(body) ||
     typeof body.session_id !== "string" ||
     typeof body.state_id !== "string" ||
-    !isRecord(body.pipeline_metadata) ||
-    !isRecord(body.composition_snapshot) ||
+    !isPipelineMetadata(body.pipeline_metadata) ||
+    !isCompositionSnapshot(body.composition_snapshot) ||
     typeof body.yaml !== "string" ||
-    !isAuditReadinessSnapshot(body.audit_readiness) ||
     typeof body.created_by_user_id !== "string" ||
     typeof body.created_at !== "string" ||
     typeof body.expires_at !== "string"
   ) {
+    throw unexpectedShape(status, "shared-inspect");
+  }
+  // Full per-row + per-validation-check audit_readiness validation
+  // delegated to the shared validator in api/auditReadiness.ts (FIX-K).
+  // Wrap to re-label the error under the shared-inspect endpoint so
+  // callers can match on a single `where` token.
+  let audit_readiness;
+  try {
+    audit_readiness = validateAuditReadinessSnapshot(body.audit_readiness, status);
+  } catch (_exc) {
     throw unexpectedShape(status, "shared-inspect");
   }
   return {
@@ -112,7 +147,7 @@ function validateSharedInspectResponse(body: unknown, status: number): SharedIns
     pipeline_metadata: body.pipeline_metadata,
     composition_snapshot: body.composition_snapshot,
     yaml: body.yaml,
-    audit_readiness: body.audit_readiness,
+    audit_readiness,
     created_by_user_id: body.created_by_user_id,
     created_at: body.created_at,
     expires_at: body.expires_at,

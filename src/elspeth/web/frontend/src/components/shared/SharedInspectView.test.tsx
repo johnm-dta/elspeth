@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { axe, toHaveNoViolations } from "jest-axe";
 import { SharedInspectView } from "./SharedInspectView";
 import { ReadOnlyProvider, useReadOnly } from "@/contexts/ReadOnlyContext";
@@ -36,7 +36,21 @@ const _validResponse: SharedInspectResponse = {
   session_id: "00000000-0000-0000-0000-000000000001",
   state_id: "11111111-1111-1111-1111-111111111111",
   pipeline_metadata: { name: "Demo Pipeline", description: "A test" },
-  composition_snapshot: { version: 1, nodes: [], edges: [], outputs: [] },
+  // FIX-K: full CompositionState shape now required at the type level.
+  // The wire shape (CompositionState.to_dict()) does not include `id`
+  // or `validation_*` runtime-only fields. We cast through `unknown`
+  // because the front-end type retains those for compat with live
+  // composer surfaces; the shared-inspect wire genuinely lacks them.
+  // See SharedInspectResponse docstring at types/api.ts for the
+  // wire-vs-runtime caveat.
+  composition_snapshot: {
+    version: 1,
+    metadata: { name: "Demo Pipeline", description: "A test" },
+    source: null,
+    nodes: [],
+    edges: [],
+    outputs: [],
+  } as unknown as SharedInspectResponse["composition_snapshot"],
   yaml: "version: 1\nname: Demo\n",
   audit_readiness: _validReadiness,
   created_by_user_id: "alice",
@@ -180,6 +194,7 @@ describe("SharedInspectView", () => {
       ..._validResponse,
       composition_snapshot: {
         version: 1,
+        metadata: { name: "Demo Pipeline", description: "A test" },
         source: { plugin: "csv", options: {} },
         nodes: [
           {
@@ -191,7 +206,7 @@ describe("SharedInspectView", () => {
         ],
         edges: [],
         outputs: [{ name: "out", plugin: "stdout", options: {} }],
-      },
+      } as unknown as SharedInspectResponse["composition_snapshot"],
     };
     vi.spyOn(api, "fetchSharedInspect").mockResolvedValueOnce(populated);
     render(<SharedInspectView token="abc" />);
@@ -256,6 +271,119 @@ describe("SharedInspectView", () => {
       screen.queryByRole("button", { name: /provenance/i }),
     ).not.toBeInTheDocument();
   });
+
+  // FIX-H (gap-analysis remediation): widened read-only enforcement
+  // audit per plan 19b:484-494. The pre-FIX-H assertion above checked
+  // only the provenance <button>; the multi-reviewer revision requires
+  // a tree-wide scan covering inputs, textareas, selects, interactive
+  // buttons (excluding the YamlDisplay Copy / Download chrome which is
+  // a non-edit affordance), contentEditable, draggable, and
+  // role={combobox,listbox,textbox,spinbutton}. We scope the
+  // interactive-button scan to the edit surfaces (header metadata
+  // block + audit-readiness panel) — that is honest about "no edit
+  // affordances on edit surfaces" without snagging on the legitimate
+  // YamlDisplay buttons.
+  it(
+    "renders no editable controls anywhere in the loaded shared view " +
+      "(widened read-only audit per plan 19b:484-494)",
+    async () => {
+      vi.spyOn(api, "fetchSharedInspect").mockResolvedValueOnce(_validResponse);
+      const { container } = render(<SharedInspectView token="abc" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("shared-inspect-loaded")).toBeInTheDocument(),
+      );
+
+      // Tree-wide scan: these element types must NOT appear anywhere
+      // in the loaded surface — no input, no textarea, no select, no
+      // contentEditable, no draggable, no editable-widget roles. The
+      // matched count must be zero. (Any of these existing implies an
+      // editable surface, which contradicts read-only mode.)
+      expect(container.querySelectorAll("input").length).toBe(0);
+      expect(container.querySelectorAll("textarea").length).toBe(0);
+      expect(container.querySelectorAll("select").length).toBe(0);
+      expect(
+        container.querySelectorAll('[contenteditable="true"]').length,
+      ).toBe(0);
+      expect(container.querySelectorAll('[draggable="true"]').length).toBe(0);
+      expect(container.querySelectorAll('[role="combobox"]').length).toBe(0);
+      expect(container.querySelectorAll('[role="listbox"]').length).toBe(0);
+      expect(container.querySelectorAll('[role="textbox"]').length).toBe(0);
+      expect(container.querySelectorAll('[role="spinbutton"]').length).toBe(0);
+
+      // Interactive-button scan: the global tree legitimately contains
+      // the YamlDisplay "Copy YAML" / "Download YAML" buttons, which
+      // are non-edit affordances and are excluded from the read-only
+      // ban. So we narrow the scan to the editable surfaces:
+      //   1. The pipeline-metadata header block (name + description).
+      //   2. The audit-readiness panel.
+      // Both should contain zero interactive <button> elements.
+      const metadataHeader = screen
+        .getByTestId("shared-inspect-pipeline-name")
+        .closest("header");
+      expect(metadataHeader).not.toBeNull();
+      expect(
+        metadataHeader!.querySelectorAll("button").length,
+      ).toBe(0);
+      const auditPanel = screen.getByTestId("shared-audit-readiness-panel");
+      expect(auditPanel.querySelectorAll("button").length).toBe(0);
+    },
+  );
+
+  // FIX-H Test 7 (plan 19b:467): the shared view does NOT render the
+  // <CompletionBar /> or the composer chat panel. Both are owner-side
+  // affordances; a reviewer following a share link must not see them.
+  // CompletionBar exposes data-testid="completion-bar" on its <div
+  // role="group">. The chat panel is a <div aria-label="Chat panel">
+  // (no semantic role); the canonical query is by accessible name.
+  it(
+    "does not render <CompletionBar /> or the composer chat panel " +
+      "(plan 19b:467)",
+    async () => {
+      vi.spyOn(api, "fetchSharedInspect").mockResolvedValueOnce(_validResponse);
+      render(<SharedInspectView token="abc" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("shared-inspect-loaded")).toBeInTheDocument(),
+      );
+      expect(screen.queryByTestId("completion-bar")).toBeNull();
+      // ChatPanel sets aria-label="Chat panel" on its outer <div>. No
+      // role is assigned, so role-based queries don't match — query by
+      // accessible name via aria-label.
+      expect(screen.queryByLabelText(/^Chat panel$/i)).toBeNull();
+    },
+  );
+
+  // FIX-H Test 8 (plan 19b:468): pipeline metadata fields are not
+  // editable — no <input>, <textarea>, or editable widget exists in
+  // the metadata block. This is a narrower, surface-specific version
+  // of the widened audit above; keeping it as its own test so the
+  // plan's enumerated step 8 is independently auditable.
+  it(
+    "does not render any <input> elements inside the metadata block " +
+      "(plan 19b:468)",
+    async () => {
+      vi.spyOn(api, "fetchSharedInspect").mockResolvedValueOnce(_validResponse);
+      render(<SharedInspectView token="abc" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("shared-inspect-loaded")).toBeInTheDocument(),
+      );
+      // The metadata block is the <header> housing the pipeline name
+      // and description. Scope to that element.
+      const metadataHeader = screen
+        .getByTestId("shared-inspect-pipeline-name")
+        .closest("header");
+      expect(metadataHeader).not.toBeNull();
+      expect(metadataHeader!.querySelectorAll("input").length).toBe(0);
+      expect(metadataHeader!.querySelectorAll("textarea").length).toBe(0);
+      expect(metadataHeader!.querySelectorAll("select").length).toBe(0);
+      // No editable widgets either.
+      expect(
+        within(metadataHeader as HTMLElement).queryAllByRole("textbox").length,
+      ).toBe(0);
+      expect(
+        within(metadataHeader as HTMLElement).queryAllByRole("combobox").length,
+      ).toBe(0);
+    },
+  );
 
   // Plan line 470: jest-axe accessibility assertion on the shared
   // inspect view. The loaded state is the user-visible terminal happy

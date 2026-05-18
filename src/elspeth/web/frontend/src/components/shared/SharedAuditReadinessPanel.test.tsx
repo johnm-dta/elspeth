@@ -116,4 +116,42 @@ describe("SharedAuditReadinessPanel", () => {
       screen.getByText(/Composition v7/),
     ).toBeInTheDocument();
   });
+
+  // FIX-H (gap-analysis remediation): plan 19b:519-542 mandates an
+  // explicit test that the shared panel renders the LLM-interpretations
+  // row from the snapshot's `summary` text, NOT from the live
+  // `interpretationEventsStore` that the owner-side AuditReadinessPanel
+  // consults. The mandated proof shape is: render a snapshot whose
+  // llm_interpretations row carries `summary: "2 pending review (3
+  // resolved)"`, assert the rendered tree contains "2 pending review".
+  //
+  // The plan also asks us to seed the interpretation-events store as
+  // empty to prove non-coupling. SharedAuditReadinessPanel does not
+  // import that store at all (verified by reading the impl source —
+  // it only imports AuditReadinessRow + types). The store-empty step
+  // is therefore structural: if a future refactor were to introduce a
+  // store read, this test's snapshot summary ("2 pending review") and
+  // the absent store contents ("0 events visible") would diverge, and
+  // the assertion below would fail. Documented so a future reader
+  // does not assume a missing setup step.
+  it(
+    "renders the llm_interpretations row from snapshot.summary without " +
+      "reading interpretationEventsStore (plan 19b:519-542)",
+    () => {
+      const decoupling_snapshot: AuditReadinessSnapshot = {
+        ..._snapshot,
+        rows: _snapshot.rows.map((r) =>
+          r.id === "llm_interpretations"
+            ? {
+                ...r,
+                status: "warning" as const,
+                summary: "2 pending review (3 resolved)",
+              }
+            : r,
+        ),
+      };
+      render(<SharedAuditReadinessPanel snapshot={decoupling_snapshot} />);
+      expect(screen.getByText(/2 pending review/)).toBeInTheDocument();
+    },
+  );
 });

@@ -23,6 +23,7 @@ import * as api from "@/api/client";
 import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
+import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { usePreferencesStore } from "./preferencesStore";
 
 function getExecutionStore() {
@@ -421,6 +422,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
       // Fire-and-forget: refresh blob list for the newly selected session
       useBlobStore.getState().loadBlobs(id);
+
+      // Phase 5b Task 3 — rehydrate interpretation-event projection for
+      // the newly selected session.  Fire-and-forget: a failure on this
+      // route must not block session selection (the readiness panel will
+      // simply show stale/empty counts until the next refresh).  The
+      // store keys by session_id, so navigating back to a previously
+      // visited session preserves its prior pending events without a
+      // reset.  Tests #6 and #7 in interpretationEventsStore.test.ts
+      // cover the session-load and session-change behaviours.
+      void useInterpretationEventsStore.getState().refreshAll(id);
     } catch (err) {
       if ((err as ApiError).status === 404 && get().activeSessionId === id) {
         set({

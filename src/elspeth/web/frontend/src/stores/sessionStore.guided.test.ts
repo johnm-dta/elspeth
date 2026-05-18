@@ -27,6 +27,11 @@ vi.mock("@/api/client", () => ({
   respondGuided: vi.fn(),
   reenterGuided: vi.fn(),
   chatGuided: vi.fn(),
+  // Phase 5b — selectSession fires a fire-and-forget refreshAll on the
+  // interpretationEventsStore.  Mocked to resolve empty so jsdom does not
+  // attempt the real HTTP call; targeted assertions live in
+  // interpretationEventsStore.test.ts.
+  listInterpretationEvents: vi.fn().mockResolvedValue([]),
 }));
 
 // Mock the execution store dependency (selectSession calls clearValidation)
@@ -147,9 +152,15 @@ const sampleExitedGuidedSession: GuidedSession = {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("sessionStore — guided-mode fields and actions", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
     resetStore(useSessionStore);
+    // Phase 5b — reseed the listInterpretationEvents mock that
+    // vi.resetAllMocks() cleared, so selectSession's fire-and-forget
+    // refreshAll path does not produce unhandled rejections in tests
+    // that exercise it indirectly.
+    const apiMod = await import("@/api/client");
+    (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   });
 
   // ── Test 1: Initial state ─────────────────────────────────────────────────

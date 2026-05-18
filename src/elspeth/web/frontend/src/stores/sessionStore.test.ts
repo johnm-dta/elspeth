@@ -41,6 +41,12 @@ vi.mock("@/api/client", () => ({
     updated_at: "2026-05-15T00:00:00Z",
   }),
   updateUserComposerPreferences: vi.fn(),
+  // Phase 5b — sessionStore.selectSession fires a fire-and-forget refreshAll
+  // on the interpretationEventsStore, which routes through this method.
+  // Mocked to resolve with an empty array so the unhandled-rejection path
+  // does not trip session-load tests; targeted assertions on the call live
+  // in interpretationEventsStore.test.ts.
+  listInterpretationEvents: vi.fn().mockResolvedValue([]),
 }));
 
 // Mock the execution store dependency
@@ -134,6 +140,12 @@ describe("sessionStore", () => {
       banner_dismissed_at: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
+    // Phase 5b — sessionStore.selectSession fires a fire-and-forget
+    // refreshAll on the interpretationEventsStore which awaits this
+    // method.  vi.resetAllMocks() wiped the at-mock-declaration default,
+    // so reseed it here; an unmocked or undefined-returning fn surfaces
+    // as an unhandled rejection in the per-session refresh path.
+    (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   });
 
   describe("initial state", () => {

@@ -856,6 +856,16 @@ Install task (lives in the `caddy_origin` role):
   # file and the next caddy reload either takes the service down or
   # silently keeps the previous in-memory config until the next
   # restart — both modes hide the failure.
+  #
+  # Expected `caddy validate` warning: "Caddyfile input is not
+  # formatted; run 'caddy fmt --overwrite' to fix inconsistencies".
+  # Caddy's canonical formatting uses tab indentation; this runbook's
+  # Markdown examples use 4-space indentation for cross-renderer
+  # readability. The warning is cosmetic — the config is valid (the
+  # task exits 0). If the noise bothers you, either reformat your
+  # `elspeth.caddyfile.j2` with tabs, or add a `caddy fmt --overwrite`
+  # post-render task before this one and the warning disappears.
+  # Validated against Caddy 2.11.2 on 2026-05-18.
 
 - name: Enable the elspeth Caddy site
   ansible.builtin.file:

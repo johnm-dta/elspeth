@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useBlobStore } from "@/stores/blobStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
 
 interface ChatInputProps {
@@ -70,6 +71,24 @@ export function ChatInput({
     (s) => s.compositionState?.version ?? 0,
   );
   const uploadBlob = useBlobStore((s) => s.uploadBlob);
+  // Phase 5b Task 8 — when a pending interpretation event exists for the
+  // active session AND it has a non-null `user_term`, the chat-input
+  // placeholder briefly cues the user that the InterpretationReviewTurn
+  // widget above is waiting on a decision.  Auto-baked rows
+  // (interpretation_source = auto_interpreted_opt_out / no_surfaces) have
+  // user_term=null per types/interpretation.ts:101-106 — there is no term
+  // to echo, so the cue falls through to the next placeholder layer.
+  // Selector returns just the string|null so this component only re-renders
+  // when the *displayed term* changes, not on every pending-map mutation.
+  const pendingInterpretationUserTerm = useInterpretationEventsStore((s) => {
+    if (!activeSessionId) return null;
+    const pending = s.pendingBySession[activeSessionId];
+    if (!pending) return null;
+    for (const event of Object.values(pending)) {
+      if (event.user_term !== null) return event.user_term;
+    }
+    return null;
+  });
 
   // Listen for prefill events dispatched by InlineChatSourceEntry (catalog
   // Sources tab, Phase 7C). After Phase 7B the PluginCard no longer dispatches
@@ -156,15 +175,31 @@ export function ChatInput({
 
   const canSend = !disabled && text.trim().length > 0;
 
-  // Phase 5a Task 1 — derive the effective placeholder.  Precedence:
+  // Phase 5b Task 8 (extends Phase 5a Task 1) — derive the effective
+  // placeholder.  Precedence (highest wins):
   //   1. explicit `placeholder` prop (Phase A slice 4 guided-mode nudge)
-  //   2. empty-state data-priming wording (no messages, no composition)
-  //   3. canonical "describe the pipeline" wording
+  //   2. pending-interpretation cue (Phase 5b Task 8 — when an interpretation
+  //      review widget is awaiting the user's decision and has a non-null
+  //      user_term to echo)
+  //   3. empty-state data-priming wording (Phase 5a — no messages, no
+  //      composition)
+  //   4. canonical "describe the pipeline" wording
+  //
+  // The pending-interpretation cue sits above empty-state because it
+  // describes a *concrete pending decision* the user must address;
+  // empty-state is only a generic prime for first-typed-input.  Both
+  // continue to sit below an explicit prop so guided-mode per-step nudges
+  // (Phase A slice 4) remain authoritative.
   const isEmptyState = messageCount === 0 && compositionVersion === 0;
   const defaultPlaceholder = isEmptyState
     ? "Describe your pipeline, paste a URL, or type a few rows of data to start..."
     : "Describe the pipeline you want to build...";
-  const effectivePlaceholder = placeholder ?? defaultPlaceholder;
+  const interpretationCuePlaceholder =
+    pendingInterpretationUserTerm !== null
+      ? `Reviewing your interpretation of "${pendingInterpretationUserTerm}" above — pick Use mine or Change it to continue.`
+      : null;
+  const effectivePlaceholder =
+    placeholder ?? interpretationCuePlaceholder ?? defaultPlaceholder;
 
   return (
     <div className="chat-input">

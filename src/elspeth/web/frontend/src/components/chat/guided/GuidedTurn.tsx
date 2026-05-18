@@ -111,6 +111,15 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           disabled={disabled}
         />
       );
+    case "interpretation_review":
+      // Phase 5b — the InterpretationReviewTurn widget is implemented in
+      // Task 4 of 18b-phase-5b-frontend.md.  Until then, surfacing this turn
+      // type is a backend/frontend phase-skew condition: throw with a
+      // diagnostic message rather than rendering nothing.  Task 4 replaces
+      // this branch with the real <InterpretationReviewTurn /> render.
+      throw new Error(
+        "GuidedTurn: interpretation_review widget not yet implemented (Phase 5b Task 4 pending)",
+      );
     default: {
       // Exhaustiveness check: if a new TurnType is added to guided.ts without
       // a matching case here, TypeScript will report a compile error on this

@@ -53,6 +53,23 @@ export type {
   RecoveryTranscriptRow,
 } from "./recovery";
 
+// ── Interpretation events (Phase 5b) ───────────────────────────────────────
+// Wire shapes for the LLM-interpretation review surface.  See
+// ./interpretation.ts for the full per-type docstrings and the closed-enum
+// governance.  Re-exported here so consumer code can `import type { ... }
+// from "@/types/api"` uniformly with the other session-surface types.
+
+export type {
+  InterpretationChoice,
+  InterpretationSource,
+  InterpretationEvent,
+  ListInterpretationEventsResponse,
+  InterpretationResolveRequest,
+  InterpretationResolveResponse,
+  InterpretationOptOutResponse,
+  OptOutSummaryResponse,
+} from "./interpretation";
+
 // ── Account-level composer preferences (Phase 1B) ──────────────────────────
 // Account-scoped row; distinct from the per-session `ComposerPreferences`
 // (trust_mode / density_default) re-exported above. The name disambiguator is

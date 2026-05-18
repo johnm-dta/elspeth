@@ -30,6 +30,11 @@ const TURN_TYPE_LABELS: Record<TurnType, string> = {
   schema_form: "Schema form",
   propose_chain: "Proposed chain",
   recipe_offer: "Recipe offer",
+  // Phase 5b — interpretation-review history label.  The widget itself lands
+  // in Task 4 of 18b-phase-5b-frontend.md; this label entry exists so the
+  // Record<TurnType, string> exhaustive-keys contract holds the moment the
+  // TurnType union widens.
+  interpretation_review: "Interpretation review",
 };
 
 // ── Component ────────────────────────────────────────────────────────────────

@@ -370,6 +370,19 @@ class TestR1SourceRegressions:
         r1_findings = [finding for finding in findings if finding.rule_id == "R1" and finding.symbol_context in target_contexts]
         assert r1_findings == []
 
+    def test_session_fork_blob_rewrite_call_sites_have_no_r1_findings(self) -> None:
+        findings = scan_file(
+            Path("src/elspeth/web/sessions/routes.py"),
+            Path("src/elspeth"),
+        )
+
+        r1_findings = [
+            finding
+            for finding in findings
+            if finding.rule_id == "R1" and finding.symbol_context == ("create_session_router", "fork_from_message")
+        ]
+        assert r1_findings == []
+
 
 # =============================================================================
 # R2: getattr() detection

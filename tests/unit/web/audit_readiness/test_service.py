@@ -9,6 +9,11 @@ from uuid import UUID
 
 import pytest
 
+from elspeth.contracts.composer_interpretation import (
+    InterpretationChoice,
+    InterpretationEventRecord,
+    InterpretationSource,
+)
 from elspeth.contracts.secrets import SecretInventoryItem
 from elspeth.web.audit_readiness.service import ReadinessService
 from elspeth.web.composer.state import (
@@ -108,13 +113,61 @@ def _state(*, source_plugin="csv", transforms=(), sinks=(("out", "csv"),)):
     )
 
 
-def _make_service(state, validation_result, inventory=()):
+# Deterministic UUID for the test composition-state-id. The
+# llm_interpretations row uses this to scope event lookups; tests that
+# construct InterpretationEventRecord instances must pin the same value
+# so the row builder sees them.
+_TEST_COMPOSITION_STATE_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+
+def _interpretation_event_records_dispatch(events_by_source_and_state):
+    """Build an AsyncMock that filters a fixed event list per call args.
+
+    The ReadinessService issues two reads:
+      (a) opt-out probe — sources=(AUTO_INTERPRETED_OPT_OUT,), composition_state_id=None
+      (b) scoped events — no sources filter, composition_state_id=<current>
+
+    ``events_by_source_and_state`` is a mapping ``{"opt_out": [...],
+    "scoped": [...]}`` describing what each read should return. The
+    dispatch routes by the ``sources`` kwarg (if AUTO_INTERPRETED_OPT_OUT
+    is in the filter, route to the opt-out bucket; otherwise to scoped).
+    """
+
+    async def _list(
+        _session_id,
+        *,
+        status="all",
+        composition_state_id=None,
+        sources=None,
+    ):
+        # `status` and `composition_state_id` accepted for signature
+        # parity with the real method; the dispatch routes solely on
+        # the `sources` argument (opt-out probe vs. scoped events).
+        del status, composition_state_id
+        if sources is not None and InterpretationSource.AUTO_INTERPRETED_OPT_OUT in sources:
+            return list(events_by_source_and_state.get("opt_out", []))
+        return list(events_by_source_and_state.get("scoped", []))
+
+    return AsyncMock(side_effect=_list)
+
+
+def _make_session_service(events_by_source_and_state=None):
+    sess_svc = MagicMock()
+    record = MagicMock()
+    # record.id is read by ReadinessService.compute_snapshot as a UUID
+    # (CompositionStateRecord.id — protocol.py:369). Pin a deterministic
+    # value so test events bound to this id are correctly scoped.
+    record.id = _TEST_COMPOSITION_STATE_ID
+    sess_svc.get_current_state = AsyncMock(return_value=record)
+    sess_svc.list_interpretation_events = _interpretation_event_records_dispatch(events_by_source_and_state or {})
+    return sess_svc
+
+
+def _make_service(state, validation_result, inventory=(), interpretation_events=None):
     exec_svc = MagicMock()
     exec_svc.validate = AsyncMock(side_effect=AssertionError("ReadinessService must validate the already-read state"))
     exec_svc.validate_state = AsyncMock(return_value=validation_result)
-    sess_svc = MagicMock()
-    record = MagicMock()
-    sess_svc.get_current_state = AsyncMock(return_value=record)
+    sess_svc = _make_session_service(interpretation_events)
     # Use scoped_secret_resolver mock (list_refs(user_id) only — no auth_provider_type).
     # Matches app.py:470 precedent and the _SecretServiceLike Protocol (fix C4).
     scoped_resolver = MagicMock()
@@ -131,9 +184,7 @@ def _make_service(state, validation_result, inventory=()):
 
 
 def _make_service_with_execution_service(state, exec_svc, inventory=()):
-    sess_svc = MagicMock()
-    record = MagicMock()
-    sess_svc.get_current_state = AsyncMock(return_value=record)
+    sess_svc = _make_session_service()
     scoped_resolver = MagicMock()
     scoped_resolver.list_refs = MagicMock(return_value=list(inventory))
     settings = MagicMock()
@@ -144,6 +195,109 @@ def _make_service_with_execution_service(state, exec_svc, inventory=()):
         scoped_secret_resolver=scoped_resolver,
         settings=settings,
         state_from_record=lambda _record: state,
+    )
+
+
+def _make_event(
+    *,
+    choice: InterpretationChoice,
+    interpretation_source: InterpretationSource = InterpretationSource.USER_APPROVED,
+    affected_node_id: str | None = "llm_node",
+    user_term: str | None = "cool",
+    composition_state_id: UUID | None = _TEST_COMPOSITION_STATE_ID,
+    event_id: UUID | None = None,
+) -> InterpretationEventRecord:
+    """Build a minimally-populated InterpretationEventRecord for tests.
+
+    Field-population rules mirror the source-conditional CHECK
+    constraints documented in ``contracts/composer_interpretation.py``:
+
+      * USER_APPROVED + PENDING: surface fields populated; resolution
+        fields (accepted_value, arguments_hash, resolved_at) are NULL.
+      * USER_APPROVED + ACCEPTED_AS_DRAFTED/AMENDED: resolution fields
+        populated.
+      * AUTO_INTERPRETED_OPT_OUT: all surface and provenance fields
+        NULL; choice is OPTED_OUT.
+      * AUTO_INTERPRETED_NO_SURFACES: surface fields NULL; provenance
+        fields populated; choice is OPTED_OUT (semantic, not session-
+        wide opt-out).
+    """
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
+    if interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT:
+        return InterpretationEventRecord(
+            id=event_id if event_id is not None else UUID("00000000-0000-0000-0000-000000000001"),
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            composition_state_id=None,
+            affected_node_id=None,
+            tool_call_id=None,
+            user_term=None,
+            llm_draft=None,
+            accepted_value=None,
+            choice=InterpretationChoice.OPTED_OUT,
+            created_at=now,
+            resolved_at=now,
+            actor="alice",
+            model_identifier=None,
+            model_version=None,
+            provider=None,
+            composer_skill_hash=None,
+            arguments_hash=None,
+            hash_domain_version=None,
+            interpretation_source=interpretation_source,
+            runtime_model_identifier_at_resolve=None,
+            runtime_model_version_at_resolve=None,
+            resolved_prompt_template_hash=None,
+        )
+    if interpretation_source is InterpretationSource.AUTO_INTERPRETED_NO_SURFACES:
+        return InterpretationEventRecord(
+            id=event_id if event_id is not None else UUID("00000000-0000-0000-0000-000000000002"),
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            composition_state_id=composition_state_id,
+            affected_node_id=None,
+            tool_call_id=None,
+            user_term=None,
+            llm_draft=None,
+            accepted_value=None,
+            choice=InterpretationChoice.OPTED_OUT,
+            created_at=now,
+            resolved_at=now,
+            actor="alice",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-01-01",
+            provider="anthropic",
+            composer_skill_hash="0" * 64,
+            arguments_hash=None,
+            hash_domain_version=None,
+            interpretation_source=interpretation_source,
+            runtime_model_identifier_at_resolve=None,
+            runtime_model_version_at_resolve=None,
+            resolved_prompt_template_hash=None,
+        )
+    # USER_APPROVED row
+    resolved = choice is not InterpretationChoice.PENDING
+    return InterpretationEventRecord(
+        id=event_id if event_id is not None else UUID("00000000-0000-0000-0000-000000000003"),
+        session_id=UUID("11111111-1111-1111-1111-111111111111"),
+        composition_state_id=composition_state_id,
+        affected_node_id=affected_node_id,
+        tool_call_id="tc_1",
+        user_term=user_term,
+        llm_draft="something cool",
+        accepted_value="something cool" if resolved else None,
+        choice=choice,
+        created_at=now,
+        resolved_at=now if resolved else None,
+        actor="alice",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-01-01",
+        provider="anthropic",
+        composer_skill_hash="0" * 64,
+        arguments_hash="a" * 64 if resolved else None,
+        hash_domain_version="v1" if resolved else None,
+        interpretation_source=interpretation_source,
+        runtime_model_identifier_at_resolve="anthropic/claude-opus-4-7" if resolved else None,
+        runtime_model_version_at_resolve="2026-01-01" if resolved else None,
+        resolved_prompt_template_hash="b" * 64 if resolved else None,
     )
 
 
@@ -443,7 +597,37 @@ def test_retention_row_reports_system_value():
     assert "90" in row.summary
 
 
-def test_llm_interpretations_always_not_applicable_in_phase_2a():
+def test_llm_interpretations_not_applicable_when_no_llm_transforms():
+    """No LLM transforms in the composition → not_applicable.
+
+    Also asserts the service short-circuits: it does NOT query the
+    session-service for interpretation events when there's nothing to
+    interpret. This keeps the per-snapshot read cost zero for the
+    common non-LLM composition.
+    """
+    svc = _make_service(_state(transforms=(("t", "passthrough"),)), _OK)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "not_applicable"
+    assert row.summary == "No LLM transforms in this composition"
+    assert row.component_ids == ()
+    # No interpretation-events query was issued (short-circuit).
+    sess_svc = svc._session_service  # type: ignore[attr-defined]
+    sess_svc.list_interpretation_events.assert_not_called()
+
+
+def test_llm_interpretations_not_applicable_when_llm_present_but_no_events():
+    """LLM transforms present, no interpretation events yet → not_applicable.
+
+    The surfacing hasn't been triggered yet — the panel reports the
+    distinction between "this composition will never interpret" (no
+    LLM) and "this composition could interpret but hasn't yet".
+    """
     svc = _make_service(_state(transforms=(("j", "llm"),)), _OK)
     snap = asyncio.run(
         svc.compute_snapshot(
@@ -451,7 +635,137 @@ def test_llm_interpretations_always_not_applicable_in_phase_2a():
             user_id="alice",
         )
     )
-    assert _row(snap, "llm_interpretations").status == "not_applicable"
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "not_applicable"
+    assert row.summary == "No interpretation events yet for this composition"
+    assert row.component_ids == ()
+
+
+def test_llm_interpretations_warning_when_pending_events_present():
+    """Any PENDING interpretation event → warning + node ids in component_ids."""
+    events = {
+        "opt_out": [],
+        "scoped": [
+            _make_event(
+                choice=InterpretationChoice.PENDING,
+                affected_node_id="j",
+                user_term="cool",
+            ),
+        ],
+    }
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK, interpretation_events=events)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "warning"
+    assert row.summary == "1 pending interpretation review"
+    assert row.component_ids == ("j",)
+    assert row.detail is not None
+    assert "cool" in row.detail
+
+
+def test_llm_interpretations_ok_when_all_events_resolved():
+    """All events resolved (USER_APPROVED + accepted) → ok."""
+    events = {
+        "opt_out": [],
+        "scoped": [
+            _make_event(
+                choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+                affected_node_id="j",
+                event_id=UUID("00000000-0000-0000-0000-00000000000a"),
+            ),
+            _make_event(
+                choice=InterpretationChoice.AMENDED,
+                affected_node_id="j",
+                event_id=UUID("00000000-0000-0000-0000-00000000000b"),
+            ),
+        ],
+    }
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK, interpretation_events=events)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "ok"
+    assert row.summary == "2 interpretation(s) resolved"
+    assert row.component_ids == ("j",)
+
+
+def test_llm_interpretations_not_applicable_when_session_opted_out():
+    """Session-wide opt-out → not_applicable with an explicit note.
+
+    The opt-out signal is read via a SEPARATE query
+    (sources=[AUTO_INTERPRETED_OPT_OUT]) because the opt-out row is
+    written with composition_state_id=NULL and would not match a
+    composition-state-scoped WHERE clause.
+    """
+    events = {
+        "opt_out": [
+            _make_event(
+                choice=InterpretationChoice.OPTED_OUT,
+                interpretation_source=InterpretationSource.AUTO_INTERPRETED_OPT_OUT,
+            )
+        ],
+        # Even if there were scoped events, opt-out wins. The dispatcher
+        # would never read this bucket because the service short-circuits
+        # after detecting opt-out, but the test pins that intent.
+        "scoped": [],
+    }
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK, interpretation_events=events)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "not_applicable"
+    assert "opted out" in row.summary.lower()
+    assert row.detail is not None
+    assert "stop asking" in row.detail
+
+
+def test_llm_interpretations_ok_when_auto_interpreted_no_surfaces_baked_in():
+    """auto_interpreted_no_surfaces rows count as resolved, NOT as opt-out.
+
+    Distinct from AUTO_INTERPRETED_OPT_OUT: AUTO_INTERPRETED_NO_SURFACES
+    is the rate-cap-baked-in case where the LLM produced the
+    interpretation silently because the surface budget was exhausted.
+    The user did NOT opt out session-wide; this composition state
+    simply has resolved interpretations bound to it. The row should
+    surface as ok.
+    """
+    events = {
+        "opt_out": [],
+        "scoped": [
+            _make_event(
+                choice=InterpretationChoice.OPTED_OUT,
+                interpretation_source=InterpretationSource.AUTO_INTERPRETED_NO_SURFACES,
+                affected_node_id=None,  # NULL per the source-conditional CHECK
+                user_term=None,
+            ),
+        ],
+    }
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK, interpretation_events=events)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "ok"
+    assert row.summary == "1 interpretation resolved"
+    # affected_node_id is NULL on this row shape, so component_ids
+    # excludes it (the dedup-and-sort projection skips None).
+    assert row.component_ids == ()
 
 
 def test_secrets_not_applicable_when_no_refs():

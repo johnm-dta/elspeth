@@ -21,6 +21,7 @@ from uuid import UUID
 import pydantic
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
+from elspeth.contracts.composer_interpretation import InterpretationChoice, InterpretationSource
 from elspeth.web.execution.schemas import DiscardSummary, RunAccounting
 from elspeth.web.sessions.protocol import (
     ComposerDensityDefault,
@@ -503,17 +504,13 @@ class InterpretationEventResponse(BaseModel):
     user_term: str | None = Field(default=None, max_length=8192)
     llm_draft: str | None = Field(default=None, max_length=8192)
     accepted_value: str | None = Field(default=None, max_length=8192)
-    choice: Literal["pending", "accepted_as_drafted", "amended", "opted_out", "abandoned"]
+    choice: InterpretationChoice
     created_at: datetime
     resolved_at: datetime | None = None
     # Actor format mirrors ``ProposalEventRecord.actor``: originator:role:id
     # for request-scoped actors, system:{component} for system writers.
     actor: str = Field(min_length=1, max_length=256)
-    interpretation_source: Literal[
-        "user_approved",
-        "auto_interpreted_opt_out",
-        "auto_interpreted_no_surfaces",
-    ]
+    interpretation_source: InterpretationSource
     # Audit-provenance fields — bound to which LLM produced the draft.
     # Exposed on the wire so the audit-readiness panel and any future
     # reviewer surface can render "drafted by claude-opus-4-7 v… on

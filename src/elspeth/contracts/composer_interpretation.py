@@ -35,7 +35,7 @@ from uuid import UUID
 class InterpretationChoice(StrEnum):
     """The user's resolution of an interpretation surface.
 
-    CLOSED LIST — adding a value requires (a) amending the Phase 5b plan,
+    CLOSED LIST — adding a value requires (a) amending the interpretation-event contract,
     (b) extending this enum, (c) updating the closed-enum tests, and
     (d) a writer-path audit.
 
@@ -58,14 +58,64 @@ class InterpretationChoice(StrEnum):
 class InterpretationSource(StrEnum):
     """Structural source of an interpretation event row.
 
-    Closed enum. Adding a value requires (a) amending this plan, (b) extending
-    InterpretationSource here, (c) updating the closed-enum tests, and (d) a
+    Closed enum. Adding a value requires (a) amending the interpretation-event
+    contract, (b) extending InterpretationSource here, (c) updating the closed-enum tests, and (d) a
     writer-path audit. NO SILENT EXTENSION. See models.py governance block.
     """
 
     USER_APPROVED = "user_approved"
     AUTO_INTERPRETED_OPT_OUT = "auto_interpreted_opt_out"
     AUTO_INTERPRETED_NO_SURFACES = "auto_interpreted_no_surfaces"
+
+
+_INTERPRETATION_SURFACE_FIELDS: tuple[str, ...] = (
+    "composition_state_id",
+    "affected_node_id",
+    "tool_call_id",
+    "user_term",
+    "llm_draft",
+)
+_INTERPRETATION_LLM_PROVENANCE_FIELDS: tuple[str, ...] = (
+    "model_identifier",
+    "model_version",
+    "provider",
+    "composer_skill_hash",
+)
+_INTERPRETATION_SHAPE_FIELDS: tuple[str, ...] = (
+    *_INTERPRETATION_SURFACE_FIELDS,
+    *_INTERPRETATION_LLM_PROVENANCE_FIELDS,
+)
+_CHOICES_WITH_ACCEPTED_VALUE: frozenset[InterpretationChoice] = frozenset(
+    {
+        InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        InterpretationChoice.AMENDED,
+    }
+)
+
+
+def _validate_enum_member(value: object, enum_type: type[StrEnum], field_name: str) -> None:
+    if not isinstance(value, enum_type):
+        raise ValueError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
+
+
+def _shape_violation_message(
+    source: InterpretationSource,
+    *,
+    missing_required_fields: list[str],
+    non_null_fields: list[str],
+) -> str:
+    offender_names = set(missing_required_fields) | set(non_null_fields)
+    ordered_offenders = [name for name in _INTERPRETATION_SHAPE_FIELDS if name in offender_names]
+    detail_parts: list[str] = []
+    if missing_required_fields:
+        detail_parts.append(f"missing required fields: {', '.join(missing_required_fields)}")
+    if non_null_fields:
+        detail_parts.append(f"fields must be None: {', '.join(non_null_fields)}")
+    return (
+        f"InterpretationEventRecord {source.value} violates row shape; "
+        f"offending fields: {', '.join(ordered_offenders)}; "
+        f"{'; '.join(detail_parts)}"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +201,56 @@ class InterpretationEventRecord:
     # prompt-template string, computed at resolve time using stable_hash()
     # from contracts/hashing.py. NOT part of INTERPRETATION_HASH_DOMAIN_V1.
     resolved_prompt_template_hash: str | None
+
+    def __post_init__(self) -> None:
+        """Validate Tier-1 row-shape invariants at construction time."""
+        _validate_enum_member(self.choice, InterpretationChoice, "choice")
+        _validate_enum_member(self.interpretation_source, InterpretationSource, "interpretation_source")
+        self._validate_source_shape()
+        self._validate_choice_status_fields()
+        self._validate_hash_domain_pair()
+
+    def _validate_source_shape(self) -> None:
+        missing_required_fields: list[str] = []
+        non_null_fields: list[str] = []
+
+        if self.interpretation_source is InterpretationSource.USER_APPROVED:
+            missing_required_fields = [name for name in _INTERPRETATION_SHAPE_FIELDS if getattr(self, name) is None]
+        elif self.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT:
+            non_null_fields = [name for name in _INTERPRETATION_SHAPE_FIELDS if getattr(self, name) is not None]
+        elif self.interpretation_source is InterpretationSource.AUTO_INTERPRETED_NO_SURFACES:
+            non_null_fields = [name for name in _INTERPRETATION_SURFACE_FIELDS if getattr(self, name) is not None]
+            missing_required_fields = [name for name in _INTERPRETATION_LLM_PROVENANCE_FIELDS if getattr(self, name) is None]
+
+        if missing_required_fields or non_null_fields:
+            raise ValueError(
+                _shape_violation_message(
+                    self.interpretation_source,
+                    missing_required_fields=missing_required_fields,
+                    non_null_fields=non_null_fields,
+                )
+            )
+
+    def _validate_choice_status_fields(self) -> None:
+        if (self.choice is InterpretationChoice.PENDING) != (self.resolved_at is None):
+            raise ValueError(
+                "InterpretationEventRecord choice/resolved_at invariant violated: "
+                "choice='pending' must have resolved_at=None and all other choices must have resolved_at populated"
+            )
+
+        requires_accepted_value = self.choice in _CHOICES_WITH_ACCEPTED_VALUE
+        if requires_accepted_value != (self.accepted_value is not None):
+            raise ValueError(
+                "InterpretationEventRecord choice/accepted_value invariant violated: "
+                "accepted_value is populated only for accepted_as_drafted and amended choices"
+            )
+
+    def _validate_hash_domain_pair(self) -> None:
+        if (self.arguments_hash is None) != (self.hash_domain_version is None):
+            raise ValueError(
+                "InterpretationEventRecord arguments_hash/hash_domain_version invariant violated: "
+                "arguments_hash and hash_domain_version must both be None or both be populated"
+            )
 
 
 # INTERPRETATION_HASH_DOMAIN_V1: the closed set of fields used to compute

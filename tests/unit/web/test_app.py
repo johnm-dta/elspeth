@@ -12,9 +12,11 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.exc import CompileError, OperationalError
 from starlette.requests import Request
+from starlette.responses import Response as StarletteResponse
 
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
+    _BodySizeLimitMiddleware,
     _periodic_orphan_cleanup,
     _settings_from_env,
     create_app,
@@ -185,6 +187,61 @@ class TestBodySizeLimitMiddleware:
             content=b"{}",
         )
         assert response.status_code != 413
+
+    def test_allows_exact_content_length_boundary(self, tmp_path) -> None:
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        response = client.post(
+            "/api/health",
+            headers={
+                "Content-Length": str(_BodySizeLimitMiddleware._MAX_BODY_BYTES),
+                "Content-Type": "application/json",
+            },
+            content=b"{}",
+        )
+        assert response.status_code != 413
+
+    def test_rejects_one_byte_over_content_length_boundary(self, tmp_path) -> None:
+        app = create_app(_settings(tmp_path))
+        client = TestClient(app)
+        response = client.post(
+            "/api/health",
+            headers={
+                "Content-Length": str(_BodySizeLimitMiddleware._MAX_BODY_BYTES + 1),
+                "Content-Type": "application/json",
+            },
+            content=b"{}",
+        )
+        assert response.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_missing_content_length_stream_passes_through_without_body_read(self) -> None:
+        """No Content-Length means the middleware defers to per-route validators."""
+        middleware = _BodySizeLimitMiddleware(app=lambda scope, receive, send: None)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/health",
+            "headers": [(b"content-type", b"application/json")],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+
+        async def receive() -> dict[str, object]:
+            raise AssertionError("Content-Length-only guard must not read streamed bodies")
+
+        request = Request(scope, receive)
+
+        async def call_next(_request: Request) -> StarletteResponse:
+            return StarletteResponse(status_code=204)
+
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 204
 
 
 class TestGetSettingsDependency:

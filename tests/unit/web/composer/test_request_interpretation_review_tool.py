@@ -197,6 +197,8 @@ def test_01_tool_registered_in_get_tool_definitions() -> None:
     assert set(params["required"]) == {"affected_node_id", "user_term", "llm_draft"}
     assert set(params["properties"]) == {"affected_node_id", "user_term", "llm_draft"}
     assert all(params["properties"][k]["type"] == "string" for k in params["properties"])
+    assert "Do not ask the user in assistant prose" in tool["description"]
+    assert "stage the LLM transform with a placeholder first" in tool["description"]
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +241,37 @@ async def test_02_happy_path_produces_success_and_db_row(service: SessionService
     assert rows[0].llm_draft == "Visually appealing."
     assert rows[0].choice is InterpretationChoice.PENDING
     assert rows[0].interpretation_source is InterpretationSource.USER_APPROVED
+
+
+@pytest.mark.asyncio
+async def test_02b_opted_out_session_does_not_return_pending_payload(service: SessionServiceImpl) -> None:
+    """After session opt-out, the tool reports suppression and writes no PENDING row."""
+    session_id = uuid4()
+    state_id = await _seed_session(service, session_id)
+    await service.record_session_interpretation_opt_out(session_id=session_id, actor="user:alice")
+    state = _state_with(_llm_node())
+
+    result = await _handle_request_interpretation_review(
+        arguments={"affected_node_id": "rate_node", "user_term": "cool", "llm_draft": "Visually appealing."},
+        state=state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_after_opt_out",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+
+    assert result.success is True
+    assert result.data["_kind"] == "interpretation_review_suppressed_by_opt_out"
+    assert result.data["interpretation_review_disabled"] is True
+    assert await service.list_interpretation_events(session_id, status="pending") == []
+    all_rows = await service.list_interpretation_events(session_id, status="all")
+    assert len(all_rows) == 1
+    assert all_rows[0].interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
 
 
 # --------------------------------------------------------------------------- #
@@ -725,7 +758,7 @@ def test_detect_unresolved_placeholder_empty_when_resolved() -> None:
 def _make_llm_node(
     *,
     node_id: str,
-    prompt_template: str | None,
+    prompt_template: object | None,
     plugin: str | None = "llm",
 ) -> NodeSpec:
     """Construct a minimal NodeSpec for the typed detector tests.
@@ -861,6 +894,16 @@ def test_typed_detector_skips_node_with_no_prompt_template() -> None:
     """LLM node lacking ``prompt_template`` in options → []."""
     nodes = (_make_llm_node(node_id="rate_node", prompt_template=None),)
     assert _detect_unresolved_interpretation_placeholders_typed(nodes) == []
+
+
+def test_typed_detector_raises_for_non_string_prompt_template() -> None:
+    """LLM node with non-string prompt_template routes through ARG_ERROR."""
+    nodes = (_make_llm_node(node_id="rate_node", prompt_template={"text": "{{interpretation:cool}}"}),)
+    with pytest.raises(ToolArgumentError) as exc_info:
+        _detect_unresolved_interpretation_placeholders_typed(nodes)
+    assert exc_info.value.argument == "nodes[].options.prompt_template"
+    assert exc_info.value.expected == "a string"
+    assert exc_info.value.actual_type in {"dict", "mappingproxy"}
 
 
 def test_typed_detector_deduplicates_within_a_node() -> None:

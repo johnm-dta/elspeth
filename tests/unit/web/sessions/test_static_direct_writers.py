@@ -881,6 +881,31 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
             "trigger behaviour, not the production writer."
         ),
     ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestTriggerInstalledByBootstrap.test_chat_messages_delete_raises_even_without_blob_reference",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "schema trigger test: seeds a chat_messages row to assert that "
+            "trg_chat_messages_no_delete blocks direct DELETE even when no "
+            "blob lineage FK exists. Direct insert is required because the "
+            "test is isolating trigger behaviour, not exercising the "
+            "production writer."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="TestTriggerInstalledByBootstrap.test_chat_messages_delete_allowed_only_through_session_cascade",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "schema trigger test: seeds a chat_messages row to assert that "
+            "whole-session archival may remove transcript rows only through "
+            "the sessions-table FK cascade. Direct insert keeps the test "
+            "focused on trigger/cascade semantics."
+        ),
+    ),
     # ------ tests/unit/web/sessions/test_fork.py — corruption fixture ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_fork.py",

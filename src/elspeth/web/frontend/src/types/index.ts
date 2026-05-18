@@ -839,10 +839,10 @@ export type BlobCreationModalityWire =
 
 /**
  * Display form of the creation modality used by
- * `InlineSourceSummary.provenance` (Phase 5a Task 2.5). Hyphenated form;
- * see `BlobCreationModalityWire` for the snake_case wire form. The
- * adapter `toInlineSourceProvenance` in `api/client.ts` is the only
- * place wire → display translation is performed.
+ * `InlineSourceSummary.provenance`. Hyphenated form; see
+ * `BlobCreationModalityWire` for the snake_case wire form. The adapter
+ * `toInlineSourceProvenance` in `api/client.ts` is the only place wire
+ * → display translation is performed.
  */
 export type InlineSourceProvenance =
   | "verbatim"
@@ -862,9 +862,9 @@ export interface BlobMetadata {
   created_by: "user" | "assistant" | "pipeline";
   source_description: string | null;
   status: "ready" | "pending" | "error";
-  // Inline-blob provenance (Phase 5a Task 2.5). The wire form is
-  // snake_case; the frontend's `InlineSourceSummary.provenance` field is
-  // hyphenated. Translation lives in `api/client.ts` only.
+  // Inline-blob provenance. The wire form is snake_case; the frontend's
+  // `InlineSourceSummary.provenance` field is hyphenated. Translation
+  // lives in `api/client.ts` only.
   creation_modality: BlobCreationModalityWire;
   created_from_message_id: string | null;
   creating_model_identifier: string | null;
@@ -962,18 +962,18 @@ export interface InlineSourceSummary {
    * NON-NULLABLE BY CONTRACT. Every persisted blob carries a hash — that's
    * a Tier-1 audit-trail invariant on our data (CLAUDE.md "Auditability
    * Standard": hashes survive payload deletion, integrity is always
-   * verifiable). The projection layer in ChatPanel MUST throw, not
+   * verifiable). The inline-source projection MUST throw, not
    * coerce, when the wire returns a null or empty hash: silently
    * substituting an empty string into the rendered audit-info pane
    * gives an auditor a value the system never asserted, which is exactly
-   * the fabrication CLAUDE.md forbids. The throw lives in the
-   * `getBlobMetadata` projection in ChatPanel.tsx — keep it there.
+   * the fabrication CLAUDE.md forbids. The throw lives in
+   * `projectInlineSourceSummary` — keep it there.
    */
   contentHash: string;
   /**
    * How this inline source's content was produced. Projected from the
-   * server-recorded `creation_modality` column (Task 2.5) via the
-   * `fetchBlob` response adapter in `client.ts`.
+   * server-recorded `creation_modality` column via the `fetchBlob`
+   * response adapter in `client.ts`.
    *
    * - "verbatim"                   — user typed the content directly.
    * - "llm-generated"              — LLM generated rows; user confirmed.

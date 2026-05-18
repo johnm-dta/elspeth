@@ -639,6 +639,12 @@ def _build_llm_interpretations_row(
             or None,
             component_ids=component_ids,
         )
+    # ``model_identifier`` is the composer model that drafted the
+    # interpretation surface; ``runtime_model_identifier_at_resolve`` is the
+    # pipeline model that will execute the resolved prompt. They are different
+    # roles, so comparing them would produce false "rotated model" warnings.
+    # A future same-role drift signal must capture the runtime model at both
+    # surfacing and resolve time before warning here.
     return ReadinessRow(
         id="llm_interpretations",
         label="LLM interpretations",

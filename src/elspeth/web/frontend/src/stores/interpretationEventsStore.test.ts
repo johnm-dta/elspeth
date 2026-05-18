@@ -144,19 +144,12 @@ describe("interpretationEventsStore", () => {
         accepted_value: "witty",
         resolved_at: "2026-05-18T00:03:00Z",
       });
-      const optedOutEvt = makePendingEvent({
-        id: "evt-optout",
-        choice: "opted_out",
-        resolved_at: "2026-05-18T00:04:00Z",
-        interpretation_source: "auto_interpreted_opt_out",
-      });
 
       vi.mocked(api.listInterpretationEvents).mockResolvedValue([
         pendingEvt,
         acceptedEvt,
         amendedEvt1,
         amendedEvt2,
-        optedOutEvt,
       ]);
 
       await useInterpretationEventsStore.getState().refreshAll("sess-1");
@@ -167,6 +160,31 @@ describe("interpretationEventsStore", () => {
       expect(state.resolvedCountBySession["sess-1"]).toEqual({
         accepted_as_drafted: 1,
         amended: 2,
+        opted_out: 0,
+      });
+    });
+
+    it("rehydrates opt-out from history and suppresses stale pending entries", async () => {
+      const stalePendingEvt = makePendingEvent({ id: "evt-stale-pending" });
+      const optedOutEvt = makePendingEvent({
+        id: "evt-optout",
+        choice: "opted_out",
+        resolved_at: "2026-05-18T00:04:00Z",
+        interpretation_source: "auto_interpreted_opt_out",
+      });
+      vi.mocked(api.listInterpretationEvents).mockResolvedValue([
+        stalePendingEvt,
+        optedOutEvt,
+      ]);
+
+      await useInterpretationEventsStore.getState().refreshAll("sess-1");
+
+      const state = useInterpretationEventsStore.getState();
+      expect(state.optedOutBySession["sess-1"]).toBe(true);
+      expect(state.pendingBySession["sess-1"]).toEqual({});
+      expect(state.resolvedCountBySession["sess-1"]).toEqual({
+        accepted_as_drafted: 0,
+        amended: 0,
         opted_out: 1,
       });
     });

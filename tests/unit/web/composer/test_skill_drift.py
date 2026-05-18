@@ -201,6 +201,34 @@ class TestLLMModelGuidance:
         assert "never invent identifiers" in _WEB_SKILL_CONTENT
 
 
+class TestInterpretationReviewGuidance:
+    """Pin the prompt guidance that makes Phase 5b observable in LLM runs."""
+
+    def test_web_skill_teaches_subjective_term_interpretation_review(self) -> None:
+        """The skill must do more than list ``request_interpretation_review``.
+
+        A live local smoke run can emit a valid LLM pipeline with
+        ``prompt_template`` while silently baking "cool" into the prompt if the
+        skill only enumerates the tool. Keep the usage contract explicit so a
+        future prompt edit cannot remove the rule while leaving the tool name in
+        Step 0.
+        """
+        guidance = _section_between(
+            _WEB_SKILL_CONTENT,
+            "### Subjective Interpretation Review",
+            "### TERMINATION GATE",
+        )
+
+        assert "request_interpretation_review" in guidance
+        assert "subjective or underspecified" in guidance
+        assert "{{interpretation:<term>}}" in guidance
+        assert "After the state-staging tool succeeds" in guidance
+        assert "before any final reply" in guidance
+        assert "Do not ask the user to confirm subjective terms in normal assistant prose" in guidance
+        assert "Do not silently bake" in guidance
+        assert "interpretation_review_disabled" in guidance
+
+
 class TestEngineValidatorPluginDrift:
     """Verify static plugin sets in engine-side validators match the runtime registry.
 

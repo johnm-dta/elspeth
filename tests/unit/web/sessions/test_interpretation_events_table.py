@@ -1,13 +1,11 @@
 """Schema tests for ``interpretation_events`` table and its dependencies.
 
-Phase 5b Task 2 — covers the new table, the
-``composition_states.provenance`` closed-enum extension, the
-``sessions.interpretation_review_disabled`` column, the two BEFORE UPDATE
-triggers (``trg_interpretation_events_immutable_resolved`` and
-``trg_chat_messages_immutable_content``), the
-``calls.resolved_prompt_template_hash`` column added to the L1 Landscape,
-the partial unique index on pending tool calls, and the F-11 lookup index
-on ``composition_state_id``.
+Coverage includes the interpretation-event table,
+``composition_states.provenance`` closed-enum extension,
+``sessions.interpretation_review_disabled`` column, append-only UPDATE and
+DELETE triggers, ``calls.resolved_prompt_template_hash`` in the L1 Landscape,
+the partial unique index on pending tool calls, and the lookup index on
+``composition_state_id``.
 
 Tests follow the spec at
 ``docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md`` (Task 2,
@@ -522,6 +520,44 @@ class TestImmutabilityTrigger:
                 {"id": row_id},
             )
 
+    def test_delete_resolved_row_raises(self, engine) -> None:
+        """Resolved interpretation rows are append-only against DELETE too."""
+        _, row_id = self._insert_resolved_row(engine)
+        with pytest.raises(IntegrityError, match="append-only"), engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM interpretation_events WHERE id = :id"),
+                {"id": row_id},
+            )
+
+    def test_delete_pending_row_does_not_raise(self, engine) -> None:
+        """F-29 orphan recovery can delete unresolved PENDING rows."""
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        row_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            conn.execute(
+                insert(interpretation_events_table).values(
+                    _user_approved_row(
+                        row_id=row_id,
+                        session_id=session_id,
+                        state_id=state_id,
+                        choice="pending",
+                    )
+                )
+            )
+
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM interpretation_events WHERE id = :id"),
+                {"id": row_id},
+            )
+
+        with engine.connect() as conn:
+            row = conn.execute(select(interpretation_events_table.c.id).where(interpretation_events_table.c.id == row_id)).fetchone()
+        assert row is None
+
 
 # Test 11 — F-8 trigger-existence via production bootstrap path ----------------
 class TestTriggerInstalledByBootstrap:
@@ -536,6 +572,20 @@ class TestTriggerInstalledByBootstrap:
         with engine.connect() as conn:
             row = conn.execute(
                 text("SELECT name FROM sqlite_master WHERE type='trigger' AND name='trg_chat_messages_immutable_content'")
+            ).fetchone()
+        assert row is not None
+
+    def test_immutable_resolved_delete_trigger_present(self, engine) -> None:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='trigger' AND name='trg_interpretation_events_no_delete_resolved'")
+            ).fetchone()
+        assert row is not None
+
+    def test_immutable_chat_messages_delete_trigger_present(self, engine) -> None:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='trigger' AND name='trg_chat_messages_no_delete'")
             ).fetchone()
         assert row is not None
 
@@ -562,6 +612,57 @@ class TestTriggerInstalledByBootstrap:
                 {"id": msg_id},
             )
 
+    def test_chat_messages_delete_raises_even_without_blob_reference(self, engine) -> None:
+        """chat_messages rows are audit anchors even when no blob FK exists."""
+        session_id = str(uuid.uuid4())
+        msg_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            conn.execute(
+                insert(chat_messages_table).values(
+                    id=msg_id,
+                    session_id=session_id,
+                    role="user",
+                    content="original",
+                    sequence_no=1,
+                    writer_principal="route_user_message",
+                    created_at=datetime.now(UTC),
+                )
+            )
+        with pytest.raises(IntegrityError, match="append-only"), engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM chat_messages WHERE id = :id"),
+                {"id": msg_id},
+            )
+
+    def test_chat_messages_delete_allowed_only_through_session_cascade(self, engine) -> None:
+        """Whole-session archival may purge chat rows through FK cascades."""
+        session_id = str(uuid.uuid4())
+        msg_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            conn.execute(
+                insert(chat_messages_table).values(
+                    id=msg_id,
+                    session_id=session_id,
+                    role="user",
+                    content="original",
+                    sequence_no=1,
+                    writer_principal="route_user_message",
+                    created_at=datetime.now(UTC),
+                )
+            )
+
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM sessions WHERE id = :id"),
+                {"id": session_id},
+            )
+
+        with engine.connect() as conn:
+            row = conn.execute(select(chat_messages_table.c.id).where(chat_messages_table.c.id == msg_id)).fetchone()
+        assert row is None
+
 
 # Test 12 — F-11 composition_state_id index uses index, not scan --------------
 class TestCompositionStateIdIndex:
@@ -577,14 +678,23 @@ class TestCompositionStateIdIndex:
 
 # F-24 — schema validator catches missing triggers ----------------------------
 class TestSchemaValidatorCatchesMissingTrigger:
-    def test_validator_raises_when_trigger_dropped(self, engine, tmp_path) -> None:
+    @pytest.mark.parametrize(
+        "trigger_name",
+        [
+            "trg_interpretation_events_immutable_resolved",
+            "trg_interpretation_events_no_delete_resolved",
+            "trg_chat_messages_immutable_content",
+            "trg_chat_messages_no_delete",
+        ],
+    )
+    def test_validator_raises_when_trigger_dropped(self, trigger_name: str, tmp_path) -> None:
         from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_schema
 
         db_path = tmp_path / "session_drop_trigger.db"
         eng = create_session_engine(f"sqlite:///{db_path}")
         initialize_session_schema(eng)
         with eng.begin() as conn:
-            conn.execute(text("DROP TRIGGER trg_interpretation_events_immutable_resolved"))
+            conn.execute(text(f"DROP TRIGGER {trigger_name}"))
         # Second initialize call validates the existing DB and must crash.
         with pytest.raises(SessionSchemaError, match="trigger"):
             initialize_session_schema(eng)

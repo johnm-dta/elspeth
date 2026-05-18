@@ -32,8 +32,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, delete, func, select, update
 
-from elspeth.contracts.composer_interpretation import InterpretationEventRecord
-from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationSource
+from elspeth.contracts.enums import CreationModality, is_llm_authored_creation_modality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.schema import get_aggregation_contract_options
@@ -96,7 +96,11 @@ from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
-from elspeth.web.validation import _reject_credential_shaped_content, _validate_accepted_value_content
+from elspeth.web.validation import (
+    INTERPRETATION_PLACEHOLDER_RE,
+    _reject_credential_shaped_content,
+    _validate_accepted_value_content,
+)
 
 if TYPE_CHECKING:
     pass
@@ -1173,7 +1177,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "required": ["source", "nodes", "edges", "outputs"],
             },
         },
-        # Wave 4 tools
+        # Source-reset and validation-explanation tools.
         {
             "name": "clear_source",
             "description": "Remove the source from the pipeline composition state.",
@@ -1579,8 +1583,8 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "required": ["name"],
             },
         },
-        # Phase 5b Task 5 — composer-LLM-callable tool surface for surfacing an
-        # interpretation of a subjective or under-specified term for user review.
+        # Composer-LLM-callable tool surface for surfacing an interpretation
+        # of a subjective or under-specified term for user review.
         # The description below is normative documentation for the LLM (mirrored
         # in the composer skill markdown) and is reviewed by the audit panel as
         # part of the request_interpretation_review event row's provenance.
@@ -1599,9 +1603,12 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "MUST already contain the affected LLM transform (call upsert_node "
                 "first) and its prompt_template MUST contain the placeholder "
                 "{{interpretation:<term>}}. The user will see your draft and "
-                "either accept it or amend it. Do not call this for concrete "
-                "operators (e.g., 'rate 1-10') or for terms the user already "
-                "defined in the conversation."
+                "either accept it or amend it. Do not ask the user in assistant "
+                "prose; this tool is the review surface. If no composition state "
+                "exists yet, stage the LLM transform with a placeholder first, "
+                "wait for that tool result, then call this tool. Do not call this "
+                "for concrete operators (e.g., 'rate 1-10') or for terms the "
+                "user already defined in the conversation."
             ),
             "parameters": {
                 "type": "object",
@@ -1646,7 +1653,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
 
 # --- Tool Registry ---
 
-# Dual-registry invariant (F-18, Phase 5b Task 5):
+# Dual-registry invariant (F-18):
 # ELSPETH dispatches composer tools through TWO disjoint registries.
 #
 #   ``_DISCOVERY_TOOLS`` / ``_MUTATION_TOOLS`` (and the blob/secret peer
@@ -2152,8 +2159,8 @@ _MIME_TO_SOURCE: dict[str, tuple[str, dict[str, str]]] = {
 class BlobToolRecord(TypedDict):
     """Closed dict shape returned by composer blob discovery helpers.
 
-    Inline-blob provenance fields (Phase 5a Task 2.5) mirror the columns
-    introduced on ``blobs_table``: ``creation_modality`` carries the
+    Inline-blob provenance fields mirror the columns introduced on
+    ``blobs_table``: ``creation_modality`` carries the
     closed-enum string (wire form), ``created_from_message_id`` binds to
     the originating chat message, and the five ``creating_*`` fields
     carry LLM-provenance for the three LLM-authored modalities.
@@ -2230,7 +2237,7 @@ def _blob_row_to_tool_dict(row: Any) -> BlobToolRecord:
         "created_by": row.created_by,
         "source_description": row.source_description,
         "status": row.status,
-        # Inline-blob provenance (Phase 5a Task 2.5). The Tier 1 guard in
+        # Inline-blob provenance. The Tier 1 guard in
         # ``_guard_blob_row_literals`` already validated
         # ``creation_modality`` against the closed CreationModality enum.
         "creation_modality": row.creation_modality,
@@ -2489,6 +2496,8 @@ def _prevalidate_plugin_options(
         for k, v in injected_fields.items():
             if k not in merged:
                 merged[k] = v
+    if plugin_type == "transform" and plugin_name == "llm":
+        _mask_pending_interpretation_placeholders_for_authoring_validation(merged)
 
     # Strip secret_ref markers before validation.  A secret-ref'd field
     # IS provisioned (the user called wire_secret_ref), just deferred to
@@ -2523,6 +2532,30 @@ def _prevalidate_plugin_options(
         # Re-format only the non-secret errors.
         lines = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in remaining)
         return f"Invalid options for {plugin_type} '{plugin_name}': {lines}"
+
+
+def _mask_pending_interpretation_placeholders_for_authoring_validation(
+    options: dict[str, Any],
+) -> None:
+    """Allow unresolved interpretation placeholders during composer authoring.
+
+    ``{{interpretation:<term>}}`` is a Phase 5b composer-review token, not a
+    runtime Jinja variable. The LLM must be able to stage a pending LLM node
+    carrying that token so ``request_interpretation_review`` can create the
+    audit row and the user can resolve it. Runtime remains strict: execution
+    rejects unresolved placeholders before YAML generation, and resolved
+    prompts validate through the normal LLM config path.
+    """
+
+    if "resolved_prompt_template_hash" in options:
+        return
+    prompt_template = options.get("prompt_template")
+    if not isinstance(prompt_template, str):
+        return
+    options["prompt_template"] = INTERPRETATION_PLACEHOLDER_RE.sub(
+        "pending interpretation",
+        prompt_template,
+    )
 
 
 def _secret_ref_placement_error(
@@ -3086,8 +3119,7 @@ def _execute_set_source_from_blob(
     ``service.py``, rev-3 N7 / rev-4 M1).  On
     :class:`pydantic.ValidationError` we re-raise as
     :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing
-    at ``service.py:2480`` receives the right exception class (Task 13
-    / Wave 2; mirrors Task 4 pattern at ``tools.py:2320-2327``).
+    at ``service.py:2480`` receives the right exception class.
 
     The prior in-handler ``isinstance(caller_options, dict)`` guard at
     this site is superseded by the Pydantic model's ``options: dict[str,
@@ -3161,8 +3193,8 @@ def _resolve_blob_quota_bytes(max_blob_storage_per_session_bytes: int | None) ->
 class _PreparedBlobCreate:
     """Validated blob-create payload ready for filesystem/DB persistence.
 
-    Provenance fields (Phase 5a Task 2.5)
-    -------------------------------------
+    Provenance fields
+    -----------------
     ``creation_modality`` declares how the content was produced; mirror
     enum is :class:`elspeth.contracts.enums.CreationModality`.  The five
     ``creating_*`` fields carry LLM-provenance and are populated only for
@@ -3237,15 +3269,15 @@ def _prepare_blob_create(
 
     Type guarantees on entry
     ------------------------
-    Post Task 14 (set_pipeline promotion), every reachable caller validates
-    ``arguments`` via a Pydantic model BEFORE invoking this helper:
+    Every reachable caller validates ``arguments`` via a Pydantic model
+    BEFORE invoking this helper:
 
       * :func:`_execute_create_blob` — :class:`CreateBlobArgumentsModel`
-        (Task 13 / Wave 2; ``filename: str``, ``mime_type: str``,
-        ``content: str`` + ``extra="forbid"``).
+        (``filename: str``, ``mime_type: str``, ``content: str`` +
+        ``extra="forbid"``).
       * :func:`_execute_set_pipeline` inline-blob path — passes
-        ``validated.source.inline_blob.model_dump()`` (Task 14 / Wave 3
-        via :class:`_InlineBlobModel`; same string-typed required fields
+        ``validated.source.inline_blob.model_dump()`` (via
+        :class:`_InlineBlobModel`; same string-typed required fields
         + ``extra="forbid"``).
 
     The three ``isinstance(..., str)`` guards that previously sat at the
@@ -3260,8 +3292,8 @@ def _prepare_blob_create(
     sanitisation, UTF-8 encodability) ARE NOT type checks — they enforce
     content-validity rules Pydantic cannot express — and remain.
 
-    Provenance kwargs (Phase 5a Task 2.5)
-    ------------------------------------
+    Provenance kwargs
+    -----------------
     All callers MUST supply ``creation_modality`` and
     ``created_from_message_id``.  The five ``creating_*`` kwargs default
     to ``None`` and MUST be left as ``None`` for ``CreationModality.VERBATIM``;
@@ -3274,6 +3306,11 @@ def _prepare_blob_create(
     filename = arguments["filename"]
     mime_type = arguments["mime_type"]
     content = arguments["content"]
+
+    if is_llm_authored_creation_modality(creation_modality) and created_from_message_id is None:
+        raise AuditIntegrityError(
+            "LLM-authored blob creation_modality requires created_from_message_id so the audit trail can walk back to the triggering chat message"
+        )
 
     if mime_type not in _ALLOWED_BLOB_MIME_TYPES:
         # Tier-3 boundary: the LLM-supplied mime_type is not in the
@@ -3303,7 +3340,7 @@ def _prepare_blob_create(
             actual_type="str",
         ) from exc
 
-    # UTF-8 encode guard (Phase 5a Task 2.5): a Python ``str`` that contains
+    # UTF-8 encode guard: a Python ``str`` that contains
     # an unpaired surrogate code point (e.g. ``"\udc80"``) is a valid
     # ``str`` but is NOT encodable to UTF-8 — the underlying file write
     # would raise UnicodeEncodeError downstream and leave the audit layer
@@ -3437,7 +3474,7 @@ def _persist_prepared_blob_create(
                     created_by="assistant",
                     source_description=prepared.description,
                     status="ready",
-                    # Inline-blob provenance (Phase 5a Task 2.5). The
+                    # Inline-blob provenance. The
                     # DB-side CHECK ck_blobs_creating_llm_provenance_nullability
                     # rejects any combination where the modality and the
                     # five creating_* fields disagree on LLM authorship.
@@ -3491,8 +3528,7 @@ def _execute_create_blob(
     rev-3 N7 / rev-4 M1).  On :class:`pydantic.ValidationError` we
     re-raise as :class:`ToolArgumentError` so the compose loop's
     ARG_ERROR routing at ``service.py:2480`` receives the right
-    exception class (Task 13 / Wave 2; mirrors Task 4 pattern at
-    ``tools.py:2320-2327``).
+    exception class.
 
     The validated ``model_dump()`` is then fed to ``_prepare_blob_create``
     which still performs the MIME-type allowlist check and
@@ -3519,14 +3555,14 @@ def _execute_create_blob(
     # The Pydantic model catches type/shape violations; _prepare_blob_create
     # catches value-domain violations.  Both route via ToolArgumentError
     # to ARG_ERROR (CEC1 channel discipline).
-    # Provenance classification (Phase 5a Task 2.5). The ``create_blob``
+    # Provenance classification. The ``create_blob``
     # tool is invoked by the LLM as a self-directed action — the content
     # the LLM passes is, by construction, content the LLM authored as part
     # of its tool-call response. However, in this commit we tag every
     # create_blob payload as VERBATIM with NULL creating_* fields,
-    # matching the set_pipeline.inline_blob path, until Phase 5a Tasks
-    # 3/4/8 supply the call-loop context (model identifier, version,
-    # provider, prompt hash) needed to populate LLM_GENERATED.  The
+    # matching the set_pipeline.inline_blob path, until the call-loop
+    # context (model identifier, version, provider, prompt hash) can
+    # populate LLM_GENERATED. The
     # ``created_from_message_id`` still names the user turn that
     # triggered the LLM's response, so the audit walk works today.
     prepared = _prepare_blob_create(
@@ -3708,8 +3744,7 @@ def _execute_update_blob(
     rev-3 N7 / rev-4 M1).  On :class:`pydantic.ValidationError` we
     re-raise as :class:`ToolArgumentError` so the compose loop's
     ARG_ERROR routing at ``service.py:2480`` receives the right
-    exception class (Task 13 / Wave 2; mirrors Task 4 pattern at
-    ``tools.py:2320-2327``).
+    exception class.
 
     Validation precedence (file/lock safety).  ``model_validate`` MUST
     run BEFORE :func:`_session_blob_lock` is acquired and BEFORE any
@@ -4303,8 +4338,7 @@ def _execute_apply_pipeline_recipe(
     ``service.py``, rev-3 N7 / rev-4 M1).  On
     :class:`pydantic.ValidationError` the handler re-raises as
     :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing
-    at ``service.py:2480`` receives the right exception class (Task 4
-    pattern; mirrored by Task 13 / Task 14).
+    at ``service.py:2480`` receives the right exception class.
 
     Semantic vs argument-shape failures
     ------------------------------------
@@ -4571,8 +4605,7 @@ def _execute_set_pipeline(
 
     On :class:`pydantic.ValidationError` the handler re-raises as
     :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
-    ``service.py:2480`` receives the right exception class (Task 4 pattern;
-    mirrored by Task 13 promotions at ``tools.py:2326-2333``).
+    ``service.py:2480`` receives the right exception class.
 
     Dispatcher-wired kwargs
     -----------------------
@@ -4669,19 +4702,19 @@ def _execute_set_pipeline(
         # _prepare_blob_create raises ToolArgumentError on invalid LLM
         # arguments (CEC1 channel discipline) — propagate to the
         # compose loop's ARG_ERROR branch rather than masking as
-        # SUCCESS-with-success=False.  Post-Task 14 the inline_blob
-        # contents are already type-validated by ``_InlineBlobModel``
+        # SUCCESS-with-success=False. The inline_blob contents are already
+        # type-validated by ``_InlineBlobModel``
         # (str/str/str + extra=forbid), so the isinstance guards inside
         # _prepare_blob_create are unreachable from this caller — see
-        # the Task 14 cleanup that removes them.
-        # Provenance classification (Phase 5a Task 2.5).  In this commit
-        # we always tag inline-blob set_pipeline payloads as VERBATIM with
+        # the cleanup that removes them.
+        # Provenance classification. We always tag inline-blob
+        # set_pipeline payloads as VERBATIM with
         # all five creating_* fields = None.  The discriminant that
         # distinguishes LLM-authored vs verbatim content (substring match
         # against the triggering chat message body, or a tool-call-loop
-        # tag the LLM emits explicitly) is deferred to Phase 5a Tasks
-        # 3/4/8 per the plan: those tasks own the call-loop context (model
-        # identifier, version, provider, prompt hash) required to populate
+        # tag the LLM emits explicitly) is handled at the call-loop layer:
+        # that layer owns the context (model identifier, version, provider,
+        # prompt hash) required to populate
         # the LLM-authored variant without violating the
         # ck_blobs_creating_llm_provenance_nullability CHECK.  Until the
         # discriminant exists, defaulting VERBATIM keeps the CHECK
@@ -5245,7 +5278,7 @@ def _handle_patch_output_options(
     return _execute_patch_output_options(arguments, state, data_dir)
 
 
-# --- Wave 4 handlers ---
+# --- Source-reset and validation-explanation handlers ---
 
 
 def _execute_clear_source(
@@ -6482,7 +6515,7 @@ _BLOB_QUOTA_MUTATION_TOOLS: frozenset[str] = frozenset(
 )
 
 # Blob-mutation tools that create a NEW blob row and therefore accept the
-# ``user_message_id`` provenance kwarg (Phase 5a Task 2.5).
+# ``user_message_id`` provenance kwarg.
 # ``set_source_from_blob`` and ``delete_blob`` operate on existing rows
 # whose provenance was fixed at create time; ``update_blob`` rewrites the
 # file but leaves the original blob row's provenance intact.
@@ -6696,8 +6729,8 @@ def execute_tool(
         }
         if tool_name in _BLOB_QUOTA_MUTATION_TOOLS:
             blob_kwargs["max_blob_storage_per_session_bytes"] = max_blob_storage_per_session_bytes
-        # Phase 5a Task 2.5: ``create_blob`` writes the blob row with a
-        # ``created_from_message_id`` provenance pointer.  Only tools that
+        # ``create_blob`` writes the blob row with a
+        # ``created_from_message_id`` provenance pointer. Only tools that
         # actually persist a new blob need the kwarg; ``set_source_from_blob``,
         # ``delete_blob``, and ``update_blob`` operate on existing rows
         # whose provenance is fixed at create time.
@@ -6727,7 +6760,7 @@ def execute_tool(
 
 
 # ---------------------------------------------------------------------------
-# Phase 5b Task 5 — request_interpretation_review (session-aware async tool)
+# request_interpretation_review (session-aware async tool)
 # ---------------------------------------------------------------------------
 #
 # This is the first session-aware async composer tool. Unlike the state-pure
@@ -6745,6 +6778,7 @@ def execute_tool(
 # ``begin_dispatch_or_arg_error`` covers the dispatch on both success and
 # ARG_ERROR paths.
 
+
 # Regex for detecting placeholders of the form ``{{interpretation:<term>}}``
 # inside a prompt_template string. Used by both the per-tool boundary check
 # (``_assert_affected_llm_node`` — confirms the LLM's draft is being staged
@@ -6757,9 +6791,6 @@ def execute_tool(
 # because LLM drafts vary. The captured term is trimmed by the caller before
 # comparison so leading/trailing whitespace on the term does not cause a
 # false negative.
-_INTERPRETATION_PLACEHOLDER_RE: Final[re.Pattern[str]] = re.compile(r"\{\{\s*interpretation\s*:\s*([^{}]+?)\s*\}\}")
-
-
 def _assert_affected_llm_node(
     state: CompositionState,
     affected_node_id: str,
@@ -6808,7 +6839,7 @@ def _assert_affected_llm_node(
             expected=f"node {affected_node_id!r} to declare options.prompt_template (str) containing {{{{interpretation:{user_term}}}}}",
             actual_type=f"options.prompt_template is {type(prompt_template).__name__}",
         )
-    matched_terms = [match.group(1).strip() for match in _INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template)]
+    matched_terms = [match.group(1).strip() for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template)]
     if user_term.strip() not in matched_terms:
         raise ToolArgumentError(
             argument="affected_node_id",
@@ -6847,7 +6878,7 @@ def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> 
         prompt_template = options.get("prompt_template") if isinstance(options, Mapping) else None
         if not isinstance(prompt_template, str):
             continue
-        for match in _INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
+        for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
             unresolved[match.group(1).strip()] = None
     return list(unresolved.keys())
 
@@ -6887,11 +6918,17 @@ def _detect_unresolved_interpretation_placeholders_typed(
     for node in nodes:
         if node.plugin != "llm":
             continue
-        prompt_template = node.options.get("prompt_template")
-        if not isinstance(prompt_template, str):
+        if "prompt_template" not in node.options:
             continue
+        prompt_template = node.options["prompt_template"]
+        if not isinstance(prompt_template, str):
+            raise ToolArgumentError(
+                argument="nodes[].options.prompt_template",
+                expected="a string",
+                actual_type=type(prompt_template).__name__,
+            )
         seen_in_node: dict[str, None] = {}
-        for match in _INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
+        for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
             term = match.group(1).strip()
             if term in seen_in_node:
                 continue
@@ -6989,8 +7026,8 @@ async def _check_interpretation_rate_limits(
                 f"term {user_term!r} would be surfaced {per_term_count + 1} times — use a direct "
                 f"interpretation in the prompt template instead"
             ),
-            # Compose-loop discriminant (Phase 5b Task 5 follow-on, F-6):
-            # the rate-cap branch is the trigger for the
+            # Compose-loop discriminant (F-6): the rate-cap branch is the
+            # trigger for the
             # AUTO_INTERPRETED_NO_SURFACES writer + F-15 telemetry. The
             # ``code`` field lets the loop distinguish this exception from a
             # generic ARG_ERROR without grepping the message string.
@@ -7031,7 +7068,7 @@ async def _handle_request_interpretation_review(
     create_pending_interpretation_event: Callable[..., Awaitable[InterpretationEventRecord]],
     list_interpretation_events: Callable[..., Awaitable[list[InterpretationEventRecord]]],
 ) -> ToolResult:
-    """Stage a pending interpretation event for user review (Phase 5b Task 5).
+    """Stage a pending interpretation event for user review.
 
     Returns a SUCCESS :class:`ToolResult` whose ``data`` payload signals
     the frontend to surface the review affordance. Does NOT advance
@@ -7109,6 +7146,19 @@ async def _handle_request_interpretation_review(
         provider=provider,
         composer_skill_hash=composer_skill_hash,
     )
+    if event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT:
+        return ToolResult(
+            success=True,
+            updated_state=state,
+            validation=state.validate(),
+            affected_nodes=(),
+            data={
+                "_kind": "interpretation_review_suppressed_by_opt_out",
+                "event_id": str(event.id),
+                "interpretation_review_disabled": True,
+                "message": "Interpretation review suppressed because this session has opted out.",
+            },
+        )
     return ToolResult(
         success=True,
         updated_state=state,  # no state change yet — /resolve advances version
@@ -7128,9 +7178,9 @@ async def _handle_request_interpretation_review(
     )
 
 
-# Session-aware async tool handler registry (Phase 5b Task 5).
+# Session-aware async tool handler registry.
 # See the dual-registry invariant documented at the registry block above
-# (search for "Dual-registry invariant (F-18, Phase 5b Task 5)").
+# (search for "Dual-registry invariant (F-18)").
 SessionAwareToolHandler = Callable[..., Awaitable[ToolResult]]
 
 _SESSION_AWARE_TOOL_HANDLERS: dict[str, SessionAwareToolHandler] = {

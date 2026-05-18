@@ -500,6 +500,10 @@ class CreationModality(StrEnum):
     """LLM generated rows, user then amended the content before
     finalisation."""
 
+    def requires_llm_provenance(self) -> bool:
+        """Return whether this modality requires LLM-provenance fields."""
+        return self in _LLM_AUTHORED_CREATION_MODALITIES
+
 
 # The set of modalities that require LLM-provenance fields (the five
 # ``creating_*`` columns on ``blobs_table``).  Mirrored by the
@@ -513,6 +517,11 @@ _LLM_AUTHORED_CREATION_MODALITIES: frozenset[CreationModality] = frozenset(
         CreationModality.LLM_GENERATED_THEN_AMENDED,
     }
 )
+
+
+def is_llm_authored_creation_modality(modality: CreationModality) -> bool:
+    """Return whether a blob modality requires LLM-provenance fields."""
+    return modality.requires_llm_provenance()
 
 
 def error_edge_label(transform_id: str) -> str:

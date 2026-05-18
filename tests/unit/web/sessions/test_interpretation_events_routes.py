@@ -28,6 +28,7 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationSource,
 )
+from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.service import SessionServiceImpl
 from tests.unit.web.conftest import _make_session
@@ -40,23 +41,47 @@ def _llm_node(
     model: str | None = "anthropic/claude-opus-4-7",
     model_version: str | None = "2026-05-01",
 ) -> dict[str, Any]:
-    """Return an LLM transform node carrying a single interpretation placeholder.
+    """Return a production-serialized LLM node carrying one placeholder.
 
     Shape note: ``prompt_template`` lives inside ``options`` because that is
     the field ``_patch_llm_transform_prompt`` reads and the field NodeSpec
-    surfaces to the runtime YAML generator. See Phase 5b Task 9.
+    surfaces to the runtime YAML generator. The returned dict comes from
+    ``CompositionState.to_dict()`` so route tests exercise the production
+    ``node_type``/``plugin`` discriminator rather than a private ``kind``
+    fixture.
     """
-    node: dict[str, Any] = {
-        "id": node_id,
-        "kind": "llm",
-        "options": {
-            "prompt_template": f"Rate how {{{{interpretation:{user_term}}}}} this is.",
-        },
+    options: dict[str, Any] = {
+        "prompt_template": f"Rate how {{{{interpretation:{user_term}}}}} this is.",
     }
     if model is not None:
-        node["model"] = model
+        options["model"] = model
     if model_version is not None:
-        node["model_version"] = model_version
+        options["model_version"] = model_version
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="input",
+                on_success="out",
+                on_error="quarantine",
+                options=options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Routes Test", description=""),
+        version=1,
+    )
+    node = state.to_dict()["nodes"][0]
     return node
 
 
@@ -276,6 +301,25 @@ async def test_08_resolve_event_from_different_session_returns_404(
         json={"choice": "accepted_as_drafted"},
     )
     assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
+async def test_08b_resolve_existing_event_with_consumed_placeholder_returns_422(
+    test_client: TestClient,
+) -> None:
+    """A real patch failure must not be laundered as "event not found"."""
+    seeded = await _seed_session_with_pending_event(
+        test_client,
+        node=_llm_node(user_term="cool") | {"options": {"prompt_template": "No interpretation placeholder remains."}},
+    )
+
+    response = test_client.post(
+        f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve",
+        json={"choice": "accepted_as_drafted"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "interpretation_placeholder_unavailable"
 
 
 # --------------------------------------------------------------------------- #

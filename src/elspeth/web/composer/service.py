@@ -94,6 +94,7 @@ from elspeth.web.composer.tools import (
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     RuntimePreflight,
     ToolResult,
+    _detect_unresolved_interpretation_placeholders_typed,
     _sync_list_blobs,
     compute_proof_diagnostics,
     execute_tool,
@@ -114,6 +115,7 @@ from elspeth.web.execution.runtime_preflight import (
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.sessions.models import sessions_table
+from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
 slog = structlog.get_logger()
 
@@ -465,7 +467,7 @@ def _attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) ->
 
 
 # ---------------------------------------------------------------------------
-# Provider prompt-cache markers (elspeth-4e79436719 §Phase 3)
+# Provider prompt-cache markers (elspeth-4e79436719)
 #
 # Anthropic-family providers (Anthropic direct, OpenRouter Anthropic routing,
 # AWS Bedrock Anthropic, Google Vertex Anthropic) use explicit
@@ -1039,6 +1041,21 @@ def _last_mutation_was_pending_proposal(tool_invocations: tuple[ComposerToolInvo
     return False
 
 
+def _last_failure_was_pre_state_interpretation_review(tool_invocations: tuple[ComposerToolInvocation, ...]) -> bool:
+    """Return True when review was called before any state row existed."""
+    for invocation in reversed(tool_invocations):
+        if is_discovery_tool(invocation.tool_name):
+            continue
+        return (
+            invocation.tool_name == "request_interpretation_review"
+            and invocation.status is ComposerToolStatus.ARG_ERROR
+            and invocation.error_message is not None
+            and "composition_state_id" in invocation.error_message
+            and "missing current_state_id" in invocation.error_message
+        )
+    return False
+
+
 def _blocking_result_from_tool_invocations(tool_invocations: tuple[ComposerToolInvocation, ...]) -> str:
     """Name the most recent failed build/edit tool result, if one exists."""
     for invocation in reversed(tool_invocations):
@@ -1061,6 +1078,53 @@ def _blocking_result_from_tool_invocations(tool_invocations: tuple[ComposerToolI
             ):
                 return f"{invocation.tool_name} succeeded without mutating CompositionState (version stayed {invocation.version_before})."
     return "the model ended the turn without calling any build/edit tool."
+
+
+def _pre_state_interpretation_review_repair_message(*, next_turn: int) -> str:
+    return (
+        "[composer-system] You called request_interpretation_review before a "
+        "persisted composition state existed. Do not reply to the user yet. "
+        "First call set_pipeline or another state-staging tool to create the "
+        "affected LLM transform with prompt_template containing the "
+        "{{interpretation:<term>}} placeholder. Wait for that tool result, "
+        "then call request_interpretation_review again. "
+        f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}."
+    )
+
+
+def _pending_interpretation_review_repair_message(
+    missing_sites: tuple[tuple[str, str], ...],
+    *,
+    next_turn: int,
+) -> str:
+    sites = ", ".join(f"{node_id}: {{{{interpretation:{term}}}}}" for node_id, term in missing_sites)
+    return (
+        "[composer-system] The current pipeline contains pending interpretation "
+        "placeholder/event handoff(s) that are missing or unresolvable: "
+        f"{sites}. Do not reply to the user yet. For each listed handoff, "
+        "ensure there is exactly one matching {{interpretation:<term>}} token "
+        "in that node's options.prompt_template and exactly one pending "
+        "request_interpretation_review event for the same affected_node_id and "
+        "user_term. If the event is missing, call request_interpretation_review. "
+        "If the prompt has zero or multiple matching tokens, patch the prompt "
+        "so it has exactly one. Do not rewrite the token as a normal Jinja variable. "
+        f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}."
+    )
+
+
+def _matching_interpretation_placeholder_count(
+    state: CompositionState,
+    *,
+    node_id: str,
+    term: str,
+) -> int:
+    node = next((candidate for candidate in state.nodes if candidate.id == node_id), None)
+    if node is None or node.plugin != "llm":
+        return 0
+    prompt_template = node.options.get("prompt_template")
+    if not isinstance(prompt_template, str):
+        return 0
+    return sum(1 for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template) if match.group(1).strip() == term)
 
 
 def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
@@ -1270,8 +1334,8 @@ class ComposerServiceImpl:
         self._phase3_last_redacted_tool_rows: tuple[RedactedToolRow, ...] = ()
         self._phase3_last_audit_outcome: AuditOutcome | None = None
 
-        # Phase 5b Task 5 follow-on (F-5a). Re-read the composer skill
-        # markdown from disk and assert its SHA-256 still matches the
+        # F-5a. Re-read the composer skill markdown from disk and assert
+        # its SHA-256 still matches the
         # ``PIPELINE_COMPOSER_SKILL_HASH`` captured atomically at module
         # import. A mismatch means the on-disk file was edited after the
         # LRU cache populated — the LLM would be prompted with the cached
@@ -1293,7 +1357,7 @@ class ComposerServiceImpl:
         )
         self._composer_skill_hash: str = PIPELINE_COMPOSER_SKILL_HASH
         self._composer_skill_name: str = PIPELINE_COMPOSER_SKILL_NAME
-        # Phase 5b F-5c gate: ensures the first ``compose()`` call upserts
+        # F-5c gate: ensures the first ``compose()`` call upserts
         # the skill markdown into ``skill_markdown_history`` exactly once
         # per service instance. Subsequent compose() calls observe the
         # flag set and skip the upsert.
@@ -1307,8 +1371,9 @@ class ComposerServiceImpl:
         current_state_id: str | None = None,
         initial_state: CompositionState | None = None,
         user_message_id: str | None = None,
+        message: str = "one-turn compose-loop test driver",
     ) -> ComposeLoopTestResult:
-        """Drive exactly one compose-loop turn for Phase 3 tests.
+        """Drive exactly one compose-loop turn for compose-loop tests.
 
         Test-only helper: it bypasses HTTP route setup but exercises the
         same ``_compose_loop`` body, including ``_require_sessions_service()``.
@@ -1340,7 +1405,7 @@ class ComposerServiceImpl:
         self._call_llm = _call_fake_llm  # type: ignore[method-assign]
         try:
             result = await self._compose_loop(
-                "Phase 3 one-turn test driver",
+                message,
                 [],
                 state,
                 session_id=resolved_session_id,
@@ -1364,7 +1429,7 @@ class ComposerServiceImpl:
         *,
         telemetry: Any,
     ) -> str:
-        """Serialize one Step 1 outcome through the Phase 2 response walker."""
+        """Serialize one Step 1 outcome through the redaction response walker."""
 
         # Keep redaction imports local to the redaction paths; service.py is
         # already load-order sensitive and these walkers are cold-path helpers.
@@ -1411,8 +1476,8 @@ class ComposerServiceImpl:
                 validation_errors=tuple(error.message for error in result.validation.errors),
                 composer_meta=None,
             ),
-            # Phase 1 inserts composition state rows inside
-            # persist_compose_turn under the session write lock and re-derives
+            # persist_compose_turn inserts composition state rows under
+            # the session write lock and re-derives
             # lineage from per-session version ordering when this is None
             # (spec §5.7.1). The async loop deliberately does not fabricate a
             # predecessor id for a row that has not been allocated yet.
@@ -1489,7 +1554,43 @@ class ComposerServiceImpl:
             yaml_generator,
             secret_service=self._secret_service,
             user_id=user_id,
+            allow_pending_interpretation_placeholders=True,
         )
+
+    async def _missing_pending_interpretation_review_sites(
+        self,
+        state: CompositionState,
+        *,
+        session_id: str | None,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return pending interpretation handoffs that cannot be resolved."""
+
+        sites = tuple(_detect_unresolved_interpretation_placeholders_typed(state.nodes))
+        if session_id is None:
+            return ()
+        sessions_service = self._require_sessions_service()
+        events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
+        pending_sites = {
+            (event.affected_node_id, event.user_term.strip())
+            for event in events
+            if event.affected_node_id is not None and event.user_term is not None
+        }
+        missing_or_unresolvable: dict[tuple[str, str], None] = {}
+        for site in sites:
+            if site not in pending_sites:
+                missing_or_unresolvable[site] = None
+        for event in events:
+            if event.affected_node_id is None or event.user_term is None:
+                continue
+            site = (event.affected_node_id, event.user_term.strip())
+            placeholder_count = _matching_interpretation_placeholder_count(
+                state,
+                node_id=site[0],
+                term=site[1],
+            )
+            if placeholder_count != 1:
+                missing_or_unresolvable[site] = None
+        return tuple(missing_or_unresolvable)
 
     def _new_runtime_preflight_cache(self) -> _RuntimePreflightCache:
         return {}
@@ -2300,8 +2401,8 @@ class ComposerServiceImpl:
                 guided-mode exit; the layered transition prompt is used.
         """
         initial_version = state.version
-        # Phase 5b Task 5 follow-on (F-5c). On the first compose-loop entry
-        # of this service instance, upsert the composer skill markdown into
+        # F-5c. On the first compose-loop entry of this service instance,
+        # upsert the composer skill markdown into
         # ``skill_markdown_history`` so an auditor inspecting a future
         # interpretation_events row can join via ``composer_skill_hash``
         # to retrieve the exact text the LLM was prompted with. The
@@ -2385,8 +2486,8 @@ class ComposerServiceImpl:
         current_state_id: str | None = initial_current_state_id
 
         while True:
-            # Phase 3 Step 1 captures the state id observed before the
-            # provider call. Step 2 passes this exact value to
+            # The compose-loop audit path captures the state id observed
+            # before the provider call and passes this exact value to
             # persist_compose_turn_async as expected_current_state_id.
             await _emit_progress(progress, _model_call_progress_event(message))
             response = await self._call_llm_before_deadline(
@@ -2418,6 +2519,41 @@ class ComposerServiceImpl:
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:
+                if (
+                    repair_turns_used < _MAX_REPAIR_TURNS
+                    and _user_request_expects_pipeline_mutation(message)
+                    and _state_is_structurally_empty(state)
+                    and _last_failure_was_pre_state_interpretation_review(recorder.invocations)
+                ):
+                    llm_messages.append(
+                        {
+                            "role": "user",
+                            "content": _pre_state_interpretation_review_repair_message(
+                                next_turn=repair_turns_used + 1,
+                            ),
+                        }
+                    )
+                    repair_turns_used += 1
+                    continue
+
+                if repair_turns_used < _MAX_REPAIR_TURNS:
+                    missing_interpretation_sites = await self._missing_pending_interpretation_review_sites(
+                        state,
+                        session_id=session_id,
+                    )
+                    if missing_interpretation_sites:
+                        llm_messages.append(
+                            {
+                                "role": "user",
+                                "content": _pending_interpretation_review_repair_message(
+                                    missing_interpretation_sites,
+                                    next_turn=repair_turns_used + 1,
+                                ),
+                            }
+                        )
+                        repair_turns_used += 1
+                        continue
+
                 if await self._attempt_empty_state_uploaded_blob_repair(
                     state=state,
                     llm_messages=llm_messages,
@@ -2888,6 +3024,7 @@ class ComposerServiceImpl:
                             arguments_redacted_json=proposal_summary.arguments_redacted_json,
                             base_state_id=UUID(current_state_id) if current_state_id is not None else None,
                             actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
+                            user_message_id=UUID(user_message_id) if user_message_id is not None else None,
                         )
                         proposals_this_turn += 1
                         proposal_payload = {
@@ -3225,7 +3362,7 @@ class ComposerServiceImpl:
                     )
                     continue
 
-                # Session-aware async tool dispatch (Phase 5b Task 5 follow-on).
+                # Session-aware async tool dispatch.
                 #
                 # ``_SESSION_AWARE_TOOL_HANDLERS`` holds handlers that AWAIT
                 # session-service writers/readers; they cannot be dispatched
@@ -3236,9 +3373,9 @@ class ComposerServiceImpl:
                 # through the same audit envelope discipline as the sync
                 # path (finish_success / finish_arg_error / finish_plugin_crash).
                 #
-                # Currently registered: ``request_interpretation_review``
-                # (Phase 5b Task 5). Adding another session-aware tool
-                # extends ``_SESSION_AWARE_TOOL_HANDLERS`` and the per-tool
+                # Currently registered: ``request_interpretation_review``.
+                # Adding another session-aware tool extends
+                # ``_SESSION_AWARE_TOOL_HANDLERS`` and the per-tool
                 # kwarg-build dict below; no new dispatch branch is needed.
                 if is_session_aware_tool(tool_name):
                     session_aware_outcome = await self._dispatch_session_aware_tool(
@@ -4130,7 +4267,7 @@ class ComposerServiceImpl:
         llm_messages: list[dict[str, Any]],
         anti_anchor: AntiAnchorTracker,
     ) -> _SessionAwareDispatchOutcome:
-        """Dispatch a session-aware async composer tool (Phase 5b Task 5 follow-on).
+        """Dispatch a session-aware async composer tool.
 
         Mirrors the structural envelope discipline of ``dispatch_with_audit``
         used for the sync ``execute_tool`` path:
@@ -4158,9 +4295,9 @@ class ComposerServiceImpl:
           not Tier-3).
         * ``current_state_id`` is not None for tools that need a
           composition_state foreign key (currently every session-aware
-          tool). The handler's ``ToolArgumentError`` discipline already
-          validates ``affected_node_id`` against the in-memory state, but
-          the persisted row needs the FK to the composition_states row.
+          tool). If the LLM calls the tool before a successful state-staging
+          tool has created that row, this returns ARG_ERROR so the model can
+          retry after staging the state instead of crashing the request.
 
         Per-tool dispatch is performed by reading the handler from
         ``_SESSION_AWARE_TOOL_HANDLERS`` and awaiting it with the
@@ -4182,16 +4319,41 @@ class ComposerServiceImpl:
                 f"the LLM on unsaved-session compose calls."
             )
         if current_state_id is None:
-            # Same invariant: the AUTO_INTERPRETED_NO_SURFACES writer
-            # and the create_pending_interpretation_event writer need
-            # the composition_states FK. The first compose() turn for a
-            # never-saved session has no row yet; the route is expected
-            # to persist an initial state before invoking compose().
-            raise RuntimeError(
-                f"Session-aware tool {tool_name!r} dispatched with no current_state_id. "
-                f"The composition_states row must be persisted before the LLM is given "
-                f"access to session-aware tools."
+            # Fresh chat sessions legitimately start without a
+            # composition_states row. A session-aware tool can only write
+            # its audit row after a successful state-staging tool
+            # (set_pipeline/upsert_node/etc.) has advanced and persisted
+            # the state. Treat an earlier call as LLM-correctable
+            # sequencing, not a server crash: the request reached this
+            # branch through a valid authenticated compose session, but
+            # the LLM called the review tool before its FK target exists.
+            exc = ToolArgumentError(
+                argument="composition_state_id",
+                expected=(
+                    "a persisted composition state; call set_pipeline or another "
+                    "state-staging tool successfully, wait for its tool result, "
+                    "then call request_interpretation_review"
+                ),
+                actual_type="missing current_state_id",
             )
+            arg_error_payload = _arg_error_payload(exc, tool_name)
+            recorder.record(
+                finish_arg_error(
+                    audit,
+                    error_class="ToolArgumentError",
+                    error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
+                    error_payload=arg_error_payload,
+                )
+            )
+            anti_anchor.record_failure(tool_name, audit.arguments_hash)
+            llm_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps(arg_error_payload),
+                }
+            )
+            return _SessionAwareDispatchOutcome(result=None, is_discovery=False)
 
         handler = _SESSION_AWARE_TOOL_HANDLERS[tool_name]
         kwargs = self._build_session_aware_kwargs(
@@ -4316,7 +4478,7 @@ class ComposerServiceImpl:
         """Build the kwarg dict for a session-aware tool handler.
 
         Each session-aware tool's handler signature is closed-form
-        (Phase 5b Task 5 documents the contract); the kwargs differ per
+        (the session-aware tool contract documents the required shape); the kwargs differ per
         tool because the injected service methods and snapshot fields
         vary. Adding a new session-aware tool adds a branch here.
         """
@@ -4543,7 +4705,7 @@ class ComposerServiceImpl:
         transformed payload is what flows to LiteLLM and what the audit
         ``messages_hash`` / ``tools_spec_hash`` record — the hash is over
         the bytes actually sent, so the audit row is truthful about the
-        wire payload (elspeth-4e79436719 §Phase 3).
+        wire payload (elspeth-4e79436719).
         """
         from litellm.exceptions import APIError as LiteLLMAPIError
         from litellm.exceptions import AuthenticationError as LiteLLMAuthError
@@ -5021,7 +5183,7 @@ def _arg_error_payload(exc: ToolArgumentError, tool_name: str) -> Mapping[str, A
         Leak-safe canonicalization of the Pydantic chained cause —
         ``loc``/``msg``/``type`` only, ``input``/``url``/``ctx``
         stripped. Provides field-name detail for recovery flows in
-        Phase 3+ that need to know which specific Pydantic field
+        recovery flows that need to know which specific Pydantic field
         failed validation. Absent (key omitted) when there is no
         chained Pydantic cause or the chained cause is not a
         ``ValidationError``; recording an empty list has no audit
@@ -5036,26 +5198,26 @@ def _arg_error_payload(exc: ToolArgumentError, tool_name: str) -> Mapping[str, A
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 test-only compose-loop driver result carrier.
+# Test-only compose-loop driver result carrier.
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class ComposeLoopTestResult:
-    """Structured result returned by the Phase 3 one-turn test driver."""
+    """Structured result returned by the one-turn compose-loop test driver."""
 
     assistant_message: str
     tool_outcomes: tuple[Any, ...] = ()
     persisted_assistant_row: Any | None = None
     persisted_assistant_tool_calls: tuple[Any, ...] = ()
     persisted_tool_row_content: tuple[Any, ...] = ()
-    # Phase 5b Task 5 follow-on: the buffered per-call audit invocations
-    # so dispatch-branch tests can assert recorder state without
+    # Buffered per-call audit invocations so dispatch-branch tests can
+    # assert recorder state without
     # touching the persistence machinery directly.
     tool_invocations: tuple[Any, ...] = ()
 
     @property
     def tool_outcomes_for_assertion(self) -> tuple[Any, ...]:
-        """Backward-compatible assertion surface named by the Phase 3 plan."""
+        """Backward-compatible assertion surface for compose-loop tests."""
 
         return self.tool_outcomes

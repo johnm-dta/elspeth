@@ -37,6 +37,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -60,6 +61,7 @@ from elspeth.web.composer.tools import (
     RATE_CAP_PER_SESSION_DAY_CODE,
     RATE_CAP_PER_TERM_CODE,
 )
+from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     sessions_table,
@@ -89,6 +91,18 @@ def _fake_response_with_tool_call(
     ``response.model`` for ``_safe_response_model``. We synthesise the
     minimum the loop needs.
     """
+    return _fake_response_with_tool_calls(
+        tool_calls=[{"id": tool_call_id, "name": tool_name, "arguments": arguments}],
+        response_model=response_model,
+    )
+
+
+def _fake_response_with_tool_calls(
+    *,
+    tool_calls: list[dict[str, Any]],
+    response_model: str = "anthropic/claude-opus-4-7-20260101",
+) -> Any:
+    """Build a minimal LiteLLM-shaped response carrying one or more tool calls."""
 
     class _Func:
         def __init__(self, name: str, arguments: str) -> None:
@@ -114,7 +128,13 @@ def _fake_response_with_tool_call(
             self.choices = [
                 _Choice(
                     _Message(
-                        tool_calls=[_ToolCall(tool_call_id, _Func(tool_name, json.dumps(arguments)))],
+                        tool_calls=[
+                            _ToolCall(
+                                str(call["id"]),
+                                _Func(str(call["name"]), json.dumps(call["arguments"])),
+                            )
+                            for call in tool_calls
+                        ],
                         content=None,
                     )
                 )
@@ -210,6 +230,35 @@ def _state_with_llm_node(term: str = "cool") -> CompositionState:
     )
 
 
+def _set_pipeline_with_pending_interpretation_args(term: str = "cool") -> dict[str, Any]:
+    return {
+        "source": {
+            "plugin": "null",
+            "on_success": "rows",
+            "options": {},
+        },
+        "nodes": [
+            {
+                "id": "rate_node",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "scored_rows",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": f"Rate how {{{{interpretation:{term}}}}} this row is.",
+                    "schema": {"mode": "observed"},
+                },
+            }
+        ],
+        "edges": [],
+        "outputs": [],
+    }
+
+
 async def _seed_session_and_state(
     service: SessionServiceImpl,
     *,
@@ -283,6 +332,24 @@ def _build_composer(tmp_path: Path, sessions_service: SessionServiceImpl) -> Com
         sessions_service=sessions_service,
         session_engine=sessions_service._engine,
     )
+
+
+def test_composer_runtime_preflight_allows_pending_interpretation_placeholders(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """Composer authoring preflight must not force the LLM to consume pending review tokens."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_llm_node()
+    expected = ValidationResult(is_valid=True, checks=[], errors=[])
+
+    with patch("elspeth.web.composer.service.validate_pipeline", return_value=expected) as validate:
+        result = composer._runtime_preflight(state, user_id="alice")
+
+    assert result is expected
+    validate.assert_called_once()
+    assert validate.call_args.kwargs["allow_pending_interpretation_placeholders"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +426,365 @@ async def test_compose_loop_dispatches_request_interpretation_review(
     from elspeth.web.composer.prompts import PIPELINE_COMPOSER_SKILL_HASH
 
     assert event.composer_skill_hash == PIPELINE_COMPOSER_SKILL_HASH
+
+
+@pytest.mark.asyncio
+async def test_fresh_session_set_pipeline_then_request_interpretation_review_persists_pending_event(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A fresh chat session can stage an LLM placeholder, persist the new
+    composition state, and request interpretation review on the next model
+    turn.
+
+    This is the Phase 5b success-metric path from a first user message:
+    no initial ``composition_states`` row exists, the LLM first calls
+    ``set_pipeline`` with ``{{interpretation:cool}}`` in
+    ``options.prompt_template``, then calls
+    ``request_interpretation_review`` after the state-staging tool result.
+    The placeholder is a composer-time review token, so authoring
+    prevalidation must allow it until the user resolves the pending event.
+    """
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Fresh interpretation review session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_with_pending_interpretation_args(),
+            ),
+            _fake_response_with_tool_call(
+                tool_call_id="call_review",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "user_term": "cool",
+                    "llm_draft": "modern, useful, engaging, and clear for the public.",
+                },
+            ),
+            _fake_text_response("Done — interpretation review is pending."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+    )
+
+    invocations = result.tool_invocations
+    assert [inv.tool_name for inv in invocations] == [
+        "set_pipeline",
+        "request_interpretation_review",
+    ]
+    assert [inv.status.value for inv in invocations] == ["success", "success"]
+
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert len(events) == 1
+    event = events[0]
+    assert event.composition_state_id is not None
+    assert event.affected_node_id == "rate_node"
+    assert event.tool_call_id == "call_review"
+    assert event.user_term == "cool"
+    assert event.llm_draft == "modern, useful, engaging, and clear for the public."
+
+
+@pytest.mark.asyncio
+async def test_pending_interpretation_placeholder_without_event_forces_review_tool_retry(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A staged ``{{interpretation:...}}`` token is incomplete until the audit event exists."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Missing interpretation review repair session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_with_pending_interpretation_args(),
+            ),
+            _fake_text_response("Done — the pipeline is ready."),
+            _fake_response_with_tool_call(
+                tool_call_id="call_review_after_repair",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "user_term": "cool",
+                    "llm_draft": "modern, useful, engaging, and clear for the public.",
+                },
+            ),
+            _fake_text_response("Done — interpretation review is pending."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+        message="create a workflow that rates how cool pages are",
+    )
+
+    assert [inv.tool_name for inv in result.tool_invocations] == [
+        "set_pipeline",
+        "request_interpretation_review",
+    ]
+    assert [inv.status.value for inv in result.tool_invocations] == ["success", "success"]
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert len(events) == 1
+    assert events[0].user_term == "cool"
+    assert events[0].affected_node_id == "rate_node"
+    assert events[0].tool_call_id == "call_review_after_repair"
+
+
+@pytest.mark.asyncio
+async def test_pending_interpretation_event_with_duplicate_placeholder_forces_prompt_repair(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A pending event is still broken if the live prompt has two replacement sites."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Duplicate placeholder repair session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    duplicate_prompt = (
+        "Rate how {{interpretation:cool}} this row is. Use this meaning for {{interpretation:cool}} after the user approves it."
+    )
+    repaired_prompt = "Rate how {{interpretation:cool}} this row is after the user approves the pending definition."
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_with_pending_interpretation_args(),
+            ),
+            _fake_response_with_tool_call(
+                tool_call_id="call_review",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "user_term": "cool",
+                    "llm_draft": "modern, useful, engaging, and clear for the public.",
+                },
+            ),
+            _fake_response_with_tool_call(
+                tool_call_id="call_duplicate_placeholder",
+                tool_name="patch_node_options",
+                arguments={
+                    "node_id": "rate_node",
+                    "patch": {"prompt_template": duplicate_prompt},
+                },
+            ),
+            _fake_text_response("Done — interpretation review is pending."),
+            _fake_response_with_tool_call(
+                tool_call_id="call_repair_duplicate_placeholder",
+                tool_name="patch_node_options",
+                arguments={
+                    "node_id": "rate_node",
+                    "patch": {"prompt_template": repaired_prompt},
+                },
+            ),
+            _fake_text_response("Done — interpretation review is still pending."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+        message="create a workflow that rates how cool pages are",
+    )
+
+    assert [inv.tool_name for inv in result.tool_invocations] == [
+        "set_pipeline",
+        "request_interpretation_review",
+        "patch_node_options",
+        "patch_node_options",
+    ]
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert len(events) == 1
+    state_record = await sessions_service.get_current_state(session_id)
+    assert state_record is not None
+    [rate_node] = [node for node in state_record.nodes if node["id"] == "rate_node"]
+    assert rate_node["options"]["prompt_template"] == repaired_prompt
+
+
+@pytest.mark.asyncio
+async def test_missing_state_interpretation_review_arg_error_forces_staging_retry(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A build-style request must not stop after calling review too early.
+
+    The live model sometimes tries ``request_interpretation_review`` before
+    any composition state exists, receives the missing-current-state ARG_ERROR,
+    then emits prose saying it needs to stage the workflow first. For a
+    build-style user request, that prose is not a valid stopping point: the
+    compose loop should inject a repair instruction and continue so the model
+    can call ``set_pipeline`` and then retry the review tool.
+    """
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Early review repair session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_too_soon",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "user_term": "cool",
+                    "llm_draft": "modern and useful.",
+                },
+            ),
+            _fake_text_response("I need to stage the LLM node first."),
+            _fake_response_with_tool_call(
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                arguments=_set_pipeline_with_pending_interpretation_args(),
+            ),
+            _fake_response_with_tool_call(
+                tool_call_id="call_review",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "user_term": "cool",
+                    "llm_draft": "modern and useful.",
+                },
+            ),
+            _fake_text_response("Done — interpretation review is pending."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+        message="create a workflow that rates how cool pages are",
+    )
+
+    assert [inv.tool_name for inv in result.tool_invocations] == [
+        "request_interpretation_review",
+        "set_pipeline",
+        "request_interpretation_review",
+    ]
+    assert [inv.status.value for inv in result.tool_invocations] == [
+        "arg_error",
+        "success",
+        "success",
+    ]
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    assert len(events) == 1
+    assert events[0].tool_call_id == "call_review"
+
+
+@pytest.mark.asyncio
+async def test_request_interpretation_review_without_persisted_state_returns_arg_error(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """An over-eager request before any state row exists is LLM-correctable,
+    not a server crash.
+
+    Fresh sessions legitimately start with ``current_state_id=None``. If the
+    model calls ``request_interpretation_review`` before a successful
+    state-staging tool has been persisted, the compose loop must return an
+    ARG_ERROR instructing it to stage state first instead of raising
+    ``RuntimeError``.
+    """
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id = uuid4()
+    with sessions_service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Early interpretation review session",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_too_soon",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "user_term": "cool",
+                    "llm_draft": "modern and useful.",
+                },
+            ),
+            _fake_text_response("I will stage the LLM node first."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=None,
+    )
+
+    invocations = result.tool_invocations
+    assert len(invocations) == 1
+    invocation = invocations[0]
+    assert invocation.tool_name == "request_interpretation_review"
+    assert invocation.status.value == "arg_error"
+    assert invocation.error_class == "ToolArgumentError"
+    assert "composition_state_id" in (invocation.error_message or "")
+
+    events = await sessions_service.list_interpretation_events(session_id, status="all")
+    assert events == []
 
 
 # ---------------------------------------------------------------------------

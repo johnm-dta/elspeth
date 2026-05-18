@@ -960,6 +960,13 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
 // widget"). Detailed widget rendering, edit-button visibility per
 // provenance, and audit-info disclosure all live in the widget test.
 describe("ChatPanel inline-source projection", () => {
+  const twoRowInlineSourceText = "url\nhttps://a.gov.au\nhttps://b.gov.au";
+  const twoRowInlineSourceHash =
+    "9b8d3393ad3be052da5f25595789f926a161a4f8c0090c61f10a9cbab69a473c";
+  const oneRowInlineSourceText = "url\nhttps://a.gov.au";
+  const differentInlineSourceHash =
+    "e14713c61f9a7d0119925f46e9957e6d42a1604a5d62932853c46b03681af30b";
+
   const sessionFixture: Session = {
     id: "session-inline",
     title: "Inline session",
@@ -967,14 +974,14 @@ describe("ChatPanel inline-source projection", () => {
     updated_at: "2026-05-18T10:00:00Z",
   };
 
-  function makeBlobMetadata(): BlobMetadata {
+  function makeBlobMetadata(overrides: Partial<BlobMetadata> = {}): BlobMetadata {
     return {
       id: "blob-inline-1",
       session_id: "session-inline",
       filename: "chat.csv",
       mime_type: "text/csv",
       size_bytes: 42,
-      content_hash: "abc123def456",
+      content_hash: twoRowInlineSourceHash,
       created_at: "2026-05-18T10:00:01Z",
       created_by: "user",
       source_description: null,
@@ -986,6 +993,7 @@ describe("ChatPanel inline-source projection", () => {
       creating_provider: "anthropic",
       creating_composer_skill_hash: "skill-hash",
       creating_arguments_hash: "args-hash",
+      ...overrides,
     };
   }
 
@@ -1009,7 +1017,7 @@ describe("ChatPanel inline-source projection", () => {
     );
     (
       apiClient.previewBlobContent as ReturnType<typeof vi.fn>
-    ).mockResolvedValue("url\nhttps://a.gov.au\nhttps://b.gov.au");
+    ).mockResolvedValue(twoRowInlineSourceText);
 
     const composition = makeComposition(1, {
       source: {
@@ -1130,6 +1138,142 @@ describe("ChatPanel inline-source projection", () => {
       );
     });
 
+    expect(
+      screen.queryByRole("region", { name: /source created/i }),
+    ).toBeNull();
+
+    errorSpy.mockRestore();
+  });
+
+  it("does NOT render the widget when blob MIME metadata has malformed parameter syntax", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata({ mime_type: "text/csv; charset=" }),
+    );
+    (
+      apiClient.previewBlobContent as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(twoRowInlineSourceText);
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const composition = makeComposition(1, {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: "blob-inline-1" },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\[inline-source\] projection failed:/),
+        expect.objectContaining({
+          message: expect.stringMatching(/invalid MIME metadata/i),
+        }),
+      );
+    });
+
+    expect(
+      screen.queryByRole("region", { name: /source created/i }),
+    ).toBeNull();
+    expect(
+      useInlineSourceStore.getState().getSummary("session-inline"),
+    ).toBeNull();
+
+    errorSpy.mockRestore();
+  });
+
+  it("does NOT render the widget when preview bytes disagree with blob metadata content_hash", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata({ content_hash: differentInlineSourceHash }),
+    );
+    (
+      apiClient.previewBlobContent as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(oneRowInlineSourceText);
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const composition = makeComposition(1, {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: "blob-inline-1" },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\[inline-source\] projection failed:/),
+        expect.objectContaining({
+          message: expect.stringMatching(/content_hash mismatch/i),
+        }),
+      );
+    });
+
+    expect(
+      screen.queryByRole("region", { name: /source created/i }),
+    ).toBeNull();
+    expect(
+      useInlineSourceStore.getState().getSummary("session-inline"),
+    ).toBeNull();
+
+    errorSpy.mockRestore();
+  });
+
+  it("logs the bound projection error object when provenance translation throws", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata(),
+    );
+    (
+      apiClient.previewBlobContent as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(twoRowInlineSourceText);
+    const projectionError = new TypeError("projection dependency failed");
+    vi.spyOn(apiClient, "toInlineSourceProvenance").mockImplementation(() => {
+      throw projectionError;
+    });
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const composition = makeComposition(1, {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: "blob-inline-1" },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\[inline-source\] projection failed:/),
+        projectionError,
+      );
+    });
     expect(
       screen.queryByRole("region", { name: /source created/i }),
     ).toBeNull();
@@ -1670,6 +1814,27 @@ describe("ChatPanel inline-source fallback prompt", () => {
     ).toBeInTheDocument();
   });
 
+  it("does NOT render while the composer is still responding to the user message", () => {
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: true,
+      compositionState: null,
+      error: null,
+    });
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [makeUserMessage("https://example.com")],
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /inline source fallback prompt/i }),
+    ).toBeNull();
+  });
+
   it("does NOT render the prompt when there are no user messages", () => {
     useSessionStore.setState({
       activeSessionId: sessionFixture.id,
@@ -2027,7 +2192,8 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       filename: "rows.csv",
       mime_type: "text/csv",
       size_bytes: 32,
-      content_hash: "hash-routing",
+      content_hash:
+        "bb34d52cc97aefb5ce4513edda086520863c513bd8f3bd9165404000347d1081",
       created_at: "2026-05-18T10:00:01Z",
       created_by: "user",
       source_description: null,

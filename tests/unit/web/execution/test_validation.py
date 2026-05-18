@@ -330,6 +330,100 @@ class TestValidatePipelineBatchTransformOptions:
         mock_yaml_gen.generate_yaml.assert_not_called()
 
 
+class TestValidatePipelinePendingInterpretationPlaceholders:
+    """Runtime preflight must distinguish composer authoring from execution."""
+
+    def test_pending_interpretation_placeholder_is_preserved_by_default(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="llm",
+                    options={"prompt_template": "Rate how {{ interpretation: cool }} this row is."},
+                ),
+            )
+        )
+        settings = _make_settings()
+        captured_states: list[CompositionState] = []
+        mock_yaml_gen = MagicMock()
+
+        def _generate_yaml(candidate: CompositionState) -> str:
+            captured_states.append(candidate)
+            return "source:\n  plugin: csv_source"
+
+        mock_yaml_gen.generate_yaml.side_effect = _generate_yaml
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert captured_states[0].nodes[0].options["prompt_template"] == "Rate how {{ interpretation: cool }} this row is."
+
+    def test_pending_interpretation_placeholder_is_masked_for_authoring_preflight(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="llm",
+                    options={"prompt_template": "Rate how {{ interpretation: cool }} this row is."},
+                ),
+            )
+        )
+        settings = _make_settings()
+        captured_states: list[CompositionState] = []
+        mock_yaml_gen = MagicMock()
+
+        def _generate_yaml(candidate: CompositionState) -> str:
+            captured_states.append(candidate)
+            return "source:\n  plugin: csv_source"
+
+        mock_yaml_gen.generate_yaml.side_effect = _generate_yaml
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                allow_pending_interpretation_placeholders=True,
+            )
+
+        assert result.is_valid is False
+        assert captured_states[0].version == state.version
+        assert captured_states[0].nodes[0].options["prompt_template"] == "Rate how pending interpretation this row is."
+        assert state.nodes[0].options["prompt_template"] == "Rate how {{ interpretation: cool }} this row is."
+
+    def test_resolved_prompt_hash_keeps_placeholder_strict_even_in_authoring_preflight(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="llm",
+                    options={
+                        "prompt_template": "Rate how {{ interpretation: cool }} this row is.",
+                        "resolved_prompt_template_hash": "sha256-rfc8785-v1:abc123",
+                    },
+                ),
+            )
+        )
+        settings = _make_settings()
+        captured_states: list[CompositionState] = []
+        mock_yaml_gen = MagicMock()
+
+        def _generate_yaml(candidate: CompositionState) -> str:
+            captured_states.append(candidate)
+            return "source:\n  plugin: csv_source"
+
+        mock_yaml_gen.generate_yaml.side_effect = _generate_yaml
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(
+                state,
+                settings,
+                mock_yaml_gen,
+                allow_pending_interpretation_placeholders=True,
+            )
+
+        assert result.is_valid is False
+        assert captured_states[0].nodes[0].options["prompt_template"] == "Rate how {{ interpretation: cool }} this row is."
+
+
 class TestValidatePipelineSinkPathAllowlist:
     """Sink path allowlist — prevents arbitrary file writes via sink options."""
 

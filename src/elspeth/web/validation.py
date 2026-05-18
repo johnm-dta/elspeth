@@ -34,6 +34,7 @@ SECRET_NAME_MAX_LENGTH = 256
 SECRET_NAME_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*$"
 _SECRET_NAME_RE = re.compile(SECRET_NAME_PATTERN)
 SERVER_SECRET_RESERVED_PREFIX = "ELSPETH_"
+INTERPRETATION_PLACEHOLDER_RE = re.compile(r"\{\{\s*interpretation\s*:\s*([^{}]+?)\s*\}\}")
 
 
 def has_visible_content(s: str) -> bool:

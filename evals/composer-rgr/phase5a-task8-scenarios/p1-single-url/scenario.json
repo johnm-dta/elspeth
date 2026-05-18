@@ -1,0 +1,29 @@
+{
+  "scenario_id": "phase5a_task8_p1_single_url",
+  "phase": "5a-task8",
+  "summary": "Phase 5a Task 8 validation prompt #1 (plan 17 §Task 8 Step 4 lines 2326-2328). Single URL typed into chat. Expected: set_pipeline call with source.inline_blob (1 row). Fail if the LLM asks for a CSV upload or proposes anything else for the source.",
+  "opening_prompt": "go to www.finance.gov.au",
+  "red_criteria": {
+    "passivity_phrases": [
+      "if you want, i can",
+      "if you'd like, i can",
+      "should i ",
+      "do you want me to",
+      "would you like me to",
+      "shall i "
+    ],
+    "build_failure_sentinels": [
+      "i cannot mark this pipeline complete",
+      "runtime preflight failed"
+    ],
+    "must_be_valid": true
+  },
+  "green_criteria": {
+    "must_be_valid": true,
+    "must_have_node_kinds_substring_any_of": [
+      ["web_scrape"]
+    ],
+    "must_have_outputs_min": 1,
+    "must_not_contain_passivity": true
+  }
+}

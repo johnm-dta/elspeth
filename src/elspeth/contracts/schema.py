@@ -301,6 +301,7 @@ def _normalize_field_spec(spec: Any, *, index: int) -> str | Mapping[str, Any]:
     - String: "field_name: type" or "field_name: type?"
     - Dict (from YAML): {"field_name": "type"} or {"field_name": "type?"}
     - Dict (round-trip): {"name": "x", "type": "str", "required": True, "nullable": False}
+    - Dict (JSON Schema authoring): {"name": "x", "field_type": "str", "required"?: bool, "nullable"?: bool}
 
     For round-trip dict format (with "name" and "type" keys), returns the dict
     directly to preserve all fields including nullable. FieldDefinition.parse()
@@ -356,11 +357,54 @@ def _normalize_field_spec(spec: Any, *, index: int) -> str | Mapping[str, Any]:
             # Return dict directly - FieldDefinition.parse() handles dict input
             return spec
 
+        # Handle the Pydantic/dataclass input shape advertised by get_plugin_schema().
+        # The schema exposes FieldDefinition's Python field names ("field_type")
+        # and defaulted booleans, while our audit round-trip shape serializes the
+        # type under "type" and requires the booleans explicitly. Normalize the
+        # advertised authoring shape into the canonical round-trip dict before
+        # FieldDefinition.parse() sees it.
+        if "name" in spec and "field_type" in spec:
+            allowed_keys = {"name", "field_type", "required", "nullable"}
+            extra_keys = set(spec) - allowed_keys
+            if extra_keys:
+                raise ValueError(
+                    f"Field spec at index {index}: unsupported key(s) for JSON-Schema field spec: "
+                    f"{', '.join(sorted(str(key) for key in extra_keys))}. "
+                    "Expected keys are 'name', 'field_type', 'required', and 'nullable'."
+                )
+            name = spec["name"]
+            field_type = spec["field_type"]
+            if not isinstance(name, str):
+                raise ValueError(f"Field spec at index {index}: 'name' must be a string, got {type(name).__name__}.")
+            if not isinstance(field_type, str):
+                raise ValueError(f"Field spec at index {index}: 'field_type' must be a string, got {type(field_type).__name__}.")
+            required = spec.get("required", True)
+            if type(required) is not bool:
+                raise ValueError(
+                    f"Field spec at index {index}: 'required' must be a bool, "
+                    f"got {type(required).__name__} ({required!r}). "
+                    f"Use true/false (YAML) or True/False (Python), not strings."
+                )
+            nullable = spec.get("nullable", False)
+            if type(nullable) is not bool:
+                raise ValueError(
+                    f"Field spec at index {index}: 'nullable' must be a bool, "
+                    f"got {type(nullable).__name__} ({nullable!r}). "
+                    f"Use true/false (YAML) or True/False (Python), not strings."
+                )
+            return {
+                "name": name,
+                "type": field_type,
+                "required": required,
+                "nullable": nullable,
+            }
+
         # YAML `- id: int` parses as {"id": "int"}
         if len(spec) != 1:
             raise ValueError(
                 f"Field spec at index {index} is a dict with {len(spec)} keys. "
-                f"Expected single-key dict like {{'field_name': 'type'}} or a string like 'field_name: type'."
+                "Expected single-key dict like {'field_name': 'type'}, a string like 'field_name: type', "
+                "or JSON-Schema field shape {'name': 'field_name', 'field_type': 'type'}."
             )
         name, type_spec = next(iter(spec.items()))
         if not isinstance(name, str) or not isinstance(type_spec, str):

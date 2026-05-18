@@ -9,7 +9,7 @@ per_file_rules:
   - R5
   reason: Type discrimination for schema field parsing and union detection
   expires: null
-  max_hits: 17
+  max_hits: 19
 - pattern: contracts/contract_records.py
   rules:
   - R5
@@ -309,4 +309,11 @@ allow_hits:
   safety: >-
     Narrow ValueError/TypeError catch falls back to repr_hash, logs no row content, and still records a
     validation-error token.
+  expires: null
+# Phase 5 remediation hook closeout entries, generated from enforce_tier_model
+# findings on 2026-05-19 after reviewing the touched boundary contexts.
+- key: "contracts/composer_interpretation.py:R5:_validate_enum_member:fp=d350662f41cd717e"
+  owner: contracts
+  reason: "Contract construction/parsing boundary; this check rejects malformed enum/schema data before it enters typed audit contracts."
+  safety: "Failure raises immediately at construction or parse time; no fallback value is fabricated."
   expires: null

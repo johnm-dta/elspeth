@@ -1,7 +1,11 @@
 // src/components/chat/ChatPanel.tsx
 import { useEffect, useMemo, useRef, useCallback, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
-import { useInlineSourceStore } from "@/stores/inlineSourceStore";
+import {
+  deriveInlineSourceRowCount,
+  projectInlineSourceSummary,
+  useInlineSourceStore,
+} from "@/stores/inlineSourceStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useComposer } from "@/hooks/useComposer";
 import { FOCUSABLE_SELECTOR } from "@/hooks/useFocusTrap";
@@ -37,20 +41,6 @@ import type {
 import type { GuidedStep } from "@/types/guided";
 
 /**
- * Maximum characters retained from the preview-content fetch when building
- * the InlineSourceSummary projection.  The widget clips again to 280 chars
- * for the visible preview, but we slice early so we do not stash the full
- * blob payload in the zustand store — F-22 (no full-payload leak into
- * client memory beyond what the widget needs).
- *
- * Named `_CHARS` (not `_BYTES`) because `String.prototype.slice` operates on
- * UTF-16 code units; a 1024-char slice of multi-byte content is more bytes
- * than 1024 in UTF-8.  The exact byte budget does not matter for this
- * projection — the constant is "small enough to keep memory bounded".
- */
-const INLINE_SOURCE_PREVIEW_CHARS = 1024;
-
-/**
  * Best-effort row-count from CSV-like text content.
  *
  * Returns `null` when the mime type is not CSV-shaped — we'd rather be honest
@@ -73,13 +63,7 @@ export function deriveRowCount(
   mimeType: string,
   text: string,
 ): number | null {
-  const baseMimeType = mimeType.split(";")[0].trim().toLowerCase();
-  if (baseMimeType !== "text/csv") return null;
-  const trimmed = text.trim();
-  if (trimmed === "") return 0;
-  const lines = trimmed.split("\n").length;
-  // Subtract the header row.  A single-line CSV is `header only` → 0 rows.
-  return Math.max(0, lines - 1);
+  return deriveInlineSourceRowCount(mimeType, text);
 }
 
 // ── Inline-source disambiguation heuristic (Phase 5a Task 4) ─────────────────
@@ -584,35 +568,13 @@ export function ChatPanel({
       try {
         const meta = await getBlobMetadata(sessionId, targetBlobId);
         if (cancelled) return;
-        // Tier-1 audit-trail invariant: every persisted blob has a
-        // SHA-256 hash (CLAUDE.md "Auditability Standard": hashes survive
-        // payload deletion).  A null/empty hash from our own backend is
-        // an audit-trail bug we want to SURFACE, not mask with a
-        // fabricated empty string.  The caller-side catch arm below
-        // logs the throw via console.error so the failure is
-        // debuggable in the browser console.  The widget remains
-        // un-mounted on hash absence — that's the correct outcome
-        // (rendering a blank-hash audit pane would assert a value the
-        // system never recorded; see CLAUDE.md "fabrication decision
-        // test").
-        if (meta.content_hash === null || meta.content_hash === "") {
-          throw new Error(
-            `inline blob ${targetBlobId} has no content_hash — ` +
-              "audit-trail invariant violated (Tier-1)",
-          );
-        }
         const text = await previewBlobContent(sessionId, targetBlobId);
         if (cancelled) return;
-        const truncatedPreview = text.slice(0, INLINE_SOURCE_PREVIEW_CHARS);
-        const summary: InlineSourceSummary = {
-          blobId: meta.id,
-          filename: meta.filename,
-          mimeType: meta.mime_type,
-          contentPreview: truncatedPreview,
-          rowCount: deriveRowCount(meta.mime_type, text),
-          contentHash: meta.content_hash,
-          provenance: toInlineSourceProvenance(meta.creation_modality),
-        };
+        const summary = await projectInlineSourceSummary({
+          metadata: meta,
+          contentText: text,
+          toProvenance: toInlineSourceProvenance,
+        });
         if (cancelled) return;
         setInlineSourceSummary(sessionId, summary);
       } catch (err) {
@@ -822,11 +784,14 @@ export function ChatPanel({
   //      the actual candidate (we walk the last few user messages so a
   //      transient question turn doesn't suppress the affordance when a
   //      prior URL is still the unresolved input).
-  //   4. No source-related tool call is in flight on the latest
+  //   4. The composer is not currently responding to that user message.
+  //      The fallback is a post-turn safety net, not a mid-compose
+  //      competing offer.
+  //   5. No source-related tool call is in flight on the latest
   //      assistant message (set_pipeline, set_source_from_blob,
   //      set_source). If one is in flight the LLM is mid-response and
   //      we must not race the affordance against the proposal pipeline.
-  //   5. The fallback has not been dismissed for this session (F-20).
+  //   6. The fallback has not been dismissed for this session (F-20).
   //
   // The candidate is the most recent looksLikeData-positive user message
   // text, walking backwards through the LAST 3 user messages (a 3-turn
@@ -880,6 +845,7 @@ export function ChatPanel({
 
   const shouldRenderFallback =
     fallbackCandidate !== null &&
+    !isComposing &&
     !hasInflightSourceCall &&
     !compositionHasSource &&
     !sessionDismissed;

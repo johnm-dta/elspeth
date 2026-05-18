@@ -47,12 +47,13 @@ from sqlalchemy.types import JSON
 # with separate lifecycles and separate epochs.
 #
 # Epoch history (pre-1.0 policy — bumps require DB recreation):
-#   1 → initial schema (Phase 1A baseline)
-#   2 → Phase 5b: interpretation_events_table arrives in Task 2; the
-#        epoch is bumped HERE in Task 1.5 so the guard is wired before
-#        the table lands. Operators upgrading across Phase 5b MUST delete
-#        their session DB.
-SESSION_SCHEMA_EPOCH = 2
+#   1 → initial schema.
+#   2 → interpretation_events_table added; operators upgrading across
+#        this boundary MUST delete their session DB.
+#   3 → composition_proposals gains user_message_id so explicit-approval
+#        replay can preserve inline-blob chat-message provenance when
+#        accepting a deferred proposal.
+SESSION_SCHEMA_EPOCH = 3
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -120,8 +121,8 @@ sessions_table = Table(
     ),
     Column("forked_from_message_id", String, nullable=True),
     # ``interpretation_review_disabled`` — per-session "stop asking" toggle for
-    # LLM-surfaced interpretation review (Phase 5b Task 2). Fast-path read by
-    # the compose loop; the authoritative audit record is the ``opted_out``
+    # LLM-surfaced interpretation review. Fast-path read by the compose loop;
+    # the authoritative audit record is the ``opted_out``
     # row in ``interpretation_events_table``.
     #
     # Two-source-of-truth tension (F-35): the opted-out state is represented
@@ -191,7 +192,7 @@ chat_messages_table = Table(
     # removes child tool rows when the assistant is deleted, preventing
     # orphan tool rows from accumulating in the audit DB. The schema
     # cannot mechanically enforce that the referenced row has
-    # role='assistant'; Task 9's _assert_parent_assistant_message guard
+    # role='assistant'; _assert_parent_assistant_message guard
     # adds that check at the helper-call boundary.
     ForeignKeyConstraint(
         ["parent_assistant_id", "session_id"],
@@ -302,8 +303,8 @@ composition_states_table = Table(
     # accept (id, session_id) as an FK reference.
     UniqueConstraint("id", "session_id", name="uq_composition_state_id_session"),
     # Closed enum: every value corresponds to a documented writer path
-    # in spec §4.1.2 (as amended by the Phase 1 plan supersession
-    # marker — ``session_fork`` is the cross-session fork-copy value).
+    # in spec §4.1.2 (``session_fork`` is the cross-session fork-copy
+    # value).
     # Adding a value here without amending the spec creates an
     # untraceable writer category in the audit DB.
     #
@@ -330,7 +331,7 @@ composition_states_table = Table(
     #                                     are pre-existing mis-attributions, see the
     #                                     comments at those call sites)
     #   - ``session_fork``            — service.py fork_session_at_message
-    #   - ``interpretation_resolve``  — routes.py /resolve handler (Phase 5b Task 2):
+    #   - ``interpretation_resolve``  — routes.py /resolve handler:
     #                                    a composition-state row written when the
     #                                    user resolves an LLM-surfaced interpretation
     #                                    (accept_as_drafted / amend) so the patched
@@ -366,6 +367,12 @@ composition_proposals_table = Table(
         index=True,
     ),
     Column("tool_call_id", String, nullable=False),
+    # Originating user chat message for proposals created by the composer
+    # in explicit_approve mode. Nullable for legacy/imported proposals and
+    # future non-chat proposal sources. When present, the composite FK forces
+    # same-session ownership so accept/replay cannot bind blobs to another
+    # session's message.
+    Column("user_message_id", String, nullable=True),
     Column("tool_name", String, nullable=False),
     Column("status", String, nullable=False),
     Column("summary", Text, nullable=False),
@@ -389,6 +396,12 @@ composition_proposals_table = Table(
         ["committed_state_id", "session_id"],
         ["composition_states.id", "composition_states.session_id"],
         name="fk_composition_proposals_committed_state_session",
+    ),
+    ForeignKeyConstraint(
+        ["user_message_id", "session_id"],
+        ["chat_messages.id", "chat_messages.session_id"],
+        name="fk_composition_proposals_user_message_session",
+        ondelete="RESTRICT",
     ),
     UniqueConstraint(
         "session_id",
@@ -442,30 +455,6 @@ Index(
     proposal_events_table.c.created_at,
 )
 
-# Phase 9 migration notes (F-16):
-# The following interdependent DDL objects must be recreated together when
-# the schema is migrated (Phase 9's migration runner replaces the
-# delete-the-DB policy for production):
-#
-#   1. ``interpretation_events_table`` — the main table (below).
-#   2. ``sessions_table.interpretation_review_disabled`` column (above).
-#   3. ``composition_states.provenance`` CHECK extension (add
-#      ``'interpretation_resolve'``).
-#   4. ``trg_interpretation_events_immutable_resolved`` trigger.
-#   5. ``trg_chat_messages_immutable_content`` trigger (F-4).
-#   6. ``skill_markdown_history_table``.
-#
-# SQLite recreation sequence for the ``composition_states.provenance`` CHECK
-# extension (SQLite does not support ALTER TABLE ... ADD CONSTRAINT):
-#   1. BEGIN IMMEDIATE;
-#   2. CREATE TABLE composition_states_new (...,
-#        CHECK(provenance IN (..., 'interpretation_resolve')));
-#   3. INSERT INTO composition_states_new SELECT * FROM composition_states;
-#   4. DROP TABLE composition_states;
-#   5. ALTER TABLE composition_states_new RENAME TO composition_states;
-#   6. COMMIT;
-# The Phase 9 migration runner MUST run this sequence atomically and verify
-# row count before DROP. Reference: project_db_migration_policy.md.
 interpretation_events_table = Table(
     "interpretation_events",
     metadata,
@@ -688,13 +677,19 @@ skill_markdown_history_table = Table(
 # rows are still permitted (e.g. backfilling provenance), but flipping the
 # decision is not.
 #
+# ``trg_interpretation_events_no_delete_resolved`` extends that resolved-row
+# protection to DELETE while deliberately leaving unresolved PENDING rows
+# deletable for orphan recovery.
+#
 # ``trg_chat_messages_immutable_content`` enforces append-only semantics
 # for ``chat_messages.content`` — once a message is written, its body
-# cannot be edited. Phase 5a elevated ``chat_messages`` to an audit anchor
-# via ``blobs.created_from_message_id``; without this trigger, post-hoc
-# editing would invalidate the lineage audit. The trigger lives in this
-# Phase 5b commit because Phase 5b carries all schema work for the
-# umbrella PR.
+# cannot be edited. ``chat_messages`` is an audit anchor via
+# ``blobs.created_from_message_id``; without this trigger, post-hoc
+# editing would invalidate the lineage audit.
+#
+# ``trg_chat_messages_no_delete`` protects the same anchor against row
+# deletion. A missing chat row makes blob lineage unverifiable even if the
+# blob FK never existed, so the trigger is unconditional.
 #
 # ``IF NOT EXISTS`` makes the DDL idempotent across repeated
 # ``metadata.create_all`` calls. ``event.listen`` is **table-scoped**, not
@@ -721,6 +716,20 @@ event.listen(
 )
 
 event.listen(
+    interpretation_events_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_interpretation_events_no_delete_resolved "
+        "BEFORE DELETE ON interpretation_events "
+        "FOR EACH ROW "
+        "WHEN OLD.resolved_at IS NOT NULL "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'interpretation_events: resolved rows are append-only'); "
+        "END;"
+    ),
+)
+
+event.listen(
     chat_messages_table,
     "after_create",
     DDL(  # type: ignore[no-untyped-call]
@@ -728,6 +737,20 @@ event.listen(
         "BEFORE UPDATE OF content ON chat_messages "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'chat_messages.content is append-only'); "
+        "END;"
+    ),
+)
+
+event.listen(
+    chat_messages_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_chat_messages_no_delete "
+        "BEFORE DELETE ON chat_messages "
+        "FOR EACH ROW "
+        "WHEN EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'chat_messages rows are append-only'); "
         "END;"
     ),
 )
@@ -764,7 +787,7 @@ runs_table = Table(
         ["composition_states.id", "composition_states.session_id"],
         name="fk_runs_state_session",
     ),
-    # Phase 2.2 (elspeth-0de989c56d): four-value terminal taxonomy.
+    # elspeth-0de989c56d: four-value terminal taxonomy.
     # The constraint mirrors SessionRunStatus in web/sessions/protocol.py;
     # adding a value to the Literal without updating this CheckConstraint
     # would let the dataclass validator pass while the DB rejects the row,
@@ -820,11 +843,10 @@ blobs_table = Table(
     Column("created_by", String, nullable=False),
     Column("source_description", String, nullable=True),
     Column("status", String, nullable=False, server_default="ready"),
-    # --- Inline-blob provenance (Phase 5a Task 2.5) ---
+    # --- Inline-blob provenance ---
     # creation_modality: closed enum — how this blob's content was produced.
-    # Non-nullable with default "verbatim" so pre-Task-2.5 blobs (created
-    # via the legacy create_blob / inline_blob writers before the columns
-    # existed) retain a valid value when the DB is rebuilt (we have no
+    # Non-nullable with default "verbatim" so blobs created before these
+    # columns existed retain a valid value when the DB is rebuilt (we have no
     # users yet; the operator deletes-and-recreates per
     # project_db_migration_policy).
     #
@@ -849,8 +871,8 @@ blobs_table = Table(
     # blob creation paths that have no originating user message
     # (e.g. pipeline-emitted blobs whose audit anchor is the run record).
     Column("created_from_message_id", Text, nullable=True),
-    # LLM-provenance columns (Phase 5a Task 2.5): populated for the three
-    # LLM-authored modalities (llm_generated, disambiguated,
+    # LLM-provenance columns: populated for the three LLM-authored
+    # modalities (llm_generated, disambiguated,
     # llm_generated_then_amended); NULL for verbatim.  Required together —
     # a blob cannot claim LLM authorship without naming the model,
     # version, provider, the composer-skill prompt hash, and the
@@ -950,7 +972,7 @@ blobs_table = Table(
 )
 
 # Index for the reverse-lookup path: "given a chat message, which inline
-# blobs were created from it?"  Backs the Phase 5a explain() walk —
+# blobs were created from it?"  Backs the inline-blob lineage walk —
 # chat_messages.id → blobs.created_from_message_id → blobs.id — without
 # triggering a full table scan when an auditor opens the lineage drawer
 # on a session with thousands of blobs.
@@ -1071,7 +1093,7 @@ user_preferences_table = Table(
 # This table records who viewed audit-grade message data (the eventual
 # ``include_tool_rows=true`` route surface). 1A lands the table SCHEMA
 # ONLY: no route writes it, no service method writes it, no fixture
-# writes it. Phase 1A is the destructive session-DB schema reset
+# writes it. The destructive session-DB schema reset
 # boundary, so deferring this table to a later phase would force a
 # second staging DB recreation for a table whose ownership, FK shape,
 # and writer_principal enum are already known.

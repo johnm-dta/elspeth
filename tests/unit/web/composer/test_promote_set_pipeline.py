@@ -300,6 +300,59 @@ class TestPromoteSetPipelineArgErrorRouting:
         # Inline content must not leak into the affected/data summary.
         assert "hello" not in str(result.to_dict())
 
+    def test_csv_fixed_schema_accepts_advertised_field_definition_shape(self, tmp_path: Path) -> None:
+        """CSV prevalidation accepts the field shape exposed by plugin JSON Schema."""
+        engine, session_id = _session_engine_with_session()
+        output_path = tmp_path / "outputs" / "out.csv"
+
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": [{"name": "url", "field_type": "str"}],
+                    }
+                },
+                "inline_blob": {
+                    "filename": "input.csv",
+                    "mime_type": "text/csv",
+                    "content": "url\nhttps://example.test\n",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [
+                {
+                    "sink_name": "rows",
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(output_path),
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+
+        result = _execute_set_pipeline(
+            args,
+            _empty_state(),
+            _mock_catalog(),
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+        )
+
+        assert result.success is True, result.data
+        assert result.validation.is_valid is True
+        assert result.updated_state.source is not None
+        assert result.updated_state.source.plugin == "csv"
+        assert result.updated_state.source.options["schema"]["fields"] == ({"name": "url", "field_type": "str"},)
+
     def test_omitted_metadata_validates_at_model_layer(self) -> None:
         """``metadata`` is optional at the top level; absent leaves the field None."""
         validated = SetPipelineArgumentsModel.model_validate(_minimal_valid_args())

@@ -198,7 +198,6 @@ class AuditedHTTPClient(AuditedClientBase):
         request_payload: CallPayload,
         response_payload: CallPayload | None = None,
         token_id_override: str | None = None,
-        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         """Record call to audit trail and emit telemetry event.
 
@@ -208,10 +207,6 @@ class AuditedHTTPClient(AuditedClientBase):
             token_id_override: Per-call token_id for telemetry. When provided,
                 overrides the client-level token_id. Used by batch transforms
                 where a single client serves multiple tokens.
-            resolved_prompt_template_hash: Phase 5b Task 9 cross-DB anchor.
-                Forwarded by the OpenRouter LLM provider for LLM transforms
-                downstream of a resolved interpretation event. ``None`` for
-                non-LLM HTTP calls.
 
         Returns:
             Call object from Landscape recording (contains request_ref and response_ref blob hashes).
@@ -224,7 +219,6 @@ class AuditedHTTPClient(AuditedClientBase):
             response_data=response_payload,
             error=error_data,
             latency_ms=latency_ms,
-            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
         # Telemetry emitted AFTER successful Landscape recording
@@ -318,7 +312,6 @@ class AuditedHTTPClient(AuditedClientBase):
         params: dict[str, str | int | float] | None = None,
         audit_request_metadata: Mapping[str, Any] | None = None,
         token_id: str | None = None,
-        resolved_prompt_template_hash: str | None = None,
     ) -> httpx.Response:
         """Execute an HTTP request with audit recording and telemetry.
 
@@ -401,7 +394,6 @@ class AuditedHTTPClient(AuditedClientBase):
                 request_payload=request_dto,
                 response_payload=None,
                 token_id_override=token_id,
-                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
 
             raise
@@ -433,7 +425,6 @@ class AuditedHTTPClient(AuditedClientBase):
             request_payload=request_dto,
             response_payload=response_dto,
             token_id_override=token_id,
-            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
         return response
@@ -447,7 +438,6 @@ class AuditedHTTPClient(AuditedClientBase):
         timeout: float | None = None,
         audit_request_metadata: Mapping[str, Any] | None = None,
         token_id: str | None = None,
-        resolved_prompt_template_hash: str | None = None,
     ) -> httpx.Response:
         """Make POST request with automatic audit recording.
 
@@ -461,12 +451,6 @@ class AuditedHTTPClient(AuditedClientBase):
                 service.
             token_id: Per-call token_id for telemetry (overrides client default).
                 Used by batch transforms where one client serves multiple tokens.
-            resolved_prompt_template_hash: Phase 5b Task 9 cross-DB anchor.
-                Forwarded to the Landscape ``calls`` row when an LLM
-                provider (e.g. OpenRouter) routes its chat completion
-                through this HTTP client and the transform is downstream
-                of a resolved interpretation event. ``None`` for non-LLM
-                HTTP traffic.
 
         Returns:
             httpx.Response object
@@ -482,7 +466,6 @@ class AuditedHTTPClient(AuditedClientBase):
             json=json,
             audit_request_metadata=audit_request_metadata,
             token_id=token_id,
-            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def get(

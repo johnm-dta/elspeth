@@ -78,6 +78,34 @@ def _opted_out_record_kwargs() -> dict[str, object]:
     }
 
 
+def _no_surfaces_record_kwargs() -> dict[str, object]:
+    """Kwargs for an auto_interpreted_no_surfaces row."""
+    return {
+        "id": uuid4(),
+        "session_id": uuid4(),
+        "composition_state_id": None,
+        "affected_node_id": None,
+        "tool_call_id": None,
+        "user_term": None,
+        "llm_draft": None,
+        "accepted_value": None,
+        "choice": InterpretationChoice.OPTED_OUT,
+        "created_at": datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        "resolved_at": datetime(2026, 5, 18, 12, 0, 0, tzinfo=UTC),
+        "actor": "composer-llm",
+        "model_identifier": "anthropic/claude-opus-4-7",
+        "model_version": "2026-01-15",
+        "provider": "anthropic",
+        "composer_skill_hash": "a" * 64,
+        "arguments_hash": None,
+        "hash_domain_version": None,
+        "interpretation_source": InterpretationSource.AUTO_INTERPRETED_NO_SURFACES,
+        "runtime_model_identifier_at_resolve": None,
+        "runtime_model_version_at_resolve": None,
+        "resolved_prompt_template_hash": None,
+    }
+
+
 def test_interpretation_choice_has_exactly_five_values() -> None:
     """InterpretationChoice is a closed enum with exactly 5 members."""
     members = {member.value for member in InterpretationChoice}
@@ -114,6 +142,22 @@ def test_record_missing_required_field_raises_typeerror() -> None:
     kwargs = _resolved_record_kwargs()
     del kwargs["actor"]
     with pytest.raises(TypeError):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+def test_record_rejects_literal_cast_choice() -> None:
+    """Tier-1 records require enum members, not raw DB strings."""
+    kwargs = _resolved_record_kwargs()
+    kwargs["choice"] = "accepted_as_drafted"
+    with pytest.raises(ValueError, match=r"choice.*InterpretationChoice"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+def test_record_rejects_literal_cast_interpretation_source() -> None:
+    """Tier-1 records require enum members, not raw DB strings."""
+    kwargs = _resolved_record_kwargs()
+    kwargs["interpretation_source"] = "user_approved"
+    with pytest.raises(ValueError, match=r"interpretation_source.*InterpretationSource"):
         InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
 
 
@@ -181,6 +225,112 @@ def test_opted_out_record_roundtrips_through_asdict() -> None:
         "resolved_prompt_template_hash",
     ):
         assert snapshot[nullable] is None
+
+
+def test_no_surfaces_record_constructs_successfully() -> None:
+    """auto_interpreted_no_surfaces has NULL surfaces and populated provenance."""
+    record = InterpretationEventRecord(**_no_surfaces_record_kwargs())
+    assert record.choice is InterpretationChoice.OPTED_OUT
+    assert record.interpretation_source is InterpretationSource.AUTO_INTERPRETED_NO_SURFACES
+    assert record.composition_state_id is None
+    assert record.affected_node_id is None
+    assert record.tool_call_id is None
+    assert record.user_term is None
+    assert record.llm_draft is None
+    assert record.model_identifier == "anthropic/claude-opus-4-7"
+    assert record.provider == "anthropic"
+    assert record.composer_skill_hash == "a" * 64
+
+
+def test_user_approved_record_requires_surface_and_provenance_fields() -> None:
+    """USER_APPROVED mirrors ck_interpretation_events_user_approved_required."""
+    kwargs = _resolved_record_kwargs()
+    kwargs["user_term"] = None
+    kwargs["model_identifier"] = None
+    with pytest.raises(ValueError, match=r"user_approved.*user_term.*model_identifier"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+def test_opted_out_record_requires_null_surface_and_provenance_fields() -> None:
+    """AUTO_INTERPRETED_OPT_OUT mirrors ck_interpretation_events_source_nullability."""
+    kwargs = _opted_out_record_kwargs()
+    kwargs["user_term"] = "cool"
+    kwargs["provider"] = "anthropic"
+    with pytest.raises(ValueError, match=r"auto_interpreted_opt_out.*user_term.*provider"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+def test_no_surfaces_record_requires_null_surfaces_and_provenance() -> None:
+    """AUTO_INTERPRETED_NO_SURFACES mirrors ck_interpretation_events_no_surfaces_shape."""
+    kwargs = _no_surfaces_record_kwargs()
+    kwargs["tool_call_id"] = "tool-call-abc"
+    kwargs["model_identifier"] = None
+    with pytest.raises(ValueError, match=r"auto_interpreted_no_surfaces.*tool_call_id.*model_identifier"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("choice", "resolved_at"),
+    [
+        (InterpretationChoice.PENDING, datetime(2026, 5, 18, 12, 0, 30, tzinfo=UTC)),
+        (InterpretationChoice.ACCEPTED_AS_DRAFTED, None),
+    ],
+)
+def test_record_validates_choice_resolved_at_coupling(
+    choice: InterpretationChoice,
+    resolved_at: datetime | None,
+) -> None:
+    """choice and resolved_at mirror ck_interpretation_events_resolved_at_status."""
+    kwargs = _resolved_record_kwargs()
+    kwargs["choice"] = choice
+    kwargs["resolved_at"] = resolved_at
+    if choice is InterpretationChoice.PENDING:
+        kwargs["accepted_value"] = None
+        kwargs["arguments_hash"] = None
+        kwargs["hash_domain_version"] = None
+        kwargs["runtime_model_identifier_at_resolve"] = None
+        kwargs["runtime_model_version_at_resolve"] = None
+        kwargs["resolved_prompt_template_hash"] = None
+    with pytest.raises(ValueError, match="resolved_at"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("choice", "accepted_value"),
+    [
+        (InterpretationChoice.ACCEPTED_AS_DRAFTED, None),
+        (InterpretationChoice.OPTED_OUT, "something cool"),
+    ],
+)
+def test_record_validates_choice_accepted_value_coupling(
+    choice: InterpretationChoice,
+    accepted_value: str | None,
+) -> None:
+    """choice and accepted_value mirror ck_interpretation_events_accepted_value_status."""
+    kwargs = _resolved_record_kwargs()
+    kwargs["choice"] = choice
+    kwargs["accepted_value"] = accepted_value
+    with pytest.raises(ValueError, match="accepted_value"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("arguments_hash", "hash_domain_version"),
+    [
+        ("b" * 64, None),
+        (None, "v1"),
+    ],
+)
+def test_record_validates_arguments_hash_domain_coupling(
+    arguments_hash: str | None,
+    hash_domain_version: str | None,
+) -> None:
+    """arguments_hash and hash_domain_version are created as a pair."""
+    kwargs = _resolved_record_kwargs()
+    kwargs["arguments_hash"] = arguments_hash
+    kwargs["hash_domain_version"] = hash_domain_version
+    with pytest.raises(ValueError, match=r"arguments_hash.*hash_domain_version"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
 
 
 def test_hash_domain_v1_names_are_valid_record_fields() -> None:

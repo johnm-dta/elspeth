@@ -32,6 +32,10 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.composer_interpretation import (
+    InterpretationChoice,
+    InterpretationSource,
+)
 from elspeth.web.sessions.schemas import (
     CompositionStateResponse,
     InterpretationEventResponse,
@@ -76,6 +80,11 @@ def _valid_event_kwargs() -> dict[str, object]:
 
 
 class TestInterpretationEventResponse:
+    def test_closed_list_fields_use_contract_enums(self) -> None:
+        """Wire schema must not hand-duplicate the interpretation closed lists."""
+        assert InterpretationEventResponse.model_fields["choice"].annotation is InterpretationChoice
+        assert InterpretationEventResponse.model_fields["interpretation_source"].annotation is InterpretationSource
+
     def test_full_user_approved_row_constructs(self) -> None:
         event = InterpretationEventResponse(**_valid_event_kwargs())  # type: ignore[arg-type]
         assert event.choice == "accepted_as_drafted"

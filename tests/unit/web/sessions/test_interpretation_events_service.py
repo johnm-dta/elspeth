@@ -23,6 +23,7 @@ prompt-patch can land on real node JSON.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -36,6 +37,7 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationSource,
 )
 from elspeth.contracts.hashing import stable_hash
+from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_states_table,
@@ -45,7 +47,7 @@ from elspeth.web.sessions.models import (
 )
 from elspeth.web.sessions.protocol import CompositionStateData, CompositionStateRecord
 from elspeth.web.sessions.schema import initialize_session_schema
-from elspeth.web.sessions.service import SessionServiceImpl, _patch_llm_transform_prompt
+from elspeth.web.sessions.service import SessionServiceImpl, _interpretation_event_record_from_row, _patch_llm_transform_prompt
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 # --------------------------------------------------------------------------- #
@@ -92,23 +94,43 @@ def _llm_node(
     user_term: str = "cool",
     prompt_template: str | None = None,
 ) -> dict:
-    """Return a minimally-shaped LLM-transform node carrying a placeholder.
+    """Return a production-serialized LLM transform node carrying a placeholder.
 
     Shape note: ``prompt_template`` lives inside ``options`` because that is
     the field ``_patch_llm_transform_prompt`` reads (mirroring
-    ``NodeSpec.options["prompt_template"]`` — the shape consumed by the
-    runtime YAML generator). Earlier fixture iterations placed
-    ``prompt_template`` at the top level, which silently dropped after
-    ``state_from_record`` and meant the patched resolved template never
-    reached the runtime. See Phase 5b Task 9.
+    ``NodeSpec.options["prompt_template"]``). The returned dict comes from
+    ``CompositionState.to_dict()`` so resolve tests use the same
+    ``node_type``/``plugin`` discriminator that production composer state
+    emits. Earlier fixture iterations used a private ``kind`` field and let
+    production break while unit tests stayed green.
     """
     if prompt_template is None:
         prompt_template = f"Rate how {{{{interpretation:{user_term}}}}} this is."
-    return {
-        "id": node_id,
-        "kind": "llm",
-        "options": {"prompt_template": prompt_template},
-    }
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="input",
+                on_success="out",
+                on_error="quarantine",
+                options={"prompt_template": prompt_template},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
 
 
 async def _seed_state_with_llm_node(
@@ -123,7 +145,11 @@ async def _seed_state_with_llm_node(
     node = node if node is not None else _llm_node()
     state = await service.save_composition_state(
         session_id,
-        CompositionStateData(nodes=[node], is_valid=True),
+        CompositionStateData(
+            nodes=[node],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
         provenance="tool_call",
     )
     return state
@@ -277,6 +303,54 @@ async def test_03_resolve_accepted_as_drafted_uses_llm_draft(service) -> None:
     with service._engine.begin() as conn:
         state_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == str(new_state.id))).one()
     assert state_row.provenance == "interpretation_resolve"
+
+
+@pytest.mark.asyncio
+async def test_03b_resolve_recomputes_validation_for_patched_live_state(service) -> None:
+    """Resolve must not carry stale unresolved-placeholder validation errors.
+
+    A compose turn can persist a pending interpretation event and later leave
+    the current state row marked invalid because runtime Jinja validation saw
+    the unresolved ``{{interpretation:<term>}}`` placeholder. Resolving the
+    event patches that placeholder out of the live state; the new
+    interpretation_resolve row must recompute authoring validity instead of
+    copying the stale error from the pre-resolve live row.
+    """
+    session_id = uuid4()
+    surfacing_state = await _seed_state_with_llm_node(service, session_id=session_id)
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=surfacing_state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_42",
+        user_term="cool",
+        llm_draft="Innovative and creative",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+    stale_error = "Invalid Jinja2 template: expected token 'end of print statement', got ':'"
+    await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=[_llm_node()],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=False,
+            validation_errors=[stale_error],
+        ),
+        provenance="session_seed",
+    )
+
+    _resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert stale_error not in list(new_state.validation_errors or ())
 
 
 @pytest.mark.asyncio
@@ -606,6 +680,39 @@ async def test_10b_opt_out_is_idempotent(service) -> None:
     assert len(rows) == 1
 
 
+@pytest.mark.asyncio
+async def test_create_pending_after_session_opt_out_returns_opt_out_row(service) -> None:
+    """Opt-out is enforced at the pending-event writer boundary."""
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(service, session_id=session_id)
+    opt_out = await service.record_session_interpretation_opt_out(
+        session_id=session_id,
+        actor="user:alice",
+    )
+
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_after_opt_out",
+        user_term="cool",
+        llm_draft="A draft definition",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    assert event.id == opt_out.id
+    assert event.choice is InterpretationChoice.OPTED_OUT
+    assert event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
+
+    pending_rows = await service.list_interpretation_events(session_id, status="pending")
+    all_rows = await service.list_interpretation_events(session_id, status="all")
+    assert pending_rows == []
+    assert [row.id for row in all_rows] == [opt_out.id]
+
+
 # --------------------------------------------------------------------------- #
 # _patch_llm_transform_prompt — direct-helper unit tests
 # --------------------------------------------------------------------------- #
@@ -628,6 +735,42 @@ def _state_with_node(node: dict) -> CompositionStateRecord:
         derived_from_state_id=None,
         composer_meta=None,
     )
+
+
+def _interpretation_row(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "id": str(uuid4()),
+        "session_id": str(uuid4()),
+        "composition_state_id": str(uuid4()),
+        "affected_node_id": "llm_transform_1",
+        "tool_call_id": "tool-call-abc",
+        "user_term": "cool",
+        "llm_draft": "A draft definition of cool",
+        "accepted_value": "A draft definition of cool",
+        "choice": "accepted_as_drafted",
+        "created_at": datetime.now(UTC),
+        "resolved_at": datetime.now(UTC),
+        "actor": "user:alice",
+        "model_identifier": "anthropic/claude-opus-4-7",
+        "model_version": "2026-05-01",
+        "provider": "anthropic",
+        "composer_skill_hash": "a" * 64,
+        "arguments_hash": "b" * 64,
+        "hash_domain_version": "v1",
+        "interpretation_source": "user_approved",
+        "runtime_model_identifier_at_resolve": "anthropic/claude-opus-4-7",
+        "runtime_model_version_at_resolve": "2026-05-01",
+        "resolved_prompt_template_hash": "c" * 64,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_interpretation_row_conversion_rejects_empty_composition_state_id_as_bad_uuid() -> None:
+    """Tier-1 empty-string corruption must reach UUID parsing, not become None."""
+    row = _interpretation_row(composition_state_id="")
+    with pytest.raises(ValueError, match=r"badly formed|UUID|hexadecimal"):
+        _interpretation_event_record_from_row(row)
 
 
 def test_11_patch_helper_rejects_multiple_placeholders() -> None:
@@ -698,9 +841,26 @@ def test_14_patch_helper_succeeds_on_clean_template() -> None:
     assert "Innovative and creative" in patched_template
     # The other surrounding text is preserved verbatim.
     assert patched_template == "Rate how Innovative and creative this is."
-    # Node id/kind unchanged.
+    # Production node discriminator unchanged.
     assert patched["id"] == "llm_transform_1"
-    assert patched["kind"] == "llm"
+    assert patched["node_type"] == "transform"
+    assert patched["plugin"] == "llm"
+    assert "kind" not in patched
+
+
+def test_patch_helper_accepts_whitespace_tolerant_placeholder() -> None:
+    """Resolve accepts the same whitespace placeholder form as staging."""
+    state = _state_with_node(_llm_node(prompt_template="Rate how {{ interpretation : cool }} this is."))
+    nodes_out = _patch_llm_transform_prompt(
+        state,
+        affected_node_id="llm_transform_1",
+        user_term="cool",
+        accepted_value="Innovative and creative",
+    )
+    patched = next(iter(nodes_out))
+    patched_template = patched["options"]["prompt_template"]
+    assert "{{ interpretation : cool }}" not in patched_template
+    assert patched_template == "Rate how Innovative and creative this is."
 
 
 def test_patch_helper_rejects_missing_node() -> None:
@@ -715,10 +875,35 @@ def test_patch_helper_rejects_missing_node() -> None:
         )
 
 
-def test_patch_helper_rejects_non_llm_kind() -> None:
-    """Helper-contract guard: kind != 'llm' ⇒ raise."""
-    state = _state_with_node({"id": "csv_source_1", "kind": "csv", "options": {}})
-    with pytest.raises(ValueError, match=r"llm|kind"):
+def test_patch_helper_rejects_legacy_kind_only_llm_shape() -> None:
+    """Helper-contract guard: private ``kind`` fixtures are not accepted."""
+    state = _state_with_node(
+        {
+            "id": "llm_transform_1",
+            "kind": "llm",
+            "options": {"prompt_template": "Rate how {{interpretation:cool}} this is."},
+        }
+    )
+    with pytest.raises(ValueError, match=r"node_type|plugin|LLM discriminator"):
+        _patch_llm_transform_prompt(
+            state,
+            affected_node_id="llm_transform_1",
+            user_term="cool",
+            accepted_value="x",
+        )
+
+
+def test_patch_helper_rejects_non_llm_production_shape() -> None:
+    """Helper-contract guard: production node shape with plugin != 'llm' raises."""
+    state = _state_with_node(
+        {
+            "id": "csv_source_1",
+            "node_type": "source",
+            "plugin": "csv",
+            "options": {},
+        }
+    )
+    with pytest.raises(ValueError, match=r"llm|plugin|node_type"):
         _patch_llm_transform_prompt(
             state,
             affected_node_id="csv_source_1",
@@ -729,7 +914,14 @@ def test_patch_helper_rejects_non_llm_kind() -> None:
 
 def test_patch_helper_rejects_missing_prompt_template() -> None:
     """Helper-contract guard: no options.prompt_template field ⇒ raise."""
-    state = _state_with_node({"id": "llm_transform_1", "kind": "llm", "options": {}})
+    state = _state_with_node(
+        {
+            "id": "llm_transform_1",
+            "node_type": "transform",
+            "plugin": "llm",
+            "options": {},
+        }
+    )
     with pytest.raises(ValueError, match="prompt_template"):
         _patch_llm_transform_prompt(
             state,
@@ -745,7 +937,13 @@ def test_patch_helper_rejects_missing_options() -> None:
     Mirrors the runtime contract: options is the carrier for prompt_template,
     so a node without options can never be a valid LLM interpretation target.
     """
-    state = _state_with_node({"id": "llm_transform_1", "kind": "llm"})
+    state = _state_with_node(
+        {
+            "id": "llm_transform_1",
+            "node_type": "transform",
+            "plugin": "llm",
+        }
+    )
     with pytest.raises(ValueError, match="options"):
         _patch_llm_transform_prompt(
             state,
@@ -894,7 +1092,6 @@ async def test_resolve_round_trips_through_state_from_record_and_yaml(service) -
     nodes = [
         {
             "id": "llm_transform_1",
-            "kind": "llm",
             "node_type": "transform",
             "plugin": "llm",
             "input": "input",

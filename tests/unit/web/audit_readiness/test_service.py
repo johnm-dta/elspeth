@@ -198,6 +198,9 @@ def _make_service_with_execution_service(state, exec_svc, inventory=()):
     )
 
 
+_UNSET: object = object()
+
+
 def _make_event(
     *,
     choice: InterpretationChoice,
@@ -206,6 +209,8 @@ def _make_event(
     user_term: str | None = "cool",
     composition_state_id: UUID | None = _TEST_COMPOSITION_STATE_ID,
     event_id: UUID | None = None,
+    runtime_model_identifier_at_resolve: str | None | object = _UNSET,
+    runtime_model_version_at_resolve: str | None | object = _UNSET,
 ) -> InterpretationEventRecord:
     """Build a minimally-populated InterpretationEventRecord for tests.
 
@@ -252,7 +257,7 @@ def _make_event(
         return InterpretationEventRecord(
             id=event_id if event_id is not None else UUID("00000000-0000-0000-0000-000000000002"),
             session_id=UUID("11111111-1111-1111-1111-111111111111"),
-            composition_state_id=composition_state_id,
+            composition_state_id=None,
             affected_node_id=None,
             tool_call_id=None,
             user_term=None,
@@ -295,8 +300,14 @@ def _make_event(
         arguments_hash="a" * 64 if resolved else None,
         hash_domain_version="v1" if resolved else None,
         interpretation_source=interpretation_source,
-        runtime_model_identifier_at_resolve="anthropic/claude-opus-4-7" if resolved else None,
-        runtime_model_version_at_resolve="2026-01-01" if resolved else None,
+        runtime_model_identifier_at_resolve=(
+            ("anthropic/claude-opus-4-7" if resolved else None)
+            if runtime_model_identifier_at_resolve is _UNSET
+            else runtime_model_identifier_at_resolve  # type: ignore[return-value]
+        ),
+        runtime_model_version_at_resolve=(
+            ("2026-01-01" if resolved else None) if runtime_model_version_at_resolve is _UNSET else runtime_model_version_at_resolve  # type: ignore[return-value]
+        ),
         resolved_prompt_template_hash="b" * 64 if resolved else None,
     )
 
@@ -766,6 +777,95 @@ def test_llm_interpretations_ok_when_auto_interpreted_no_surfaces_baked_in():
     # affected_node_id is NULL on this row shape, so component_ids
     # excludes it (the dedup-and-sort projection skips None).
     assert row.component_ids == ()
+
+
+def test_llm_interpretations_ok_when_composer_and_runtime_models_differ():
+    """Composer drafter and runtime executor models are different roles.
+
+    ``model_identifier`` records which composer LLM drafted the
+    interpretation surface. ``runtime_model_identifier_at_resolve`` records
+    which pipeline LLM will execute the resolved prompt. A mismatch between
+    those two fields is normal and must not be reported as a rotated model.
+    """
+    events = {
+        "opt_out": [],
+        "scoped": [
+            _make_event(
+                choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+                affected_node_id="j",
+                runtime_model_identifier_at_resolve="anthropic/claude-sonnet-4-5",
+            ),
+        ],
+    }
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK, interpretation_events=events)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "ok"
+    assert row.detail is None
+    assert row.component_ids == ("j",)
+
+
+def test_llm_interpretations_ok_when_runtime_model_matches_recorded():
+    """F-19 parity case: runtime_model_identifier_at_resolve equals
+    model_identifier (the common case where the operator did not rotate models)
+    → row stays ``ok``; no drift warning is emitted.
+
+    Pins the boundary so a regression that always-emits a drift warning
+    surfaces immediately.
+    """
+    events = {
+        "opt_out": [],
+        "scoped": [
+            _make_event(
+                choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+                affected_node_id="j",
+                # Both equal — factory default for both fields when resolved.
+            ),
+        ],
+    }
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK, interpretation_events=events)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "ok"
+
+
+def test_llm_interpretations_opt_out_overrides_runtime_model_drift():
+    """Status precedence pin: session-wide opt-out is a stronger statement
+    than runtime-model drift; opt-out keeps the row at ``not_applicable``
+    even if scoped events would otherwise emit a drift warning.
+
+    Without this pin a future drift implementation that blindly downgrades
+    ``not_applicable`` to ``warning`` would silently leak opt-out as a
+    warning state.
+    """
+    events = {
+        "opt_out": [
+            _make_event(
+                choice=InterpretationChoice.OPTED_OUT,
+                interpretation_source=InterpretationSource.AUTO_INTERPRETED_OPT_OUT,
+            )
+        ],
+        "scoped": [],
+    }
+    svc = _make_service(_state(transforms=(("j", "llm"),)), _OK, interpretation_events=events)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "llm_interpretations")
+    assert row.status == "not_applicable"
 
 
 def test_secrets_not_applicable_when_no_refs():

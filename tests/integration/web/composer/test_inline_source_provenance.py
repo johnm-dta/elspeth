@@ -12,9 +12,10 @@ post-insert read.  Test #5 (non-UTF-8 surrogate) targets
 Test list (1-5):
   1. ``test_verbatim_blob_records_creation_modality_and_message_id``
   2. ``test_llm_generated_blob_carries_llm_provenance``
-  3. ``test_cross_session_message_id_rejected``
-  4. ``test_oversize_content_raises_tool_argument_error``
-  5. ``test_non_utf8_content_raises_tool_argument_error``
+  3. ``test_llm_generated_blob_requires_message_anchor``
+  4. ``test_cross_session_message_id_rejected``
+  5. ``test_oversize_content_raises_tool_argument_error``
+  6. ``test_non_utf8_content_raises_tool_argument_error``
 
 Layer: integration — boots an in-memory session DB via
 ``create_session_engine`` + ``initialize_session_schema``, then drives
@@ -35,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
@@ -241,8 +243,31 @@ def test_llm_generated_blob_carries_llm_provenance(tmp_path: Path) -> None:
     assert row.creating_arguments_hash.startswith("sha256:deadbeef")
 
 
+def test_llm_generated_blob_requires_message_anchor(tmp_path: Path) -> None:
+    """LLM-authored blob writes must name the user message that triggered them."""
+    _engine, session_id, _user_message_id = _session_with_user_message()
+
+    with pytest.raises(AuditIntegrityError, match="created_from_message_id"):
+        _prepare_blob_create(
+            {
+                "filename": "generated.csv",
+                "mime_type": "text/csv",
+                "content": "score\n42\n",
+            },
+            data_dir=str(tmp_path),
+            session_id=session_id,
+            creation_modality=CreationModality.LLM_GENERATED,
+            created_from_message_id=None,
+            creating_model_identifier="gpt-5.4-mini",
+            creating_model_version="2026-05-01",
+            creating_provider="openai",
+            creating_composer_skill_hash="sha256:cafebabe" + "0" * 56,
+            creating_arguments_hash="sha256:deadbeef" + "0" * 56,
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────
-# Test 3 — cross-session message id is rejected by the composite FK
+# Test 4 — cross-session message id is rejected by the composite FK
 # ─────────────────────────────────────────────────────────────────────────
 
 

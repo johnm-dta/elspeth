@@ -12,12 +12,10 @@ lines 2941-2982):
 
 1. Seed the session DB with a resolved interpretation event whose
    ``resolved_prompt_template_hash`` we capture.
-2. Drive an ``AuditedLLMClient.chat_completion`` call against an in-memory
-   Landscape DB, passing the same hash through the public hand-off kwarg
-   (the production flow path: ``LLMConfig.resolved_prompt_template_hash``
-   → ``LLMTransform._resolved_prompt_template_hash`` →
-   ``AzureLLMProvider/OpenRouterLLMProvider._resolved_prompt_template_hash``
-   → ``AuditedLLMClient.chat_completion(resolved_prompt_template_hash=...)``).
+2. Drive an audited LLM call against an in-memory Landscape DB, passing the
+   same hash through the public hand-off kwarg. Azure uses
+   ``AuditedLLMClient.chat_completion`` directly; OpenRouter records a logical
+   ``CallType.LLM`` row around its HTTP transport.
 3. Read back ``calls.resolved_prompt_template_hash`` from the Landscape DB and
    assert byte equality with the session DB value.
 4. External-recompute step (spec step 9): compute
@@ -43,6 +41,7 @@ passes.
 
 from __future__ import annotations
 
+import json as jsonlib
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -61,6 +60,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import calls_table
 from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient
+from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterLLMProvider
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
@@ -138,16 +138,54 @@ def _make_fake_openai_response(content: str, model: str) -> Any:
     return response
 
 
+class _FakeHTTPXClient:
+    """Small httpx.Client stand-in for OpenRouter transport tests."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.closed = False
+
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        body = {
+            "choices": [
+                {
+                    "message": {"content": "7 / 10"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "model": "openrouter/test-model",
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        }
+        import httpx
+
+        return httpx.Response(
+            status_code=200,
+            content=jsonlib.dumps(body).encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", url),
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @pytest.mark.asyncio
 async def test_runtime_handoff_cross_db_hash_anchored() -> None:
     """Steps 6-9 of spec lines 2941-2982: cross-DB hash equality + recompute.
 
-    Drives the production hash-plumbing chain through ``AuditedLLMClient`` —
-    the same path ``AzureLLMProvider.execute_query`` and
-    ``OpenRouterLLMProvider.execute_query`` invoke. The kwarg the providers
-    forward (``resolved_prompt_template_hash``) is the same kwarg this test
-    passes directly, so a regression in the L1/L3 chain surfaces as a
-    failed assertion here.
+    Drives the Azure/public-client side of the production hash-plumbing chain
+    through ``AuditedLLMClient``. OpenRouter's raw-HTTP variant is covered below
+    so both provider families keep the same cross-DB invariant.
     """
     # ── Session-DB side: seed a session, a composition state with an LLM
     # node carrying the placeholder, a pending interpretation event, and
@@ -166,7 +204,6 @@ async def test_runtime_handoff_cross_db_hash_anchored() -> None:
     nodes = [
         {
             "id": "llm_rate",
-            "kind": "llm",
             "node_type": "transform",
             "plugin": "llm",
             "input": "input",
@@ -239,7 +276,7 @@ async def test_runtime_handoff_cross_db_hash_anchored() -> None:
     # plugin's hand-off point: the provider reads
     # ``self._resolved_prompt_template_hash`` (snapshotted from
     # ``LLMConfig.resolved_prompt_template_hash`` at transform construction)
-    # and passes it to ``client.chat_completion``.
+    # and Azure passes it to ``client.chat_completion``.
     db = LandscapeDB.in_memory()
     factory = RecorderFactory(db)
 
@@ -334,6 +371,86 @@ async def test_runtime_handoff_cross_db_hash_anchored() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openrouter_hash_handoff_records_logical_llm_call_not_http_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter's HTTP transport must not carry the LLM prompt hash.
+
+    Regression guard for the live execution crash where
+    ``resolved_prompt_template_hash`` leaked onto an ``http`` call row and
+    tripped the ``Call`` invariant before the logical LLM audit row could be
+    written.
+    """
+    db = LandscapeDB.in_memory()
+    factory = RecorderFactory(db)
+
+    run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+    source_node = factory.data_flow.register_node(
+        run_id=run.run_id,
+        plugin_name="csv_source",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        schema_config=DYNAMIC_SCHEMA,
+    )
+    llm_node = factory.data_flow.register_node(
+        run_id=run.run_id,
+        plugin_name="llm",
+        node_type=NodeType.TRANSFORM,
+        plugin_version="1.0",
+        config={"prompt_template": "Rate how modern this is."},
+        schema_config=DYNAMIC_SCHEMA,
+    )
+    row = factory.data_flow.create_row(
+        run_id=run.run_id,
+        source_node_id=source_node.node_id,
+        row_index=0,
+        data={"input": "demo"},
+    )
+    token = factory.data_flow.create_token(row_id=row.row_id)
+    node_state = factory.execution.begin_node_state(
+        token_id=token.token_id,
+        node_id=llm_node.node_id,
+        run_id=run.run_id,
+        step_index=1,
+        input_data={"input": "demo"},
+    )
+
+    session_hash = "b" * 64
+    provider = OpenRouterLLMProvider(
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        timeout_seconds=30.0,
+        recorder=factory.execution,
+        run_id=run.run_id,
+        telemetry_emit=lambda event: None,
+        resolved_prompt_template_hash=session_hash,
+    )
+    monkeypatch.setattr("elspeth.plugins.infrastructure.clients.http.httpx.Client", _FakeHTTPXClient)
+
+    result = provider.execute_query(
+        messages=[{"role": "user", "content": "Rate how modern this is."}],
+        model="openrouter/test-model",
+        temperature=0.0,
+        max_tokens=100,
+        state_id=node_state.state_id,
+        token_id=token.token_id,
+    )
+
+    assert result.content == "7 / 10"
+    with db.connection() as conn:
+        rows = conn.execute(
+            select(calls_table.c.call_type, calls_table.c.resolved_prompt_template_hash)
+            .where(calls_table.c.state_id == node_state.state_id)
+            .order_by(calls_table.c.call_index)
+        ).all()
+
+    assert [row.call_type for row in rows].count("http") == 1
+    assert [row.resolved_prompt_template_hash for row in rows if row.call_type == "http"] == [None]
+    assert [row.resolved_prompt_template_hash for row in rows if row.call_type == "llm"] == [session_hash]
+
+
+@pytest.mark.asyncio
 async def test_runtime_handoff_none_hash_records_null() -> None:
     """When the LLM transform is not downstream of an interpretation event,
     the hash kwarg is None and the Landscape column is NULL.
@@ -422,7 +539,6 @@ async def test_session_db_records_match_runtime_landscape_join() -> None:
     nodes = [
         {
             "id": "llm_eval",
-            "kind": "llm",
             "node_type": "transform",
             "plugin": "llm",
             "input": "input",

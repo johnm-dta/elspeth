@@ -6,14 +6,12 @@ two anchoring invariants the audit trail depends on:
 - **2b** ``test_blob_provenance_anchor_is_immutable`` — mutation attempts on
   ``chat_messages.content`` raise :class:`IntegrityError` via the
   ``trg_chat_messages_immutable_content`` trigger owned by
-  ``18a-phase-5b-backend.md`` (F-4).  Until 18a- ships, this test is
-  skip-guarded by introspecting ``sqlite_master`` for the trigger name.
+  ``18a-phase-5b-backend.md`` (F-4).
 
 - **2c** ``test_chat_message_delete_while_blob_references_it_raises`` —
   attempting to DELETE the ``chat_messages`` row a blob points at raises
-  :class:`IntegrityError` via the ON DELETE RESTRICT composite FK
-  ``fk_blobs_created_from_message_session`` landed in Task 2.5.  This
-  passes against the schema today; no skip-guard.
+  :class:`IntegrityError` via the unconditional
+  ``trg_chat_messages_no_delete`` trigger.
 
 The fixture pattern mirrors
 ``test_inline_source_provenance.py``: a function-local helper boots an
@@ -113,19 +111,10 @@ def _session_with_user_message_and_blob(tmp_path: Path) -> tuple[Any, str, str]:
 def test_blob_provenance_anchor_is_immutable(tmp_path: Path) -> None:
     """``blob.created_from_message_id`` points to an immutable ``chat_messages`` row.
 
-    The ``trg_chat_messages_immutable_content`` trigger (owned by 18a-) must
-    be installed before this test can pass.  When the trigger is absent
-    the test skips cleanly so this commit ships green now and flips to a
-    real assertion when 18a- lands the trigger DDL.
+    The ``trg_chat_messages_immutable_content`` trigger is part of current
+    schema bootstrap; if it is missing, this test must fail rather than skip.
     """
     engine, session_id, user_message_id = _session_with_user_message_and_blob(tmp_path)
-
-    with engine.connect() as conn:
-        trigger_exists = conn.execute(
-            text("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_chat_messages_immutable_content'")
-        ).fetchone()
-    if trigger_exists is None:
-        pytest.skip("18a- trigger trg_chat_messages_immutable_content not yet deployed")
 
     # Confirm the blob's created_from_message_id resolves to the expected row.
     with engine.connect() as conn:
@@ -147,15 +136,14 @@ def test_blob_provenance_anchor_is_immutable(tmp_path: Path) -> None:
 def test_chat_message_delete_while_blob_references_it_raises(tmp_path: Path) -> None:
     """DELETE on a ``chat_messages`` row referenced by a blob raises ``IntegrityError``.
 
-    Protection comes from the ON DELETE RESTRICT composite FK
-    ``fk_blobs_created_from_message_session`` (Task 2.5), NOT from a
-    trigger.  The IntegrityError surfaces the FK violation, not the
-    trigger's ``append-only`` message.
+    Protection comes from ``trg_chat_messages_no_delete``. The FK also
+    protects referenced rows, but the trigger is deliberately stronger:
+    every chat message is an audit anchor, even before a blob points at it.
     """
     engine, _session_id, user_message_id = _session_with_user_message_and_blob(tmp_path)
 
     with (
-        pytest.raises(IntegrityError, match="FOREIGN KEY constraint failed"),
+        pytest.raises(IntegrityError, match="append-only"),
         engine.begin() as conn,
     ):
         conn.execute(

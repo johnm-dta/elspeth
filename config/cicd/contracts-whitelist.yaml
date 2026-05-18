@@ -385,6 +385,11 @@ allowed_dict_patterns:
   # ═══════════════════════════════════════════════════════════════════════════
   - "src/elspeth/plugins/infrastructure/clients/http.py:AuditedHTTPClient._execute_request:json"
   - "src/elspeth/plugins/infrastructure/clients/http.py:AuditedHTTPClient.post:json"
+  # OpenRouter direct provider — OpenAI-compatible response_format and raw
+  # provider JSON are dynamic API payload shapes. LLMCallRequest and
+  # LLMCallResponse are the typed audit contracts around these mappings.
+  - "src/elspeth/plugins/transforms/llm/providers/openrouter.py:OpenRouterLLMProvider._build_llm_request_payload:response_format"
+  - "src/elspeth/plugins/transforms/llm/providers/openrouter.py:OpenRouterLLMProvider._record_logical_llm_success:raw_response"
   - "src/elspeth/plugins/infrastructure/clients/replayer.py:ReplayMissError.__init__:request_data"
   - "src/elspeth/plugins/infrastructure/clients/replayer.py:CallReplayer.replay:request_data"
   - "src/elspeth/plugins/infrastructure/clients/verifier.py:CallVerifier.verify:request_data"
@@ -743,6 +748,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_serialize_plugin_assistance_example:return"
   # Prevalidation helpers — options dicts are user-authored plugin config (Tier 3)
   - "src/elspeth/web/composer/tools.py:_compute_validation_delta:return"
+  - "src/elspeth/web/composer/tools.py:_mask_pending_interpretation_placeholders_for_authoring_validation:options"
   - "src/elspeth/web/composer/tools.py:_validate_sink_path:options"
   - "src/elspeth/web/composer/tools.py:_prevalidate_plugin_options:options"
   - "src/elspeth/web/composer/tools.py:_prevalidate_plugin_options:injected_fields"

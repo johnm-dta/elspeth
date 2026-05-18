@@ -86,11 +86,12 @@ interface InterpretationEventsState {
   refreshPending: (sessionId: string) => Promise<void>;
 
   /**
-   * Refresh both pending events and resolved counts for a session.
+   * Refresh pending events, resolved counts, and opt-out state for a session.
    *
    * Calls GET /interpretations?status=all and partitions the result:
    *   - pending rows → pendingBySession[sessionId]
    *   - non-pending rows → counted into resolvedCountBySession[sessionId]
+   *   - auto_interpreted_opt_out row → optedOutBySession[sessionId] = true
    *
    * Used on session load to bootstrap the per-session view in one round-trip.
    */
@@ -216,7 +217,11 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
       const events = await api.listInterpretationEvents(sessionId, "all");
       const pendingMap: Record<string, InterpretationEvent> = {};
       const counts: ResolvedCounts = { ...EMPTY_COUNTS };
+      let optedOutFromHistory = false;
       for (const event of events) {
+        if (event.interpretation_source === "auto_interpreted_opt_out") {
+          optedOutFromHistory = true;
+        }
         if (event.choice === "pending") {
           pendingMap[event.id] = event;
         } else if (
@@ -232,13 +237,23 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
         // 'abandoned' rows are not counted in this store; the audit-readiness
         // panel surfaces them via a separate code path if needed.
       }
-      set((state) => ({
-        pendingBySession: { ...state.pendingBySession, [sessionId]: pendingMap },
-        resolvedCountBySession: {
-          ...state.resolvedCountBySession,
-          [sessionId]: counts,
-        },
-      }));
+      set((state) => {
+        const optedOut =
+          optedOutFromHistory || state.optedOutBySession[sessionId] === true;
+        return {
+          pendingBySession: {
+            ...state.pendingBySession,
+            [sessionId]: optedOut ? {} : pendingMap,
+          },
+          resolvedCountBySession: {
+            ...state.resolvedCountBySession,
+            [sessionId]: counts,
+          },
+          optedOutBySession: optedOut
+            ? { ...state.optedOutBySession, [sessionId]: true }
+            : state.optedOutBySession,
+        };
+      });
     },
 
     async resolveEvent(

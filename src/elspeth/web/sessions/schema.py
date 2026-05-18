@@ -23,15 +23,21 @@ from elspeth.web.sessions.models import (
 
 _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 
-# F-24 — required SQLite triggers. These triggers enforce audit invariants
+# Required SQLite triggers. These triggers enforce audit invariants
 # that cannot be expressed as table CHECK constraints:
 #
 # * ``trg_interpretation_events_immutable_resolved`` — resolved
-#   ``interpretation_events`` rows cannot be retroactively edited (Phase 5b
-#   Task 2; the table itself is the source of truth for user resolutions).
+#   ``interpretation_events`` rows cannot be retroactively edited.
+# * ``trg_interpretation_events_no_delete_resolved`` — resolved
+#   ``interpretation_events`` rows cannot be deleted, while unresolved
+#   PENDING rows remain deletable for orphan recovery.
 # * ``trg_chat_messages_immutable_content`` — ``chat_messages.content`` is
-#   append-only once written (Phase 5a Task 2.6; chat messages anchor the
-#   ``blobs.created_from_message_id`` lineage walk).
+#   append-only once written.
+# * ``trg_chat_messages_no_delete`` — ``chat_messages`` rows cannot be
+#   deleted directly because they anchor the ``blobs.created_from_message_id``
+#   lineage walk. Whole-session archival remains the bounded lifecycle
+#   purge path and is implemented by deleting the owning ``sessions`` row,
+#   allowing schema-owned cascades to remove session-scoped children.
 #
 # The validator catches the case where schema bootstrap succeeded but the
 # trigger DDL failed silently (e.g., if the DDL event listener was removed
@@ -41,7 +47,9 @@ _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 _REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
     {
         "trg_interpretation_events_immutable_resolved",
+        "trg_interpretation_events_no_delete_resolved",
         "trg_chat_messages_immutable_content",
+        "trg_chat_messages_no_delete",
     }
 )
 

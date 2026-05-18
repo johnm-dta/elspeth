@@ -215,6 +215,7 @@ class CompositionProposalRecord:
     id: UUID
     session_id: UUID
     tool_call_id: str
+    user_message_id: UUID | None
     tool_name: str
     status: ProposalLifecycleStatus
     summary: str
@@ -674,6 +675,7 @@ class SessionServiceProtocol(Protocol):
         arguments_redacted_json: Mapping[str, Any],
         base_state_id: UUID | None,
         actor: str,
+        user_message_id: UUID | None = None,
     ) -> CompositionProposalRecord: ...
 
     async def list_composition_proposals(

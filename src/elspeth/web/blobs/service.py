@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
+from opentelemetry import metrics
 from sqlalchemy import Engine, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
@@ -49,6 +50,8 @@ from elspeth.web.sessions.models import (
 from elspeth.web.sessions.protocol import CompositionStateRecord
 
 _T = TypeVar("_T")
+
+_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER = metrics.get_meter(__name__).create_counter("blob_copy_fork.orphan_rows_left_behind")
 
 _ACTIVE_RUN_COMPOSITION_COLUMNS = (
     runs_table.c.id.label("run_id"),
@@ -1031,6 +1034,14 @@ class BlobServiceImpl:
                     f"Storage file was unlinked, but the DB row remains and "
                     f"will appear as a 'ready' blob in the target session — "
                     f"manual cleanup of blobs.id={orphan_id} required."
+                )
+                _BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER.add(
+                    1,
+                    {
+                        "orphan_blob_id": str(orphan_id),
+                        "target_session_id": target_session_id_str,
+                        "exc_type": type(recorded_exc).__name__,
+                    },
                 )
             raise
 

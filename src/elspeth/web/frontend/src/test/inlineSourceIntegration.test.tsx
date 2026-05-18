@@ -207,6 +207,13 @@ const SESSION_ID = "session-1";
 const BLOB_ID = "blob-1";
 const USER_MESSAGE_ID = "msg-user-1";
 const ASSISTANT_MESSAGE_ID = "msg-asst-1";
+const VERBATIM_INLINE_SOURCE_TEXT = "url\nhttps://finance.gov.au";
+const VERBATIM_INLINE_SOURCE_HASH =
+  "8a1a2e0744ef2cdd5b1fbbffef930dcb73bdb0a4afae201688d1f243a8b80e83";
+const LLM_INLINE_SOURCE_TEXT =
+  "url\nhttps://gov.au/1\nhttps://gov.au/2\nhttps://gov.au/3\nhttps://gov.au/4\nhttps://gov.au/5";
+const LLM_INLINE_SOURCE_HASH =
+  "c85e8a7843f8d4b014a8cde944256635cddbfa882f817d7f503d5623cfa1bc3f";
 
 /**
  * Build a CompositionState whose source is an `inline_blob` source with
@@ -235,6 +242,7 @@ function makeCompositionStateWithInlineBlob(): CompositionState {
  */
 function makeBlobMetadata(
   creationModality: BlobMetadata["creation_modality"],
+  contentHash: string,
 ): BlobMetadata {
   return {
     id: BLOB_ID,
@@ -242,7 +250,7 @@ function makeBlobMetadata(
     filename: "chat.csv",
     mime_type: "text/csv",
     size_bytes: 32,
-    content_hash: "sha256-abc123def456",
+    content_hash: contentHash,
     created_at: "2026-05-18T00:00:00Z",
     created_by: "user",
     source_description: "From chat",
@@ -401,11 +409,9 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
       .spyOn(api, "sendMessage")
       .mockResolvedValue(makeSendMessageResponse());
     vi.spyOn(api, "getBlobMetadata").mockResolvedValue(
-      makeBlobMetadata("verbatim"),
+      makeBlobMetadata("verbatim", VERBATIM_INLINE_SOURCE_HASH),
     );
-    vi.spyOn(api, "previewBlobContent").mockResolvedValue(
-      "url\nhttps://finance.gov.au",
-    );
+    vi.spyOn(api, "previewBlobContent").mockResolvedValue(VERBATIM_INLINE_SOURCE_TEXT);
 
     render(<App />);
 
@@ -464,7 +470,7 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
     expect(summary?.blobId).toBe(BLOB_ID);
     expect(summary?.filename).toBe("chat.csv");
     expect(summary?.mimeType).toBe("text/csv");
-    expect(summary?.contentHash).toBe("sha256-abc123def456");
+    expect(summary?.contentHash).toBe(VERBATIM_INLINE_SOURCE_HASH);
 
     // (g) Audit-readiness panel Provenance row reflects the inline source.
     // The panel auto-fetches once compositionState.version === 2 (the
@@ -474,7 +480,7 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
     await waitFor(() => {
       expect(screen.getByText(/inline content hashed/i)).toBeInTheDocument();
     });
-    expect(screen.getByText(/sha256-abc12/)).toBeInTheDocument();
+    expect(screen.getByText(/8a1a2e0744ef/)).toBeInTheDocument();
   });
 
   it("llm_generated path — canonical demo prompt, widget renders WITH Edit button", async () => {
@@ -482,11 +488,9 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
 
     vi.spyOn(api, "sendMessage").mockResolvedValue(makeSendMessageResponse());
     vi.spyOn(api, "getBlobMetadata").mockResolvedValue(
-      makeBlobMetadata("llm_generated"),
+      makeBlobMetadata("llm_generated", LLM_INLINE_SOURCE_HASH),
     );
-    vi.spyOn(api, "previewBlobContent").mockResolvedValue(
-      "url\nhttps://gov.au/1\nhttps://gov.au/2\nhttps://gov.au/3\nhttps://gov.au/4\nhttps://gov.au/5",
-    );
+    vi.spyOn(api, "previewBlobContent").mockResolvedValue(LLM_INLINE_SOURCE_TEXT);
 
     render(<App />);
 
@@ -515,13 +519,12 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
     expect(summary?.blobId).toBe(BLOB_ID);
 
     // (g) Audit-readiness panel Provenance row reflects the inline source.
-    // The integration fixture reuses the same blob `content_hash` for both
-    // creation modalities; only the `provenance` discriminant differs,
-    // and the row override depends on inlineSummary being non-null —
-    // both paths display the same hash-prefix line.
+    // The integration fixture hashes the actual mocked preview text for
+    // each creation modality so ChatPanel's projection guard verifies the
+    // same SHA-256 value the audit-readiness row displays.
     await waitFor(() => {
       expect(screen.getByText(/inline content hashed/i)).toBeInTheDocument();
     });
-    expect(screen.getByText(/sha256-abc12/)).toBeInTheDocument();
+    expect(screen.getByText(/c85e8a7843f8/)).toBeInTheDocument();
   });
 });

@@ -80,6 +80,43 @@ def test_create_session_engine_enables_foreign_keys(file_db_url: str) -> None:
     assert foreign_keys == 1
 
 
+def test_create_session_engine_reapplies_sqlite_pragmas_after_reconnect(
+    file_db_url: str,
+) -> None:
+    """PRAGMA discipline MUST be per DBAPI connection, not one-shot setup.
+
+    ``foreign_keys``, ``busy_timeout``, and ``synchronous`` are connection-
+    scoped in SQLite. Disposing the pool forces the next checkout to create
+    a new DBAPI connection, so this pins the connect-listener guarantee.
+    """
+    engine = create_session_engine(file_db_url)
+    with engine.connect() as conn:
+        first = {
+            "foreign_keys": conn.execute(text("PRAGMA foreign_keys")).scalar_one(),
+            "journal_mode": conn.execute(text("PRAGMA journal_mode")).scalar_one(),
+            "busy_timeout": conn.execute(text("PRAGMA busy_timeout")).scalar_one(),
+            "synchronous": conn.execute(text("PRAGMA synchronous")).scalar_one(),
+        }
+
+    engine.dispose()
+
+    with engine.connect() as conn:
+        second = {
+            "foreign_keys": conn.execute(text("PRAGMA foreign_keys")).scalar_one(),
+            "journal_mode": conn.execute(text("PRAGMA journal_mode")).scalar_one(),
+            "busy_timeout": conn.execute(text("PRAGMA busy_timeout")).scalar_one(),
+            "synchronous": conn.execute(text("PRAGMA synchronous")).scalar_one(),
+        }
+
+    assert first == {
+        "foreign_keys": 1,
+        "journal_mode": "wal",
+        "busy_timeout": 5000,
+        "synchronous": 1,
+    }
+    assert second == first
+
+
 def test_initialize_session_schema_stamps_application_id_and_user_version(
     file_db_url: str,
 ) -> None:

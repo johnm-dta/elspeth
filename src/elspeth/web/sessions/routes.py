@@ -174,6 +174,13 @@ from elspeth.web.sessions.schemas import (
     UpdateSessionRequest,
     ValidationEntryResponse,
 )
+from elspeth.web.sessions.service import (
+    InterpretationEventAlreadyResolvedError,
+    InterpretationEventNotFoundError,
+    InterpretationNodeMissingError,
+    InterpretationNodePluginMutatedError,
+    InterpretationPlaceholderConsumedError,
+)
 
 slog = structlog.get_logger()
 
@@ -518,13 +525,13 @@ def _extract_runtime_model_snapshot(
     """Extract (model_identifier, model_version) for the affected LLM node (F-19).
 
     ``state.nodes`` is typed ``Sequence[Mapping[str, Any]] | None`` so the
-    Mapping shape is guaranteed; ``id`` is a structurally required key
-    (Tier-1 read — KeyError on absence is correct behaviour). ``model``
-    and ``model_version`` are *optional* keys by design — an LLM transform
-    without an explicit pin uses an LLM-pack default at runtime. The
-    audit row's columns are nullable; recording ``None`` accurately
-    reflects "no runtime model pinned in composition state" without
-    fabricating a default.
+    Mapping shape is guaranteed; ``id`` and ``options`` are structurally
+    required keys (Tier-1 read — KeyError on absence is correct behaviour).
+    ``options.model`` and ``options.model_version`` are *optional* keys by
+    design — an LLM transform without an explicit pin uses an LLM-pack
+    default at runtime. The audit row's columns are nullable; recording
+    ``None`` accurately reflects "no runtime model pinned in composition
+    state" without fabricating a default.
 
     A non-string value at one of the optional keys is a Tier-1 anomaly
     (the composition_state JSON came from our own writer). It is raised
@@ -539,17 +546,24 @@ def _extract_runtime_model_snapshot(
     for node in state.nodes:
         if node["id"] != node_id:
             continue
-        identifier = node.get("model")
-        version = node.get("model_version")
+        options = node["options"]
+        if not isinstance(options, Mapping):
+            raise AuditIntegrityError(
+                f"Tier 1 audit anomaly: node {node_id!r}.options is "
+                f"{type(options).__name__!r}, expected mapping. The composition_state "
+                f"writer guarantees an options mapping for LLM nodes."
+            )
+        identifier = options.get("model")
+        version = options.get("model_version")
         if identifier is not None and type(identifier) is not str:
             raise AuditIntegrityError(
-                f"Tier 1 audit anomaly: node {node_id!r}.model is "
+                f"Tier 1 audit anomaly: node {node_id!r}.options.model is "
                 f"{type(identifier).__name__!r}, expected str. The composition_state "
                 f"writer guarantees a str-or-absent shape for this key."
             )
         if version is not None and type(version) is not str:
             raise AuditIntegrityError(
-                f"Tier 1 audit anomaly: node {node_id!r}.model_version is "
+                f"Tier 1 audit anomaly: node {node_id!r}.options.model_version is "
                 f"{type(version).__name__!r}, expected str. The composition_state "
                 f"writer guarantees a str-or-absent shape for this key."
             )
@@ -932,7 +946,7 @@ def _is_composer_llm_audit_tool_message(message: ChatMessageRecord) -> bool:
 
     Rev-4: LLM-call audit rows are persisted with ``role="audit"`` (they
     have no real OpenAI tool-call identity, so they cannot be ``role="tool"``
-    after the parent-CHECK biconditional landed in Task 1).
+    after the parent-CHECK biconditional landed).
     """
     if message.role != "audit" or message.tool_calls is None:
         return False
@@ -3102,9 +3116,9 @@ async def _dispatch_guided_respond(
         )
 
     # --- STEP_3_TRANSFORMS turns ----------------------------------------
-    # The only response shape we handle in Phase 4 is ACCEPT on a
-    # propose_chain turn.  Reject and clarifying SINGLE_SELECT responses are
-    # deferred to Phase 5 (which adds re-solve, repair, and advisor flows).
+    # The only response shape handled here is ACCEPT on a propose_chain
+    # turn. Reject and clarifying SINGLE_SELECT responses remain explicit
+    # gaps for future re-solve, repair, and advisor flows.
     if current_step is GuidedStep.STEP_3_TRANSFORMS:
         if current_turn_type is TurnType.PROPOSE_CHAIN:
             control = turn_response["control_signal"]
@@ -3311,10 +3325,7 @@ async def _dispatch_guided_respond(
             if chosen == ["reject"]:
                 raise HTTPException(
                     status_code=501,
-                    detail=(
-                        "Step 3 chain rejection is not yet implemented — Phase 5 will add "
-                        "re-solve and repair flows. Use exit-to-freeform to drop to freeform mode."
-                    ),
+                    detail=("Step 3 chain rejection is not yet implemented. Use exit-to-freeform to drop to freeform mode."),
                 )
             raise HTTPException(
                 status_code=400,
@@ -3407,10 +3418,10 @@ async def _dispatch_guided_respond(
             )
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
-        # SINGLE_SELECT clarifying-question response at STEP_3 — Phase 5.
+        # SINGLE_SELECT clarifying-question response at STEP_3.
         raise HTTPException(
             status_code=501,
-            detail="Step 3 clarifying question handling is not yet implemented — Phase 5.",
+            detail="Step 3 clarifying question handling is not yet implemented.",
         )
 
     # Unhandled branch — this is a dispatcher gap, not a user error.
@@ -3636,6 +3647,7 @@ def create_session_router() -> APIRouter:
             session_id=str(session.id),
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
+            user_message_id=str(proposal.user_message_id) if proposal.user_message_id is not None else None,
         )
         if result.updated_state.version == current_state.version:
             # The tool ran but did not advance composition state. The route
@@ -3973,8 +3985,8 @@ def create_session_router() -> APIRouter:
                         user_id=str(user.user_id),
                         progress=progress_sink,
                         guided_terminal=_guided_terminal_for_compose,
-                        # Phase 5a Task 2.5: bind the freshly persisted
-                        # user message id so any inline_blob created by
+                        # Bind the freshly persisted user message id so any
+                        # inline_blob created by
                         # this turn's tool calls can record provenance
                         # back to it.  The composite FK on
                         # ``(created_from_message_id, session_id)`` in
@@ -4516,9 +4528,10 @@ def create_session_router() -> APIRouter:
                 _record_composer_request_terminal(terminal_status, endpoint="send_message")
                 # Bounded await of the auto-title task so its result is in
                 # the DB before the route returns and the strong reference
-                # outlives the event-loop's weak-ref GC window. The task
-                # swallows its own exceptions; the wait_for timeout is
-                # belt-and-braces against a pathological provider hang.
+                # outlives the event-loop's weak-ref GC window. Expected
+                # provider/timeout failures are recorded inside the task;
+                # programmer bugs and DB write failures propagate here
+                # instead of being silently swallowed.
                 if auto_title_task is not None:
                     try:
                         await asyncio.wait_for(auto_title_task, timeout=2.0)
@@ -5244,7 +5257,7 @@ def create_session_router() -> APIRouter:
         return _state_response(new_state)
 
     # ------------------------------------------------------------------ #
-    # Interpretation events (Phase 5b Tasks 6 + 7)
+    # Interpretation events
     # ------------------------------------------------------------------ #
     #
     # DI / telemetry note:
@@ -5273,7 +5286,7 @@ def create_session_router() -> APIRouter:
         raw_request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
     ) -> InterpretationResolveResponse:
-        """User-driven resolve of a pending interpretation event (Phase 5b Task 6).
+        """User-driven resolve of a pending interpretation event.
 
         Tier-3 boundary: request body validated by Pydantic; ``choice`` /
         ``amended_value`` consistency enforced by the model validator on
@@ -5300,13 +5313,10 @@ def create_session_router() -> APIRouter:
         operators see "no runtime model pinned" rather than a
         fabricated default.
 
-        Status-code mapping for service ``ValueError``: the service
-        raises a single ``ValueError`` for three distinct failure modes —
-        non-existent event, cross-session reference, and double-resolve
-        (TOCTOU).  A follow-up read disambiguates: a row matching
-        ``(id, session_id)`` that is NOT pending → 409 (conflict —
-        already resolved); else 404 (not found / cross-session — both
-        IDOR-safe).
+        Status-code mapping is driven by typed service exceptions. Unknown
+        event / cross-session remains 404 and double-resolve remains 409;
+        prompt-patch failures are 422 so an existing event is never laundered
+        as "not found". Tier-1 audit anomalies surface as 500.
         """
         await _verify_session_ownership(session_id, user, raw_request)  # 404 on IDOR
         service: SessionServiceProtocol = raw_request.app.state.session_service
@@ -5322,8 +5332,8 @@ def create_session_router() -> APIRouter:
         # If the pending row does not exist for this session, the
         # extraction returns ``(None, None)`` and the resolve call
         # raises ``ValueError`` (mapped to 404 below).
-        pending_events = await service.list_interpretation_events(session_id, status="all")
-        pending_event = next((e for e in pending_events if e.id == event_id), None)
+        interpretation_events = await service.list_interpretation_events(session_id, status="all")
+        pending_event = next((e for e in interpretation_events if e.id == event_id), None)
         affected_node_id = pending_event.affected_node_id if pending_event is not None else None
         current_state = await service.get_current_state(session_id)
         if current_state is None:
@@ -5341,21 +5351,54 @@ def create_session_router() -> APIRouter:
                 runtime_model_identifier=runtime_model_identifier,
                 runtime_model_version=runtime_model_version,
             )
-        except ValueError as exc:
-            # Disambiguate.  If a row exists at ``(id, session_id)`` with
-            # ``choice != 'pending'``, this is a double-resolve / TOCTOU
-            # collision: return 409.  Otherwise (unknown id, or
-            # cross-session reference), return 404 — IDOR-safe.
-            existing = next(
-                (e for e in pending_events if e.id == event_id and e.choice is not InterpretationChoice.PENDING),
-                None,
-            )
-            if existing is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Interpretation event is already resolved.",
-                ) from exc
-            raise HTTPException(status_code=404, detail="Interpretation event not found") from exc
+        except InterpretationEventAlreadyResolvedError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "interpretation_already_resolved",
+                    "message": "Interpretation event is already resolved.",
+                },
+            ) from exc
+        except InterpretationEventNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "interpretation_event_not_found",
+                    "message": "Interpretation event not found.",
+                },
+            ) from exc
+        except InterpretationNodeMissingError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "interpretation_node_missing",
+                    "message": "The affected LLM node is no longer present in the current composition state.",
+                },
+            ) from exc
+        except InterpretationNodePluginMutatedError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "interpretation_node_mutated",
+                    "message": "The affected node is no longer an LLM transform.",
+                },
+            ) from exc
+        except InterpretationPlaceholderConsumedError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "interpretation_placeholder_unavailable",
+                    "message": "The affected LLM prompt no longer contains the expected interpretation placeholder.",
+                },
+            ) from exc
+        except AuditIntegrityError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "interpretation_audit_integrity_error",
+                    "message": "Interpretation resolution hit an audit-integrity anomaly.",
+                },
+            ) from exc
 
         return InterpretationResolveResponse(
             event=_interpretation_event_response(event),
@@ -5372,7 +5415,7 @@ def create_session_router() -> APIRouter:
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         status: Literal["pending", "all"] = "all",
     ) -> ListInterpretationEventsResponse:
-        """List interpretation events for the session (Phase 5b Task 6).
+        """List interpretation events for the session.
 
         Used by the frontend on session reload to rehydrate pending
         review affordances, and by the audit-readiness panel for counts.
@@ -5393,7 +5436,7 @@ def create_session_router() -> APIRouter:
         raw_request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
     ) -> InterpretationOptOutResponse:
-        """Record the per-session 'stop asking about interpretations' decision (Phase 5b Task 7).
+        """Record the per-session 'stop asking about interpretations' decision.
 
         Single transaction (enforced inside
         :meth:`SessionServiceProtocol.record_session_interpretation_opt_out`):
@@ -6028,10 +6071,9 @@ def create_session_router() -> APIRouter:
                         # Guided-mode server-emitted turn: the LLM converged on a
                         # guided step transition and the resulting state is being
                         # persisted. ``convergence_persist`` is the closest existing
-                        # provenance category (Phase 1A enum does not have a
-                        # ``guided_persist`` value; widening the enum mid-merge
-                        # would require a Phase 1A spec amendment and is out of
-                        # scope here — see merge commit message).
+                        # provenance category. The closed enum does not have a
+                        # ``guided_persist`` value; widening it is out of
+                        # scope here — see merge commit message.
                         provenance="convergence_persist",
                     )
 
@@ -6188,8 +6230,8 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                         # Guided endpoints don't dispatch tools that can plugin-crash;
                         # auto-drop on solver exhaustion is a separate channel that
-                        # doesn't surface through this audit path. Phase 1B/rev-4
-                        # made this keyword-only with no default, exposing the gap.
+                        # doesn't surface through this audit path. Rev-4 made
+                        # this keyword-only with no default, exposing the gap.
                         plugin_crash_pending=False,
                     )
                     await _persist_llm_calls(
@@ -6208,8 +6250,8 @@ def create_session_router() -> APIRouter:
                             state_record_out.id if state_record_out is not None else None,
                             # Guided endpoints don't dispatch tools that can plugin-crash;
                             # auto-drop on solver exhaustion is a separate channel that
-                            # doesn't surface through this audit path. Phase 1B/rev-4
-                            # made this keyword-only with no default, exposing the gap.
+                            # doesn't surface through this audit path. Rev-4 made
+                            # this keyword-only with no default, exposing the gap.
                             plugin_crash_pending=False,
                         )
                     except Exception as persist_exc:
@@ -6841,8 +6883,8 @@ def create_session_router() -> APIRouter:
                     # Guided POST /respond: the user-supplied turn converged on a
                     # guided step transition and the resulting state is being
                     # persisted. Same provenance choice as the GET /guided server-
-                    # emitted path (the Phase 1A enum predates guided mode; widening
-                    # is out of scope here — see merge commit message).
+                    # emitted path (the closed enum has no guided-specific value;
+                    # widening is out of scope here — see merge commit message).
                     provenance="convergence_persist",
                 )
 
@@ -6935,8 +6977,8 @@ def create_session_router() -> APIRouter:
                         state_record_out.id if state_record_out is not None else None,
                         # Guided endpoints don't dispatch tools that can plugin-crash;
                         # auto-drop on solver exhaustion is a separate channel that
-                        # doesn't surface through this audit path. Phase 1B/rev-4
-                        # made this keyword-only with no default, exposing the gap.
+                        # doesn't surface through this audit path. Rev-4 made
+                        # this keyword-only with no default, exposing the gap.
                         plugin_crash_pending=False,
                     )
                     await _persist_llm_calls(
@@ -7468,8 +7510,8 @@ def create_session_router() -> APIRouter:
                     state_data,
                     # Per-step chat persists guided-session metadata
                     # (chat_history/chat_turn_seq) after the LLM response has
-                    # converged. The Phase 1A provenance enum predates guided
-                    # chat, so use the same closest category as sibling guided
+                    # converged. The closed provenance enum has no guided-chat
+                    # category, so use the same closest category as sibling guided
                     # state writes rather than widening the closed list mid-merge.
                     provenance="convergence_persist",
                 )

@@ -47,7 +47,10 @@ metadata = MetaData()
 #        can deduplicate per failed batch rather than per aggregation node.
 #   7 → ADR-019 Stage 2/3: token_outcomes stores the two-axis terminal model
 #        (`outcome`, `path`, `completed`) instead of the old single-axis outcome + is_terminal.
-SQLITE_SCHEMA_EPOCH = 7
+#   8 → Phase 5b interpretation-review audit anchor:
+#        calls.resolved_prompt_template_hash records the runtime-side hash used
+#        to join Landscape LLM calls back to session interpretation_events.
+SQLITE_SCHEMA_EPOCH = 8
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.

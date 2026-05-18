@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.transforms.llm.base import LLMConfig
 
@@ -85,6 +86,42 @@ class TestLLMConfigBase:
             required_input_fields=["text"],
         )
         assert config.queries is None
+
+    def test_resolved_prompt_template_hash_must_match_prompt_template(self) -> None:
+        """Phase 5b runtime anchor refuses prompt/hash drift at config load."""
+        resolved_template = "Rate how innovative this is."
+        config = LLMConfig(
+            provider="azure",
+            prompt_template=resolved_template,
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=[],
+            resolved_prompt_template_hash=stable_hash(resolved_template),
+        )
+        assert config.resolved_prompt_template_hash == stable_hash(resolved_template)
+
+        with pytest.raises(ValidationError, match="resolved_prompt_template_hash"):
+            LLMConfig(
+                provider="azure",
+                prompt_template="Rate how boring this is.",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=[],
+                resolved_prompt_template_hash=stable_hash(resolved_template),
+            )
+
+    def test_missing_required_input_fields_error_names_composer_options_repair(self) -> None:
+        """Runtime preflight errors must name the composer patch location."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="URL: {{ row['url'] }}\nContent: {{ row['content'] }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "options.required_input_fields" in message
+        assert "patch_node_options" in message
+        assert '"patch": {"required_input_fields": ["content", "url"]}' in message
 
 
 class TestLLMConfigResponseFieldValidation:

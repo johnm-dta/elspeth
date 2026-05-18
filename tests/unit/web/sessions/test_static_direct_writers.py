@@ -1021,6 +1021,31 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
             "obscure the schema-level assertion."
         ),
     ),
+    # ------ tests/integration/web/composer/test_chat_messages_attributability.py ------
+    #
+    # Phase 5a Task 2.6 attributability test seeds a session + one user
+    # chat_messages row directly so the blob-provenance / immutable-content
+    # assertions have a stable anchor row to bind against. The production
+    # write path is still exercised in the same test via
+    # ``_prepare_blob_create`` + ``_persist_prepared_blob_create``; the
+    # direct insert is only the chat-row anchor, not the system-under-test.
+    ReviewedWriter(
+        path="tests/integration/web/composer/test_chat_messages_attributability.py",
+        enclosing_symbol="_session_with_user_message_and_blob",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Phase 5a Task 2.6 attributability fixture: seeds one session + "
+            "one user chat message so the test can persist a blob via the "
+            "real composer write path (_prepare_blob_create + "
+            "_persist_prepared_blob_create) and assert the composite FK "
+            "fk_blobs_created_from_message_session binds to a stable, "
+            "caller-controlled message id. Routing the anchor row through "
+            "SessionServiceImpl.add_message would obscure the schema-level "
+            "assertions (created_from_message_id immutability, trigger "
+            "trg_chat_messages_immutable_content) the test is pinning."
+        ),
+    ),
 )
 
 

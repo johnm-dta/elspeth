@@ -29,6 +29,38 @@ If either check fails, return to 18a.
 
 ---
 
+## Worktree
+
+**Branch:** `feat/composer-phase-5-chat-data-entry`
+**Worktree path:** `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`
+**Shared with:** the entire Phase 5 umbrella (17-, 18-, 18a-, 18b-). Phase 5a and Phase 5b ship as a coordinated PR; do NOT split into separate branches. This document is one of the four that will be implemented together on this single worktree. Shared with 17-, 18-, 18a- (the Phase 5a plan, Phase 5b overview, and Phase 5b backend plan).
+
+### Setup (one-time)
+
+From the main checkout at `/home/john/elspeth`:
+
+```bash
+git worktree add .worktrees/composer-phase-5-chat-data-entry -b feat/composer-phase-5-chat-data-entry
+cd .worktrees/composer-phase-5-chat-data-entry
+uv venv --python 3.13                       # Python 3.13 to match main; mismatched versions produce ~300 spurious tier-model violations
+source .venv/bin/activate
+uv pip install -e ".[dev,llm]"              # editable install bound to THIS worktree's venv, not main's
+```
+
+### Operational notes
+
+- **uv venv discipline:** every `uv pip install` invocation in this worktree MUST be preceded by `source .venv/bin/activate` OR invoked with `--python /home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/.venv/bin/python`. Without this, `uv` resolves to main's `.venv` and clobbers it. (See `feedback_uv_venv_leak`.)
+- **filigree CLI:** the bare `filigree` command rejects realpath-escaping DBs from inside a worktree. Prefer the `mcp__filigree__*` tools. If you must use the CLI, run it from the git common dir: `(cd "$(git rev-parse --git-common-dir)/.." && filigree <verb>)`.
+- **Subagent dispatch from this worktree:** subagents inherit parent CWD silently. Prefix every dispatch prompt with: "Your CWD is `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`; all file paths must be absolute." Use absolute paths everywhere. (See `feedback_subagents_cant_use_worktrees`.)
+- **Composer-skill edits stay on main:** the `src/elspeth/web/composer/skills/pipeline_composer.md` file is read by the live `elspeth-web.service` from main, not from any worktree. Skill-prompt edits in this phase (e.g. 5a Task 8 nudge, 5b Task 8 nudge) must be applied on main and the service restarted, per `feedback_skip_worktree_for_skill_and_config_edits`. Land the rest of the work in the worktree as normal.
+
+### Coordination during implementation
+
+- All four plan docs ship one commit history. The order is: 17- (Phase 5a) lands first; then 18a- (Phase 5b backend); then 18b- (Phase 5b frontend). 18- (overview) carries no code changes — its amendments land alongside whichever backend doc they cross-reference.
+- The two-DB deletion requirement (session DB + Landscape audit.db) is operator-visible — surface it in the PR description so the operator can run the deletion before deploy.
+
+---
+
 ## Tech Stack (frontend slice)
 
 - React + Zustand + Vitest + testing-library, matching the rest of
@@ -41,6 +73,8 @@ If either check fails, return to 18a.
 
 ## File structure (frontend changes)
 
+> All file paths below are relative to the worktree root at `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`; this is identical to main's tree but isolates working state per the project's worktree-by-default convention (`feedback_default_to_worktree`).
+
 ```text
 src/elspeth/web/frontend/src/
   types/
@@ -49,7 +83,7 @@ src/elspeth/web/frontend/src/
     interpretation.ts                                           CREATE    (Task 1 — domain types)
   api/
     client.ts                                                   MODIFY    (Task 2 — API methods)
-    client.test.ts                                              MODIFY    (Task 2)
+    client.interpretation.test.ts                               CREATE    (Task 2)
   stores/
     interpretationStore.ts                                      CREATE    (Task 3)
     interpretationStore.test.ts                                 CREATE    (Task 3)
@@ -112,7 +146,8 @@ export type InterpretationChoice =
   | "pending"
   | "accepted_as_drafted"
   | "amended"
-  | "opted_out";
+  | "opted_out"
+  | "abandoned"; // Phase 11 orphan-cleanup — mirrors Python ABANDONED enum value
 
 export interface InterpretationEvent {
   id: string;
@@ -134,7 +169,8 @@ export interface InterpretationEvent {
 
 Tests in `types/interpretation.test.ts` (or extending `guided.test.ts`):
 
-1. `InterpretationChoice` union has exactly 4 values.
+1. `InterpretationChoice` union has exactly 5 values (`"pending"`,
+   `"accepted_as_drafted"`, `"amended"`, `"opted_out"`, `"abandoned"`).
 2. `InterpretationEvent` has all 13 fields (six required-by-spec +
    seven operational).
 3. `TurnType` union now has 7 values (was 6, adds
@@ -157,7 +193,10 @@ Apply the type additions.
 **Files:**
 
 - Modify: `src/elspeth/web/frontend/src/api/client.ts`.
-- Modify: `src/elspeth/web/frontend/src/api/client.test.ts`.
+- Create: `src/elspeth/web/frontend/src/api/client.interpretation.test.ts`
+  (new file following the naming convention of `client.guided.test.ts`,
+  `client.preferences.test.ts`, `client.recovery.test.ts`; there is no
+  unified `client.test.ts` in this codebase).
 
 ### Methods
 
@@ -185,7 +224,7 @@ export async function optOutOfInterpretations(
 
 ### Test shape
 
-`client.test.ts` adds:
+`client.interpretation.test.ts` contains:
 
 1. `listInterpretationEvents` issues `GET /api/sessions/{id}/interpretations`
    with the correct query string.
@@ -332,8 +371,8 @@ interface InterpretationReviewTurnProps {
 
 The widget renders a card with:
 
-- Header: "Before we run: when you said *<user_term>*, I read that as
-  roughly *<llm_draft>*."
+- Header: "Before we finalise: when you said *<user_term>*, I read that
+  as roughly *<llm_draft>*."
 - Two primary buttons:
   - `Use my interpretation` — calls
     `resolveEvent(sessionId, event.id, { choice: 'accepted_as_drafted' })`.
@@ -342,8 +381,11 @@ The widget renders a card with:
     calls `resolveEvent(sessionId, event.id, { choice: 'amended',
     amended_value: <textarea value> })`, and a Cancel button that
     reverts to the two-button view.
-- A small footer link: "Don't ask me again this session" — opens a
-  confirm modal; on confirm, calls `optOut(sessionId)`.
+- A small footer link: "Stop reviewing interpretations this session" —
+  opens a confirm modal; on confirm, calls `optOut(sessionId)`. This
+  label makes the session-level scope explicit (the most common
+  per-term action — accepting a single draft — is distinct from this
+  session-wide opt-out).
 
 ### Accessibility
 
@@ -352,11 +394,18 @@ The widget renders a card with:
 - Buttons have descriptive `aria-label`s ("Accept the LLM's
   interpretation of cool", "Edit the interpretation of cool").
 - The textarea is properly labelled.
-- Focus moves to the textarea when the "Change it" path is selected
-  (per the project memory `feedback_focus_on_step_advance` and the
-  accessibility audit per design doc 06 §"Mode discrepancy").
-- The "Don't ask me again" link is visually de-emphasised but
-  keyboard-accessible.
+- **Focus on mount:** on component mount, focus moves to the primary
+  action button ("Use my interpretation"). Screen reader users gain
+  immediate keyboard entry without manual navigation.
+- Focus moves to the textarea when the "Change it" path is selected.
+- The "Stop reviewing interpretations this session" link is visually
+  de-emphasised but keyboard-accessible (Tab-reachable; Enter/Space
+  activates the confirm modal). The link must NOT have `tabIndex="-1"`.
+- **Live-region on mount:** the widget emits an `aria-live="polite"`
+  announcement (or renders inside a `role="status"` container)
+  containing "Your input needs review" when it appears mid-conversation.
+  Without this, a screen reader user focused in the chat textarea receives
+  no signal that a blocking widget has appeared.
 
 ### Test shape
 
@@ -377,19 +426,38 @@ The widget renders a card with:
 7. Submitting an empty amendment is disabled (Submit button greyed).
 8. Submitting an amendment that exceeds the 8KB cap shows a client-side
    validation error before issuing the request.
-9. "Don't ask me again this session" opens a confirm modal; on confirm,
-   calls `optOut`.
-10. While the resolve API request is in flight, both buttons are
-    disabled and a spinner shows.
+9. "Stop reviewing interpretations this session" link opens a confirm
+   modal; on confirm, calls `optOut`. Assert: the modal copy names the
+   session scope explicitly.
+10. While the resolve API request is in flight, both primary buttons are
+    disabled and a spinner shows (in-flight button state parity with
+    `InlineSourceDisambiguationTurn`).
 11. If the resolve API returns 409 (TOCTOU — already resolved),
     surface "This interpretation has already been resolved" and
     refresh the store.
 12. If the resolve API returns 422 (Pydantic validation),
     surface the validation error.
+13. **ARIA region:** `expect(screen.getByRole("region",
+    { name: /interpretation review/i })).toBeInTheDocument()`.
+14. **Keyboard navigation:** Tab order reaches all interactive elements;
+    "Stop reviewing interpretations this session" link is Tab-reachable
+    (assert `tabIndex !== "-1"`); Enter/Space activates both primary
+    buttons; Enter/Space activates the "Stop reviewing" link to open the
+    modal.
+15. **Focus on mount:** on initial render, `document.activeElement` is
+    the "Use my interpretation" button.
+16. **Live-region announcement:** on mount, a `role="status"` element
+    with text "Your input needs review" is present in the DOM.
+17. **Multi-tab TOCTOU UX (F-12):** if the resolve API returns 409
+    (event already resolved), the widget displays "This interpretation
+    was already resolved in another tab — reload to see the latest"
+    rather than a generic error banner. The generic error path (test 11)
+    and this multi-tab message path share the same 409 handler; the
+    message is the primary content of the 409 recovery.
 
 `GuidedTurn.test.tsx` updates:
 
-13. A turn with `type: "interpretation_review"` dispatches to
+18. A turn with `type: "interpretation_review"` dispatches to
     `InterpretationReviewTurn`.
 
 ### Step 1-3 — RED → GREEN → commit
@@ -443,7 +511,7 @@ interface InterpretationReviewInlineMessageProps {
 - Same two affordances as guided mode (Use mine / Change it) but
   rendered as inline buttons within the message body, not as a
   separate card.
-- Same "Don't ask me again this session" footer link.
+- Same "Stop reviewing interpretations this session" footer link.
 
 The behaviour, accessibility requirements, error handling, and store
 interaction are IDENTICAL to `InterpretationReviewTurn`. The two
@@ -604,6 +672,61 @@ The row component update must handle the three status values above
 as an exhaustive match — no fallthrough to a stale "hardcoded
 not_applicable" branch.
 
+**Frontend-derived state note (F-14).** The fifth rendering case —
+"LLM interpretations: not yet surfaced" — is computed entirely on the
+frontend by comparing `compositionState.nodes` (any LLM transform with
+an unresolved placeholder) against the store's event count. It does not
+map to a distinct `ReadinessStatus` value from the backend; the backend
+returns `not_applicable` and the frontend applies the LLM-transform
+check locally. If a future iteration requires server-canonical truth for
+this state, the backend's readiness service must be extended to return a
+new status value (e.g., `"pending_surfacing"`), and the frontend
+mapping table here must be updated in the same commit. Document this
+trade-off in any architectural review.
+
+**Cross-reference — provenance mapping (F-15).** Any section of this
+plan that depends on `InlineSourceSummary.provenance` inherits its
+wire-to-store mapping contract from Phase 5a Task 6 integration test in
+`17-phase-5a-dynamic-source-from-chat.md` (provenance assertions at the
+`verbatim` test case, approximately line 2018, and the `llm_generated`
+test case, approximately line 2047). If `provenance` field shape changes,
+both 17- Task 6 and this plan's Task 6 Part A (store-hydration ordering
+assertions) must be updated in the same commit.
+
+### Run-button gating on pending interpretations (F-5 / F-8)
+
+**UI contract.** The Run button state is derived from
+`interpretationStore.pendingBySession[sessionId]` alongside the
+session's opt-out flag:
+
+| Session state | Run button |
+|---|---|
+| No pending interpretation events | Enabled (normal path) |
+| At least one pending event (`choice='pending'`) AND NOT opted-out | **Disabled** with tooltip "Resolve pending interpretation first." |
+| Opted-out (`optedOutBySession[sessionId] === true`) | **Enabled** — opted-out sessions run freely; the backend bakes auto-interpretations directly into prompt templates and the Landscape records them as `interpretation_source='auto_interpreted_opt_out'`. No user review gate applies. |
+
+The opted-out case is the complement of the pending-event gate: opting
+out removes the gate entirely for the remainder of the session. The
+audit trail records all auto-interpretations regardless (via the backend
+`interpretation_events` rows written by the composer tool).
+
+**Implementation note.** The Run button already reads from session
+state. This contract adds a read from `interpretationStore` (either
+directly or via a selector) to derive the disabled state. The gating
+predicate is:
+
+```typescript
+const isRunBlocked =
+  !optedOut &&
+  Object.keys(pendingBySession[sessionId] ?? {}).length > 0;
+```
+
+**Files additionally touched by this contract** (beyond
+`AuditReadinessPanel.tsx`):
+
+- `components/chat/ChatPanel.tsx` — wherever the Run / Execute button
+  is rendered; add disabled logic and `title="Resolve pending interpretation first."` when `isRunBlocked`.
+
 ### Test shape
 
 `AuditReadinessPanel.test.tsx` adds:
@@ -613,11 +736,25 @@ not_applicable" branch.
 3. Row "pending review" when 1 pending, 1 resolved.
 4. Row "opted out" when opt-out flag is set, 0 pending, 2 drafted.
 5. Row "not yet surfaced" when there's an LLM transform with an
-   unresolved placeholder and no events.
+   unresolved placeholder and no events (frontend-derived; not a
+   distinct backend ReadinessStatus — see frontend-derived state
+   note above).
+
+`ChatPanel.test.tsx` (or dedicated Run-button test) adds:
+
+6. When `pendingBySession[sessionId]` is non-empty AND the session is
+   NOT opted-out, the Run button is disabled and its `title` attribute
+   is `"Resolve pending interpretation first."`.
+7. After `resolveEvent` removes the last pending event, the Run button
+   is re-enabled.
+8. When opted-out (`optedOutBySession[sessionId] === true`), the Run
+   button is enabled regardless of any remaining store entries (the
+   opt-out clears local pending events, but this test guards the
+   predicate logic directly).
 
 ### Step 1-3 — RED → GREEN → commit
 
-`frontend(audit-panel): interpretations row`.
+`frontend(audit-panel): interpretations row + Run-button gating`.
 
 ---
 
@@ -687,8 +824,8 @@ skill edits). Frontend `npm run build` deployed to staging
         records the resolved prompt template (NOT the placeholder).
       - `explain(run_id, token_id)` walks back to the
         `interpretation_events` row.
-- [ ] Open a SECOND session. Type the same prompt. Click "Don't ask
-      me again this session." Confirm:
+- [ ] Open a SECOND session. Type the same prompt. Click "Stop
+      reviewing interpretations this session." Confirm:
       - The opt-out audit row is in `interpretation_events` with
         `choice='opted_out'` and
         `interpretation_source='auto_interpreted_opt_out'`.
@@ -736,6 +873,9 @@ etc.).
 | Date | Reviewer | Verdict | Finding IDs | Notes |
 |------|----------|---------|-------------|-------|
 | 2026-05-15 | Review panel | CHANGES_REQUESTED | B1, I1, I2 | Applied in this revision. B1 (BLOCKER): The finding alleged misplaced shareable-link test stubs at `client.test.ts` lines referencing `GET /api/sessions/:id/shareable-link` and `GET /api/sessions/shared/:token`. Review of this file confirms no such stubs exist — the finding's premise did not hold. The actual test body completeness defect addressed was the fragile preflight check; see I1. I1: replaced `git log --oneline | grep 'interpretation'` preflight grep with a Python import check and a direct pytest invocation of the audit spot-check integration test. I2: added backend-status → frontend rendering mapping table to Task 7, specifying how `not_applicable`/`warning`/`ok` from 18a-Task-10 map to row text and glyph colour; added opt-out override path; required exhaustive status match. |
+| 2026-05-18 | 9-reviewer panel | CHANGES_REQUESTED | F-1–F-15 | Applied in this revision. F-1 (BLOCKER): `client.test.ts` does not exist — replaced with `client.interpretation.test.ts` (CREATE) in the file-structure manifest, Task 2 Files list, and Task 2 test-shape header. F-2 (FYI): Removed fabricated `feedback_focus_on_step_advance` memory citation from Task 4 accessibility; guidance now stands directly as an accessibility requirement. F-3 (MAJOR): Added `"abandoned"` to `InterpretationChoice` union (mirrors Python `ABANDONED` enum value used by Phase 11 orphan-cleanup); updated Task 1 RED test count from 4 to 5. F-4 (MAJOR): Renamed footer link "Don't ask me again this session" → "Stop reviewing interpretations this session" at Task 4 Rendered UI, Task 4 test 9, Task 5 footer spec. F-5 (MAJOR): Added Run-button gating contract to Task 7 — disabled with tooltip when pending events exist; enabled when opted-out; tests 6–8 added to task. F-6 (MAJOR): Added focus-on-mount spec (primary button) to Task 4 accessibility and test 15. F-7 (MAJOR): Added ARIA region assertion (test 13) and keyboard navigation assertion (test 14) to Task 4. F-8 (UX coordination): Added opted-out = Run freely contract to Task 7 run-button table. F-9 (MINOR): Added `aria-live="polite"` / `role="status"` live-region spec to Task 4 accessibility and test 16. F-10 (MINOR): Added keyboard accessibility spec for "Stop reviewing" link in Task 4 accessibility and covered by test 14. F-11 (MINOR): Confirmed at Task 4 test 10 — already present. F-12 (MINOR): Added multi-tab TOCTOU UX spec to Task 4 test 17. F-13 (NIT): Renamed header copy "Before we run:" → "Before we finalise:" in Task 4 Rendered UI. F-14 (Systems MINOR-5): Added frontend-derived state note to Task 7. F-15 (Quality MAJOR-2 coordination): Added provenance cross-reference to Task 7. |
+| 2026-05-18 | follow-up patch | APPROVED | F-4 follow-up, F-15 follow-up | Two missed edits from the F-1–F-15 amendment applied. F-4 follow-up (MAJOR): Task 9 smoke-checklist at line 792 still read `"Don't ask me again this session."` — a fifth site missed by the F-4 pass. Updated to `"Stop reviewing interpretations this session."` so testers look for the correct button. F-15 follow-up (MINOR): Task 7 cross-reference to 17- Task 6 tightened to name the specific test cases carrying the provenance assertions (verbatim test case ~line 2018 and llm_generated test case ~line 2047 of `17-phase-5a-dynamic-source-from-chat.md`). |
+| 2026-05-18 | Plan amendment | APPLIED | (no finding ID) | Added shared-worktree section: `feat/composer-phase-5-chat-data-entry` at `.worktrees/composer-phase-5-chat-data-entry`; Phase 5a + Phase 5b ship as coordinated PR on one branch. Added worktree-root prefix note to File structure section. |
 
 ---
 

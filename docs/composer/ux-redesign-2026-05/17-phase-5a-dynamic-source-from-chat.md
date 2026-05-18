@@ -18,7 +18,7 @@ mechanism for inline-content sources already exists end-to-end:
   CSV-sourced rows. `source_data_hash` (`schema.py` line 165) is populated
   identically.
 - Redaction has Pydantic models for `source.inline_blob` —
-  `src/elspeth/web/composer/redaction.py` lines 1022-1106.
+  `src/elspeth/web/composer/redaction.py` lines 1021-1106.
 
 **Implication:** Phase 5a is **primarily a frontend plan** plus a small
 composer-skill prompt nudge, with one targeted backend addition (Task 2.5)
@@ -45,12 +45,44 @@ phase 5a row.
 
 ---
 
+## Worktree
+
+**Branch:** `feat/composer-phase-5-chat-data-entry`
+**Worktree path:** `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`
+**Shared with:** the entire Phase 5 umbrella (17-, 18-, 18a-, 18b-). Phase 5a and Phase 5b ship as a coordinated PR; do NOT split into separate branches. This document is one of the four that will be implemented together on this single worktree. Shared with 18-, 18a-, 18b- (the Phase 5b overview, backend, and frontend plans).
+
+### Setup (one-time)
+
+From the main checkout at `/home/john/elspeth`:
+
+```bash
+git worktree add .worktrees/composer-phase-5-chat-data-entry -b feat/composer-phase-5-chat-data-entry
+cd .worktrees/composer-phase-5-chat-data-entry
+uv venv --python 3.13                       # Python 3.13 to match main; mismatched versions produce ~300 spurious tier-model violations
+source .venv/bin/activate
+uv pip install -e ".[dev,llm]"              # editable install bound to THIS worktree's venv, not main's
+```
+
+### Operational notes
+
+- **uv venv discipline:** every `uv pip install` invocation in this worktree MUST be preceded by `source .venv/bin/activate` OR invoked with `--python /home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/.venv/bin/python`. Without this, `uv` resolves to main's `.venv` and clobbers it. (See `feedback_uv_venv_leak`.)
+- **filigree CLI:** the bare `filigree` command rejects realpath-escaping DBs from inside a worktree. Prefer the `mcp__filigree__*` tools. If you must use the CLI, run it from the git common dir: `(cd "$(git rev-parse --git-common-dir)/.." && filigree <verb>)`.
+- **Subagent dispatch from this worktree:** subagents inherit parent CWD silently. Prefix every dispatch prompt with: "Your CWD is `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`; all file paths must be absolute." Use absolute paths everywhere. (See `feedback_subagents_cant_use_worktrees`.)
+- **Composer-skill edits stay on main:** the `src/elspeth/web/composer/skills/pipeline_composer.md` file is read by the live `elspeth-web.service` from main, not from any worktree. Skill-prompt edits in this phase (e.g. 5a Task 8 nudge, 5b Task 8 nudge) must be applied on main and the service restarted, per `feedback_skip_worktree_for_skill_and_config_edits`. Land the rest of the work in the worktree as normal.
+
+### Coordination during implementation
+
+- All four plan docs ship one commit history. The order is: 17- (Phase 5a) lands first; then 18a- (Phase 5b backend); then 18b- (Phase 5b frontend). 18- (overview) carries no code changes — its amendments land alongside whichever backend doc they cross-reference.
+- The two-DB deletion requirement (session DB + Landscape audit.db) is operator-visible — surface it in the PR description so the operator can run the deletion before deploy.
+
+---
+
 ## Scope boundaries
 
 **In scope:**
 
 - A context-aware empty-state placeholder for `ChatInput.tsx`. Empty state
-  reads "Describe your pipeline, or paste a URL or sample data to start...".
+  reads "Describe your pipeline, paste a URL, or type a few rows of data to start...".
   Active composition state retains the existing "Describe the pipeline you
   want to build..." placeholder.
 - A new turn widget `InlineSourceCreatedTurn.tsx` that surfaces, after the
@@ -82,12 +114,15 @@ phase 5a row.
 
 **Out of scope:**
 
-- **Backend (mostly).** `redaction.py`, `data_flow_repository.py`,
-  `hashing.py`, and the composer service are untouched. Task 2.5 adds two
-  columns (`creation_modality`, `created_from_message_id`) to the blob
-  metadata table (`schema.py`) and updates `_prepare_blob_create` in
-  `tools.py` to write them. This is the only backend change; the Landscape
-  `create_row` path is unmodified.
+- **Backend (mostly).** `data_flow_repository.py`, `hashing.py`, and
+  the composer service core are untouched. The Landscape `create_row`
+  path is unmodified. Task 2.5 adds provenance columns to
+  `web/sessions/models.py:blobs_table` and updates `_prepare_blob_create`
+  in `tools.py`. Task 2.5 also adds `max_length=262_144` to
+  `_InlineBlobModel.content` in `redaction.py` (correcting an incorrect
+  prior claim that oversize content was already rejected). Task 2.6 adds
+  an immutability trigger to `chat_messages_table` in
+  `web/sessions/models.py`. These are the only backend changes.
 - **Catalog reshape "Inline data from chat" entry.** Per design doc
   [08-catalog-reshape.md](08-catalog-reshape.md) and the design-spec
   bullet from this scope brief: the catalog entry is owned by Phase 7
@@ -123,26 +158,42 @@ path validate Tier-3 input at the boundary?
    transport already enforces that the field is a string at the wire
    boundary; non-string content fails JSON parsing.
 2. The redaction model `_InlineBlobModel`
-   (`redaction.py` line 1022-1048) declares
+   (`redaction.py` line 1021-1048) declares
    `content: Annotated[str, Sensitive(summarizer=...)]` with
    `model_config = ConfigDict(extra="forbid")`. Pydantic enforces both
-   the type and the closed-field-set at decode time.
+   the type and the closed-field-set at decode time. Task 2.5 Step 3a
+   adds `max_length=262_144` to this field (256 KiB cap).
 3. `_prepare_blob_create` (called from the `inline_blob is not None`
    branch in `_execute_set_pipeline`, `tools.py` line 4452) validates
    `mime_type` against `_MIME_TO_SOURCE` (an allowlist; unknown MIME types
    produce a `ToolArgumentError`) and produces a SHA-256 hash of the raw
-   bytes before storage. The hash is what flows into `source_data_hash`.
+   bytes before storage. The resulting digest is stored as `content_hash` on
+   the `blobs_table` row (session DB, `web/sessions/models.py`). This
+   `content_hash` subsequently flows into `source_data_hash` on the
+   `rows_table` row in the Landscape audit DB (`core/landscape/schema.py`
+   line 165) when the row is created — two distinct fields in two distinct
+   databases, linked by computation.
 4. Post-storage, the inline blob behaves identically to a user-uploaded
    blob — same allowlist, same hashing, same Landscape provenance.
 
 **What Phase 5a must NOT do:** invent Tier-3 validation on the frontend.
 The frontend is allowed to assume the backend will reject malformed input
-(missing `mime_type`, non-allowlisted MIME, oversize content, etc.) and
-surface the rejection to the user via the standard tool-call-error path.
-Defensive frontend pre-validation would duplicate the boundary check and
-make the contract ambiguous about which side is authoritative. Per
-CLAUDE.md trust-tier model: validate **once** at the boundary; the
-boundary here is the backend `set_pipeline` handler.
+(missing `mime_type`, non-allowlisted MIME, etc.) and surface the rejection
+to the user via the standard tool-call-error path. Defensive frontend
+pre-validation would duplicate the boundary check and make the contract
+ambiguous about which side is authoritative. Per CLAUDE.md trust-tier
+model: validate **once** at the boundary; the boundary here is the backend
+`set_pipeline` handler.
+
+**Correction (F-6):** An earlier draft of this plan claimed the backend
+already rejected oversize content. This was incorrect — prior to Task 2.5,
+`_InlineBlobModel.content` had no `max_length` constraint and
+`_prepare_blob_create` could allocate unbounded bytes before the session
+quota check. Task 2.5/Step 3a adds `max_length=262_144` (256 KiB) to
+`_InlineBlobModel.content` in `redaction.py`. After this change, a content
+payload exceeding 256 KiB raises `ToolArgumentError` at Pydantic decode
+time, before any allocation. The frontend does not add size validation —
+it relies on the backend rejection surfaced via the standard error path.
 
 **What Phase 5a MUST do:** propagate backend rejections back to the user
 as a visible, repairable turn-level error. The existing `ToolCallCard`
@@ -179,8 +230,8 @@ verify the LLM picks `inline_blob` for short user inputs.
 
 1. Start a fresh session on staging (`elspeth.foundryside.dev` per
    `project_staging_deployment`).
-2. Confirm the empty-state placeholder reads "Describe your pipeline, or
-   paste a URL or sample data to start...".
+2. Confirm the empty-state placeholder reads "Describe your pipeline,
+   paste a URL, or type a few rows of data to start...".
 3. Type "go to www.finance.gov.au" → confirm the LLM creates an
    inline_blob source and the new turn widget surfaces what was created.
 4. Type "check these URLs: a.com, b.com, c.com" → confirm the
@@ -198,16 +249,20 @@ end-to-end without a CSV upload step.
 
 ## File structure (what changes in this phase)
 
+> All file paths below are relative to the worktree root at `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`; this is identical to main's tree but isolates working state per the project's worktree-by-default convention (`feedback_default_to_worktree`). Exception: `src/elspeth/web/composer/skills/pipeline_composer.md` is edited on main, not in the worktree — see the Worktree section above.
+
 ```text
 src/elspeth/contracts/
-  models.py                                                     MODIFY    (Task 2.5 — CreationModality enum)
+  enums.py                                                      MODIFY    (Task 2.5 — CreationModality StrEnum; NOT contracts/models.py which does not exist)
 
-src/elspeth/core/landscape/
-  schema.py                                                     MODIFY    (Task 2.5 — creation_modality + created_from_message_id columns)
+src/elspeth/web/sessions/
+  models.py                                                     MODIFY    (Task 2.5 — provenance columns on blobs_table;
+                                                                           Task 2.6 — immutability trigger on chat_messages_table)
 
 src/elspeth/web/composer/
+  redaction.py                                                  MODIFY    (Task 2.5 — max_length=262_144 on _InlineBlobModel.content)
   skills/pipeline_composer.md                                   MODIFY    (Task 8)
-  tools.py                                                      MODIFY    (Task 2.5 — _prepare_blob_create + response serialiser)
+  tools.py                                                      MODIFY    (Task 2.5 — _prepare_blob_create signature + UTF-8 guard + response serialiser)
 
 src/elspeth/web/frontend/src/
   components/chat/
@@ -236,27 +291,37 @@ src/elspeth/web/frontend/src/
     inlineSourceIntegration.test.tsx                            CREATE    (Task 6)
 
 tests/integration/web/composer/
-  test_inline_source_provenance.py                              CREATE    (Task 2.5 — backend attributability test)
+  test_inline_source_provenance.py                              CREATE    (Task 2.5 — backend attributability + oversize + non-UTF-8 tests)
+
+tests/integration/web/sessions/
+  test_chat_messages_immutability.py                            CREATE    (Task 2.6 — chat_messages immutability trigger test)
 
 docs/composer/ux-redesign-2026-05/
   17-phase-5a-dynamic-source-from-chat.md                       THIS FILE
 ```
 
-**Backend changes (newly in scope as of this revision):** Task 2.5 adds two
-columns to the blob metadata table and updates `_prepare_blob_create` in
-`tools.py`. These are the only backend changes. The Landscape `create_row`
-path, `hashing.py`, `redaction.py`, and `data_flow_repository.py` are still
-untouched. No Alembic migration — operator deletes the old DB on deploy per
-`project_db_migration_policy`.
+**Backend changes (newly in scope as of this revision):**
+
+- Task 2.5 adds provenance columns to `web/sessions/models.py:blobs_table`,
+  adds `max_length=262_144` to `_InlineBlobModel.content` in `redaction.py`,
+  and updates `_prepare_blob_create` in `tools.py`. The `CreationModality`
+  enum goes to `contracts/enums.py` (not `contracts/models.py` — that file
+  does not exist; not `core/landscape/schema.py` — `blobs_table` is a
+  session-DB table in `web/sessions/models.py`, not a Landscape schema table).
+- Task 2.6 adds an immutability trigger to `chat_messages_table` in
+  `web/sessions/models.py`.
+- The Landscape `create_row` path, `hashing.py`, `data_flow_repository.py`,
+  and `core/landscape/schema.py` are untouched. No Alembic migration —
+  operator deletes the old DB on deploy per `project_db_migration_policy`.
 
 ---
 
 ## Task 1 — Empty-state chat-input placeholder
 
 **Goal.** Change the `ChatInput.tsx` placeholder to read "Describe your
-pipeline, or paste a URL or sample data to start..." when the chat has
-zero non-system messages and no active composition state. Revert to the
-existing wording when either condition flips.
+pipeline, paste a URL, or type a few rows of data to start..." when
+the chat has zero non-system messages and no active composition state.
+Revert to the existing wording when either condition flips.
 
 **Files:**
 
@@ -285,7 +350,7 @@ The session-state inputs the component now reads:
   singleton, not per-session-keyed).
 
 Verified against `src/elspeth/web/frontend/src/stores/sessionStore.ts`
-lines 153–154: `messages: ChatMessage[]` and
+lines 154–155: `messages: ChatMessage[]` and
 `compositionState: CompositionState | null`.
 
 Pseudo-shape of the new test cases:
@@ -295,7 +360,7 @@ describe("ChatInput empty-state placeholder", () => {
   it("shows the data-priming placeholder when the session has no messages and no composition state", () => {
     // arrange: fresh session, messages=[], version=0
     // act: render ChatInput
-    // assert: textarea placeholder == "Describe your pipeline, or paste a URL or sample data to start..."
+    // assert: textarea placeholder == "Describe your pipeline, paste a URL, or type a few rows of data to start..."
   });
 
   it("reverts to the standard placeholder once the user has sent a message", () => {
@@ -345,7 +410,7 @@ In `ChatInput.tsx`:
    ```
 
    These selectors are correct for the existing store shape (verified
-   against `sessionStore.ts` lines 153–154). Do NOT add new store
+   against `sessionStore.ts` lines 154–155). Do NOT add new store
    fields just for this — the information already exists.
 
 2. Derive the effective placeholder once, near the existing `canSend`
@@ -354,7 +419,7 @@ In `ChatInput.tsx`:
    ```typescript
    const isEmptyState = messageCount === 0 && compositionVersion === 0;
    const defaultPlaceholder = isEmptyState
-     ? "Describe your pipeline, or paste a URL or sample data to start..."
+     ? "Describe your pipeline, paste a URL, or type a few rows of data to start..."
      : "Describe the pipeline you want to build...";
    const effectivePlaceholder = placeholder ?? defaultPlaceholder;
    ```
@@ -429,13 +494,22 @@ export interface InlineSourceSummary {
   /** SHA-256 of the raw inline content (from session blob metadata). */
   contentHash: string;
   /**
-   * Whether the rows in this inline source were typed verbatim by the
-   * user ("verbatim") or generated by the LLM and confirmed
-   * ("llm-generated") or interpreted ambiguously and confirmed by the
-   * user ("disambiguated"). Drives which review affordance the turn
-   * widget surfaces.
+   * How this inline source's content was produced. Projected from the
+   * server-recorded `creation_modality` column (Task 2.5) via the
+   * `fetchBlob` response adapter in `client.ts`.
+   *
+   * - "verbatim"                  — user typed the content directly.
+   * - "llm-generated"             — LLM generated rows; user confirmed.
+   * - "disambiguated"             — LLM interpreted ambiguous input; user confirmed.
+   * - "llm-generated-then-amended" — LLM generated rows, user amended via
+   *                                   "Edit the list" (F-4). Drives the Edit
+   *                                   button visibility alongside "llm-generated".
+   *
+   * The frontend uses hyphenated forms; the server uses snake_case
+   * (`llm_generated`, `llm_generated_then_amended`). The adapter in
+   * `client.ts` is the single translation point.
    */
-  provenance: "verbatim" | "llm-generated" | "disambiguated";
+  provenance: "verbatim" | "llm-generated" | "disambiguated" | "llm-generated-then-amended";
 }
 ```
 
@@ -509,6 +583,41 @@ describe("inlineSourceStore", () => {
     expect(useInlineSourceStore.getState().getSummary("session-1")?.provenance).toBe("verbatim");
     expect(useInlineSourceStore.getState().getSummary("session-2")?.provenance).toBe("llm-generated");
   });
+
+  // --- Disambiguation re-fire guard tests (F-11) ---
+
+  it("addUserRequestedSingleRow stores the message ID and prevents re-check", () => {
+    useInlineSourceStore.getState().addUserRequestedSingleRow("msg-1");
+    expect(
+      useInlineSourceStore.getState().userRequestedSingleRowForMessageIds.has("msg-1"),
+    ).toBe(true);
+    expect(
+      useInlineSourceStore.getState().userRequestedSingleRowForMessageIds.has("msg-2"),
+    ).toBe(false);
+  });
+
+  // --- "Not source data" escape tests (F-10) ---
+
+  it("addNonSourceMessage stores the message ID", () => {
+    useInlineSourceStore.getState().addNonSourceMessage("msg-escape-1");
+    expect(
+      useInlineSourceStore.getState().nonSourceMessageIds.has("msg-escape-1"),
+    ).toBe(true);
+  });
+
+  // --- Fallback-prompt dismiss persistence tests (F-20) ---
+
+  it("markDismissed records a session-scoped dismissal timestamp", () => {
+    const before = Date.now();
+    useInlineSourceStore.getState().markDismissed("session-1");
+    const ts = useInlineSourceStore.getState().dismissedAt.get("session-1");
+    expect(ts).toBeGreaterThanOrEqual(before);
+    expect(useInlineSourceStore.getState().isDismissed("session-1")).toBe(true);
+  });
+
+  it("isDismissed returns false for sessions that were never dismissed", () => {
+    expect(useInlineSourceStore.getState().isDismissed("session-never")).toBe(false);
+  });
 });
 ```
 
@@ -529,10 +638,30 @@ import { create } from "zustand";
 import type { InlineSourceSummary } from "@/types/api";
 
 interface InlineSourceState {
+  // --- Primary projection: per-session inline-source summary ---
   summariesBySession: Record<string, InlineSourceSummary>;
   setSummary: (sessionId: string, summary: InlineSourceSummary) => void;
   clearSummary: (sessionId: string) => void;
   getSummary: (sessionId: string) => InlineSourceSummary | null;
+
+  // --- Disambiguation re-fire guard (F-11) ---
+  // Message IDs for which the user explicitly chose "treat as 1 row".
+  // The disambiguation predicate in ChatPanel skips these message IDs.
+  userRequestedSingleRowForMessageIds: Set<string>;
+  addUserRequestedSingleRow: (messageId: string) => void;
+
+  // --- "Not source data" escape (F-10) ---
+  // Message IDs for which the user explicitly chose "this isn't source data".
+  // The disambiguation predicate and fallback-prompt predicate skip these.
+  nonSourceMessageIds: Set<string>;
+  addNonSourceMessage: (messageId: string) => void;
+
+  // --- Fallback-prompt dismiss persistence (F-20) ---
+  // Keyed by sessionId. A dismissed fallback prompt must not re-fire
+  // within the same session regardless of predicate re-evaluation.
+  dismissedAt: Map<string, number>;
+  markDismissed: (sessionId: string) => void;
+  isDismissed: (sessionId: string) => boolean;
 }
 
 export const useInlineSourceStore = create<InlineSourceState>((set, get) => ({
@@ -548,6 +677,30 @@ export const useInlineSourceStore = create<InlineSourceState>((set, get) => ({
       return { summariesBySession: next };
     }),
   getSummary: (sessionId) => get().summariesBySession[sessionId] ?? null,
+
+  userRequestedSingleRowForMessageIds: new Set(),
+  addUserRequestedSingleRow: (messageId) =>
+    set((s) => ({
+      userRequestedSingleRowForMessageIds: new Set([
+        ...s.userRequestedSingleRowForMessageIds,
+        messageId,
+      ]),
+    })),
+
+  nonSourceMessageIds: new Set(),
+  addNonSourceMessage: (messageId) =>
+    set((s) => ({
+      nonSourceMessageIds: new Set([...s.nonSourceMessageIds, messageId]),
+    })),
+
+  dismissedAt: new Map(),
+  markDismissed: (sessionId) =>
+    set((s) => {
+      const next = new Map(s.dismissedAt);
+      next.set(sessionId, Date.now());
+      return { dismissedAt: next };
+    }),
+  isDismissed: (sessionId) => get().dismissedAt.has(sessionId),
 }));
 ```
 
@@ -585,31 +738,37 @@ git commit -m "feat(composer/frontend): inlineSourceStore for projected inline-s
 > display), Task 6 (integration test assertions), and Task 7 (audit-panel
 > row).
 
-**Goal.** Record, server-side, two new facts about every inline-blob source:
-(1) _how_ the blob's content was produced (`creation_modality`), and (2)
-_which_ user chat message triggered its creation (`created_from_message_id`).
-This makes `InlineSourceSummary.provenance` a projection of server-recorded
-state rather than a frontend heuristic, closing the attributability gap: an
-auditor calling `explain(recorder, run_id, token_id)` can now walk from
-runtime decision → blob hash → `creation_modality` → `chat_messages.id` of
-the original user prose.
+**Goal.** Record, server-side, provenance facts about every inline-blob
+source: (1) _how_ the blob's content was produced (`creation_modality`),
+(2) _which_ user chat message triggered its creation
+(`created_from_message_id`), and (3) _which LLM_ produced the content
+for LLM-generated modalities (five `creating_*` provenance columns).
+This makes `InlineSourceSummary.provenance` a projection of
+server-recorded state rather than a frontend heuristic, closing the
+attributability gap: an auditor calling `explain(recorder, run_id,
+token_id)` can now walk from runtime decision → blob hash →
+`creation_modality` → `chat_messages.id` of the original user prose →
+the LLM identifier that generated the content (for `llm_generated`
+modalities).
 
-**Schema decision:** New columns on the existing blob metadata table (not a
-new `inline_source_origin_events` table). Rationale: blob identity is
+**Schema decision:** New columns on the existing blob metadata table (not
+a new `inline_source_origin_events` table). Rationale: blob identity is
 immutable post-creation; a single blob cannot have multiple origin events;
-the simpler join path keeps the audit-readiness query coherent. This is a
-two-column DDL change, no foreign-table join needed.
+the simpler join path keeps the audit-readiness query coherent.
 
-**Layer:** `src/elspeth/web/composer/tools.py` is L3 (application layer);
-the blob metadata storage is L1 (`src/elspeth/core/landscape/`). The two new
-columns live on the existing blob table (L1 Landscape schema). The
-`_prepare_blob_create` writer is in `tools.py` (L3); it already writes
-`source_data_hash`. The two new fields follow the same write path.
+**Layer:** Both the blob table and `_prepare_blob_create` writer live in
+the L3 session layer. `src/elspeth/web/sessions/models.py` contains
+`blobs_table` (lines 447-519). `src/elspeth/web/composer/tools.py`
+contains `_prepare_blob_create` (lines 3026-3145); it is also L3. No L1
+Landscape schema changes are needed — `blobs_table` is a session-DB
+table, not a Landscape table.
 
 **Enum governance:** `creation_modality` is a closed enum. Its canonical
-values are registered at `src/elspeth/contracts/models.py` (governance site
-for all closed enums in this codebase, per pattern at lines 274-289).
-Values: `verbatim` | `llm_generated` | `disambiguated`.
+values are registered at `src/elspeth/contracts/enums.py` — the existing
+file where all project-wide `StrEnum` enums live (verified: the file
+contains `RunStatus`, `NodeStateStatus`, `BatchStatus`, etc.; `models.py`
+does not exist in `contracts/`). Values: `verbatim` | `llm_generated` |
+`disambiguated` | `llm_generated_then_amended`.
 
 **Wire naming:** the JSON wire form uses snake_case (`creation_modality`,
 `created_from_message_id`). The frontend `InlineSourceSummary.provenance`
@@ -617,34 +776,47 @@ type accepts the wire form at the API boundary:
 
 - `verbatim` → `"verbatim"` (no change; already matches frontend type)
 - `llm_generated` → `"llm-generated"` (frontend retains hyphenated
-  display-string for backwards compatibility with Tasks 3-5 which are already
-  specified; the mapping is performed in the `fetchBlob` response adapter in
-  `client.ts`, not in the store or component)
+  display-string; the mapping is performed in the `fetchBlob` response
+  adapter in `client.ts`, not in the store or component)
 - `disambiguated` → `"disambiguated"` (no change)
+- `llm_generated_then_amended` → `"llm-generated-then-amended"` (F-4;
+  frontend may collapse to `"llm-generated"` for the Edit-button
+  display discriminant if the distinction is not shown in the UI; the
+  adapter in `client.ts` is the single translation point)
 
-The `InlineSourceSummary` type in `types/index.ts` keeps the hyphenated
-`"llm-generated"` discriminant for the internal/display surface; the
-adapter in `client.ts` is the single translation point.
+The `InlineSourceSummary` type in `types/index.ts` retains hyphenated
+discriminants for the internal/display surface.
+
+**Trust-tier check correction (F-6):** The earlier prose claimed the
+backend already rejects oversize content. This was incorrect. Prior to
+this plan, `_InlineBlobModel.content` had no `max_length` constraint, and
+`_prepare_blob_create` could allocate unbounded bytes. Step 3 below adds a
+`max_length=262_144` (256 KiB) constraint to `_InlineBlobModel.content` in
+`redaction.py`. The backend now rejects oversize content at Pydantic decode
+time, before any allocation, raising `ToolArgumentError`. The session quota
+check that follows is a secondary defense, not the first.
 
 **Files:**
 
-- Modify: `src/elspeth/contracts/models.py` — add `CreationModality` enum
-  (closed list; governance comment required per pattern at lines 274-289).
-- Modify: `src/elspeth/core/landscape/schema.py` — add `creation_modality`
-  (non-nullable, default `verbatim`) and `created_from_message_id`
-  (nullable `Text` FK to `chat_messages.id`) columns on the blob metadata
-  table.
-- Modify: `src/elspeth/web/composer/tools.py` — update `_prepare_blob_create`
-  to accept and write `creation_modality` and `created_from_message_id`.
-  Pass `creation_modality` from the call site in `_execute_set_pipeline`
-  (already has context: `inline_blob` branch knows whether content was
-  user-typed or LLM-generated from the message context). Pass
-  `created_from_message_id` from the active chat message id at call time.
-- Modify: `src/elspeth/web/composer/tools.py` — update the blob-metadata
-  response serialiser so the two new fields appear in `fetchBlob` responses.
-- Modify: `src/elspeth/web/frontend/src/api/client.ts` — add
-  `creation_modality` and `created_from_message_id` to the `fetchBlob`
-  response type; add the `creation_modality` → `provenance` adapter mapping.
+- Modify: `src/elspeth/contracts/enums.py` — add `CreationModality`
+  `StrEnum` (closed list; governance comment required per pattern at
+  `web/sessions/models.py` lines 274-289).
+- Modify: `src/elspeth/web/sessions/models.py` — add provenance columns
+  to `blobs_table`: `creation_modality`, `created_from_message_id`,
+  `creating_model_identifier`, `creating_model_version`,
+  `creating_provider`, `creating_composer_skill_hash`,
+  `creating_arguments_hash`, plus three new constraints
+  (`fk_blobs_created_from_message_session`, `ck_blobs_creation_modality`,
+  `ck_blobs_creating_llm_provenance_nullability`).
+- Modify: `src/elspeth/web/composer/redaction.py` — add
+  `max_length=262_144` to `_InlineBlobModel.content` (line 1021).
+- Modify: `src/elspeth/web/composer/tools.py` — update
+  `_prepare_blob_create` signature and body to accept and write all new
+  provenance fields; add UTF-8 encode guard; update the blob-metadata
+  response serialiser to include all new fields.
+- Modify: `src/elspeth/web/frontend/src/api/client.ts` — add all new
+  provenance fields to the `fetchBlob` response type; add the
+  `creation_modality` → `provenance` adapter mapping.
 - Create: `tests/integration/web/composer/test_inline_source_provenance.py` —
   backend integration test (see Step 4).
 
@@ -654,150 +826,499 @@ the post-DDL state.
 
 ### Step 1 — Add the `CreationModality` enum to contracts
 
-In `src/elspeth/contracts/models.py`, near the existing closed-enum block
-(lines 274-289), add:
+In `src/elspeth/contracts/enums.py`, add alongside the existing `StrEnum`
+classes (using `StrEnum`, not `str, enum.Enum`, to match the file's
+established pattern):
 
 ```python
 # CLOSED LIST — do not extend without design review. See ADR-xxx.
 # Describes how an inline-blob source's content was produced.
-class CreationModality(str, enum.Enum):
-    VERBATIM = "verbatim"        # User typed the content directly
-    LLM_GENERATED = "llm_generated"  # LLM generated rows; user confirmed
-    DISAMBIGUATED = "disambiguated"  # LLM interpreted ambiguous input; user confirmed
+# Adding a fifth value MUST include: (a) a spec amendment documenting the
+# new modality and its audit semantics; (b) an integration test; (c) a
+# Filigree ticket linking the change back to this enum.
+class CreationModality(StrEnum):
+    VERBATIM = "verbatim"                          # User typed the content directly
+    LLM_GENERATED = "llm_generated"               # LLM generated rows; user confirmed
+    DISAMBIGUATED = "disambiguated"               # LLM interpreted ambiguous input; user confirmed
+    LLM_GENERATED_THEN_AMENDED = "llm_generated_then_amended"  # LLM generated, user amended via "Edit the list"
 ```
 
-### Step 2 — Add columns to the blob metadata table
+### Step 2 — Add columns to `blobs_table` in `web/sessions/models.py`
 
-In `src/elspeth/core/landscape/schema.py`, on the blob metadata table
-definition, add after the existing `source_data_hash` column:
+In `src/elspeth/web/sessions/models.py`, on `blobs_table` (currently ends
+at line 519), add after the existing `status` column and before the
+`ck_blobs_created_by` constraint:
 
 ```python
-Column("creation_modality", Text, nullable=False, default="verbatim"),
+# --- Inline-blob provenance (Phase 5a) ---
+# creation_modality: closed enum — how this blob's content was produced.
+# Non-nullable with default "verbatim" so pre-5a blobs created outside
+# the inline path retain a valid value. Tier 1 crash-on-anomaly applies
+# to reads: assert the value is a valid CreationModality member; do not
+# coerce silently.
+#
+# CLOSED LIST — do not extend without design review. See ADR-xxx.
+# Adding a fifth value MUST include: (a) spec amendment; (b) integration
+# test; (c) Filigree ticket. Mirror also goes into CreationModality at
+# contracts/enums.py and the ck_blobs_creation_modality CHECK here.
+Column("creation_modality", Text, nullable=False, server_default="verbatim"),
+
+# created_from_message_id: FK to chat_messages.id of the user message
+# that triggered the set_pipeline call. Composite FK with session_id
+# closes the cross-session lineage hole (mirrors the
+# fk_chat_messages_parent_assistant_session pattern at models.py:136-141).
 Column("created_from_message_id", Text, nullable=True),
+
+# LLM-provenance columns: populated for llm_generated, disambiguated,
+# and llm_generated_then_amended modalities; NULL for verbatim.
+# Required together: a blob cannot claim LLM authorship without naming
+# the model. See ck_blobs_creating_llm_provenance_nullability below.
+Column("creating_model_identifier", String, nullable=True),
+Column("creating_model_version", String, nullable=True),
+Column("creating_provider", String, nullable=True),
+Column("creating_composer_skill_hash", String, nullable=True),
+Column("creating_arguments_hash", String, nullable=True),
+
+# Composite FK: blob's (created_from_message_id, session_id) must
+# reference an existing row in chat_messages with the same session_id.
+# ON DELETE RESTRICT prevents message deletion while a blob references
+# it — the blob is the audit anchor; deleting its originating message
+# would break the attributability walk.
+ForeignKeyConstraint(
+    ["created_from_message_id", "session_id"],
+    ["chat_messages.id", "chat_messages.session_id"],
+    name="fk_blobs_created_from_message_session",
+    ondelete="RESTRICT",
+),
+
+# Index for the FK column: the audit-readiness query joins blobs to
+# chat_messages on created_from_message_id; without an index this is
+# a full-table scan on every provenance lookup.
+Index("ix_blobs_created_from_message_id", "created_from_message_id"),
+
+CheckConstraint(
+    "creation_modality IN ('verbatim', 'llm_generated', 'disambiguated', 'llm_generated_then_amended')",
+    name="ck_blobs_creation_modality",
+),
+
+# LLM-provenance nullability invariant:
+# LLM-authored modalities MUST carry all five provenance fields (the
+# auditor must be able to answer "which LLM fabricated this content?").
+# verbatim modality MUST NOT carry them (the user typed the content;
+# no LLM was involved).
+# disambiguated: the LLM parsed the row structure; provenance is
+# required to identify which model made the parsing decision.
+# Plain SQL boolean equivalence — no dialect-specific syntax needed
+# (unlike ck_blobs_ready_hash which uses GLOB / POSIX regex).
+CheckConstraint(
+    "(creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) = "
+    "(creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
+    "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
+    "creating_arguments_hash IS NOT NULL)",
+    name="ck_blobs_creating_llm_provenance_nullability",
+),
 ```
 
-`creation_modality` is non-nullable with default `"verbatim"` so existing
-blobs created outside the inline path retain a valid value. Tier 1 crash-on-
-anomaly still applies: reads from the Landscape must assert the value is a
-valid `CreationModality` member; do not coerce silently.
+### Step 3 — Update `_prepare_blob_create` in `tools.py` and `_InlineBlobModel` in `redaction.py`
 
-### Step 3 — Update `_prepare_blob_create` in `tools.py`
+**3a — Size cap in `redaction.py` (F-6).**
 
-In `src/elspeth/web/composer/tools.py`, update the `_prepare_blob_create`
-function signature and body to accept `creation_modality: CreationModality`
-and `created_from_message_id: str | None`, and write them alongside the
-existing `source_data_hash`. At the call site in `_execute_set_pipeline`
-(the `inline_blob is not None` branch), pass:
+In `src/elspeth/web/composer/redaction.py`, at `_InlineBlobModel` (line
+1021), add `max_length=262_144` to the `content` field:
 
-- `creation_modality`: derived from whether the content was user-typed
-  (the message preceding the tool call was a plain user message →
-  `CreationModality.VERBATIM`) or LLM-generated (the model produced the
-  content as part of its own response → `CreationModality.LLM_GENERATED`).
-  The call site already has access to the message context; this is a
-  classification at the boundary, not a frontend guess.
-- `created_from_message_id`: the `id` of the `chat_messages` row for the
-  user message that triggered this `set_pipeline` call. If unavailable (e.g.
-  the call is synthetic), pass `None`.
+```python
+content: Annotated[str, Field(max_length=262_144), Sensitive(summarizer=...)]
+```
 
-Also update the blob-metadata response serialiser (whichever method/dict
-builds the `fetchBlob` response payload) to include both fields.
+This enforces the 256 KiB cap at Pydantic decode time, before
+`_prepare_blob_create` allocates any bytes. A content payload exceeding
+this limit produces a Pydantic `ValidationError` (wrapped as
+`ToolArgumentError` at the route layer). The session quota check that
+follows is a secondary defense.
+
+**3b — Signature update in `tools.py`.**
+
+Update the `_prepare_blob_create` function signature to accept the new
+provenance arguments:
+
+```python
+def _prepare_blob_create(
+    arguments: Mapping[str, Any],
+    *,
+    data_dir: str,
+    session_id: str,
+    creation_modality: "CreationModality",
+    created_from_message_id: str | None,
+    creating_model_identifier: str | None = None,
+    creating_model_version: str | None = None,
+    creating_provider: str | None = None,
+    creating_composer_skill_hash: str | None = None,
+    creating_arguments_hash: str | None = None,
+) -> ...:
+```
+
+The four `creating_*` arguments default to `None`; the call site in
+`_execute_set_pipeline` must supply them when `creation_modality` is
+`LLM_GENERATED`, `DISAMBIGUATED`, or `LLM_GENERATED_THEN_AMENDED`. The
+DB-level CHECK (Step 2) enforces the invariant; a missing value at the call
+site will raise `IntegrityError` at insert time — crash, not silent pass.
+
+**3c — UTF-8 encode guard (F-13).**
+
+In `_prepare_blob_create`, guard the `content.encode("utf-8")` call:
+
+```python
+try:
+    content_bytes = content.encode("utf-8")
+except UnicodeEncodeError as exc:
+    raise ToolArgumentError(
+        argument="content",
+        expected="valid UTF-8 text",
+        actual_type="str (contained non-encodable character, e.g. surrogate)",
+    ) from exc
+```
+
+**3d — Call site in `_execute_set_pipeline`.**
+
+At the call site in `_execute_set_pipeline` (the `inline_blob is not None`
+branch), pass:
+
+- `creation_modality`: derived from message context. If the user message
+  immediately preceding the tool call was a plain `role=user` message and
+  the content is verbatim from that message → `CreationModality.VERBATIM`.
+  If the LLM produced the content as part of its own response →
+  `CreationModality.LLM_GENERATED`. Use `DISAMBIGUATED` when the proposal
+  went through the disambiguation widget. Use `LLM_GENERATED_THEN_AMENDED`
+  when the user clicked "Edit the list" and saved changes.
+- `created_from_message_id`: the `id` of the triggering `chat_messages`
+  row. If unavailable (synthetic call), pass `None`.
+- `creating_model_identifier`, `creating_model_version`,
+  `creating_provider`, `creating_composer_skill_hash`,
+  `creating_arguments_hash`: available from the call-loop context for
+  LLM-generated modalities. Pass `None` for `VERBATIM`.
+
+**3e — Response serialiser.**
+
+Update the blob-metadata response serialiser (whichever method/dict builds
+the `fetchBlob` response payload) to include all new provenance fields:
+`creation_modality`, `created_from_message_id`, and the five
+`creating_*` fields.
 
 ### Step 4 — Backend integration test
 
-Create `tests/integration/web/composer/test_inline_source_provenance.py`:
+Create `tests/integration/web/composer/test_inline_source_provenance.py`.
+The tests call through `_execute_set_pipeline` (the route layer) rather
+than directly into `_prepare_blob_create`, exercising the real path
+including the `creation_modality` classification at the call site (F-2,
+Quality MAJOR-1):
 
 ```python
 """
-Integration test: explain(recorder, run_id, token_id) walks back from
-runtime decision → blob hash → creation_modality → created_from_message_id
-of the original user prose.
+Integration test: creation_modality and LLM-provenance columns are written
+by _execute_set_pipeline and surfaced via fetchBlob.
 
-Covers the attributability requirement from Phase 5a Fix 1 (audit-architecture
-HIGH, LLM-safety HIGH): the frontend InlineSourceSummary.provenance must be
-a projection of this server-recorded value, not a frontend heuristic.
+Covers:
+- Attributability: explain() walks blob → creation_modality →
+  created_from_message_id of original user prose.
+- LLM-provenance: llm_generated blobs carry non-NULL creating_* fields.
+- Verbatim: verbatim blobs carry NULL creating_* fields.
+- Cross-session FK: created_from_message_id from a different session fails.
+- Oversize content: 300 KiB payload raises ToolArgumentError.
+- Non-UTF-8 content: surrogate payload raises ToolArgumentError.
 """
 import pytest
-from elspeth.web.composer.tools import _prepare_blob_create
-from elspeth.contracts.models import CreationModality
-from elspeth.core.landscape import Landscape  # L1 import — valid from test layer
+from elspeth.core.landscape import LandscapeDB  # correct export: LandscapeDB not Landscape
 
 
 @pytest.mark.integration
 def test_verbatim_blob_records_creation_modality_and_message_id(
-    tmp_landscape: Landscape,
+    composer_client,  # standard HTTP test client from tests/integration/conftest.py
+    session_id: str,
+    user_message_id: str,
 ) -> None:
-    """Blob created from user-typed content records creation_modality=verbatim
-    and the originating chat_messages.id."""
-    blob = _prepare_blob_create(
-        content=b"url\nhttps://finance.gov.au",
-        filename="chat.csv",
-        mime_type="text/csv",
-        creation_modality=CreationModality.VERBATIM,
-        created_from_message_id="msg-user-1",
-        landscape=tmp_landscape,
+    """set_pipeline with verbatim inline_blob records creation_modality=verbatim
+    and the originating chat_messages.id; creating_* fields are NULL."""
+    response = composer_client.post(
+        f"/api/sessions/{session_id}/chat",
+        json={
+            "role": "user",
+            "content": "url\nhttps://finance.gov.au",
+        },
     )
-    assert blob.creation_modality == CreationModality.VERBATIM
-    assert blob.created_from_message_id == "msg-user-1"
-    assert blob.source_data_hash is not None  # existing invariant preserved
+    # Simulate LLM tool call via the route layer — use the test harness that
+    # drives _execute_set_pipeline directly (follow existing pattern in
+    # tests/integration/web/composer/).
+    blob_response = composer_client.get(
+        f"/api/sessions/{session_id}/blobs/{response.json()['blob_id']}"
+    )
+    blob = blob_response.json()
+    assert blob["creation_modality"] == "verbatim"
+    assert blob["created_from_message_id"] == user_message_id
+    assert blob["content_hash"] is not None  # SHA-256 of inline content, populated by _prepare_blob_create
+    # verbatim → LLM provenance fields must be NULL
+    assert blob["creating_model_identifier"] is None
+    assert blob["creating_arguments_hash"] is None
 
 
 @pytest.mark.integration
-def test_llm_generated_blob_records_correct_modality(
-    tmp_landscape: Landscape,
+def test_llm_generated_blob_carries_llm_provenance(
+    composer_client,
+    session_id: str,
 ) -> None:
-    """Blob created from LLM-generated content records creation_modality=llm_generated."""
-    blob = _prepare_blob_create(
-        content=b"url\nhttps://gov.au\nhttps://ato.gov.au",
-        filename="llm-generated.csv",
-        mime_type="text/csv",
-        creation_modality=CreationModality.LLM_GENERATED,
-        created_from_message_id="msg-user-hero",
-        landscape=tmp_landscape,
-    )
-    assert blob.creation_modality == CreationModality.LLM_GENERATED
+    """llm_generated blobs carry non-NULL creating_* LLM-provenance fields."""
+    # (Drive the llm_generated path through the test harness)
+    blob = ...  # follow existing integration test pattern
+    assert blob["creation_modality"] == "llm_generated"
+    assert blob["creating_model_identifier"] is not None
+    assert blob["creating_model_version"] is not None
+    assert blob["creating_provider"] is not None
+    assert blob["creating_composer_skill_hash"] is not None
+    assert blob["creating_arguments_hash"] is not None
 
 
 @pytest.mark.integration
-def test_explain_walks_blob_provenance_chain(
-    tmp_landscape: Landscape,
-    recorder,  # standard fixture from tests/integration/conftest.py
-    run_id: str,
+def test_cross_session_message_id_rejected(
+    composer_client,
+    session_id: str,
 ) -> None:
-    """explain(recorder, run_id, token_id) exposes creation_modality and
-    created_from_message_id on the blob metadata node in the lineage graph."""
-    # Arrange: create a blob and record a row sourced from it.
-    blob = _prepare_blob_create(
-        content=b"url\nhttps://finance.gov.au",
-        filename="chat.csv",
-        mime_type="text/csv",
-        creation_modality=CreationModality.VERBATIM,
-        created_from_message_id="msg-user-1",
-        landscape=tmp_landscape,
-    )
-    # ... attach blob as source, run the pipeline, capture token_id ...
-    # (full wiring follows the existing integration test pattern in
-    # tests/integration/web/composer/ — use the same fixture stack)
+    """created_from_message_id from a different session fails the composite FK."""
+    # Attempt to write a blob with a message_id from a different session.
+    # The composite FK (fk_blobs_created_from_message_session) must reject it.
+    with pytest.raises(Exception, match="FOREIGN KEY constraint failed|IntegrityError"):
+        # Drive _execute_set_pipeline with a cross-session message_id via the
+        # route-layer test harness.
+        pass  # implement per existing integration test pattern
 
-    lineage = recorder.explain(run_id=run_id, token_id="<token>")
-    blob_node = next(n for n in lineage.nodes if n.node_type == "blob")
-    assert blob_node.creation_modality == "verbatim"
-    assert blob_node.created_from_message_id == "msg-user-1"
+
+@pytest.mark.integration
+def test_oversize_content_raises_tool_argument_error(
+    composer_client,
+    session_id: str,
+) -> None:
+    """A 300 KiB content payload produces a ToolArgumentError (F-6)."""
+    big_content = "x" * (300 * 1024)  # 300 KiB
+    response = composer_client.post(
+        f"/api/sessions/{session_id}/chat",
+        json={
+            "role": "user",
+            "content": big_content,
+        },
+    )
+    # The response must be a 422 (Pydantic ValidationError → ToolArgumentError),
+    # not a 500 (memory allocation or DB write).
+    assert response.status_code == 422
+
+
+@pytest.mark.integration
+def test_non_utf8_content_raises_tool_argument_error(
+    composer_client,
+    session_id: str,
+) -> None:
+    """A surrogate-containing string produces a ToolArgumentError (F-13)."""
+    # Surrogates in JSON strings are rejected by most HTTP clients before the
+    # route layer; test by driving _prepare_blob_create directly via the test
+    # harness with a synthetic surrogate payload.
+    from elspeth.web.composer.tools import _prepare_blob_create
+    from elspeth.web.composer.errors import ToolArgumentError
+    with pytest.raises(ToolArgumentError, match="valid UTF-8 text"):
+        _prepare_blob_create(
+            {"content": "valid-prefix-\ud800-surrogate", "filename": "f.csv", "mime_type": "text/csv"},
+            data_dir="/tmp",
+            session_id=session_id,
+            creation_modality="verbatim",
+            created_from_message_id=None,
+        )
 ```
 
-The `tmp_landscape` and `recorder` fixtures follow the existing integration
-test conventions in `tests/integration/conftest.py`. Adapt the `explain()`
-assertion to the actual return type of the lineage explorer.
+Adapt the test harness calls to the actual route-layer test infrastructure
+in `tests/integration/web/composer/`. The `composer_client` and
+`session_id` fixtures follow the existing integration test conventions in
+`tests/integration/conftest.py`.
 
 ### Step 5 — Commit
 
 ```bash
-git add src/elspeth/contracts/models.py \
-        src/elspeth/core/landscape/schema.py \
+git add src/elspeth/contracts/enums.py \
+        src/elspeth/web/sessions/models.py \
+        src/elspeth/web/composer/redaction.py \
         src/elspeth/web/composer/tools.py \
         src/elspeth/web/frontend/src/api/client.ts \
         tests/integration/web/composer/test_inline_source_provenance.py
-git commit -m "feat(composer/audit): server-side creation_modality + created_from_message_id on inline blobs (Phase 5a.2.5)"
+git commit -m "feat(composer/audit): server-side creation_modality + LLM-provenance on inline blobs (Phase 5a.2.5)"
 ```
+
+---
+
+## Task 2.6 — `chat_messages` immutability (backend)
+
+> **Numbering note:** Inserted as "2.6" (not renumbering Tasks 3-9) per the
+> same no-renumber convention as Task 2.5. This task is a prerequisite for
+> the Task 2.5 attributability claim: the `explain()` walk from blob →
+> `created_from_message_id` → `chat_messages.id` is only tamper-evident
+> if the referenced `chat_messages` row cannot be mutated after creation.
+
+**Why immutability is required for Phase 5a's audit story.** Phase 5a
+elevates `chat_messages` to an audit anchor: the `created_from_message_id`
+FK on `blobs_table` (Task 2.5) lets auditors trace provenance back to the
+originating user message. If that message row could be mutated after the
+blob was created, the attributability walk from `blob →
+created_from_message_id → chat_messages.content` would no longer prove what
+the user actually typed — silently breaking the chain. Immutability
+enforcement on `chat_messages` is therefore a correctness requirement for
+Phase 5a, not a belt-and-braces hardening.
+
+**Trigger ownership: deferred to `18a-phase-5b-backend.md`.**
+
+The `chat_messages` immutability trigger is specified and owned by
+`18a-phase-5b-backend.md` §"chat_messages immutability trigger (F-4)".
+Phase 5b's backend plan carries all schema work for the session DB
+regardless of which phase's audit claim depends on it, and 18a-'s schema
+validator (§"Schema validator extension for triggers (F-24)") owns the
+trigger-existence registry. Duplicating DDL here would create two sources of
+truth for the same schema object; 17- defers entirely.
+
+The canonical trigger name and scope (as defined in 18a-) is:
+
+- **Name:** `trg_chat_messages_immutable_content`
+- **Scope:** `BEFORE UPDATE OF content ON chat_messages` (content column
+  only)
+- **Mechanism:** SQLAlchemy table-scoped `event.listen` with `IF NOT EXISTS`
+  for idempotent bootstrap (F-23)
+
+**Scope reconciliation (DELETE protection and all-column vs content-only
+UPDATE).** An earlier draft of this task defined two triggers: an
+unconditional `BEFORE UPDATE` (all columns) and a conditional `BEFORE
+DELETE` (when a blob references the row). After review:
+
+- **DELETE**: redundant with the `ON DELETE RESTRICT` composite FK defined
+  in Task 2.5 (`fk_blobs_created_from_message_session`, 17- lines
+  843-847). The FK already prevents deletion of a `chat_messages` row while
+  any blob holds a `created_from_message_id` reference to it. A trigger
+  adding the same protection is unnecessary.
+- **All-column UPDATE vs UPDATE-OF-content**: The audit walk reconstructs
+  what the user typed, which lives in `content`. Protecting only `content`
+  (18a-'s scope) is sufficient for Phase 5a's attributability claim. Role,
+  timestamp, and session_id tampering would be misleading but do not break
+  the content-hash lineage chain. 18a-'s narrower scope is accepted.
+
+If a future reviewer believes the broader scope (all-column UPDATE, explicit
+DELETE trigger) is necessary for a different threat model, that is a scope
+extension to 18a-'s trigger, not a revision of this plan.
+
+**Co-shipping requirement.** If `18a-phase-5b-backend.md` does not ship in
+the same PR as this plan's changes, the trigger DDL MUST be moved into this
+task with the canonical 18a- name and scope:
+
+- Name: `trg_chat_messages_immutable_content`
+- Scope: `BEFORE UPDATE OF content ON chat_messages`
+- Do NOT redefine with a different name or broader scope.
+
+### Step 1 — Add the trigger
+
+No DDL in this task. Follow `18a-phase-5b-backend.md` §"chat_messages
+immutability trigger (F-4)" for the exact SQLAlchemy `event.listen` block
+to add in `web/sessions/models.py`. Verify the trigger is registered in
+the schema validator per §"Schema validator extension for triggers (F-24)".
+
+**No Alembic migration.** Same policy as Task 2.5 — operator deletes the
+old DB on deploy.
+
+### Step 2 — Integration tests
+
+Two test concerns for Phase 5a's attributability requirement:
+
+**2a — Trigger test (content mutation blocked).** This test is owned by
+18a-; see `18a-phase-5b-backend.md` §"chat_messages immutability trigger
+(F-4)" for the `trg_chat_messages_immutable_content` trigger test. The
+test asserts that an attempt to UPDATE `content` on a settled
+`chat_messages` row raises `IntegrityError`.
+
+**2b — Phase-5a-specific attributability test.** Create
+`tests/integration/web/composer/test_chat_messages_attributability.py`
+to walk the `blob → created_from_message_id → chat_messages` chain and
+confirm mutation of `content` raises `IntegrityError` (via 18a-'s
+trigger) rather than succeeding silently:
+
+```python
+"""
+Integration test: Phase 5a attributability chain is tamper-evident.
+
+Walks blob.created_from_message_id → chat_messages.id and asserts
+that a mutation attempt on chat_messages.content raises IntegrityError,
+proving the trigger (trg_chat_messages_immutable_content, owned by
+18a-phase-5b-backend.md F-4) is installed and covers the audit anchor.
+"""
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+
+@pytest.mark.integration
+def test_blob_provenance_anchor_is_immutable(
+    composer_client,
+    session_db,
+    session_id: str,
+    user_message_id: str,
+) -> None:
+    """blob.created_from_message_id points to an immutable chat_messages row.
+
+    The trg_chat_messages_immutable_content trigger (owned by 18a-) must be
+    installed before this test can pass. If 18a- has not shipped, skip with
+    pytest.skip("18a- trigger not yet deployed").
+    """
+    # Confirm the blob's created_from_message_id resolves to the expected row.
+    blob_row = session_db.execute(
+        "SELECT created_from_message_id FROM blobs WHERE session_id = :sid LIMIT 1",
+        {"sid": session_id},
+    ).fetchone()
+    assert blob_row is not None
+    assert blob_row[0] == user_message_id
+
+    # Assert mutation of content raises IntegrityError — trigger fires.
+    with pytest.raises(IntegrityError, match="append-only"):
+        session_db.execute(
+            "UPDATE chat_messages SET content = 'tampered' WHERE id = :id",
+            {"id": user_message_id},
+        )
+        session_db.commit()
+```
+
+**2c — DELETE blocked by FK (not by trigger).** Deletion of a
+`chat_messages` row while a blob references it is blocked by the
+`ON DELETE RESTRICT` composite FK from Task 2.5, not by a trigger. The
+`IntegrityError` message will reference a FK constraint, not the
+`append-only` trigger message:
+
+```python
+@pytest.mark.integration
+def test_chat_message_delete_while_blob_references_it_raises(
+    session_db,
+    user_message_id: str,
+) -> None:
+    """DELETE on a chat_messages row referenced by blobs raises IntegrityError.
+
+    Protection comes from the ON DELETE RESTRICT composite FK
+    (fk_blobs_created_from_message_session, Task 2.5), not from a trigger.
+    The IntegrityError message will reference a FOREIGN KEY constraint.
+    """
+    with pytest.raises(IntegrityError, match="FOREIGN KEY constraint failed"):
+        session_db.execute(
+            "DELETE FROM chat_messages WHERE id = :id",
+            {"id": user_message_id},
+        )
+        session_db.commit()
+```
+
+### Step 3 — Commit
+
+```bash
+git add tests/integration/web/composer/test_chat_messages_attributability.py \
+        tests/integration/web/sessions/test_chat_messages_immutability.py
+git commit -m "test(sessions/audit): Phase 5a attributability chain tamper-evidence test (Task 2.6)"
+```
+
+> Note: `models.py` is NOT staged here — the trigger DDL belongs to 18a-'s
+> commit. If co-shipping in the same PR, coordinate with the 18a- task list
+> to avoid double-patching `models.py`.
 
 ---
 
@@ -871,8 +1392,17 @@ describe("InlineSourceCreatedTurn", () => {
     expect(onEdit).toHaveBeenCalledWith(llmGenerated);
   });
 
-  it("renders the SHA-256 hash as a small audit signal", () => {
+  it("renders the SHA-256 hash inside a collapsed audit-info disclosure (F-21)", () => {
     render(<InlineSourceCreatedTurn summary={verbatim} onEdit={vi.fn()} />);
+    // Audit info (blob_id, SHA-256 hash) is behind a <details> "Show audit info"
+    // disclosure. It must NOT be visible at a glance — Linda sees filename +
+    // row count only; Sarah/Marcus expand the disclosure to audit.
+    const disclosure = screen.getByText(/show audit info/i);
+    expect(disclosure).toBeInTheDocument();
+    // The hash is NOT visible before the disclosure is opened.
+    expect(screen.queryByText(/h1/)).not.toBeInTheDocument();
+    // Open the disclosure.
+    fireEvent.click(disclosure);
     expect(screen.getByText(/h1/)).toBeInTheDocument();
   });
 
@@ -884,6 +1414,13 @@ describe("InlineSourceCreatedTurn", () => {
     render(<InlineSourceCreatedTurn summary={huge} onEdit={vi.fn()} />);
     const preview = screen.getByTestId("inline-source-preview");
     expect(preview.textContent?.length).toBeLessThanOrEqual(280);
+  });
+
+  it("announces itself via role=region with aria-label (F-18)", () => {
+    render(<InlineSourceCreatedTurn summary={verbatim} onEdit={vi.fn()} />);
+    expect(
+      screen.getByRole("region", { name: /source created/i }),
+    ).toBeInTheDocument();
   });
 });
 ```
@@ -902,12 +1439,30 @@ Expected: fail with module-not-found.
 
 ### Step 3 — Implement
 
-Component shape (clip preview to ~280 chars; show filename, MIME, row
-count, full SHA-256 hash in a small audit signal; render an "Edit the
-list" button only when `provenance === "llm-generated"`; wire `onEdit`
-to a callback that opens the inline editor). Use a `data-testid` of
-`inline-source-preview` on the clipped preview element so the Task 3
-test's clip assertion has a stable anchor.
+Component shape:
+
+- Root: `<section role="region" aria-label="Source created from your
+  message">` — the `role`/`aria-label` are load-bearing for the F-18
+  accessibility test; keep them stable.
+- Visible by default: filename, MIME type, row count (or "1 row" for
+  single-record inputs), and a clipped content preview. Clip preview
+  to ~280 chars; use `data-testid="inline-source-preview"` on the
+  preview element for the clip-assertion anchor.
+- **Audit info hidden by default (F-21):** `blob_id` and full SHA-256
+  hash are placed inside a `<details>` element with `<summary>Show
+  audit info</summary>`. Linda-persona users see filename + row count
+  at a glance; Sarah/Marcus-persona users expand the disclosure for the
+  audit fields. The Task 3 test asserts the hash is NOT visible until
+  the disclosure is opened.
+- Edit button: render `<button>Edit the list</button>` only when
+  `provenance === "llm-generated"` or `provenance === "llm-generated-then-amended"`;
+  wire `onEdit` to the callback. Not shown for `provenance === "verbatim"` or
+  `"disambiguated"`.
+- `data-testid="inline-source-created-turn"` on the root element
+  (required by Task 6 integration test assertion).
+
+Wire `onEdit` to a callback that opens the inline editor pre-filled with
+the current inline content.
 
 In `ChatPanel.tsx`, derive the `InlineSourceSummary` from the current
 composition state's source and the session blob metadata, push it into
@@ -965,8 +1520,24 @@ standard PendingProposalsBanner handles it.)
 
 The widget is a richer per-proposal UI than the standard banner: it
 shows the user's original input, the LLM's parsed row breakdown, and
-offers "Yes, that's right", "No, treat as 1 row", or "Edit the rows
-directly" actions.
+offers four actions:
+
+1. **"Yes — N rows"** (primary) — confirm the LLM's interpretation and
+   proceed to create the `inline_blob`.
+2. **"No — treat as 1 row"** — reject the multi-row interpretation;
+   the entire user message is treated as a single-row value. Sets a
+   session-scoped `user_requested_single_row_for_message_id` flag
+   (see F-11 re-fire guard below) so subsequent proposals for the same
+   message bypass disambiguation.
+3. **"Edit the rows directly"** — open the inline editor from Task 3
+   pre-filled with the proposed rows for manual correction.
+4. **"This isn't source data"** — escape hatch (F-10): dismisses the
+   widget entirely, marks the originating message with a
+   `non_source_message_ids` flag in `inlineSourceStore`, and emits a
+   clean signal to the LLM ("I don't want to treat this as source data")
+   so the LLM doesn't re-surface a disambiguation proposal for the same
+   message. The frontend must NOT re-show the disambiguation widget for
+   a message ID that is in `non_source_message_ids`.
 
 **Files:**
 
@@ -989,9 +1560,11 @@ describe("InlineSourceDisambiguationTurn", () => {
     userInput: "check these URLs: a.com, b.com, c.com",
     proposedRows: ["a.com", "b.com", "c.com"],
     proposalId: "p1",
+    messageId: "msg-user-1",
     onConfirmMultiRow: vi.fn(),
     onTreatAsOneRow: vi.fn(),
     onEditRows: vi.fn(),
+    onNotSourceData: vi.fn(),  // F-10: escape action
   };
 
   it("renders the user's original input verbatim", () => {
@@ -1024,9 +1597,25 @@ describe("InlineSourceDisambiguationTurn", () => {
     expect(props.onEditRows).toHaveBeenCalledWith("p1");
   });
 
+  it("calls onNotSourceData when the escape action is clicked (F-10)", () => {
+    render(<InlineSourceDisambiguationTurn {...props} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /this isn.t source data/i }),
+    );
+    expect(props.onNotSourceData).toHaveBeenCalledWith("msg-user-1");
+  });
+
   it("announces itself via role=region with an aria-label", () => {
     render(<InlineSourceDisambiguationTurn {...props} />);
     expect(screen.getByRole("region", { name: /row count/i })).toBeInTheDocument();
+  });
+
+  it("moves focus to the primary action button on mount (F-19)", () => {
+    render(<InlineSourceDisambiguationTurn {...props} />);
+    // Primary action is the "Yes — N rows" confirm button.
+    expect(
+      screen.getByRole("button", { name: /yes.*3 rows/i }),
+    ).toHaveFocus();
   });
 });
 ```
@@ -1045,11 +1634,39 @@ Expected: fail with module-not-found.
 Component shape: a `<section role="region" aria-label="Confirm row count
 interpretation (N rows)">` containing the user's original input
 verbatim (in a `<blockquote>`), an ordered list of the LLM's parsed
-rows, and three action buttons — `Yes — N rows` (primary; calls
-`onConfirmMultiRow(proposalId)`), `No — treat as 1 row`
-(`onTreatAsOneRow`), and `Edit the rows` (`onEditRows`). The `role` /
-`aria-label` and per-button accessible names are load-bearing for the
-Task 4 tests; keep them stable.
+rows, and four action buttons:
+
+- `Yes — N rows` (primary; calls `onConfirmMultiRow(proposalId)`)
+- `No — treat as 1 row` (calls `onTreatAsOneRow(proposalId)`)
+- `Edit the rows` (calls `onEditRows(proposalId)`)
+- `This isn't source data` (link-style escape; calls
+  `onNotSourceData(messageId)`)
+
+The `role` / `aria-label` and per-button accessible names are
+load-bearing for the Task 4 tests; keep them stable.
+
+**Focus management (F-19).** On mount, move focus to the primary action
+button ("Yes — N rows") using a `useEffect` with a `ref` on that button.
+The widget is keyboard-accessible from mount without requiring an
+additional Tab.
+
+**Re-fire guard for `onTreatAsOneRow` (F-11).** When the user clicks
+"No — treat as 1 row", store the `messageId` in
+`inlineSourceStore.userRequestedSingleRowForMessageIds` (a `Set<string>`).
+The disambiguation predicate in `ChatPanel.tsx` must check this set before
+showing the widget: if `messageId` is already present, skip the
+disambiguation widget and route to the standard proposal banner instead.
+This prevents the widget from re-appearing if the LLM re-proposes for the
+same message after a rejected multi-row interpretation.
+
+**"This isn't source data" escape (F-10).** When the user clicks this:
+1. Call `onNotSourceData(messageId)`.
+2. In `ChatPanel.tsx`, the handler adds `messageId` to
+   `inlineSourceStore.nonSourceMessageIds` (a `Set<string>`).
+3. Send a clean LLM message: "That message isn't source data — please
+   continue without creating a source from it." (no API jargon).
+4. The disambiguation predicate also gates on `nonSourceMessageIds` —
+   if the message ID is present, the widget never re-fires.
 
 Wiring in `ChatPanel.tsx`:
 
@@ -1060,13 +1677,21 @@ Wiring in `ChatPanel.tsx`:
    ambiguous; otherwise fall back to the standard banner. (This is
    intentionally heuristic — Phase 5b will design a structured field for
    the annotation; until then, the heuristic is fine and the false
-   positives are mild.)
-2. For ambiguous proposals, render `InlineSourceDisambiguationTurn`
-   inline at the proposal's position in the message stream, NOT in the
-   banner. Wire `onConfirmMultiRow` → existing `acceptCompositionProposal`,
-   `onTreatAsOneRow` → reject the current proposal then send an LLM
-   message "treat the original input as a single row", `onEditRows` →
-   open the inline editor from Task 3.
+   positives are mild.) The heuristic must NOT fire for the canonical
+   demo prompt (Task 9 Step 2 F-12 verification step).
+2. Before showing the widget, check `userRequestedSingleRowForMessageIds`
+   and `nonSourceMessageIds` from `inlineSourceStore`. If either set
+   contains the message's ID, route to the standard banner.
+3. For ambiguous proposals not excluded by step 2, render
+   `InlineSourceDisambiguationTurn` inline at the proposal's position
+   in the message stream, NOT in the banner. Wire:
+   - `onConfirmMultiRow` → existing `acceptCompositionProposal`
+   - `onTreatAsOneRow` → reject proposal + add to
+     `userRequestedSingleRowForMessageIds` + send "treat the original
+     input as a single row"
+   - `onEditRows` → open the inline editor from Task 3
+   - `onNotSourceData` → add to `nonSourceMessageIds` + send clean
+     escape message
 
 ### Step 4 — Run GREEN
 
@@ -1094,8 +1719,8 @@ git commit -m "feat(composer/chat): InlineSourceDisambiguationTurn for ambiguous
 Task 8 and fails to produce an `inline_blob` for short user inputs. If
 the user types source-shaped data (a URL, a short list, a record) and
 the LLM responds without proposing a source for N (=2) turns, surface a
-small affordance: "I haven't created a source from your text yet. Create
-one now?".
+small affordance: "Your text looks like source data. Create a source
+from it?".
 
 This is a *floor* on the affordance — it ensures the user can always
 reach the inline-source path even if the prompt nudge proves
@@ -1165,7 +1790,7 @@ describe("InlineSourceFallbackPrompt", () => {
         onDismiss={vi.fn()}
       />,
     );
-    expect(screen.getByText(/haven't created a source/i)).toBeInTheDocument();
+    expect(screen.getByText(/looks like source data/i)).toBeInTheDocument();
   });
 
   it("calls onAccept with the candidate text when the user accepts", () => {
@@ -1209,11 +1834,20 @@ npx vitest run src/components/chat/InlineSourceFallbackPrompt.test.tsx
 
 Component shape: `shouldRender === false` ⇒ render nothing
 (`return null`). Otherwise render a `<section role="region"
-aria-label="Inline source fallback prompt">` with prose "I haven't
-created a source from your text yet. Would you like me to treat your
-message as the source data?" and two buttons — "Create source from
-this text" (primary; calls `onAccept(candidateText)`) and "Dismiss"
-(link-style; calls `onDismiss`).
+aria-label="Inline source fallback prompt">` with prose "Your text
+looks like source data. Create a source from it?" and two buttons —
+"Create source from this text" (primary; calls `onAccept(candidateText)`)
+and "Dismiss" (link-style; calls `onDismiss`).
+
+**Dismiss persistence (F-20).** A dismissed prompt must not re-fire on
+subsequent renders within the same session. Use a session-scoped
+`dismissedAt: Map<sessionId, number>` entry in `inlineSourceStore`
+(add `dismissedAt` to the store's state shape in Task 2 Step 1; update
+`inlineSourceStore.test.ts` accordingly). Alternatively, a `useRef`
+at `ChatPanel` level keyed by session ID is acceptable if the store
+shape is frozen. The predicate in `ChatPanel.tsx` must gate on
+`dismissedAt` being absent for the active session before rendering the
+prompt.
 
 Predicate derivation lives in `ChatPanel.tsx`:
 
@@ -1242,22 +1876,29 @@ const shouldRender =
   Boolean(candidate) && !hasInflightSourceCall && !compositionHasSource;
 
 const onAccept = (text: string) => {
-  // Send a synthetic user message asking the LLM to create an
-  // inline_blob source from `text`. The LLM still does the structured
-  // mutation — the user's click is interpreted, not the source content.
-  sendMessage(
-    `Please create the source plugin from this text using set_pipeline ` +
-    `with source.inline_blob:\n\n${text}`
-  );
+  // Send a user-facing message; the LLM still decides the structured
+  // mutation. Do NOT expose API jargon (set_pipeline / inline_blob)
+  // in a persisted role=user message — it appears verbatim on session
+  // reload for all users (F-3). The LLM has sufficient context from
+  // the system prompt and prior message thread to interpret the intent.
+  sendMessage(`Use this as my source data:\n\n${text}`);
 };
 ```
 
-When the user accepts, dispatch a synthetic chat turn that *asks* the
+When the user accepts, dispatch a user-facing chat turn that *asks* the
 LLM to create the inline source. We deliberately keep the LLM in the
 loop — the frontend does not construct the `set_pipeline` payload
 itself, because the LLM also needs to choose the plugin (csv vs json vs
 url-list etc.) and add the other transforms. This is the safer shape
 than the frontend forcing a specific payload.
+
+The message text must not contain API jargon (`set_pipeline`,
+`source.inline_blob`). The persisted `role=user` message is visible on
+session reload and must read as natural user language regardless of
+technical sophistication. Structured intent is conveyed by the message
+context (the LLM's system prompt and the `candidateText` content);
+explicit API naming is not required and harms UX for non-technical
+users (F-3).
 
 ### Step 4 — GREEN
 
@@ -1454,19 +2095,25 @@ describe("Phase 5a integration: chat input → inline_blob → InlineSourceCreat
       expect(screen.getByText(/text\/csv/)).toBeInTheDocument();
     });
 
-    // Assertion (f): created_from_message_id is set (verified by the blob
-    // metadata mock returning msg-user-1; the inlineSourceStore projection
-    // must expose createdFromMessageId on the summary it stores).
+    // Assertion (f): wire-to-store provenance mapping — direct assertions
+    // without conditional debug-accessor guards (F-14).
+    //
+    // Case 1 — verbatim (current mock): fetchBlob returns creation_modality:
+    // 'verbatim' → inlineSourceStore.getSummary().provenance === 'verbatim'
+    // → no "Edit the list" button (already asserted in (c)).
+    //
+    // Case 2 — llm_generated (second test, see below): fetchBlob returns
+    // creation_modality: 'llm_generated' → provenance === 'llm-generated'
+    // → "Edit the list" button IS present.
+    //
+    // Both are direct assertions — no conditional or debug-accessor path.
     await waitFor(() => {
-      const summary = (window as any).__inlineSourceStoreDebug?.getSummary("session-1");
-      if (summary) {
-        // If the store exposes a debug accessor, assert directly.
-        expect(summary.createdFromMessageId).toBe("msg-user-1");
-      }
-      // Otherwise: the assertion is implicit in (c) above — provenance "verbatim"
-      // can only be set if the blob metadata fetch succeeded, which includes
-      // created_from_message_id. The integration test for the backend
-      // explainability walk (Task 2.5 Step 4) covers the full chain.
+      // The inlineSourceStore is a Zustand store; read its state directly.
+      const { useInlineSourceStore } = require("@/stores/inlineSourceStore");
+      const summary = useInlineSourceStore.getState().getSummary("session-1");
+      expect(summary).not.toBeNull();
+      expect(summary!.provenance).toBe("verbatim");
+      expect(summary!.createdFromMessageId).toBe("msg-user-1");
     });
 
     // Assertion (g): audit-readiness panel Provenance row updated.
@@ -1476,6 +2123,43 @@ describe("Phase 5a integration: chat input → inline_blob → InlineSourceCreat
       expect(screen.getByText(/abc123/)).toBeInTheDocument();
     });
   });
+
+  it("maps creation_modality='llm_generated' to provenance='llm-generated' and shows Edit button", async () => {
+    // Wire-to-store provenance mapping — Case 2 (F-14): llm_generated path.
+    vi.spyOn(client, "fetchBlob").mockResolvedValue({
+      id: "blob-uuid-llm",
+      filename: "llm-generated.csv",
+      mime_type: "text/csv",
+      content_hash: "sha256-llmdef456",
+      created_via: "inline_blob",
+      size_bytes: 60,
+      creation_modality: "llm_generated",
+      created_from_message_id: "msg-user-hero",
+    });
+
+    render(<App />);
+    const textarea = await screen.findByLabelText("Message input");
+    fireEvent.change(textarea, {
+      target: { value: "create a list of 5 government web pages" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => {
+      const { useInlineSourceStore } = require("@/stores/inlineSourceStore");
+      const summary = useInlineSourceStore.getState().getSummary("session-1");
+      expect(summary).not.toBeNull();
+      // creation_modality 'llm_generated' maps to 'llm-generated' at the
+      // API boundary (client.ts adapter). Store and component use hyphenated form.
+      expect(summary!.provenance).toBe("llm-generated");
+    });
+
+    // llm-generated provenance → "Edit the list" button IS present.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /edit the list/i }),
+      ).toBeInTheDocument(),
+    );
+  });
 });
 ```
 
@@ -1484,6 +2168,30 @@ documented in `client.ts`. The `creation_modality` and
 `created_from_message_id` fields on the blob response are new as of Task 2.5;
 if the test is written before Task 2.5 lands they will be absent and
 assertions (c) and (f) will fail — that is the intended RED state.
+
+### Known races (F-16)
+
+Two timing hazards in the inline-source flow are known but accepted in v1:
+
+**Race 1 — Streaming `set_pipeline` response vs. `inlineSourceStore` recompute.**
+While the LLM streams a `set_pipeline` response, `compositionState` may update
+mid-stream (if the composition-state subscription is push-based). The
+`inlineSourceStore` recomputes on every `compositionState` update event, not
+on tool-call response completion. This means the store may briefly hold a stale
+summary while the full blob metadata has not yet been fetched. Mitigation: the
+`InlineSourceCreatedTurn` widget is only rendered after the blob-metadata fetch
+resolves (the store's `setSummary` is called by the `fetchBlob` response handler,
+not by the composition-state update); the user never sees a partial widget.
+Backend mitigation: the session write lock serialises all `set_pipeline` mutations
+per session, so there is no interleaving of competing `set_pipeline` calls.
+
+**Race 2 — User types a new message while `InlineSourceFallbackPrompt` is visible.**
+If the user starts typing while the fallback prompt is shown, the predicate may
+flip before the component re-renders. The component's `shouldRender` prop is
+re-derived on each `messages` change; a new user message (condition 1) will
+immediately set `shouldRender=false`. The `useRef`-based `dismissedAt` guard
+(F-20) prevents re-fire within the same session even if the predicate transiently
+re-fires.
 
 ### Step 2 — RED, then GREEN, then commit
 
@@ -1619,9 +2327,13 @@ LLM picks `inline_blob` for short user inputs.
    `source.inline_blob`. Pass if true; fail if the LLM asks the user
    to upload a CSV or proposes anything else for the source.
 2. `"check these URLs: a.com, b.com, c.com"` → expect EITHER a
-   `set_pipeline` call with a 3-row `inline_blob`, OR a narration that
-   surfaces the row-count interpretation before any tool call. Pass on
-   either.
+   `set_pipeline` call with `source.inline_blob` containing exactly 3
+   rows (one URL per row), OR a narration explicitly stating "I read
+   these as 3 rows" before any tool call. Pass on either. A generic
+   "I'll create a source from those URLs" without the row-count
+   confirmation does NOT pass. Use the structured JSON artifact format
+   from Phase 5b Task 0 (`evals/composer-rgr/phase5b-task0-*.json`
+   shape) to record the raw LLM response for reproducibility.
 3. (Canonical hero) `"create a list of 5 government web pages and use
    an LLM to rate how cool they are"` — expect the LLM to generate 5
    URLs and create an `inline_blob` source from them. The LLM-generated
@@ -1733,7 +2445,7 @@ sudo systemctl restart elspeth-web.service
 - [ ] Authenticate.
 - [ ] Create a new session via the header dropdown.
 - [ ] Verify the empty-state chat input placeholder reads "Describe your
-      pipeline, or paste a URL or sample data to start...".
+      pipeline, paste a URL, or type a few rows of data to start...".
 - [ ] Type `go to https://finance.gov.au` → send.
 - [ ] Wait for the LLM response. Expected: a `set_pipeline` tool call
       with `source.inline_blob`. Verified by:
@@ -1762,6 +2474,15 @@ sudo systemctl restart elspeth-web.service
 - [ ] Click "Edit the list" → the inline editor opens with the 5 URLs
       pre-filled → edit one → save → new `set_pipeline` call → new
       InlineSourceCreatedTurn with the updated content hash.
+- [ ] **Canonical-prompt disambiguation check (F-12).** Confirm that
+      `InlineSourceDisambiguationTurn` did NOT appear during the canonical
+      hero prompt run above. The LLM generates 5 URLs with an unambiguous
+      row count; the disambiguation predicate must not fire for this input.
+      If it does fire (widget appears asking "Did I read this as 5 rows?"),
+      the disambiguation predicate is too aggressive — tighten the
+      `summary`-contains heuristic in `ChatPanel.tsx` before shipping.
+      A false positive on the canonical demo prompt is a demo-blocking
+      defect.
 - [ ] Test the LLM-skip safety net: in a fresh session, type
       `https://example.com` then send. If the LLM does NOT propose a
       source within 2 turns (it asks for a CSV instead, or natters
@@ -1807,11 +2528,15 @@ output.
 | R4 | Disambiguation widget's "treat as 1 row" branch produces a CSV with a comma-laden cell that breaks downstream parsing | Medium | The LLM still constructs the inline_blob.content, and CSV-quoting is its responsibility (well within capability). If a turn produces a bad CSV, the source-validator on the next pipeline run quarantines or rejects — Tier-3 boundary behaviour. The frontend does not generate CSVs itself |
 | R5 | "Edit the list" inline editor degrades to a 500-line modal that nobody uses | Low | v1 is a plain `<textarea>` pre-filled with the inline content; richer editing is Phase 8 polish if telemetry shows demand |
 | R6 | `inlineSourceStore` derivation lags `compositionState` updates and renders a stale `InlineSourceCreatedTurn` | Medium | Derive on every `compositionState` change in ChatPanel; the store is a pure cache. Cover with the Task 6 integration test |
-| R7 | Task 2.5 blob-metadata columns drift from the frontend `InlineSourceSummary` type (e.g., `creation_modality` renamed on one side) | Medium | `creation_modality` and `created_from_message_id` are the only two new columns. The wire form is snake_case on both sides; the frontend type documents the mapping explicitly. Cover with the Task 2.5 integration test |
+| R7 | Task 2.5 blob-metadata columns drift from the frontend `InlineSourceSummary` type (e.g., `creation_modality` renamed on one side) | Medium | Seven new columns: `creation_modality`, `created_from_message_id`, and five `creating_*` LLM-provenance fields. The wire form is snake_case on both sides; the frontend type documents the `creation_modality`→`provenance` mapping; the adapter in `client.ts` is the single translation point. Cover with the Task 2.5 integration test |
 | R8 | The composer skill nudge backfires — the LLM now uses `inline_blob` even when a CSV upload would be more appropriate (e.g., 50 rows in chat) | Low | Threshold-cutoff redirection is explicitly scoped to Phase 8. Phase 5a's risk is one-direction; the failure mode is "inline_blob used where CSV-upload would be marginally better", which is recoverable by the user pasting CSV |
 | R9 | Phase 5b's interpretation-acceptance event shape (open question B2) constrains Phase 5a's disambiguation-turn data model | Low | Phase 5a's disambiguation turn is UI-only; it does NOT introduce a new event type. The mutation is still a standard composition_proposal. Phase 5b can layer interpretation events on top without disrupting Phase 5a's UI |
 | R10 | Chat input placeholder change creates a regression in Phase A slice 4's per-step guided-mode placeholder | Low | The explicit `placeholder?:` prop override case is covered by a dedicated test (Task 1 step 1 case 4) |
 | R11 | Downstream LLM transforms receive inline-blob row content as untrusted user-controlled text (T-05: prompt-injection delivery vector) | High | Phase 5a's responsibility is to name the risk; the structural defense-in-depth fix lives in Phase 8. **Operator-facing guidance:** any LLM transform downstream of a dynamic-source-from-chat input must be treated as receiving prompt-injection-shaped content. Do NOT deploy an LLM transform downstream of an inline-blob source without explicit review of whether the row-content fields are sanitised or sandboxed before being passed to the model. Phase 5a ships no LLM transforms itself; the risk is latent until an operator wires one |
+| R12 | `InlineSourceFallbackPrompt.onAccept` emits jargon (`set_pipeline with source.inline_blob`) as a persisted `role=user` message visible on session reload | Medium | Mitigated by F-3: `onAccept` now sends "Use this as my source data:\n\n${text}" (user-facing prose); structured intent is conveyed by context alone. Session reload shows natural language, not API jargon |
+| R13 | `chat_messages` rows used as attributability anchors are mutable (UPDATE/DELETE allowed post-creation) | High | Mitigated by F-5/Task 2.6: a `BEFORE UPDATE / BEFORE DELETE` trigger on `chat_messages_table` makes the referenced rows effectively immutable. Until Task 2.6 ships, the attributability walk is best-effort rather than tamper-evident |
+| R14 | Oversize inline content bypasses `_InlineBlobModel.max_length`, allocating unbounded bytes before the session quota check | High | Mitigated by F-6: `max_length=262_144` on `_InlineBlobModel.content` in `redaction.py`, raising `ToolArgumentError` at Pydantic decode time before any allocation. The trust-tier prose previously claimed this was already defended; F-6 corrects that claim |
+| R15 | `creation_modality = llm_generated` blobs carry no pointer to which LLM produced the content, making replay/repudiation impossible | High | Mitigated by F-9: five LLM-provenance columns added to `blobs_table` with a CHECK constraint requiring them non-NULL for LLM-produced modalities. Verbatim blobs carry NULL for these columns (correct — no LLM involved) |
 
 ## Memory references
 
@@ -1830,4 +2555,7 @@ output.
 
 | Date | Reviewer | Verdict | Finding IDs | Notes |
 |------|----------|---------|-------------|-------|
-| 2026-05-15 | Review panel | CHANGES_REQUESTED | B1, I1, I2 | Applied in this revision. B1: completed placeholder test fixtures in `inlineSourceStore.test.ts` with concrete `InlineSourceSummary` literals. I1: replaced vague detection heuristic prose with a precise 4-condition specification biased toward false negatives. I2: corrected both store selectors (`messages`, `compositionState`) to use the real singleton shape verified against `sessionStore.ts` lines 153–154. |
+| 2026-05-15 | Review panel | CHANGES_REQUESTED | B1, I1, I2 | Applied in this revision. B1: completed placeholder test fixtures in `inlineSourceStore.test.ts` with concrete `InlineSourceSummary` literals. I1: replaced vague detection heuristic prose with a precise 4-condition specification biased toward false negatives. I2: corrected both store selectors (`messages`, `compositionState`) to use the real singleton shape verified against `sessionStore.ts` lines 154–155. |
+| 2026-05-18 | 9-reviewer panel | CHANGES_REQUESTED | F-1 through F-23 | Applied in this revision. F-1: relocated `CreationModality` to `contracts/enums.py` and blob columns to `web/sessions/models.py:blobs_table`. F-2: rewrote Task 2.5 test to call through `_execute_set_pipeline`; corrected `Landscape` → `LandscapeDB`. F-3: replaced jargon-leaking `onAccept` body with user-facing prose. F-4: added `LLM_GENERATED_THEN_AMENDED` enum value. F-5: added Task 2.6 immutability trigger on `chat_messages`. F-6: added `max_length=262_144` on `_InlineBlobModel.content`; corrected trust-tier prose. F-7: composite FK on `created_from_message_id`/`session_id`. F-8: `ck_blobs_creation_modality` CHECK constraint. F-9: LLM-provenance columns + nullability CHECK. F-10: "This isn't source data" escape action in Task 4. F-11: `user_requested_single_row_for_message_id` re-fire guard. F-12: Task 9 Step 2 disambiguation non-fire check for canonical prompt. F-13: UTF-8 encode guard. F-14: direct provenance→store assertion in Task 6. F-15: tightened Task 8 prompt-2 pass criterion. F-16: added §"Known races" to Task 6. F-17: corrected `redaction.py` citations to 1021, `sessionStore.ts` citations to 154–155. F-18: ARIA assertions in Task 3. F-19: focus-on-mount spec in Task 4. F-20: `dismissedAt` persistence in Task 5 store. F-21: `<details>` audit-info collapse in Task 3. F-22: empty-state copy updated. F-23: fallback-prompt voice updated. |
+| 2026-05-18 | Follow-up reviewer pass | CHANGES_REQUESTED | P1, P2 | Applied in this revision. P1 (line 1018 content_hash fix): Task 2.5 integration test asserted `blob["source_data_hash"]` — wrong field; `source_data_hash` is on `rows_table` in the Landscape audit DB, not on the blob API response. Replaced with `blob["content_hash"]` (the `blobs_table` field populated by `_prepare_blob_create`). Adjacent prose at line 138 clarified to name both hashes and their distinct databases (blob's `content_hash` in the session DB; Landscape row's `source_data_hash` in the audit DB, linked by computation). P2 (Task 2.6 trigger ownership deferred to 18a-): Task 2.6's literal DDL blocks (`trg_chat_messages_immutable`, `trg_chat_messages_immutable_delete`) conflicted with 18a-'s canonical trigger (`trg_chat_messages_immutable_content`, BEFORE UPDATE OF content only) and were invisible to 18a-'s schema validator. DDL blocks removed; Task 2.6 now defers entirely to `18a-phase-5b-backend.md` §"chat_messages immutability trigger (F-4)". Rationale prose retained. DELETE-trigger test reframed as FK-constraint test (ON DELETE RESTRICT from Task 2.5 covers this, not a trigger). Phase-5a-specific attributability test added (walks blob → created_from_message_id → asserts content mutation raises IntegrityError via 18a-'s trigger). Scope reconciliation documented: DELETE redundant with FK; content-only UPDATE accepted as sufficient for Phase 5a's audit claim. |
+| 2026-05-18 | Plan amendment | APPLIED | (no finding ID) | Added shared-worktree section: `feat/composer-phase-5-chat-data-entry` at `.worktrees/composer-phase-5-chat-data-entry`; Phase 5a + Phase 5b ship as coordinated PR on one branch. Added worktree-root prefix note to File structure section. |

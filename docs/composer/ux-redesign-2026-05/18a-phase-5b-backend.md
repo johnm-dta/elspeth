@@ -30,6 +30,38 @@ in order: 18a then 18b.
 
 ---
 
+## Worktree
+
+**Branch:** `feat/composer-phase-5-chat-data-entry`
+**Worktree path:** `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`
+**Shared with:** the entire Phase 5 umbrella (17-, 18-, 18a-, 18b-). Phase 5a and Phase 5b ship as a coordinated PR; do NOT split into separate branches. This document is one of the four that will be implemented together on this single worktree. Shared with 17-, 18-, 18b- (the Phase 5a plan, Phase 5b overview, and Phase 5b frontend plan).
+
+### Setup (one-time)
+
+From the main checkout at `/home/john/elspeth`:
+
+```bash
+git worktree add .worktrees/composer-phase-5-chat-data-entry -b feat/composer-phase-5-chat-data-entry
+cd .worktrees/composer-phase-5-chat-data-entry
+uv venv --python 3.13                       # Python 3.13 to match main; mismatched versions produce ~300 spurious tier-model violations
+source .venv/bin/activate
+uv pip install -e ".[dev,llm]"              # editable install bound to THIS worktree's venv, not main's
+```
+
+### Operational notes
+
+- **uv venv discipline:** every `uv pip install` invocation in this worktree MUST be preceded by `source .venv/bin/activate` OR invoked with `--python /home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/.venv/bin/python`. Without this, `uv` resolves to main's `.venv` and clobbers it. (See `feedback_uv_venv_leak`.)
+- **filigree CLI:** the bare `filigree` command rejects realpath-escaping DBs from inside a worktree. Prefer the `mcp__filigree__*` tools. If you must use the CLI, run it from the git common dir: `(cd "$(git rev-parse --git-common-dir)/.." && filigree <verb>)`.
+- **Subagent dispatch from this worktree:** subagents inherit parent CWD silently. Prefix every dispatch prompt with: "Your CWD is `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`; all file paths must be absolute." Use absolute paths everywhere. (See `feedback_subagents_cant_use_worktrees`.)
+- **Composer-skill edits stay on main:** the `src/elspeth/web/composer/skills/pipeline_composer.md` file is read by the live `elspeth-web.service` from main, not from any worktree. Skill-prompt edits in this phase (e.g. 5a Task 8 nudge, 5b Task 8 nudge) must be applied on main and the service restarted, per `feedback_skip_worktree_for_skill_and_config_edits`. Land the rest of the work in the worktree as normal.
+
+### Coordination during implementation
+
+- All four plan docs ship one commit history. The order is: 17- (Phase 5a) lands first; then 18a- (Phase 5b backend); then 18b- (Phase 5b frontend). 18- (overview) carries no code changes — its amendments land alongside whichever backend doc they cross-reference.
+- The two-DB deletion requirement (session DB + Landscape audit.db) is operator-visible — surface it in the PR description so the operator can run the deletion before deploy.
+
+---
+
 ## Tech Stack (backend slice)
 
 - Python 3.13, SQLAlchemy Core, pydantic v2.
@@ -37,33 +69,66 @@ in order: 18a then 18b.
 - Session audit DB: `web/sessions/{models,schema,service,routes,schemas,protocol}.py`.
 - Composer tool surface: `web/composer/{tools,redaction,proposals,service}.py`.
 - No new third-party dependencies.
-- No Landscape (`core/landscape/`) changes.
+- One Landscape (`core/landscape/`) change: a `resolved_prompt_template_hash`
+  nullable `String(64)` column added to `calls_table` in
+  `core/landscape/schema.py` (Task 2, §"Runtime Landscape calls table").
+  No new cross-layer imports; the enforce_tier_model gate continues to pass.
 
 ## File structure (backend changes)
+
+> All file paths below are relative to the worktree root at `/home/john/elspeth/.worktrees/composer-phase-5-chat-data-entry/`; this is identical to main's tree but isolates working state per the project's worktree-by-default convention (`feedback_default_to_worktree`). Exception: `src/elspeth/web/composer/skills/pipeline_composer.md` (Task 8) is edited on main, not in the worktree — see the Worktree section above.
 
 ```text
 src/elspeth/contracts/
   composer_interpretation.py                                    CREATE    (Task 1)
+  # Adds: InterpretationEventRecord, InterpretationChoice,
+  # InterpretationSource, INTERPRETATION_HASH_DOMAIN_V1 (F-12)
+  # Adds: resolved_prompt_template_hash: str | None field on InterpretationEventRecord
+
+src/elspeth/core/landscape/
+  schema.py                                                     MODIFY    (Task 2 — calls_table resolved_prompt_template_hash column + index)
+  # Adds: resolved_prompt_template_hash nullable String(64) column to calls_table
+  # Adds: ix_calls_resolved_prompt_template_hash index
+
+src/elspeth/web/
+  validation.py                                                 MODIFY    (Task 3 — extend with shared content-check helpers; F-34)
 
 src/elspeth/web/sessions/
-  models.py                                                     MODIFY    (Task 2)
-  schema.py                                                     MODIFY    (Task 2 — validation footprint)
+  engine.py                                                     MODIFY    (Task 1.5 — WAL + busy_timeout + schema-epoch; F-9/F-10)
+  models.py                                                     MODIFY    (Tasks 1.5, 2)
+  # Adds: SESSION_SCHEMA_EPOCH, SESSION_DB_APPLICATION_ID (Task 1.5)
+  # Adds: interpretation_events_table, skill_markdown_history_table (Task 2)
+  # Adds: F-1 nullable columns, F-5c new table, F-12 hash_domain_version,
+  #        F-19 runtime model columns, immutability triggers (F-4, F-23),
+  #        Phase 9 migration notes (F-16), F-35 governance comment,
+  #        resolved_prompt_template_hash column on interpretation_events_table
+  schema.py                                                     MODIFY    (Tasks 1.5, 2 — schema-epoch check, trigger validation; F-10, F-24)
   protocol.py                                                   MODIFY    (Task 3)
-  schemas.py                                                    MODIFY    (Task 3 — wire schemas)
+  schemas.py                                                    MODIFY    (Tasks 0.5, 3 — SendMessageRequest cap + wire schemas)
   service.py                                                    MODIFY    (Task 4)
-  routes.py                                                     MODIFY    (Task 6)
+  routes.py                                                     MODIFY    (Tasks 6, 7)
   _persist_payload.py                                           MODIFY    (Task 4 — if persistence carrier touched)
 
 src/elspeth/web/composer/
+  redaction.py                                                  MODIFY    (Tasks 0.5, 5 — InlineBlobModel cap + argument redaction)
   tools.py                                                      MODIFY    (Task 5)
-  redaction.py                                                  MODIFY    (Task 5 — argument redaction)
   proposals.py                                                  MODIFY    (Task 5 — proposal summary)
   service.py                                                    MODIFY    (Task 5 — compose-loop hook)
   skills/pipeline_composer.md                                   MODIFY    (Task 8)
 
+src/elspeth/web/
+  app.py                                                        MODIFY    (Task 0.5 — ASGI body-size middleware; F-3)
+
+tests/unit/contracts/
+  test_composer_interpretation.py                               CREATE    (Task 1)
+
+tests/unit/web/
+  (validation.py tests in existing test_validation.py or new file)        (Task 3)
+
 tests/unit/web/sessions/
   test_interpretation_events_table.py                           CREATE    (Task 2)
   test_interpretation_events_service.py                         CREATE    (Task 4)
+  test_session_engine.py                                        CREATE    (Task 1.5)
   test_interpretation_events_routes.py                          CREATE    (Task 6)
   test_interpretation_opt_out_routes.py                         CREATE    (Task 7)
 
@@ -76,7 +141,9 @@ tests/integration/web/composer/
   test_interpretation_runtime_handoff.py                        CREATE    (Task 9 — prompt-template patch)
 ```
 
-No Landscape schema files change. No `core/canonical.py` change.
+One Landscape schema file changes: `core/landscape/schema.py` gains the
+`resolved_prompt_template_hash` column on `calls_table` (Task 2,
+§"Runtime Landscape calls table"). No `core/canonical.py` change.
 
 ---
 
@@ -88,7 +155,26 @@ runner that preserves `user_preferences` and session history across schema
 changes — is OWNED BY PHASE 9 (post-launch). Phase 5b ships under the current
 delete-the-DB policy with explicit acknowledgment that users who completed the
 tutorial between Phase 4 and Phase 5b will be re-tutorial'd on the Phase 5b
-deploy. Operator action: communicate this to test users before each deploy.
+deploy.
+
+**Phase 5b is the first phase that requires deleting BOTH the session DB AND
+the Landscape audit DB.** The `resolved_prompt_template_hash` column on
+`calls_table` is in `core/landscape/schema.py` (L1), which SQLAlchemy does not
+auto-migrate. The operator MUST:
+
+1. Delete the session DB (`web/sessions/*.db` or equivalent path).
+2. Delete the Landscape audit DB (`audit.db` at the project root, or wherever
+   the Landscape DB is configured for the deploy environment).
+3. Restart the service.
+
+Failure to delete the Landscape DB will leave `calls_table` without the
+`resolved_prompt_template_hash` column; the runtime LLM-transform plugin will
+fail to write the column, and the cross-DB hash-equality assertion in Task 9
+will fail permanently.
+
+Operator action: communicate the two-DB delete requirement to test users before
+each Phase 5b deploy. Document the Landscape DB path in the staging deploy
+runbook (`project_staging_deployment.md`).
 
 ---
 
@@ -187,6 +273,99 @@ Record gate outcome in the artifact and in the PR description. If
 
 ---
 
+## Task 0.5 — Defensive size caps (F-3)
+
+**Goal.** Add input-size limits that prevent unbounded payload ingestion
+before any interpretation-event code paths can be exercised. This task is
+a prerequisite for Task 1 and has no dependencies.
+
+**Files:**
+
+- Modify: `src/elspeth/web/composer/redaction.py` — add `max_length` on
+  `_InlineBlobModel.content`.
+- Modify: `src/elspeth/web/sessions/schemas.py` — add `max_length` on
+  `SendMessageRequest.content`.
+- Modify: `src/elspeth/web/app.py` — add ASGI body-size middleware.
+
+### Changes
+
+**1. `_InlineBlobModel.content` cap (`redaction.py`):**
+
+```python
+content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)] = Field(
+    max_length=262144  # 256 KiB: covers ~few hundred URLs with headroom
+)
+```
+
+Verify `_InlineBlobModel` at `redaction.py` around line 1021; currently no
+`max_length` on `content`. The 256 KiB limit covers the canonical inline-blob
+use case (a list of URLs, a short CSV fragment) with headroom for edge cases.
+
+**2. `SendMessageRequest.content` cap (`schemas.py`):**
+
+```python
+content: str = pydantic.Field(min_length=1, max_length=65536)  # 64 KiB cap
+```
+
+The current field at `schemas.py:99` has `min_length=1` but no `max_length`.
+Add `max_length=65536`. 64 KiB accommodates multi-paragraph user messages
+and long paste content while preventing unbounded string allocation.
+
+**3. ASGI body-size middleware (`app.py`):**
+
+Add a `BaseHTTPMiddleware` subclass that rejects requests with
+`Content-Length > 10 MB` with HTTP 413 before any handler reads the body:
+
+```python
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject request bodies exceeding 10 MB (Content-Length check only).
+
+    Mirrors the blob-upload body-size guard at web/blobs/routes.py:171,208.
+    This is a defense-in-depth measure; Pydantic field validators on
+    individual fields are the primary per-field cap.
+    """
+    _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
+
+    async def dispatch(self, request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            if int(content_length) > self._MAX_BODY_BYTES:
+                from starlette.responses import Response
+                return Response(
+                    content='{"error": "Request body too large (max 10 MB)"}',
+                    status_code=413,
+                    media_type="application/json",
+                )
+        return await call_next(request)
+```
+
+Register in `app.py` after the existing middleware registrations:
+```python
+app.add_middleware(_BodySizeLimitMiddleware)
+```
+
+Verify `app.py` around lines 377-391 — currently no body-size middleware.
+
+### Test shape
+
+1. `test_send_message_request_content_cap`: construct
+   `SendMessageRequest(content="x" * 65537)` and assert `ValidationError` is
+   raised. Construct with `"x" * 65536` and assert it succeeds.
+2. `test_inline_blob_model_content_cap`: construct
+   `_InlineBlobModel(filename="f", mime_type="text/plain", content="x" * 262145)`
+   and assert `ValidationError`. With 262144 chars, assert success.
+3. `test_body_size_middleware_413`: integration test — POST any JSON body
+   with `Content-Length: 11000000` header to any route; assert HTTP 413
+   response.
+
+### Step 1 — RED, Step 2 — GREEN, Step 3 — commit
+
+`web(security): add max_length caps on content fields + ASGI 10 MB body limit`.
+
+---
+
 ## Task 1 — Define the contract types
 
 **Goal.** Add a frozen-dataclass + closed-enum contract in
@@ -238,29 +417,46 @@ class InterpretationEventRecord:
     Tier-1 read-side record: every field is required-or-explicitly-None
     per the schema. Constructors crash loudly on any anomaly.
 
-    Two row shapes exist. Fields marked (*) are populated for user-resolved
-    rows and NULL for opted_out rows (where no LLM surfacing occurred):
+    Three row shapes exist (see InterpretationSource enum):
 
-    Fields populated for user-resolved rows (*):
-        composition_state_id -> (*) pipeline-state reference
-        affected_node_id     -> (*) the LLM-transform node this binds into
-        tool_call_id         -> (*) provider tool_call_id from the LLM
-        user_term            -> (*) the original user-provided term ("cool")
-        llm_draft            -> (*) the LLM's draft interpretation
-        accepted_value       -> (*) the user-approved string (None until resolved)
-        arguments_hash       -> (*) rfc8785 hash over required fields; None
-                                    until resolved (populated at resolve time)
+    user_approved rows — LLM surfaced the term; user approved or amended:
+        composition_state_id -> pipeline-state reference (NOT NULL)
+        affected_node_id     -> the LLM-transform node this binds into (NOT NULL)
+        tool_call_id         -> provider tool_call_id from the LLM (NOT NULL)
+        user_term            -> the original user-provided term, e.g. "cool" (NOT NULL)
+        llm_draft            -> the LLM's draft interpretation (NOT NULL)
+        accepted_value       -> the user-approved string (None until resolved)
+        arguments_hash       -> rfc8785 hash over required fields; None until resolved
+        model_identifier     -> e.g., "anthropic/claude-opus-4-7" (NOT NULL)
+        model_version        -> provider's reported version string (NOT NULL)
+        provider             -> "anthropic", "openai", etc. (NOT NULL)
+        composer_skill_hash  -> SHA-256 of pipeline_composer.md content (NOT NULL)
+
+    auto_interpreted_opt_out rows — user clicked "stop asking":
+        (all nine fields above are NULL — no LLM surfacing occurred)
+        choice = 'opted_out'; interpretation_source = 'auto_interpreted_opt_out'
+        resolved_at records the opt-out timestamp
+
+    auto_interpreted_no_surfaces rows — rate cap exhausted; LLM baked it in:
+        composition_state_id, affected_node_id, tool_call_id, user_term,
+        llm_draft are NULL (no surfacing occurred — the rejected request
+        never produced a draft or a composition-state binding)
+        model_identifier, model_version, provider, composer_skill_hash MUST be
+        populated (the LLM was consulted; provenance is required — read from
+        the compose-loop snapshot, same source as user_approved rows).
+        Asymmetry: interpretation surface fields are NULL; LLM provenance
+        is required. See ck_interpretation_events_no_surfaces_shape.
+        choice = 'opted_out' semantics; interpretation_source = 'auto_interpreted_no_surfaces'
 
     Fields always present:
-        id, session_id, choice, created_at, resolved_at, actor
-        model_identifier, model_version, provider, composer_skill_hash,
+        id, session_id, choice, created_at, resolved_at, actor,
         interpretation_source
 
     Per the auditability standard (design doc 06 §"Recording the
-    interpretation"), all six of: user_term, llm_draft, accepted_value,
-    created_at, actor, composition_state_id are required for user-resolved
-    rows. They are intentionally NULL for opted_out rows, where the audit
-    trail records the opt-out gesture itself, not a surfacing.
+    interpretation"), all nine of: user_term, llm_draft, accepted_value,
+    created_at, actor, composition_state_id, model_identifier, model_version,
+    composer_skill_hash are required for user_approved rows. They are
+    intentionally NULL for auto_interpreted_opt_out rows (F-1: no LLM surfacing).
 
     Audit provenance fields (snapshot what the composer LLM was using):
         model_identifier     -> e.g., "anthropic/claude-opus-4-7"
@@ -285,21 +481,70 @@ class InterpretationEventRecord:
     created_at: datetime
     resolved_at: datetime | None
     actor: str                         # user identity at resolution
-    model_identifier: str              # e.g., "anthropic/claude-opus-4-7"
-    model_version: str                 # provider-reported version string
-    provider: str                      # "anthropic", "openai", etc.
-    composer_skill_hash: str           # SHA-256 of pipeline_composer.md
+    # F-1: audit provenance fields are nullable — NULL for
+    # auto_interpreted_opt_out rows (no LLM was consulted).
+    model_identifier: str | None       # e.g., "anthropic/claude-opus-4-7"
+    model_version: str | None          # provider-reported version string
+    provider: str | None               # "anthropic", "openai", etc.
+    composer_skill_hash: str | None    # SHA-256 of pipeline_composer.md
     arguments_hash: str | None         # rfc8785 hash over required fields; None until resolved
+    hash_domain_version: str | None    # 'v1' once resolved; None for opt-out/pending
     interpretation_source: InterpretationSource
+    # F-19: runtime model snapshot at resolve time (may differ from composer model).
+    runtime_model_identifier_at_resolve: str | None
+    runtime_model_version_at_resolve: str | None
+    # Cross-DB hash anchor (Option A). NULL until resolved; NULL for
+    # auto_interpreted_opt_out rows (no prompt template is patched). For
+    # resolved user_approved rows, this is the SHA-256 of the resolved
+    # prompt-template string, computed at resolve time using stable_hash()
+    # from contracts/hashing.py. NOT part of INTERPRETATION_HASH_DOMAIN_V1.
+    resolved_prompt_template_hash: str | None
 ```
+
+**F-12 (hash domain versioning):** Also add to
+`src/elspeth/contracts/composer_interpretation.py`:
+
+```python
+# INTERPRETATION_HASH_DOMAIN_V1: the closed set of fields used to compute
+# arguments_hash for interpretation events. This constant is the source of
+# truth for the v1 hash domain. The hashing function reads from this
+# constant ONLY — adding a field to InterpretationEventRecord without
+# adding it here leaves the new field out of the hash silently.
+#
+# To add a field: (1) add it here, (2) bump hash_domain_version to 'v2',
+# (3) add a CI test that the new field is in the hash domain.
+INTERPRETATION_HASH_DOMAIN_V1: frozenset[str] = frozenset({
+    "session_id",
+    "composition_state_id",
+    "affected_node_id",
+    "tool_call_id",
+    "user_term",
+    "llm_draft",
+    "accepted_value",
+    "actor",
+    "model_identifier",
+    "model_version",
+    "provider",
+    "composer_skill_hash",
+})
+```
+
+Add a CI test (in `test_composer_interpretation.py`) that:
+1. Creates an `InterpretationEventRecord` with all required fields.
+2. Asserts that every field name in `INTERPRETATION_HASH_DOMAIN_V1` is
+   a valid field name on `InterpretationEventRecord` (guard against typos).
+3. Adds a new field to the dataclass (in the test, via monkey-patching or
+   a subclass) and asserts the hashing function does NOT include the new
+   field unless it is added to `INTERPRETATION_HASH_DOMAIN_V1`.
 
 ### Rationale
 
 Opt-out rows are recorded as `InterpretationEventRecord` instances with
 `choice=OPTED_OUT` and `interpretation_source=AUTO_INTERPRETED_OPT_OUT`,
 with nullable interpretation fields (`composition_state_id`,
-`affected_node_id`, `tool_call_id`, `user_term`, `llm_draft`, etc.) set to
-`None`. This eliminates the prior `InterpretationOptOutRecord` type and the
+`affected_node_id`, `tool_call_id`, `user_term`, `llm_draft`,
+`model_identifier`, `model_version`, `provider`, `composer_skill_hash`) set
+to `None`. This eliminates the prior `InterpretationOptOutRecord` type and the
 associated `proposal_events` routing. A single table is the single source of
 truth for all interpretation-related decisions.
 
@@ -310,7 +555,8 @@ the auto-interpret-no-surfaces path. It lives in `InterpretationSource`.
 Audit provenance fields (`model_identifier`, `model_version`, `provider`,
 `composer_skill_hash`, `arguments_hash`) snapshot what the composer LLM was
 using at surfacing time so a future auditor can re-verify the prompt that
-generated the draft interpretation.
+generated the draft interpretation. These are NULL for `auto_interpreted_opt_out`
+rows (F-1: no LLM was consulted).
 
 `InterpretationEventRecord` has no container fields; all fields are scalars,
 `StrEnum`, `datetime`, `UUID`, or `None` — `frozen=True` suffices.
@@ -346,6 +592,143 @@ or None).
 
 Single commit; message: `contracts: add InterpretationEventRecord +
 InterpretationChoice + InterpretationSource for Phase 5b`.
+
+---
+
+## Task 1.5 — Session DB hardening (F-9, F-10)
+
+**Goal.** Extend `web/sessions/engine.py` with production-grade SQLite PRAGMA
+settings (WAL, busy timeout, synchronous) and schema-version guards
+(`SESSION_SCHEMA_EPOCH`, `application_id`, `user_version`). This is the
+safety net for the operator-delete-DB policy and is tracked separately as
+`elspeth-6815a49a7d` per memory `project_phase1a_panel_round_2_complete`.
+Phase 5b co-lands it here because Phase 5b requires the session DB to be
+production-ready before the new tables are exercised.
+
+**Files:**
+
+- Modify: `src/elspeth/web/sessions/engine.py`.
+- Modify: `src/elspeth/web/sessions/models.py` — add `SESSION_SCHEMA_EPOCH`.
+
+### PRAGMA settings (F-9)
+
+Extend the `_enable_sqlite_foreign_keys` connect listener in
+`create_session_engine` to mirror `core/landscape/database.py:271-275`:
+
+```python
+@event.listens_for(engine, "connect")
+def _configure_sqlite(dbapi_conn, _record):
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+```
+
+Extend the startup probe to also verify WAL mode:
+```python
+with engine.connect() as conn:
+    fk = conn.execute(text("PRAGMA foreign_keys")).scalar_one()
+    jm = conn.execute(text("PRAGMA journal_mode")).scalar_one()
+if fk != 1:
+    raise RuntimeError(...)
+if jm != "wal":
+    raise RuntimeError(
+        f"Session engine {engine.url!r} did not enter WAL mode "
+        f"(got {jm!r}). Refusing to start — production requires WAL."
+    )
+```
+
+### Schema-version guards (F-10)
+
+Add to `src/elspeth/web/sessions/models.py`:
+```python
+# SESSION_SCHEMA_EPOCH — schema version sentinel. Bump this constant
+# whenever interpretation_events_table or any other table that requires
+# a DB delete is added. The startup validator reads PRAGMA user_version
+# and crashes if it does not match, giving the operator an actionable
+# "delete the DB and restart" message rather than a cryptic SQLAlchemy
+# error.
+#
+# Pattern mirrors SQLITE_SCHEMA_EPOCH in core/landscape/schema.py.
+SESSION_SCHEMA_EPOCH = 2  # bumped from 1 by Phase 5b (interpretation_events_table)
+
+# project-unique application_id (hex 0x454C5350 = "ELSP"):
+SESSION_DB_APPLICATION_ID = 0x454C5350
+```
+
+Add to `initialize_session_schema` in `web/sessions/schema.py`:
+```python
+def _assert_schema_version(engine: Engine) -> None:
+    """Crash with an actionable message if the session DB schema version
+    does not match SESSION_SCHEMA_EPOCH.
+
+    This is the mechanical enforcement of the operator-delete-DB policy.
+    Without this guard, a stale DB silently fails in obscure ways when
+    new tables are added. With it, the operator gets:
+        SessionSchemaError: Session DB schema version mismatch ...
+    and a clear instruction to delete the DB file and restart.
+    """
+    with engine.connect() as conn:
+        app_id = conn.execute(text("PRAGMA application_id")).scalar_one()
+        user_ver = conn.execute(text("PRAGMA user_version")).scalar_one()
+    if app_id != 0 and app_id != SESSION_DB_APPLICATION_ID:
+        raise SessionSchemaError(
+            f"Session DB has unexpected application_id={app_id:#010x}. "
+            f"Expected {SESSION_DB_APPLICATION_ID:#010x} (ELSP) or 0 "
+            f"(new database). Delete the session DB file and restart."
+        )
+    if user_ver != 0 and user_ver != SESSION_SCHEMA_EPOCH:
+        raise SessionSchemaError(
+            f"Session DB schema version {user_ver} does not match "
+            f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. "
+            f"Delete the session DB file and restart."
+        )
+```
+
+After `metadata.create_all()` for new DBs, set both PRAGMAs:
+```python
+with engine.connect() as conn:
+    conn.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
+    conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
+    conn.commit()
+```
+
+### BEGIN IMMEDIATE note (F-25)
+
+After F-9 lands the WAL PRAGMA, write-path service methods MUST open
+transactions with `BEGIN IMMEDIATE` (not the default DEFERRED) to prevent
+SQLITE_BUSY races where a WAL reader delays a writer. Document this in
+a service-layer comment:
+
+```python
+# WAL + IMMEDIATE: under WAL journal mode, BEGIN DEFERRED allows
+# concurrent readers but may delay the first write (SQLITE_BUSY) if
+# another writer is active. BEGIN IMMEDIATE acquires the write lock
+# immediately, serialising writers without blocking readers. All
+# write-path methods in this class use BEGIN IMMEDIATE.
+```
+
+### Test shape
+
+1. After `create_session_engine(url)` with a fresh in-memory DB, assert
+   `PRAGMA journal_mode` returns `"wal"`.
+2. Assert `PRAGMA busy_timeout` returns `5000`.
+3. Assert `PRAGMA foreign_keys` returns `1`.
+4. After `initialize_session_schema(engine)`, assert `PRAGMA application_id`
+   returns `SESSION_DB_APPLICATION_ID` and `PRAGMA user_version` returns
+   `SESSION_SCHEMA_EPOCH`.
+5. Simulate a stale DB (wrong `user_version`) and assert
+   `initialize_session_schema` raises `SessionSchemaError` with a message
+   containing "Delete the session DB file and restart."
+
+### Step 1 — RED, Step 2 — GREEN, Step 3 — commit
+
+`sessions(engine): WAL + busy_timeout + synchronous PRAGMA + schema-epoch
+guard (elspeth-6815a49a7d, co-landed by Phase 5b)`.
 
 ---
 
@@ -388,19 +771,26 @@ interpretation_events_table = Table(
     # Composite FK forces same-session ownership: an interpretation
     # event in session B cannot reference a composition state owned by
     # session A. Mirrors the pattern at composition_proposals.
-    Column("composition_state_id", String, nullable=False),
+    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows (no
+    # composition state was involved); NOT NULL for user_approved rows.
+    Column("composition_state_id", String, nullable=True),
     # The LLM transform's node_id within composition_states.nodes that
     # this interpretation binds into. Validated at the writer boundary
     # to exist; NOT a foreign key because nodes live inside a JSON
     # column, not a separate table.
-    Column("affected_node_id", String, nullable=False),
+    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows.
+    Column("affected_node_id", String, nullable=True),
     # The provider tool_call_id from the LLM call that surfaced this
     # interpretation. NOT a foreign key to chat_messages because the
     # tool call may still be in flight when this row is inserted.
-    Column("tool_call_id", String, nullable=False),
-    # Six required-by-spec fields:
-    Column("user_term", Text, nullable=False),
-    Column("llm_draft", Text, nullable=False),
+    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows.
+    Column("tool_call_id", String, nullable=True),
+    # Audit-mandatory fields (source-conditional: see CHECKs below):
+    # NULL for auto_interpreted_opt_out rows (no LLM surfacing occurred);
+    # NOT NULL for user_approved rows; NULL for auto_interpreted_no_surfaces rows.
+    # F-1: all nullable=True — the CHECKs below enforce source-conditional presence.
+    Column("user_term", Text, nullable=True),
+    Column("llm_draft", Text, nullable=True),
     Column("accepted_value", Text, nullable=True),  # None until resolved
     Column("choice", String, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -417,18 +807,40 @@ interpretation_events_table = Table(
         name="uq_interpretation_events_id_session",
     ),
     # Audit provenance: snapshot of the composer LLM context at surfacing time.
-    Column("model_identifier", String, nullable=False),   # e.g., "anthropic/claude-opus-4-7"
-    Column("model_version", String, nullable=False),       # provider-reported version string
-    Column("provider", String, nullable=False),            # "anthropic", "openai", etc.
-    Column("composer_skill_hash", String, nullable=False), # SHA-256 of pipeline_composer.md
+    # F-1: nullable=True for model_identifier, model_version, provider,
+    # composer_skill_hash — NULL for auto_interpreted_opt_out rows (no LLM
+    # was consulted).
+    Column("model_identifier", String, nullable=True),   # e.g., "anthropic/claude-opus-4-7"
+    Column("model_version", String, nullable=True),       # provider-reported version string
+    Column("provider", String, nullable=True),            # "anthropic", "openai", etc.
+    Column("composer_skill_hash", String, nullable=True), # SHA-256 of pipeline_composer.md
     Column("arguments_hash", String, nullable=True),
-    # NULL until resolved. For opted_out rows, arguments_hash is NULL
-    # because there is no LLM-supplied content to hash: the schema's
-    # CHECK constraints (opted_out_nullability, resolved_at_status) already
-    # pin the shape of opted_out rows, providing structural integrity without
-    # a content hash.
+    # NULL until resolved. For auto_interpreted_opt_out rows, arguments_hash
+    # is NULL because there is no LLM-supplied content to hash.
+    # F-12 (hash domain versioning): hash_domain_version records the field set
+    # used to compute arguments_hash. The v1 field set is defined in
+    # contracts/composer_interpretation.py:INTERPRETATION_HASH_DOMAIN_V1.
+    # NULL for rows without a hash (opt-out, pending). NOT NULL once resolved.
+    Column("hash_domain_version", String, nullable=True),  # 'v1' once resolved
     # Structural source of this row. Closed enum — see governance ceremony below.
     Column("interpretation_source", String, nullable=False),
+    # F-19 (runtime model snapshot at resolve time): nullable columns populated
+    # when the user resolves the event, capturing what model the affected LLM
+    # transform will use at runtime (for audit drift detection).
+    Column("runtime_model_identifier_at_resolve", String, nullable=True),
+    Column("runtime_model_version_at_resolve", String, nullable=True),
+    # Cross-DB hash anchor (Option A — see §"Hash-anchored cross-DB linkage"
+    # in sibling doc 18-phase-5b-surface-llm-interpretation.md).
+    # Populated by resolve_interpretation_event at the same time as accepted_value
+    # is committed. NULL until resolved; NULL for auto_interpreted_opt_out rows
+    # (no prompt template is patched for opt-out rows). For user_approved and
+    # auto_interpreted_no_surfaces rows that have a resolved prompt template,
+    # this is SHA-256 over the rfc8785 canonical JSON of the resolved
+    # prompt-template string, using CANONICAL_VERSION = "sha256-rfc8785-v1"
+    # (contracts/hashing.py). NOT part of INTERPRETATION_HASH_DOMAIN_V1 —
+    # it covers a different input (the resolved prompt string) and serves as
+    # a cross-DB anchor only.
+    Column("resolved_prompt_template_hash", String(64), nullable=True),
     # Closed enum on choice. Adding a value requires (a) amending this plan,
     # (b) extending InterpretationChoice in contracts/composer_interpretation.py,
     # (c) updating the closed-enum tests, and (d) a writer-path audit.
@@ -444,13 +856,45 @@ interpretation_events_table = Table(
         "('user_approved', 'auto_interpreted_opt_out', 'auto_interpreted_no_surfaces')",
         name="ck_interpretation_events_source",
     ),
-    # Opted-out rows: composition_state_id, affected_node_id, tool_call_id,
-    # user_term, and llm_draft are all NULL. The CHECK below enforces this.
+    # F-1 (source-keyed nullability CHECK): rows with
+    # interpretation_source = 'auto_interpreted_opt_out' have no LLM
+    # context; all nine interpretation fields must be NULL.
+    # Rows with interpretation_source = 'user_approved' have LLM context;
+    # all nine must be NOT NULL.
+    # Rows with interpretation_source = 'auto_interpreted_no_surfaces' had
+    # the LLM consulted (rate-cap fallback) but no surfacing; they carry
+    # LLM provenance fields but NULL for composition_state_id /
+    # affected_node_id / tool_call_id / user_term / llm_draft.
+    # This CHECK replaces the prior choice-keyed ck_interpretation_events_opted_out_nullability.
     CheckConstraint(
-        "(choice = 'opted_out') = "
+        "(interpretation_source = 'auto_interpreted_opt_out') = "
         "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
-        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL)",
-        name="ck_interpretation_events_opted_out_nullability",
+        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        " model_identifier IS NULL AND model_version IS NULL AND "
+        " provider IS NULL AND composer_skill_hash IS NULL)",
+        name="ck_interpretation_events_source_nullability",
+    ),
+    # user_approved rows must have all nine fields populated.
+    CheckConstraint(
+        "(interpretation_source != 'user_approved') OR "
+        "(composition_state_id IS NOT NULL AND affected_node_id IS NOT NULL AND "
+        " tool_call_id IS NOT NULL AND user_term IS NOT NULL AND llm_draft IS NOT NULL AND "
+        " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
+        " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
+        name="ck_interpretation_events_user_approved_required",
+    ),
+    # auto_interpreted_no_surfaces rows: the five surface fields (composition_state_id,
+    # affected_node_id, tool_call_id, user_term, llm_draft) must be NULL (no surfacing
+    # occurred); the four LLM provenance fields must be NOT NULL (the LLM was consulted
+    # for the rate-cap fallback auto-interpretation). This is the middle shape between
+    # opted_out (all nine NULL) and user_approved (all nine NOT NULL).
+    CheckConstraint(
+        "(interpretation_source != 'auto_interpreted_no_surfaces') OR "
+        "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
+        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
+        " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
+        name="ck_interpretation_events_no_surfaces_shape",
     ),
     # If choice is anything other than 'pending', resolved_at MUST be
     # populated. For opted_out rows resolved_at records the opt-out timestamp.
@@ -470,6 +914,9 @@ interpretation_events_table = Table(
 # (session_id, tool_call_id). After resolution (choice != 'pending'),
 # the same tool_call_id is allowed to recur (which it won't, but the
 # index does not need to over-constrain).
+# F-26: See web/sessions/schema.py:_validate_partial_index_dialect_symmetry
+# for the schema-validator gate that enforces both sqlite_where and
+# postgresql_where are set consistently.
 Index(
     "uq_interpretation_events_pending_tool_call",
     interpretation_events_table.c.session_id,
@@ -484,6 +931,141 @@ Index(
     interpretation_events_table.c.session_id,
     interpretation_events_table.c.created_at,
 )
+
+# F-11: index on composition_state_id for the common lookup pattern
+# "all interpretation events for this composition state".
+# Verify with EXPLAIN QUERY PLAN on
+# SELECT * FROM interpretation_events WHERE composition_state_id = ?
+# and assert SEARCH USING INDEX in the GREEN step.
+Index(
+    "ix_interpretation_events_composition_state",
+    interpretation_events_table.c.composition_state_id,
+)
+```
+
+### skill_markdown_history table (F-5c)
+
+Append to `models.py` after `interpretation_events_table` (and its indexes):
+
+```python
+# skill_markdown_history — content-addressed archive of every distinct
+# pipeline_composer.md version seen at runtime.
+#
+# One row per (SHA-256 hash, filename) pair. The compose loop upserts
+# (INSERT OR IGNORE) on first use of a hash, capturing the exact text
+# that was in memory when the LLM was prompted. This makes every
+# composer_skill_hash on interpretation_events rows forensically
+# traceable: an auditor can retrieve the exact skill prompt from this
+# table.
+#
+# Storage cost is negligible — one row per distinct deploy of the skill
+# markdown. Content is TEXT (not BLOB) because the skill file is UTF-8
+# Markdown.
+skill_markdown_history_table = Table(
+    "skill_markdown_history",
+    metadata,
+    Column("hash", String, primary_key=True),   # SHA-256 hex, 64 chars
+    Column("filename", String, nullable=False),  # e.g., "pipeline_composer.md"
+    Column("content", Text, nullable=False),     # full UTF-8 Markdown content
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+)
+```
+
+### Runtime Landscape `calls` table — `resolved_prompt_template_hash` column
+
+**Layer note.** This is an **L1 Landscape schema change** (`core/landscape/schema.py`).
+The prior framing that "Phase 5b does not touch the Landscape" is superseded here.
+Phase 5b now touches one L1 column addition. No new cross-layer imports are
+introduced (the column is a nullable `String(64)` data column on an existing
+table); the enforce_tier_model gate continues to pass. This is an additive
+data-column change only, not a new module-level dependency.
+
+**Column to add.** In `src/elspeth/core/landscape/schema.py`, inside
+`calls_table`, add the following column **after** the existing `response_ref`
+column (currently line ~327):
+
+```python
+# Cross-DB hash anchor for interpretation events (Option A — Phase 5b).
+# Populated by the LLM-transform plugin at execution time when the
+# runtime node config contains a `resolved_prompt_template_hash` sibling
+# field (written by resolve_interpretation_event at compose time and
+# committed into composition_states.nodes). If the sibling field is absent
+# (the LLM transform is NOT downstream of an interpretation event), this
+# column is NULL.
+#
+# When non-NULL, this hash MUST equal the corresponding
+# interpretation_events.resolved_prompt_template_hash in the session audit
+# DB for the same resolved prompt string. An inequality indicates tampering
+# or a composition-to-execution coherence failure. Checked by the audit-
+# tooling layer; a mismatch is a Tier-1 crash-on-anomaly (see failure-mode
+# table below).
+#
+# Hash scheme: SHA-256 over rfc8785 canonical JSON of the resolved
+# prompt-template string, using CANONICAL_VERSION = "sha256-rfc8785-v1"
+# (contracts/hashing.py:CANONICAL_VERSION). Identical scheme used by both
+# the session service (write at resolve time) and the runtime plugin
+# (write at execution time), so the hashes are comparable byte-for-byte.
+Column("resolved_prompt_template_hash", String(64), nullable=True),
+```
+
+**Index.** Add a supporting index in the same `schema.py` file, alongside the
+existing `ix_calls_state` and `ix_calls_operation` indexes:
+
+```python
+Index("ix_calls_resolved_prompt_template_hash", calls_table.c.resolved_prompt_template_hash)
+```
+
+Rationale: the primary audit-tooling query is "given a session-side
+interpretation_events.resolved_prompt_template_hash, find the matching Landscape
+calls row" — a lookup by hash value. Without this index that query is a full
+table scan on `calls`. With it, the query is O(log n). The index is sparse on
+NULL (SQLite does not include NULL keys in B-tree indexes by default), so the
+storage cost is proportional to the number of LLM-transform calls that are
+downstream of an interpretation event — typically a small fraction of all calls.
+
+**Runtime plugin read path.** The LLM-transform plugin reads its node config at
+execution time. The node config is the JSON object from `composition_states.nodes`
+for the affected node. If the node config contains a top-level key
+`resolved_prompt_template_hash`, the plugin reads that value directly and writes
+it to `calls.resolved_prompt_template_hash` without re-computation. If the key
+is absent (the LLM transform was not downstream of an interpretation event), the
+plugin writes NULL. The plugin MUST NOT re-compute the hash from the prompt
+string at runtime — the stored value is the authority. Re-computation would
+diverge if the rfc8785 library version changes between compose time and
+execution time, breaking the hash-equality invariant silently.
+
+Precise read path in plugin code:
+
+```python
+resolved_prompt_template_hash: str | None = node_config.get(
+    "resolved_prompt_template_hash"
+)
+# Write to calls row:
+#   calls_table.c.resolved_prompt_template_hash = resolved_prompt_template_hash
+```
+
+The use of `.get()` here is intentional and Tier-2 compliant: `node_config` is
+post-source pipeline data (elevated trust); the key's absence is a normal
+condition (not every LLM transform has an interpretation event), not a bug. A
+missing key → NULL is semantically correct. This is the one permitted use of
+`.get()` for this field; do not use `.get()` for Tier-1 reads.
+
+**Schema bootstrap note.** This column is added to the Landscape `calls_table`
+SQLAlchemy `Table` definition. Because the Landscape DB is governed by the same
+delete-the-DB policy as the session DB (per `project_db_migration_policy`), the
+operator MUST delete BOTH the session DB AND the Landscape DB (the `audit.db`
+file) on Phase 5b deploy. This plan's Step 4 commit message MUST mention the
+Landscape DB delete requirement explicitly. The "Migration runner ownership"
+section above covers the cumulative DB-delete impact and Phase 9 ownership.
+
+**Step 4 commit message extension.** Amend the existing commit-message template
+to include the Landscape schema change:
+
+```
+sessions(schema): add interpretation_events_table + interpretation_resolve
+provenance + interpretation_review_disabled column + append-only trigger +
+resolved_prompt_template_hash column on calls_table (L1 Landscape).
+OPERATOR: delete BOTH session DB and Landscape audit.db on deploy.
 ```
 
 ### Closed-enum extension on `composition_states.provenance`
@@ -569,12 +1151,139 @@ END;
 ```
 
 This trigger MUST be created after `CREATE TABLE interpretation_events`
-in the same migration or schema bootstrap step. In SQLAlchemy, emit it
-via `event.listen(metadata, 'after_create', DDL(...))` or run it in the
-schema bootstrap step alongside `metadata.create_all()`.
+in the same migration or schema bootstrap step. In SQLAlchemy, use a
+**table-scoped** listener with `IF NOT EXISTS` for idempotent bootstrap (F-23):
+
+```python
+from sqlalchemy import DDL, event
+
+event.listen(
+    interpretation_events_table,
+    'after_create',
+    DDL(
+        "CREATE TRIGGER IF NOT EXISTS trg_interpretation_events_immutable_resolved "
+        "BEFORE UPDATE ON interpretation_events "
+        "FOR EACH ROW BEGIN "
+        "  SELECT CASE "
+        "    WHEN OLD.resolved_at IS NOT NULL AND ("
+        "      NEW.accepted_value IS NOT OLD.accepted_value OR "
+        "      NEW.resolved_at IS NOT OLD.resolved_at OR "
+        "      NEW.actor IS NOT OLD.actor OR "
+        "      NEW.choice IS NOT OLD.choice"
+        "    ) THEN RAISE(ABORT, 'interpretation_events: resolved rows are immutable') "
+        "  END; "
+        "END;"
+    ),
+)
+```
+
+Use `table.after_create` (table-scoped), not `metadata.after_create`
+(metadata-scoped). The table-scoped form fires only when this specific
+table is created, not on every `metadata.create_all()` call for tables
+that already exist. `IF NOT EXISTS` makes the DDL idempotent across
+repeated calls.
 
 Document the trigger in the `models.py` governance block alongside the
 table definition.
+
+### chat_messages immutability trigger (F-4)
+
+Phase 5a elevates `chat_messages` to an audit anchor via
+`created_from_message_id`. Add a BEFORE UPDATE trigger to prevent
+content mutation after the fact:
+
+```python
+event.listen(
+    chat_messages_table,
+    'after_create',
+    DDL(
+        "CREATE TRIGGER IF NOT EXISTS trg_chat_messages_immutable_content "
+        "BEFORE UPDATE OF content ON chat_messages "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'chat_messages.content is append-only'); "
+        "END;"
+    ),
+)
+```
+
+This trigger is in 18a- (backend) even though the table is 5a-owned
+because 18a- carries all schema work for the Phase 5b umbrella PR. The
+trigger prevents post-hoc content editing that would invalidate the
+`created_from_message_id` lineage audit.
+
+### Schema validator extension for triggers (F-24)
+
+Extend `_validate_current_schema` in `web/sessions/schema.py` to query:
+
+```python
+triggers = {
+    row[0]
+    for row in conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='trigger'")
+    )
+}
+expected_triggers = {"trg_interpretation_events_immutable_resolved",
+                     "trg_chat_messages_immutable_content"}
+if not expected_triggers.issubset(triggers):
+    raise SessionSchemaError(
+        f"Missing triggers: {expected_triggers - triggers}"
+    )
+```
+
+This catches the case where schema bootstrap succeeds but the trigger DDL
+failed silently (e.g., if the DDL event listener was removed or reordered).
+
+### Two-source-of-truth note (F-35)
+
+Add a governance comment alongside the `interpretation_review_disabled`
+column in `models.py`:
+
+```python
+# Two-source-of-truth tension: the opted-out state is represented
+# both by this boolean column (fast-path read by the compose loop)
+# and by the existence of a row in interpretation_events with
+# choice='opted_out' (authoritative audit record). They MUST remain
+# consistent. The service's write path sets both atomically within
+# a single transaction (_session_write_lock held throughout).
+#
+# If a future audit finds the boolean true but no opted_out row exists,
+# that is a bug in the service's write path — crash on read
+# (offensive programming). The boolean is a read-cache; the
+# interpretation_events row is the source of truth.
+#
+# F-35 follow-up: consider enforcing this constraint with a trigger or
+# computed column in a future schema revision. Deferred because
+# SQLite does not support CHECK constraints that cross tables.
+```
+
+### Phase 9 migration notes (F-16)
+
+Add a commented block to `models.py` near `interpretation_events_table`:
+
+```python
+# Phase 9 migration notes (F-16):
+# The following four interdependent DDL objects must be recreated together
+# when the schema is migrated (Phase 9's migration runner replaces the
+# delete-the-DB policy for production):
+#
+# 1. interpretation_events_table — the main table
+# 2. sessions_table.interpretation_review_disabled column
+# 3. composition_states.provenance CHECK extension (add 'interpretation_resolve')
+# 4. trg_interpretation_events_immutable_resolved trigger
+# 5. trg_chat_messages_immutable_content trigger (F-4)
+# 6. skill_markdown_history_table
+#
+# SQLite recreation sequence for the composition_states provenance CHECK
+# extension (SQLite does not support ALTER TABLE ... ADD CONSTRAINT):
+#   1. BEGIN IMMEDIATE;
+#   2. CREATE TABLE composition_states_new (..., CHECK(provenance IN (..., 'interpretation_resolve')));
+#   3. INSERT INTO composition_states_new SELECT * FROM composition_states;
+#   4. DROP TABLE composition_states;
+#   5. ALTER TABLE composition_states_new RENAME TO composition_states;
+#   6. COMMIT;
+# The Phase 9 migration runner MUST run this sequence atomically and
+# verify row count before DROP. Reference: project_db_migration_policy.md.
+```
 
 ### Test shape
 
@@ -584,18 +1293,33 @@ table definition.
    SQLite engine and produces a table named `interpretation_events`
    with all the expected columns (including `model_identifier`,
    `model_version`, `provider`, `composer_skill_hash`, `arguments_hash`,
-   `interpretation_source`).
+   `interpretation_source`, `hash_domain_version`,
+   `runtime_model_identifier_at_resolve`, `runtime_model_version_at_resolve`,
+   `resolved_prompt_template_hash`).
 2. Test that inserting a row with `choice='pending'` and `resolved_at`
    set raises `IntegrityError`.
 3. Test that inserting a row with `choice='accepted_as_drafted'` and
    `accepted_value=NULL` raises `IntegrityError`.
 4. Test that inserting a row with `choice='opted_out'` and all nullable
    fields (`composition_state_id`, `affected_node_id`, `tool_call_id`,
-   `user_term`, `llm_draft`) set to NULL, and
+   `user_term`, `llm_draft`, `model_identifier`, `model_version`,
+   `provider`, `composer_skill_hash`) set to NULL, and
    `interpretation_source='auto_interpreted_opt_out'` succeeds.
 4a. Test that inserting an opted_out row with `composition_state_id`
     non-NULL raises `IntegrityError`
-    (ck_interpretation_events_opted_out_nullability).
+    (ck_interpretation_events_source_nullability — the new source-keyed CHECK).
+4b. **F-1 new test:** Test that inserting a `user_approved` row with
+    `user_term` NULL raises `IntegrityError`
+    (ck_interpretation_events_user_approved_required). Verify both
+    directions: opted_out + non-NULL user_term → IntegrityError;
+    user_approved + NULL user_term → IntegrityError.
+4c. **auto_interpreted_no_surfaces shape (F-1 third CHECK):** Test that
+    inserting an `auto_interpreted_no_surfaces` row with `user_term` non-NULL
+    raises `IntegrityError` (ck_interpretation_events_no_surfaces_shape).
+    Test that an `auto_interpreted_no_surfaces` row with `user_term` NULL and
+    `model_identifier` non-NULL succeeds. Test that an
+    `auto_interpreted_no_surfaces` row with `model_identifier` NULL raises
+    `IntegrityError` (the provenance fields are required for this source).
 5. Test that two PENDING rows with the same `(session_id, tool_call_id)`
    tuple raises `IntegrityError` (the partial unique index).
 5a. (Positive case) Test that two RESOLVED rows with the same
@@ -622,6 +1346,23 @@ table definition.
        `accepted_as_drafted` back to `pending` raises `IntegrityError`.
     c. Updating a PENDING row's non-settled fields (e.g. `model_version`)
        does NOT raise (trigger only guards resolved rows).
+11. **F-8 (trigger-existence via production bootstrap path):** After calling
+    `metadata.create_all(engine)` via the production bootstrap path
+    (i.e., call `initialize_session_schema(engine)` — do NOT create the
+    table manually), assert:
+    ```sql
+    SELECT name FROM sqlite_master
+    WHERE type='trigger' AND name='trg_interpretation_events_immutable_resolved'
+    ```
+    returns a non-empty result. Same assertion for
+    `trg_chat_messages_immutable_content`. This is the test that the
+    trigger is created by the correct SQLAlchemy event hook, not just
+    that it exists in the SQL blob.
+12. **F-11 (composition_state_id index):** Run `EXPLAIN QUERY PLAN
+    SELECT * FROM interpretation_events WHERE composition_state_id = ?`
+    after `metadata.create_all(engine)` and assert the plan contains
+    "SEARCH USING INDEX" (not a full table scan). This is the GREEN-step
+    verification for the new index.
 
 ### Step 1 — RED
 
@@ -647,11 +1388,15 @@ nullable/index attributes.
 
 Single commit. Message: `sessions(schema): add interpretation_events_table
 + interpretation_resolve provenance + interpretation_review_disabled column
-+ append-only trigger`. The commit message MUST mention all four schema
-changes: the new table, the provenance enum extension, the sessions boolean
-column, and the immutability trigger. NOTE: `interpretation.opted_out` is
-NOT added to `proposal_events.event_type` — opt-out rows go to
-`interpretation_events_table` (see opt-out pivot above).
++ append-only trigger + resolved_prompt_template_hash on calls_table (L1 Landscape).
+OPERATOR: delete BOTH session DB and Landscape audit.db on deploy.`
+The commit message MUST mention all five schema changes: the new table, the
+provenance enum extension, the sessions boolean column, the immutability
+trigger, and the `calls_table` column in L1 Landscape. The Landscape DB
+delete requirement MUST appear in the commit message so it is discoverable
+from `git log`. NOTE: `interpretation.opted_out` is NOT added to
+`proposal_events.event_type` — opt-out rows go to `interpretation_events_table`
+(see opt-out pivot above).
 
 ---
 
@@ -704,6 +1449,14 @@ class InterpretationEventResponse(BaseModel):
     provider: str | None = Field(default=None, max_length=64)
     composer_skill_hash: str | None = Field(default=None, max_length=64)  # hex SHA-256
     arguments_hash: str | None = Field(default=None, max_length=64)  # hex rfc8785-canonical hash; populated at resolve time
+    hash_domain_version: str | None = Field(default=None, max_length=16)  # 'v1' once resolved (F-12)
+    # F-19: runtime model snapshot at resolve time.
+    runtime_model_identifier_at_resolve: str | None = Field(default=None, max_length=256)
+    runtime_model_version_at_resolve: str | None = Field(default=None, max_length=128)
+    # Cross-DB hash anchor (Option A). hex SHA-256 of the resolved prompt-template
+    # string; None until resolved, None for opted_out rows. Exposed on the wire so
+    # audit-tooling consumers can verify hash equality without a second DB round-trip.
+    resolved_prompt_template_hash: str | None = Field(default=None, max_length=64)
 
 
 # Request body for POST /api/sessions/{id}/interpretations/{event_id}/resolve.
@@ -762,6 +1515,11 @@ class InterpretationResolveRequest(BaseModel):
                 "accepted_value exceeds the single-line 1024-character limit"
             )
         # Credential-shaped content prefilter (see also Task 5 chat-input boundary).
+        # NOTE: F-2 (prompt-injection bypass) — the same four checks MUST also
+        # be applied to llm_draft at the tool boundary (Task 5) so that the
+        # accepted_as_drafted path cannot bypass them. This validator is the
+        # service-layer defense-in-depth for amended_value; the tool-boundary
+        # call is the primary guard for llm_draft.
         _reject_credential_shaped_content(v)  # raises ValueError on match
         return v
 
@@ -812,15 +1570,23 @@ class ListInterpretationEventsResponse(BaseModel):
 
 ### Step 2 — GREEN
 
-Implement. `_reject_credential_shaped_content` lives in a NEW shared
-module `src/elspeth/web/_validation_helpers.py` (imported by both
-`schemas.py` and `tools.py`). Creating a new module avoids a peer
-cross-import between `web/sessions/schemas.py` and
-`web/composer/tools.py`. The helper runs the credential prefilter
-regexes listed in Task 5's "Credential-shape prefilter" section and
-raises `ValueError` with a user-visible message ("That looks like a
-credential — please re-enter without secrets") on any match. Import
-with `from elspeth.web._validation_helpers import _reject_credential_shaped_content`.
+Implement. `_reject_credential_shaped_content` and the shared content-check
+helpers (`_validate_accepted_value_content`) live in the EXISTING module
+`src/elspeth/web/validation.py` (F-34: this module already exists with
+`has_visible_content`, `validate_secret_name`, and related helpers; extend
+it rather than creating a new `_validation_helpers.py`). Extending the
+existing module avoids peer cross-imports between `web/sessions/schemas.py`
+and `web/composer/tools.py`. The helpers run the credential prefilter
+regexes listed in Task 5's "Credential-shape prefilter" section and raise
+`ValueError` with a user-visible message ("That looks like a credential —
+please re-enter without secrets") on any match. Import with:
+`from elspeth.web.validation import _reject_credential_shaped_content,
+_validate_accepted_value_content`.
+
+Also add to the test suite (test item 11): `amended_value` containing a
+benign prose sentence with periods (e.g., "The term 'cool' means visually
+appealing.") does NOT raise from the credential prefilter (JWT false-positive
+regression test — F-32 applied at the schema validation layer too).
 
 ### Step 3 — Commit
 
@@ -887,33 +1653,85 @@ async def resolve_interpretation_event(
     session_id: UUID,
     event_id: UUID,
     choice: InterpretationChoice,  # accepted_as_drafted or amended
-    accepted_value: str,  # the resolved string (== llm_draft if accepted)
+    amended_value: str | None,     # None when choice == 'accepted_as_drafted' (F-14)
     actor: str,
     resolved_at: datetime | None = None,
+    runtime_model_identifier: str | None = None,   # from affected LLM transform (F-19)
+    runtime_model_version: str | None = None,       # from affected LLM transform (F-19)
 ) -> tuple[InterpretationEventRecord, CompositionStateRecord]:
     """Commit a resolution AND patch the affected LLM transform's
     prompt template.
 
-    Single transaction:
-        1. UPDATE interpretation_events SET choice=?, accepted_value=?,
-           resolved_at=?, actor=?, arguments_hash=?
-           WHERE id=? AND choice='pending'.
-           (CHECK constraint enforces consistency; the WHERE on
-           choice='pending' is a TOCTOU guard against double-resolve.
-           arguments_hash is the rfc8785 canonical hash over all required
-           fields once all final values are known.)
-        2. Read the affected composition state, locate the LLM
-           transform node by affected_node_id, patch the prompt
-           template's interpretation placeholder with accepted_value.
-           Produce a new composition_states row with provenance =
-           'interpretation_resolve', version += 1.
-        3. Return the resolved event + the new state.
+    F-14 (business-rule split): `accepted_value` is computed internally.
+    When choice == 'accepted_as_drafted', the service reads the pending
+    event's `llm_draft` from the DB and uses that as `accepted_value`.
+    When choice == 'amended', `amended_value` is used directly.
+    The route passes only `choice` and `amended_value` — the computation
+    lives here to avoid duplicating the branch across callers.
 
-    Acquires the session write lock. Raises ValueError if the event
+    Single transaction (F-25: write transactions use BEGIN IMMEDIATE to
+    prevent SQLITE_BUSY races when WAL mode is active and two writers
+    contend; mirror the pattern at other write-path service methods):
+        1. SELECT the pending event by id AND session_id AND choice='pending'
+           (F-7: the WHERE must include session_id to prevent cross-session
+           IDOR; choice='pending' is the TOCTOU guard against double-resolve).
+           Raise ValueError (→ 404 at route) if no matching row.
+        2. Compute accepted_value per F-14 rule above.
+        3. Validate accepted_value via _validate_accepted_value_content
+           (defense-in-depth against future callers that bypass the route).
+        4. Call `_patch_llm_transform_prompt` to produce the resolved
+           prompt-template string (substituting the `{{interpretation:<term>}}`
+           placeholder with accepted_value). This is the string that will be
+           embedded in `composition_states.nodes` and executed verbatim at
+           runtime. Do NOT call this helper a second time in step 5a — keep
+           a local reference to the return value from this call.
+        4a. Compute `resolved_prompt_template_hash` as
+            `stable_hash(resolved_prompt_template_string)` using
+            `contracts/hashing.py:stable_hash`. This is a SHA-256 over the
+            rfc8785 canonical JSON of the resolved string, using
+            `CANONICAL_VERSION = "sha256-rfc8785-v1"`. This hash is NOT part
+            of `INTERPRETATION_HASH_DOMAIN_V1` — it covers a different input
+            (the resolved prompt string only) and serves as a cross-DB anchor,
+            not as the event's identity hash. Do not add it to the hash domain.
+        5. UPDATE interpretation_events SET choice=?, accepted_value=?,
+           resolved_at=?, actor=?, arguments_hash=?,
+           runtime_model_identifier_at_resolve=?,
+           runtime_model_version_at_resolve=?,
+           resolved_prompt_template_hash=?
+           WHERE id=? AND session_id=? AND choice='pending'.
+           (Double WHERE guard is belt-and-suspenders; the SELECT above
+           already verified the row exists, but the UPDATE's WHERE guards
+           against an MVCC race window.)
+        5a. Write the resolved prompt-template string (from step 4) AND the
+            hash (from step 4a) into `composition_states.nodes` for the
+            affected node. The node JSON gains two sibling fields alongside
+            the patched `prompt_template`:
+              `"prompt_template"`: resolved string (the patched result)
+              `"resolved_prompt_template_hash"`: the hash from step 4a
+            Produce a new composition_states row with provenance =
+            'interpretation_resolve', version += 1.
+            Ordering invariant: patch first (step 4), hash second (step 4a),
+            write both sinks (steps 5 and 5a) in the same transaction. The
+            runtime plugin reads `resolved_prompt_template_hash` from the
+            nodes JSON sibling field; if absent, the column is left NULL.
+            A runtime that re-computes the hash at execution time would risk
+            divergence if rfc8785 normalization changes; reading the stored
+            value avoids that risk.
+        6. Return the resolved event + the new state.
+
+    Acquires the session write lock (F-27). Raises ValueError if the event
     is already resolved (TOCTOU lost), if the affected node has
     disappeared from the composition state since the surfacing, or
     if the prompt-template patch fails (e.g., node is no longer an
     LLM transform).
+
+    Trigger error note (F-28): if the immutability trigger fires (row
+    is already resolved and the UPDATE attempts to overwrite settled
+    fields), SQLAlchemy raises IntegrityError with the trigger's
+    RAISE(ABORT, ...) message. The service-layer error classifier MUST
+    match this specific message string explicitly so it is mapped to a
+    409/400 response, not conflated with a generic integrity violation
+    (which would emit a spurious security telemetry signal).
 
     Telemetry: NONE — composition-time user decisions are audit-primary;
     no ephemeral operational signal required.
@@ -946,10 +1764,21 @@ async def record_session_interpretation_opt_out(
 ) -> InterpretationEventRecord:
     """Mark the session as 'don't surface interpretations any more'.
 
+    F-27 (write-lock annotation): acquires the session write lock for the
+    ENTIRE duration of the transaction — both the interpretation_events
+    INSERT and the sessions boolean UPDATE must be inside one
+    _session_write_lock block to ensure atomicity.
+
+    Idempotency (F-29): if an opted_out row already exists for this
+    session, return the existing record without inserting a duplicate.
+    The sessions boolean remains true. First opt-out timestamp is
+    authoritative.
+
     Writes a row to interpretation_events_table with choice='opted_out',
     interpretation_source='auto_interpreted_opt_out', all nullable
     interpretation fields (composition_state_id, affected_node_id,
-    tool_call_id, user_term, llm_draft, accepted_value, arguments_hash)
+    tool_call_id, user_term, llm_draft, model_identifier, model_version,
+    provider, composer_skill_hash, accepted_value, arguments_hash)
     set to NULL, and resolved_at set to opted_out_at.
     Also sets sessions.interpretation_review_disabled = true.
     Single transaction.
@@ -1240,7 +2069,7 @@ here. If either field matches:
   "That looks like a credential — please re-enter without secrets."
 - Do NOT persist the event row.
 
-The prefilter rejects content matching:
+The prefilter rejects content matching (credential-shaped — raises ARG_ERROR):
 - AWS access keys: `AKIA[0-9A-Z]{16}`
 - Bearer tokens: `Bearer\s+[A-Za-z0-9._-]{20,}`
 - GitHub PATs: `ghp_[A-Za-z0-9]{36}`
@@ -1252,12 +2081,40 @@ The prefilter rejects content matching:
 - Credit-card-shaped: `\d{4}[\s-]\d{4}[\s-]\d{4}[\s-]\d{4}` — apply
   LUHN check before flagging (avoid false positives on date-like strings)
 
+The following patterns emit a WARNING via operational telemetry (not a
+rejection — these may be legitimate user input) and are applied to
+`user_term` and `llm_draft` (F-20):
+- Email addresses: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
+- Phone numbers: `(\+?1?\s?)?(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})`
+- SSN-like: `\d{3}[-\s]\d{2}[-\s]\d{4}` (broader form — also covered
+  by the rejection list above; the warning form fires before the reject)
+
+Defer name/address PII detection to Phase 11 (document the deferral
+explicitly in a code comment adjacent to the prefilter function in
+`web/validation.py`).
+
+Telemetry posture for PII warnings: emit as operational telemetry signal
+`"interpretation_pii_candidate_detected"` with `field` (user_term/llm_draft)
+and `pattern_name` (email/phone/ssn_like) but WITHOUT the field value.
+
 The shared regex set lives in
-`src/elspeth/web/_validation_helpers.py:_reject_credential_shaped_content`
-(created in Task 3 Step 2). Import with:
-`from elspeth.web._validation_helpers import _reject_credential_shaped_content`.
+`src/elspeth/web/validation.py` (existing module — extend with
+`_reject_credential_shaped_content` and `_warn_pii_shaped_content`
+helpers; do NOT create a new `_validation_helpers.py` — F-34).
+The content-check helpers added for `amended_value` (Task 3) live in
+the same module (`_validate_accepted_value_content`). Import with:
+`from elspeth.web.validation import _reject_credential_shaped_content`.
 This avoids a peer cross-import between `web/sessions/schemas.py` and
 `web/composer/tools.py`.
+
+**F-2 (prompt-injection bypass):** `_validate_accepted_value_content` MUST
+also be applied to `llm_draft` at this tool boundary — BEFORE calling
+`create_pending_interpretation_event`. This catches a poisoned `llm_draft`
+(e.g., containing `{{system:override}}`) before it enters the audit DB
+and before it reaches the `accepted_as_drafted` resolution path where it
+would be embedded directly into the prompt template. Return ARG_ERROR
+(not a service exception) so the LLM can re-draft. This is the preferred
+rejection point because it is earlier and more visible to the LLM.
 
 ### Per-session rate limit
 
@@ -1299,9 +2156,67 @@ Where `_check_interpretation_rate_limits` enforces:
   interpretation requests in this session today (max 10). The compose
   loop should fall back to auto-interpretation.")`.
 
+**Rate-limit window semantics (F-30):** The "per day" window is UTC
+midnight (not a sliding 24-hour window). The daily count is the number
+of `interpretation_events` rows for the session with `created_at >=
+today_utc_midnight`. This is simpler to reason about for operators and
+produces predictable reset behaviour. Document this choice in a comment
+adjacent to the window-computation in the implementation. Tests must set
+`created_at` explicitly and use a deterministic `now` fixture to avoid
+clock-dependent failures.
+
+**Rate-limit settings keys (F-31):** Move the numeric constants to
+settings:
+```
+composer.interpretation_rate_limit_per_term = 3      # max surfacings per (session, term)
+composer.interpretation_rate_limit_per_session_day = 10  # max per session per UTC day
+```
+Both must be read from the settings object at compose-loop initialisation;
+`_check_interpretation_rate_limits` receives them as keyword arguments so
+it is testable without live settings. Document the redeploy cost in a
+comment: changing these limits requires a service restart (they are read
+at startup, not per-request).
+
 On cap exceeded, the compose loop sees an ARG_ERROR and is expected
 (per Task 8 skill nudge) to fall back to a non-LLM interpretation with
 `interpretation_source='auto_interpreted_no_surfaces'`.
+
+**AUTO_INTERPRETED_NO_SURFACES writer (F-6):** When the rate cap is
+exceeded (either limit), the compose loop MUST write an
+`interpretation_events` row with:
+- `interpretation_source = 'auto_interpreted_no_surfaces'`
+- `choice = 'opted_out'` semantics (resolved-at-write)
+- Interpretation surface fields NULL: `composition_state_id`,
+  `affected_node_id`, `tool_call_id`, `user_term`, `llm_draft` (the
+  rejected tool request never produced a draft or a composition-state
+  binding)
+- **LLM provenance fields NOT NULL** — `model_identifier`,
+  `model_version`, `provider`, `composer_skill_hash` are read from the
+  compose-loop snapshot at the time of the tool call, the identical
+  source used for `user_approved` rows. The composer LLM that triggered
+  the rate cap is fully identifiable; recording it is mandatory.
+- `arguments_hash` populated (rfc8785 over the available field subset,
+  with `hash_domain_version` reflecting the reduced domain)
+- `resolved_at` set to now (the rate-cap event is itself a resolution)
+
+**Rationale:** LLM provenance is required because the composer LLM that
+triggered the rate cap is identifiable from the compose-loop snapshot
+at the time of the tool call. The interpretation surface fields are NULL
+because the rejected request never produced a draft. This matches
+`ck_interpretation_events_no_surfaces_shape` (lines 853-859) and the
+schema comment (lines 826-829): "the LLM was consulted (rate-cap
+fallback) but no surfacing; they carry LLM provenance fields but NULL
+for composition_state_id / affected_node_id / tool_call_id / user_term
+/ llm_draft." Contrast with `auto_interpreted_opt_out`, where the LLM
+was never consulted and all nine fields are NULL.
+
+This makes the rate-cap event explicitly auditable: an auditor can
+distinguish "user opted out" from "rate cap exhausted" via
+`interpretation_source`. Add this writer call to the compose-loop hook's
+rate-cap-exceeded branch, in `web/composer/service.py`. Specify
+`create_pending_interpretation_event` or a dedicated
+`record_auto_interpreted_no_surfaces_event` service method — prefer the
+dedicated method to make the intent legible.
 
 ### Tool handler
 
@@ -1456,6 +2371,66 @@ The dispatch loop must be extended to check `_SESSION_AWARE_TOOL_HANDLERS`
 and await handlers found there, passing `session_id`, `tool_call_id`, and
 the injected service methods.
 
+**Skill hash atomicity (F-5a):** The compose-loop closure MUST compute
+`composer_skill_hash` from the **in-memory string** the LLM was prompted with,
+not from a re-read of disk. The `@lru_cache` skill loader (see Task 8) MUST
+return both the text and its SHA-256 hash as a frozen tuple:
+```python
+@lru_cache(maxsize=1)
+def _load_composer_skill() -> tuple[str, str]:  # (text, sha256_hex)
+    text = (Path(__file__).parent / "skills" / "pipeline_composer.md").read_text()
+    return text, hashlib.sha256(text.encode()).hexdigest()
+```
+The hash and text are thereby atomically consistent: the hash the DB records
+is the hash of exactly the text the LLM saw. At compose-loop startup, assert:
+```python
+assert hashlib.sha256(skill_text.encode()).hexdigest() == skill_hash
+assert hashlib.sha256(Path("...pipeline_composer.md").read_text().encode()).hexdigest() == skill_hash
+```
+If the on-disk file has changed since the LRU cache populated (indicating a
+hot-reload partial state), crash with an operator-actionable message:
+"Composer skill hash mismatch: in-memory hash differs from on-disk file. Restart
+elspeth-web.service to reload."
+
+**skill_markdown_history upsert (F-5c):** On first use of a `(skill_hash, compose_loop_init)`,
+upsert into `skill_markdown_history`:
+```sql
+INSERT OR IGNORE INTO skill_markdown_history
+  (hash, filename, content, first_seen_at)
+VALUES (:hash, 'pipeline_composer.md', :text, :now)
+```
+This is a best-effort upsert (IGNORE on conflict); do not make it transactional
+with the interpretation event row. Storage cost is negligible (one row per
+distinct skill version).
+
+**Unresolved placeholder runtime detection (F-17):** Add a sub-task in
+`web/composer/service.py` (or a new helper in the executor path): before
+executing any LLM transform, inspect its `prompt_template` for any
+`{{interpretation:…}}` placeholder. If found:
+- Raise RuntimeError: "Unresolved interpretation placeholder
+  '{{interpretation:<term>}}' in LLM transform '<node_id>'. Resolve via
+  /interpretations/<event_id>/resolve before running the pipeline."
+- Surface as a user-actionable error (not a pipeline crash — block
+  execution, return error to frontend).
+- Emit operational telemetry signal `"interpretation_placeholder_unresolved_at_runtime"`
+  with `node_id` and `term` (but NOT the prompt_template value).
+
+Specify the detection helper in the plan: it should be a standalone function
+`_detect_unresolved_interpretation_placeholders(nodes: dict) -> list[str]`
+that returns the list of terms with unresolved placeholders. An empty list
+means no placeholders; non-empty list means blocked execution. This helper
+is tested independently.
+
+**Runtime telemetry signal (F-21):** When an LLM transform's prompt template
+contains an unresolved `{{interpretation:…}}` placeholder at execution time
+(detected above), emit:
+- Signal name: `"interpretation_placeholder_unresolved_at_runtime"`
+- Posture: operational telemetry (not audit-primary; the runtime error
+  is the primary record)
+- Fields: `node_id`, `term` (NOT the prompt template value)
+- Purpose: catches LLM under-firing post-model-upgrade without offline
+  eval refresh
+
 The compose-loop closure captures the current LLM config snapshot
 (`model_identifier`, `model_version`, `provider`, `composer_skill_hash`)
 and passes these as keyword arguments to
@@ -1493,6 +2468,32 @@ at insert time.
     write (table remains empty after the raise).
 11. **Credential prefilter:** Calling with `llm_draft` containing a
     Bearer token pattern raises `ToolArgumentError`.
+12. **F-2 (llm_draft prompt-injection at tool boundary):** Calling with
+    `llm_draft` containing `{{system:override}}` raises `ToolArgumentError`
+    (metacharacter check from `_validate_accepted_value_content` applied
+    to llm_draft at the tool boundary). No DB write occurs.
+13. **F-18 (dual-registry dispatch invariant):** Enumerate all registered
+    tools: assert each tool name appears in EXACTLY one registry
+    (`_TOOL_HANDLERS` XOR `_SESSION_AWARE_TOOL_HANDLERS`). Assert every
+    handler in `_SESSION_AWARE_TOOL_HANDLERS` satisfies
+    `asyncio.iscoroutinefunction(h) == True`. Assert every handler in
+    `_TOOL_HANDLERS` satisfies `asyncio.iscoroutinefunction(h) == False`.
+    This is the mechanical guard against "async tool accidentally in
+    sync registry" silent failures.
+14. **F-32 (JWT benign-period negative test):** Calling with `llm_draft`
+    containing `"The term 'cool' means visually appealing, well-organized,
+    and easy to use."` does NOT raise from the credential prefilter
+    (benign periods in a prose sentence must not trigger the JWT pattern).
+15. **Rate-limit test (UTC window, F-30):** The rate-limit window resets
+    at UTC midnight. Test: inject a frozen `now` fixture set to
+    23:59:59 UTC; create 10 events with `created_at` in the current UTC
+    day. Advance `now` by 1 second past midnight; assert the per-session-day
+    cap is reset (11th call succeeds in the new UTC day).
+16. **Telemetry posture (F-15):** Rate-limit cap breach emits operational
+    telemetry signal `"interpretation_rate_cap_exceeded"` with `cap_type`
+    (per_term/per_session_day) and `session_id` (but NOT `user_term` in
+    telemetry — PII risk). Assert the telemetry call is made before the
+    ARG_ERROR is returned; assert no Landscape/audit row is written.
 
 `test_request_interpretation_review_redaction.py`:
 
@@ -1560,14 +2561,14 @@ async def resolve_interpretation(
     await _verify_session_ownership(session_id, user, raw_request)  # 404 on IDOR
     service: SessionServiceProtocol = raw_request.app.state.session_service
     actor = f"user:{user.user_id}"
-    accepted_value = (
-        body.amended_value if body.choice == "amended" else None  # filled by service from llm_draft
-    )
+    # F-14 (business-rule split): the route passes only choice and amended_value.
+    # The service computes accepted_value from llm_draft internally when
+    # choice == 'accepted_as_drafted'. Do NOT compute accepted_value here.
     event, new_state = await service.resolve_interpretation_event(
         session_id=session_id,
         event_id=event_id,
         choice=InterpretationChoice(body.choice),
-        accepted_value=accepted_value,  # service substitutes llm_draft if None and choice == accepted_as_drafted
+        amended_value=body.amended_value,  # None when choice == 'accepted_as_drafted'
         actor=actor,
     )
     return InterpretationResolveResponse(
@@ -1575,6 +2576,42 @@ async def resolve_interpretation(
         new_state=_composition_state_response(new_state),
     )
 ```
+
+**Design note (F-14):** The computation "if `accepted_as_drafted`, copy `llm_draft` as the
+`accepted_value`" belongs in `resolve_interpretation_event` (Task 4), not the route. The route
+is a Tier-3 boundary — it validates the request shape and passes `choice` + `amended_value` to
+the service. The service reads the pending event's `llm_draft` from the DB and applies the
+business rule in one transaction. This prevents caller drift: a future second caller
+(e.g., a CLI, an admin route) gets the same rule without duplicating the branch.
+
+### Runtime model snapshot (F-19)
+
+At resolve time, populate `runtime_model_identifier_at_resolve` and
+`runtime_model_version_at_resolve` on the `interpretation_events_table` row
+from the affected LLM transform's model config in the current composition state.
+These are nullable columns (see Task 2); if the composition state's LLM transform
+has no explicit model config, they remain NULL. Add to the service method call:
+
+```python
+    event, new_state = await service.resolve_interpretation_event(
+        ...
+        runtime_model_identifier=_extract_transform_model_identifier(new_state, event.affected_node_id),
+        runtime_model_version=_extract_transform_model_version(new_state, event.affected_node_id),
+    )
+```
+
+The audit-readiness panel (Task 10) emits a warning when the runtime model on the
+composition state differs from `model_identifier` recorded at surfacing time
+(the composer LLM may have changed between surfacing and resolve if the operator
+rotated models). This is a reviewer signal, not a blocker.
+
+### Telemetry posture (F-15)
+
+- **User-decision audit write (resolve):** NONE (audit-primary; the
+  `interpretation_events` row is the record).
+- **IDOR 404 response:** operational telemetry (security signal).
+- **Credential prefilter match on `llm_draft`:** operational telemetry
+  (security signal indicating a potentially poisoned draft surfaced).
 
 ### Read-back route
 
@@ -1629,11 +2666,17 @@ async def list_interpretations(
 12. **IDOR regression (GET /interpretations):** An authenticated user
     whose session is session-B cannot GET /interpretations for
     session-A's id. Returns 404, not 403.
+13. **Cross-session event_id IDOR (F-7):** Insert a PENDING event for
+    session-B. Call POST /resolve as the owner of session-A, passing
+    session-A's session_id path parameter and session-B's event_id.
+    Assert the response is 404. This test verifies that
+    `resolve_interpretation_event` filters on BOTH `id = :event_id AND
+    session_id = :session_id`, not event_id alone.
 
 ### Step 1 — RED, Step 2 — GREEN, Step 3 — commit
 
 `sessions(routes): add POST /interpretations/{event_id}/resolve and
-GET /interpretations`.
+GET /interpretations + cross-session IDOR test`.
 
 ---
 
@@ -1682,15 +2725,61 @@ async def opt_out_of_interpretations(
 The service method returns an `InterpretationEventRecord` with
 `choice='opted_out'`. `resolved_at` carries the opt-out timestamp.
 
+### Opt-out idempotency contract (F-29)
+
+`record_session_interpretation_opt_out` MUST be idempotent at the service
+level. On a second call for the same session:
+1. Detect the existing opted_out row (SELECT from `interpretation_events`
+   WHERE `session_id = :sid AND choice = 'opted_out'` ordered by `created_at`
+   LIMIT 1).
+2. If found, return the existing record without inserting a new row.
+   The sessions boolean remains `true` (it was already set). The first
+   opt-out timestamp is authoritative.
+3. If not found, proceed with the insert + boolean update as normal.
+
+Add a test asserting `interpretation_events_table` row count is exactly 1
+after two POST /opt_out calls for the same session.
+
+### Opt-out audit tooling (F-22)
+
+Add a §"Opt-out audit tooling" doc note below the Tests section:
+
+> After opt-out, the LLM's auto-baked interpretations are stored in
+> `composition_state.nodes` JSON with an explicit comment tag:
+> `# AUTO-INTERPRETED, REVIEW SKIPPED PER USER OPT-OUT`
+> (specified in the Task 8 skill nudge).
+>
+> API surface for session-end review (spec here, frontend in 18b-):
+> `GET /api/sessions/{id}/interpretations/opt_out_summary` returns
+> all `interpretation_events` rows with
+> `interpretation_source='auto_interpreted_opt_out'` OR
+> `interpretation_source='auto_interpreted_no_surfaces'`, ordered by
+> `created_at`. The user can browse them retroactively to see what the
+> LLM auto-baked during the opted-out portion of the session. This
+> closes the "click opt-out once, dozens of auto-interpretations
+> accumulate invisibly" audit gap. Frontend implementation is delegated
+> to 18b-; route specification belongs in 18a- as it determines the
+> backend contract.
+
+### Telemetry posture (F-15)
+
+Telemetry for this route:
+- **User-decision audit write (opt-out):** NONE (audit-primary; the
+  `interpretation_events` row is the record).
+- **IDOR 404 response:** operational telemetry signal (security
+  signal — indicates a cross-session access attempt; emit with
+  `session_id` and requesting `user_id`).
+
 ### Tests
 
 1. POST /opt_out flips the session column to true and writes an
    `interpretation_events` row with `choice='opted_out'` and
    `interpretation_source='auto_interpreted_opt_out'`. Verify NO
    `proposal_events` row was written (regression guard).
-2. POST /opt_out is idempotent — second call still returns 200; the
-   first opt-out timestamp is preserved (second call returns the
-   existing record). Deterministic choice: keep FIRST opt-out timestamp.
+2. **Idempotency:** POST /opt_out twice for the same session — second
+   call returns 200; `interpretation_events` row count for this session
+   is exactly 1; the first opt-out timestamp is returned on both calls.
+   Deterministic choice: keep FIRST opt-out timestamp.
 3. After /opt_out, the compose-loop's system prompt MUST be told the
    user opted out (Task 5's compose-loop hook reads the flag at
    compose start; verify by a fixture-level integration test in Task 9).
@@ -1700,7 +2789,7 @@ The service method returns an `InterpretationEventRecord` with
 ### Step 1-3
 
 `sessions(routes): add POST /interpretations/opt_out (routes to
-interpretation_events, not proposal_events)`.
+interpretation_events, not proposal_events) + idempotency contract`.
 
 ---
 
@@ -1739,6 +2828,19 @@ that:
 After editing, restart `elspeth-web.service` per the project memory
 `project_composer_harness_state` (the skill is `@lru_cache`'d at import
 time).
+
+### Skill-change governance (F-33)
+
+Skill markdown changes constitute audit-relevant deploys. Every distinct
+version of `pipeline_composer.md` hashed into `composer_skill_hash` on
+interpretation events must have its content captured in
+`skill_markdown_history` (see Task 2 — the table is upserted by the
+compose-loop hook the first time a new hash is seen). A deploy that
+rotates the skill markdown without restarting the service will produce
+a hash mismatch between the in-memory LRU-cached text and the on-disk
+file — detected by the Task 1.5 startup integrity check and Task 5b's
+skill-text atomicity requirement. Coordinate skill-markdown changes with
+service restarts so the hash stays consistent.
 
 ### Step 1 — Empirical validation (NOT pytest)
 
@@ -1790,14 +2892,26 @@ The test:
       `sessions.interpretation_review_disabled == true` AND an
       `interpretation_events` row with `choice='opted_out'`,
       `interpretation_source='auto_interpreted_opt_out'`, and
-      `actor` matches. Also ASSERT that `proposal_events_table`
-      contains NO row related to this opt-out (regression guard
-      against prior proposal_events routing).
+      `actor` matches. ASSERT that `composition_state_id`, `affected_node_id`,
+      `tool_call_id`, `user_term`, `llm_draft`, `model_identifier`,
+      `model_version`, `provider`, and `composer_skill_hash` are ALL NULL
+      on the opted_out row (F-1 nullability regression guard). Also ASSERT
+      that `proposal_events_table` contains NO row related to this opt-out
+      (regression guard against prior proposal_events routing).
 3. For each row, the test opens a read-only SQLAlchemy connection and
    issues `SELECT * FROM interpretation_events WHERE id = :id`. The
    test asserts EACH of the six required-by-spec fields is present and
    correctly populated. This is the explicit CLAUDE.md attributability
    compliance step.
+4. **opted_out CHECK regression (F-1):** Attempt to INSERT an `opted_out`
+   row with `user_term` non-NULL; assert `IntegrityError`
+   (ck_interpretation_events_source_nullability fires). Attempt to INSERT
+   a `user_approved` row with `user_term` NULL; assert `IntegrityError`.
+5. **arguments_hash determinism (F-13):** Create two identical
+   `interpretation_events` rows with the same field values but different
+   `id` values (different timestamps to avoid PK collision), resolve both
+   with identical inputs, assert `event1.arguments_hash == event2.arguments_hash`.
+   This verifies rfc8785 canonicalization determinism across rows.
 
 ### Runtime hand-off (`test_interpretation_runtime_handoff.py`)
 
@@ -1823,6 +2937,49 @@ The test:
 The runtime hand-off test uses the production `ExecutionGraph.from_plugin_instances()`
 + `instantiate_plugins_from_config()` path per CLAUDE.md "never bypass
 production code paths in tests."
+
+### Cross-DB hash equality check (`test_interpretation_runtime_handoff.py`)
+
+This sub-test is the verification that the 18- overview's §"Hash-anchored
+cross-DB linkage" Option A forward-references. It MUST be part of the
+`test_interpretation_runtime_handoff.py` integration run (not a separate file)
+so that it exercises the same real execution path used by the hand-off test.
+
+Add the following assertion sequence immediately after the existing step 5:
+
+6. **Session side read**: open a read-only connection to the session audit DB;
+   `SELECT resolved_prompt_template_hash FROM interpretation_events WHERE id = :event_id`.
+   Assert the value is non-NULL (the column was populated at resolve time).
+   Assign to `session_hash`.
+
+7. **Landscape side read**: open a read-only connection to the Landscape DB;
+   `SELECT resolved_prompt_template_hash FROM calls WHERE call_id = :call_id`
+   (where `call_id` is the LLM-transform call from step 4).
+   Assert the value is non-NULL (the runtime plugin wrote the column at
+   execution time).
+   Assign to `landscape_hash`.
+
+8. **Byte-equality assertion**: `assert session_hash == landscape_hash`. A
+   failure here means the composition state was mutated between resolve time
+   and execution time, or the runtime plugin received a different prompt string
+   than the one recorded. The assertion message MUST include both hash values
+   and the run_id so a failing CI output is immediately diagnosable.
+
+9. **External recompute assertion**: read `composition_states.nodes` JSON for
+   the affected node; extract the resolved `prompt_template` string. Compute
+   `stable_hash(resolved_prompt_template_string)` using `contracts/hashing.py`
+   (the same function the session service called at resolve time). Assert this
+   recomputed hash equals both `session_hash` and `landscape_hash`.
+
+   This recompute is the external audit-tooling check. It verifies that both
+   DB columns are internally consistent AND that the composition state JSON
+   contains the string that was actually hashed — i.e., the hash chain has no
+   silent intermediate step. The production code path NEVER re-computes (it
+   reads the stored hash from `composition_states.nodes`); only the test does
+   this re-computation as an external verification, so divergence between the
+   test's recompute and the stored values is a signal that the production
+   write-path is hashing a different string than the one embedded in the
+   composition state.
 
 ### Step 1 — RED, Step 2 — GREEN, Step 3 — commit
 
@@ -1990,12 +3147,16 @@ relevant task above). Any failure mode without a test is an open gap.
 | Network 5xx mid-resolve | Network | 500 with retry guidance | TOCTOU guard (`WHERE choice='pending'`) ensures no partial state; pending row preserved |
 | Patch-helper raises (placeholder absent) | System | 422 | No row |
 | Database integrity violation | System | 500 + alert | Crashes per offensive-programming discipline (CLAUDE.md) |
-| Rate cap exceeded (per-term: 3) | System | ARG_ERROR: "Too many interpretation requests for term '…' (max 3)" | No row; compose loop falls back to `auto_interpreted_no_surfaces` |
-| Rate cap exceeded (per-session-day: 10) | System | ARG_ERROR: "Too many interpretation requests in this session today (max 10)" | No row; compose loop falls back to `auto_interpreted_no_surfaces` |
+| Rate cap exceeded (per-term: 3) | System | ARG_ERROR: "Too many interpretation requests for term '…' (max 3)" | No pending row; compose loop writes a row with `interpretation_source='auto_interpreted_no_surfaces'` (see Task 5 F-6 writer) |
+| Rate cap exceeded (per-session-day: 10) | System | ARG_ERROR: "Too many interpretation requests in this session today (max 10)" | No pending row; compose loop writes `auto_interpreted_no_surfaces` row |
 | Credential-shaped content in `user_term` or `llm_draft` | User/LLM | 422: "That looks like a credential — please re-enter without secrets" | No row |
 | `accepted_value` contains control characters | User | 422 with field-specific message | No row |
+| `llm_draft` (accepted_as_drafted path) contains `{{`/`}}` | User/LLM | 422: "accepted_value must not contain template metacharacters" | No resolve committed; validated at tool boundary |
 | Append-only trigger fires (attempt to modify resolved row) | System | 500 (SQLAlchemy IntegrityError) | DB row unchanged; request fails |
 | Session ownership failure (IDOR attempt) | Attacker | 404 (not 403 — per IDOR contract) | No write; no audit row |
+| Unresolved `{{interpretation:…}}` placeholder at runtime | System | Runtime executor raises RuntimeError; user sees error banner (see Task 5 §"Unresolved placeholder runtime detection") | No Landscape run row committed; pipeline execution blocked |
+| Staged placeholder without prior `request_interpretation_review` call | System | Operational telemetry signal "interpretation placeholder unresolved at runtime" emitted (see F-21); runtime also raises | Telemetry signal recorded; no pipeline execution |
+| `calls.resolved_prompt_template_hash` ≠ `interpretation_events.resolved_prompt_template_hash` for the same resolved template string | System (hash-chain integrity violation) | Surface as integrity-violation telemetry signal at audit-tooling read time; at the Landscape read layer (audit-tooling / `explain()` query) this is a Tier-1 anomaly — crash with a meaningful error per offensive-programming discipline ("hash chain broken: Landscape calls hash does not match session interpretation_events hash for run_id=…, event_id=…"). The mismatch means either the composition state was tampered with between resolution and execution, or the runtime plugin received a different prompt string than the one recorded at resolve time. | Landscape `calls` row was committed (execution completed); session `interpretation_events` row is unchanged; the audit chain is now inconsistent. No silent recovery. |
 
 ---
 
@@ -2006,38 +3167,99 @@ Phase 5b backend is complete when:
 - [ ] **Task 0 (placeholder-convention gate)** passed; artifact at
       `evals/composer-rgr/phase5b-task0-placeholder-validation.json`
       with `gate_passed=true`. All subsequent tasks unblocked.
+- [ ] **Task 0.5 (defensive size caps)** green, committed; `max_length`
+      caps on `_InlineBlobModel.content`, `SendMessageRequest.content`,
+      and ASGI body-size middleware in `app.py` rejecting >10 MB with 413.
 - [ ] Task 1 (contract types) green, committed; `InterpretationChoice`
-      has five values; `InterpretationSource` has three values.
+      has five values; `InterpretationSource` has three values;
+      `model_identifier`, `model_version`, `provider`, `composer_skill_hash`
+      are all `str | None` on `InterpretationEventRecord`;
+      `resolved_prompt_template_hash: str | None` present on
+      `InterpretationEventRecord`.
+- [ ] **Task 1.5 (session DB hardening)** green, committed; WAL + busy_timeout
+      + synchronous PRAGMA set in `engine.py`; startup assertion
+      `journal_mode=='wal'`; `SESSION_SCHEMA_EPOCH` constant defined;
+      `PRAGMA application_id` and `user_version` set and validated on open.
 - [ ] Task 2 (schema) green, committed; the new table exists with all
       audit-provenance columns; the new provenance enum value is
       registered; the `interpretation_review_disabled` session column
-      is registered; the append-only trigger is installed.
+      is registered; the append-only trigger is installed (IF NOT EXISTS,
+      table-scoped listener); `chat_messages` immutability trigger
+      installed; `skill_markdown_history` table added; `composition_state_id`
+      index added; `hash_domain_version` column added;
+      `runtime_model_identifier_at_resolve` and
+      `runtime_model_version_at_resolve` nullable columns added;
+      `resolved_prompt_template_hash` nullable `String(64)` column added to
+      BOTH `interpretation_events_table` (session DB) AND `calls_table`
+      (L1 Landscape, `core/landscape/schema.py`);
+      `ix_calls_resolved_prompt_template_hash` index added to `calls_table`;
+      trigger-existence test via production bootstrap path passes;
+      Phase 9 migration notes block commented into `models.py`;
+      Step 4 commit message mentions BOTH DB delete requirements.
       NOTE: `proposal_events.event_type` is NOT extended — opt-out rows
       go to `interpretation_events_table`.
 - [ ] Task 3 (wire schemas) green, committed; content validators on
-      `amended_value` pass; credential prefilter tests pass.
+      `amended_value` pass (shared helper lives in `web/validation.py`);
+      credential prefilter tests pass; JWT benign-period negative test
+      passes; `_validate_accepted_value_content` applied to `llm_draft`
+      at tool boundary; `resolved_prompt_template_hash` field present on
+      `InterpretationEventResponse`.
 - [ ] Task 4 (service methods) green, committed; all four methods
       exercised by direct-DB spot-checks; opt-out method writes to
-      `interpretation_events_table` only.
+      `interpretation_events_table` only; resolve WHERE clause includes
+      `AND session_id AND choice='pending'`; `accepted_value` computed
+      inside service from `llm_draft` (not from route); write-lock
+      annotation on opt-out; trigger IntegrityError classifier noted;
+      BEGIN IMMEDIATE noted; `resolve_interpretation_event` computes
+      `resolved_prompt_template_hash` via `stable_hash()` and writes it
+      atomically to both `interpretation_events_table` column and
+      `composition_states.nodes` JSON sibling field in the same transaction.
 - [ ] Task 5 (composer tool) green, committed; dispatch spike documented;
       `_SESSION_AWARE_TOOL_HANDLERS` registry introduced; async handler
-      dispatches; rate-limit tests pass; credential prefilter tests pass;
-      redaction; proposal summary.
+      dispatches; rate-limit constants in settings; rate-limit window
+      semantics pinned (UTC midnight); rate-limit tests pass; credential
+      prefilter tests pass (including PII extensions and JWT benign-period
+      negative test); redaction; proposal summary;
+      `AUTO_INTERPRETED_NO_SURFACES` writer specified; unresolved-placeholder
+      runtime detection sub-task specified; dual-registry invariant test
+      passes; F-5a hash-atomicity from LRU cache specified; startup
+      integrity check on skill text specified; skill_markdown_history
+      upsert wired in compose-loop hook; opt-out audit-tooling note added.
 - [ ] Task 6 (resolve route + list route) green, committed; IDOR
-      regression tests pass.
+      regression tests pass (including cross-session event_id test);
+      `accepted_value` not computed at route; runtime model snapshot
+      fields populated; telemetry posture declarations present.
 - [ ] Task 7 (opt_out route) green, committed; IDOR regression test
-      passes; `proposal_events_table` regression guard passes.
+      passes; `proposal_events_table` regression guard passes;
+      opt-out idempotency contract specified; session-end review route
+      API surface specified.
 - [ ] Task 8 (skill prompt) committed; empirically validated against
-      the canonical hero prompt; `elspeth-web.service` restarted.
+      the canonical hero prompt; `elspeth-web.service` restarted;
+      skill-change governance note present.
 - [ ] Task 9 (integration spot-check + runtime hand-off) green,
-      committed; paths at `tests/integration/web/composer/`.
+      committed; paths at `tests/integration/web/composer/`;
+      `arguments_hash` determinism test passes; opted_out row NULLs
+      asserted; new opted_out + non-NULL user_term → IntegrityError
+      test passes; **cross-DB hash-equality test passes**: session
+      `interpretation_events.resolved_prompt_template_hash` equals
+      Landscape `calls.resolved_prompt_template_hash` byte-for-byte
+      for the hero-prompt integration run (see Task 9
+      §"Cross-DB hash equality check").
+- [ ] **Cross-DB hash chain (`resolved_prompt_template_hash`)**: column
+      present on BOTH `calls_table` (L1 Landscape, `core/landscape/schema.py`)
+      AND `interpretation_events_table` (L3 session DB, `web/sessions/models.py`);
+      populated identically by `resolve_interpretation_event` (session side)
+      and the LLM-transform runtime plugin (Landscape side); Task 9
+      hash-equality test green.
 - [ ] Task 10 (audit-readiness `llm_interpretations` row activation)
-      green, committed (unconditional — Phase 2C has shipped).
+      green, committed (unconditional — Phase 2C has shipped);
+      audit-readiness panel warning for mismatched runtime model present.
 - [ ] Task 11 (orphan PENDING-row cleanup spec) documented; `refreshPending`
       test passes.
 - [ ] Task 12 (evals/composer-rgr regression suite) artifact exists;
       all four pass thresholds met.
-- [ ] Failure-mode table reviewed; no uncovered failure path.
+- [ ] Failure-mode table reviewed; no uncovered failure path (including
+      unresolved placeholder at runtime, F-17 detection path).
 - [ ] Tier-model enforcer pass (`scripts/cicd/enforce_tier_model.py
       check --root src/elspeth ...`). No new upward imports.
 - [ ] Audit primacy compliance: every recording call is wrapped in the
@@ -2055,6 +3277,10 @@ Then proceed to [18b-phase-5b-frontend.md](18b-phase-5b-frontend.md).
 |------|----------|---------|-------------|-------|
 | 2026-05-15 | Review panel | CHANGES_REQUESTED | B1, C1, C2, I1, I2 | Applied in prior revision. B1: added "Migration runner ownership" section documenting cumulative DB-delete impact and Phase 9 ownership. C1: added deploy constraint paragraph to the closed-enum extension section — production deploy blocked until Phase 9. C2: expanded Task 4 test item 2 with a concrete failing-test specification for `affected_node_id` writer-boundary validation. I1: added positive-case test 5a for the partial unique index. I2: added Task 10 to activate the `llm_interpretations` audit-readiness row using `interpretation_events_table`, with conditional-on-Phase-2A guard. |
 | 2026-05-18 | 7-reviewer panel | CHANGES_REQUESTED | C1, C2, C3, H1, MED-1, MED-2, MED-3, HIGH-1, HIGH-2, HIGH-3, HIGH-4, T-01, T-02, T-04, T-06, F1, F2, F3, F4, F6, F7, M3, W2 | Applied in this revision. Task 0 hard gate added. C1: DI fixes in Tasks 6+7 (no `get_authenticated_actor`/`get_session_service`). C2: n/a (clarification). C3: integration test paths corrected to `tests/integration/web/composer/`. H1: redaction helper renamed to `_summarize_interpretation_term` (American spelling, new definition). MED-1/HIGH-4: opt-out routing pivoted from `proposal_events` to `interpretation_events_table` across Tasks 1, 2, 4, 7, 9. MED-2: `InterpretationOptOutRecord` dropped; replaced by view comment on `InterpretationEventRecord`. MED-3: `async def _handle_request_interpretation_review` + dispatch spike (Option B, `_SESSION_AWARE_TOOL_HANDLERS`). HIGH-1: Task 10 conditional removed (Phase 2C has shipped). HIGH-2: telemetry NONE declarations added per Task 4 methods. HIGH-3: dispatch spike added as Pre-Task spike in Task 5. T-01: `_verify_session_ownership` added to Tasks 6+7 routes with IDOR regression tests. T-02/F2: content validators on `amended_value` (metachar, control chars, 1024-char single-line cap, credential prefilter). T-04/F5: credential-shape prefilter added to Task 3 and Task 5. T-06/F4: `model_identifier`, `model_version`, `provider`, `composer_skill_hash`, `arguments_hash` added to schema and contract. F1/F3: append-only trigger added to Task 2; `InterpretationSource` closed enum added. F6: failure-mode table section added. F7: evals regression suite spec (Task 12) added. M3: Task 11 orphan PENDING-row recovery added. `InterpretationChoice` extended with `ABANDONED`. |
+| 2026-05-18 | 9-reviewer panel | CHANGES_REQUESTED | F-1 through F-35 | Applied in this revision. F-1: NOT NULL × CHECK contradiction resolved — 9 columns flipped to nullable=True; opted_out CHECK rewritten as source-keyed (auto_interpreted_opt_out) rather than choice-keyed; user_approved row CHECK added; InterpretationEventRecord field types updated. F-2: prompt-injection bypass fixed — _validate_accepted_value_content shared helper added to web/validation.py; applied at tool boundary (_handle_request_interpretation_review against llm_draft) AND at service writer (resolve_interpretation_event) as defense-in-depth; accepted_as_drafted path now validated. F-3: Task 0.5 added (max_length caps + ASGI body cap). F-4: chat_messages immutability trigger added in Task 2. F-5: skill_markdown_history table and hash-atomicity spec added to Task 2 and Task 5. F-6: AUTO_INTERPRETED_NO_SURFACES writer specified in Task 5 (Option B). F-7: resolve WHERE clause explicitly includes AND session_id AND choice='pending'; IDOR test for cross-session event_id added to Task 6. F-8: trigger-existence test via production bootstrap path added to Task 2. F-9: Session DB PRAGMA discipline (WAL + busy_timeout + synchronous) added as Task 1.5. F-10: SESSION_SCHEMA_EPOCH / application_id / user_version added to Task 1.5. F-11: composition_state_id index added to Task 2. F-12: hash_domain_version column + INTERPRETATION_HASH_DOMAIN_V1 constant added to Task 2. F-13: arguments_hash determinism test added to Task 9. F-14: business-rule split (accepted_value computation) pushed to service; route now passes only choice + amended_value. F-15: telemetry posture differentiated at tool and route boundaries. F-16: Phase 9 migration notes block specified in Task 2. F-17: unresolved placeholder runtime detection sub-task added in Task 5. F-18: dual-registry dispatch invariant test added to Task 5. F-19: runtime model snapshot columns (runtime_model_identifier_at_resolve, runtime_model_version_at_resolve) added to Task 2 and Task 4. F-20: PII regex extension (email, phone, SSN-like) added to credential prefilter in Task 5. F-21: unresolved-placeholder runtime telemetry signal added as sub-task in Task 5. F-22: opt-out audit tooling note + session-end review route spec added to Task 7. F-23: IF NOT EXISTS + table-scoped DDL listener specified in Task 2. F-24: schema validator trigger registry extension noted in Task 2. F-25: BEGIN IMMEDIATE note added to Task 4. F-26: partial-index dialect symmetry note added to Task 2. F-27: write-lock annotation added to record_session_interpretation_opt_out. F-28: trigger IntegrityError classifier note added to Task 4. F-29: opt-out idempotency contract specified in Task 7. F-30: rate-limit window semantics (UTC midnight vs sliding 24h) pinned in Task 5. F-31: rate-limit constants moved to settings keys in Task 5. F-32: JWT benign-period negative test added to Task 5. F-33: skill-change governance note added to Task 8. F-34: _validate_accepted_value_content placed in web/validation.py (existing module), not a new _validation_helpers.py. F-35: opted-out two-source-of-truth note added to Task 2. |
+| 2026-05-18 | Cross-file F-1 closure | APPLIED | (no finding ID) | Cross-file coordination gap closed: added `resolved_prompt_template_hash` column to both the session `interpretation_events_table` (L3 session DB) and the runtime Landscape `calls_table` (L1 Landscape DB) per the Option A commitment in sibling doc 18-. Updated `InterpretationEventRecord` (Task 1) and `InterpretationEventResponse` (Task 3) to include the field. Updated `resolve_interpretation_event` (Task 4) to compute the hash via `stable_hash()` from `contracts/hashing.py` (patch → hash → write both sinks atomically). Added Task 9 cross-DB hash-equality verification test. Added failure-mode row for hash-chain mismatch. Added completion-criteria bullet for the column pair. Updated Tech Stack "No Landscape changes" bullet and file-structure prose to reflect that Phase 5b now touches one L1 column. Added `core/landscape/schema.py MODIFY` entry to the file-structure inventory. Updated Migration runner ownership section to require deletion of both session DB and Landscape DB. Closes the dangling forward-reference from 18- §"Hash-anchored cross-DB linkage". |
+| 2026-05-18 | Independent contradiction review | APPLIED | (no finding ID) | `auto_interpreted_no_surfaces` nullability contract: F-6 writer spec (Task 5) and line-409 prose aligned with `ck_interpretation_events_no_surfaces_shape` CHECK — LLM provenance (`model_identifier`, `model_version`, `provider`, `composer_skill_hash`) MUST be populated for `auto_interpreted_no_surfaces` rows; only the five interpretation surface fields (`composition_state_id`, `affected_node_id`, `tool_call_id`, `user_term`, `llm_draft`) are NULL. Two outlier sites corrected: (1) F-6 writer bullet list rewrote "all NULL" to "surface fields NULL, provenance NOT NULL" with explicit rationale paragraph citing the CHECK and schema comment; (2) line-409 prose changed "MAY be populated" to "MUST be populated" with asymmetry note. Three concordant sources (CHECK at 853-859, schema comment at 826-829, test spec at 1281-1284) were authoritative and left unchanged. |
+| 2026-05-18 | Plan amendment | APPLIED | (no finding ID) | Added shared-worktree section: `feat/composer-phase-5-chat-data-entry` at `.worktrees/composer-phase-5-chat-data-entry`; Phase 5a + Phase 5b ship as coordinated PR on one branch. Added worktree-root prefix note to File structure section (with `pipeline_composer.md` carve-out). |
 
 ---
 

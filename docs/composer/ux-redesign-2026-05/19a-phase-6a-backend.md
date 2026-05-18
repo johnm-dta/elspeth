@@ -1,8 +1,37 @@
 # Phase 6A — Backend: completion gestures (Save for review, signing, narrative declaration)
 
+> **Note on line-number citations.** Plan was authored against an earlier codebase snapshot. When a line citation is in conflict with reality, **trust `rg`, not the line number** — `rg -n "<symbol>" src/` is the authoritative locator. Symbols are stable; line numbers drift.
+
+---
+
+## ⚠️ OPERATOR ACTION REQUIRED — read before starting Task 1
+
+Phase 6 is a schema-change cohort and a signing-key cohort. Two operator-gated actions land before Task 1 commits:
+
+**1. Staging sessions-DB delete (B8 — destructive shared-state operation).**
+
+Task 1 bumps `SESSION_SCHEMA_EPOCH` from 3 to 4. The startup validator (`_assert_schema_sentinels()` at `web/sessions/schema.py:112`) refuses to start the service against any DB whose `PRAGMA user_version` is not 4. **Existing staging sessions DBs must be deleted on the next deploy.** Per `project_db_migration_policy`, this is the ELSPETH-canonical migration mechanism pre-Phase-9. Per `feedback_operator_gate_destructive_actions`, this authorization does **not** transit through "execute Task 1" — the operator must explicitly confirm before the epoch-bump commit lands on RC5.2 (or whatever release branch Phase 6 ships on).
+
+User state lost: any composer sessions saved in staging since the Phase 18 deploy. This is acknowledged cost; the structural fix is Phase 9 (migration runner).
+
+**2. Staging config `shareable_link_signing_key` (B9 — service-startup-blocking prerequisite).**
+
+`WebSettings.shareable_link_signing_key` is declared as `Field(...)` with no default. If Phase 6A deploys to a staging config that does not provide this key, the service crashes at startup. Generate the key once and add it to staging config **before** the Phase 6A deploy:
+
+```bash
+openssl rand -base64 32
+```
+
+Store the result in the staging configuration under `web.shareable_link_signing_key` (or the equivalent env var the deploy machinery surfaces). The key must be ≥ 32 bytes and must not appear in version control, logs, or chat transcripts. If the key is leaked or accidentally rotated, **every outstanding shareable link becomes a 401** — there is no graceful key-rotation story in v1 (recovery: re-issue links). The runbook entry for this lives in Task 12 (`docs/guides/sharing-pipelines.md`).
+
+**Both actions must be confirmed by the operator before Task 1 starts.** If only one is confirmed, Task 1 is blocked: the epoch bump without the signing key produces a service that won't start; the signing key without the epoch bump produces a service that starts on the old schema and rejects every shareable-link request with a 500 (no `composer_completion_events_table` to write to).
+
+---
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or superpowers:executing-plans. Steps use `- [ ]` checkboxes.
 
-**Goal:** Land the backend half of Phase 6 — the signing primitive and content-addressable HMAC-signed artifact that back the "Save for review" verb, the read-only inspect route for shareable-link recipients, the per-plugin `supports_narrative_summary` ClassVar declaration on the plugin Protocol that the frontend uses to choose result-rendering mode, and two Tier-1 audit events recorded in a new sessions-DB table. **One DB schema addition: a new `composer_completion_events_table` in the sessions DB for the two new completion-gesture audit events (`mark_ready_for_review`, `export_yaml`).** This follows the Phase 18 (5b) precedent of "one new table per event family" — see [18-phase-5b-surface-llm-interpretation.md](18-phase-5b-surface-llm-interpretation.md) §"interpretation_events_table" for the analogue. Per `project_db_migration_policy`, this is a schema-change cohort and requires a DB delete on next deploy. The signed save-for-review artifact is stored in the existing payload store as a content-addressable blob under the normal retention policy. The completion verb set is three, not four: Save-for-review, Run-pipeline (= existing Execute path; result rendering branches on narrative-mode), and Copy-YAML (= existing Export YAML route + audit event). Per design doc 09 ("Why not four"), Run-analysis is not a separate verb — narrative result rendering is the post-run rendering layer that consumes Phase 5b's interpretation events.
+**Goal:** Land the backend half of Phase 6 — the signing primitive and content-addressable HMAC-signed artifact that back the "Save for review" verb, the read-only inspect route for shareable-link recipients, the per-plugin narrative-summary opt-in via the existing `capability_tags` open-vocabulary channel (which the frontend uses to choose result-rendering mode), and two Tier-1 audit events recorded in a new sessions-DB table. **One DB schema addition: a new `composer_completion_events_table` in the sessions DB for the two new completion-gesture audit events (`mark_ready_for_review`, `export_yaml`).** This follows the Phase 18 (5b) precedent of "one new table per event family" — see [18-phase-5b-surface-llm-interpretation.md](18-phase-5b-surface-llm-interpretation.md) §"interpretation_events_table" for the analogue. Per `project_db_migration_policy`, this is a schema-change cohort and requires a DB delete on next deploy. The signed save-for-review artifact is stored in the existing payload store as a content-addressable blob under the normal retention policy. The completion verb set is three, not four: Save-for-review, Run-pipeline (= existing Execute path; result rendering branches on narrative-mode), and Copy-YAML (= existing Export YAML route + audit event). Per design doc 09 ("Why not four"), Run-analysis is not a separate verb — narrative result rendering is the post-run rendering layer that consumes Phase 5b's interpretation events.
 
 **Architecture:** Service-then-routes (mirrors Phase 1A and Phase 2A). A new `src/elspeth/web/shareable_reviews/` package exposes `ShareableReviewService` taking the existing `SessionServiceProtocol`, the sessions-DB connection (for writing to `composer_completion_events_table`), the payload store (from `app.state`), `WebSettings`, and the new `ShareTokenSigner` as injected dependencies. The token signer is a thin wrapper around `hmac.new(..., hashlib.sha256)` — it reuses the **primitive** from `core/landscape/exporter.py`, not the exporter API (different payload shape, different rotation cadence, different blast radius). The token is **self-verifying**: its payload encodes `(version, session_id, state_id, expires_at, nonce, payload_digest, signature)` where `payload_digest` is the content-address of the snapshot blob in the payload store. The signature is over the canonical-JSON of the payload (including `payload_digest`) — tampering with either the token fields or the blob detects on verify. One new sessions-DB table, three new routes, and one extension to the existing YAML route.
 
@@ -39,8 +68,8 @@ If a future operator decides to ship Phase 6 ahead of Phase 3, the fallback is d
 - `POST /api/sessions/{session_id}/mark-ready-for-review` — generates a fresh signed token + writes the snapshot to the payload store + inserts a `mark_ready_for_review` row in `composer_completion_events_table` + returns the token and share URL.
 - `GET /api/sessions/{session_id}/shareable-link` — re-mints a fresh token for the current `(session, state)` pair on demand. Because there is no per-token row, this endpoint always mints; idempotency at the artifact level is provided by content-addressing (identical snapshot → identical `payload_digest`).
 - `GET /api/sessions/shared/{token}` — read-only inspect view. Recipient still authenticates via `Depends(get_current_user)`; the token authorizes a specific authenticated user to read a session they don't own.
-- New `BaseTransform.supports_narrative_summary: ClassVar[bool] = False` declaration on the plugin Protocol. Set to `True` on `batch_classifier_metrics` and `batch_distribution_profile` in the same commit (bootstrap pair).
-- Plugin-schema endpoint extension: surface `supports_narrative_summary` on the existing per-plugin metadata payload consumed by the frontend catalog.
+- Narrative-summary opt-in via existing `BaseTransform.capability_tags` (`plugins/infrastructure/base.py:190`, open-vocabulary). Set `capability_tags = ("narrative-summary",)` on `batch_classifier_metrics` and `batch_distribution_profile` in the same commit (bootstrap pair).
+- No new wire field — the catalog already serializes `capability_tags` at `web/catalog/service.py:333,345`. The frontend reads the tag list it already receives.
 - Tier-1 audit event on YAML export (B3) via the existing `GET /api/sessions/{session_id}/state/yaml` route — the route already exists at `web/sessions/routes.py:5145`; this plan adds the audit write as an `export_yaml` row in `composer_completion_events_table`. The write is **sync, crash-on-failure** per CLAUDE.md audit primacy — no "low-priority / telemetry-class" carve-out.
 
 **Out of scope (explicit deferrals, with link to follow-up):**
@@ -83,9 +112,15 @@ Three candidates were considered:
 3. New `shareable_reviews` table with `(token, session_id, state_id, expires_at, created_by, signature, …)` — **rejected**: schema change (and per `project_db_migration_policy` forces a destructive DB delete).
 4. **Self-verifying HMAC token + content-addressable snapshot blob in the existing payload store, with audit event in `composer_completion_events_table`.** No per-token row. The token encodes everything needed to verify: session id, state id, expiry, nonce, payload digest, signature. The snapshot is fetched from the payload store by digest. The audit event lands in the new `composer_completion_events_table` in the sessions DB — see §"Audit-event recording" below.
 
-**Decision: option 4 (Path A amendment).** Per the schema-scope adjudication (`project_db_migration_policy`: any schema change including closed-enum extensions forces a DB delete), Phase 6 avoids schema changes to existing tables. The `composer_completion_events_table` is a new addition (one schema change, accepted under Path A), following the Phase 18 (5b) precedent of "one new table per event family." Option 4 preserves every audit property the original `shareable_reviews` table promised:
+**Decision: option 4 (Path A amendment).** The token + content-addressable blob model is the right shape for three reasons:
 
-**Important:** the term "schema-free" applies only to the **token + snapshot** persistence (HMAC capability + content-addressable blob). It does **not** apply to the **audit event**, which lands in the new `composer_completion_events_table` per §"Audit-event recording" below. The two storage concerns are deliberately separated: the token is the user-visible capability, the audit event is the operator-visible record of issuance.
+1. **No DB round-trip on verify.** The signed payload encodes everything `verify()` needs (session_id, state_id, expires_at, nonce, payload_digest). A reviewer's `GET /api/sessions/shared/{token}` does not query a tokens table to check validity — signature math alone is authoritative. Eliminates a class of "token exists but row stale / row deleted but token cached" race conditions.
+2. **Self-contained portable token.** The capability surface (what the reviewer can do) is the token; the audit surface (what the operator recorded) is `composer_completion_events_table`. Separating these lets the token travel through email/Slack/copy-paste without dragging the audit record along, and lets the audit record survive token expiry / payload-store reaping for the full retention window.
+3. **Schema scope is *audit*, not capability.** The `composer_completion_events_table` addition is a one-table schema-change cohort (accepted under Path A — see `project_db_migration_policy`), following the Phase 18 (5b) precedent of "one new table per event family." The token-and-blob design is what keeps the *capability* layer schema-free; the audit layer is allowed its own table.
+
+Option 4 preserves every audit property the original `shareable_reviews` table promised:
+
+**Layer separation reminder:** "no DB round-trip on verify" and "self-contained portable token" describe the **capability** layer. The **audit** layer is *not* schema-free — it lands in the new `composer_completion_events_table` per §"Audit-event recording" below. The two storage concerns are deliberately separated: the token is the user-visible capability, the audit event is the operator-visible record of issuance.
 
 | Property | Original (table) | Adjudicated (token + blob + sessions-DB event) |
 |---|---|---|
@@ -124,7 +159,8 @@ Two new Tier-1 audit events ship in Phase 6, recorded in the new `composer_compl
 **Primacy rules:**
 
 - **Sync, crash-on-failure.** Per CLAUDE.md audit primacy: "Audit fires first (sync, crash-on-failure)." Both event writes follow this discipline; there is no logging-not-raised carve-out for either. The sessions-DB write is a synchronous SQLAlchemy `connection.execute()` call inside the request handler; the HTTP response is not returned until the write commits.
-- If the audit write fails, the entire request fails. For `mark_ready_for_review`: no token is returned, no orphan blob is exposed via API (the blob may be written before the audit write; its existence is not user-visible without a token, and the payload-store retention policy reaps unreferenced blobs).
+- **Audit-first ordering (load-bearing).** For `mark_ready_for_review`, the sequence is: (1) build the snapshot dict in memory; (2) canonical-JSON-serialize it and compute `payload_digest = sha256(serialized_bytes)`; (3) **insert the `composer_completion_events` row** with `payload_digest` (audit fires first — sync, crash-on-failure); (4) write the serialized bytes to the payload store keyed by `payload_digest`; (5) sign the token (which includes `payload_digest`); (6) return the token to the caller. **The audit insert precedes the blob write**, not the other way around. The earlier "blob first, then audit, retention reaps orphans" framing inverted CLAUDE.md's primacy rule and is removed.
+- If the audit insert fails, the entire request fails before any blob write occurs. If the blob write fails after a successful audit insert, the entire request still fails (no token is signed, no token is returned), and the audit row stands as honest evidence of the attempt. A reviewer who could somehow synthesise a token for the recorded `payload_digest` would receive `ResourceNotFound` from the payload store — a clean failure mode. There is no retention-policy dependency for orphan-blob reaping (because the blob is never written without a prior audit row), and there is no audit-trail gap (because audit fires first).
 
 **The writer dependency:** `ShareableReviewService` and the YAML-export route take the sessions-DB connection (or a `ComposerCompletionEventWriter` service object) as an injected dependency. The write path is a direct `connection.execute(composer_completion_events_table.insert().values(...))` call — the same pattern `proposal_events_table` uses at its write site. Grep `proposal_events_table.insert()` in `web/` to find the existing pattern.
 
@@ -161,7 +197,7 @@ The signing key is sourced from a new `WebSettings.shareable_link_signing_key: b
 
 The canonical encoding is `json.dumps(payload_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")` followed by HMAC-SHA256, mirroring the exporter's discipline. The token is the URL-safe base64 of `len(payload_json).to_bytes(4, "big") + payload_json + signature_bytes` — a self-contained, parseable structure.
 
-**Verify ALWAYS uses `hmac.compare_digest`** (not `==`) — same discipline as the exporter at `exporter.py:142`.
+**Verify ALWAYS uses `hmac.compare_digest`** (not `==`) — constant-time signature comparison is required by the Python `hmac` documentation to defeat timing-side-channel attacks against signature verifiers. This is **new discipline** in the signer, not a reuse from `core/landscape/exporter.py` — the exporter uses `.hexdigest()` for record-signing (`exporter.py:142`) and does not perform a constant-time compare (records are signed for write, not verified at attacker-controlled boundaries). ELSPETH-internal precedents for `compare_digest` at boundary verifiers: `core/payload_store.py:111,163` and `web/blobs/service.py:759` (both compare a caller-supplied content_hash against a stored hash). The signer pattern matches those, not the exporter's.
 
 ---
 
@@ -188,10 +224,9 @@ The canonical encoding is `json.dumps(payload_dict, sort_keys=True, separators=(
 - `src/elspeth/web/config.py` — add `WebSettings.shareable_link_signing_key: bytes` (required) and `WebSettings.shareable_link_lifetime_seconds: int` (default 30 days).
 - `src/elspeth/web/app.py` — instantiate `ShareTokenSigner` and `ShareableReviewService`; `include_router(create_shareable_reviews_router())`. Inject the sessions-DB connection and the existing payload store.
 - `src/elspeth/web/sessions/routes.py` — extend the existing `GET /{session_id}/state/yaml` route at line 5145 to insert an `export_yaml` row in `composer_completion_events_table` before returning (sync, crash-on-failure).
-- `src/elspeth/plugins/infrastructure/base.py` — add `supports_narrative_summary: ClassVar[bool] = False` to the plugin Protocol that `BaseTransform` implements (see Task 8 for the Protocol-vs-concrete-class choice).
-- `src/elspeth/plugins/transforms/batch_classifier_metrics.py` — declare `supports_narrative_summary: ClassVar[bool] = True`.
-- `src/elspeth/plugins/transforms/batch_distribution_profile.py` — declare `supports_narrative_summary: ClassVar[bool] = True`.
-- `src/elspeth/web/catalog/` (verify path in Task 9) — surface `supports_narrative_summary` on the per-plugin metadata payload.
+- `src/elspeth/plugins/transforms/batch_classifier_metrics.py` — add `capability_tags = ("narrative-summary",)` class declaration.
+- `src/elspeth/plugins/transforms/batch_distribution_profile.py` — add `capability_tags = ("narrative-summary",)` class declaration.
+- (No `infrastructure/base.py` change. No `web/catalog/` change. `capability_tags` already exists end-to-end.)
 - `docs/architecture/adr/` — ADR for the shareable-reviews design and the HMAC artifact contract.
 
 **Not modified (deliberately):**
@@ -263,7 +298,7 @@ Both triggers MUST be registered in `_REQUIRED_SQLITE_TRIGGERS` so the startup v
 
 **Schema-epoch bump (required):**
 
-Sessions-DB schema additions MUST bump `SESSION_SCHEMA_EPOCH` at `src/elspeth/web/sessions/models.py:55` from `2` to `3`. The sentinel is validated at startup by `_assert_schema_version()` in `src/elspeth/web/sessions/schema.py:140–143`: if the DB's `PRAGMA user_version` doesn't match the constant, the service refuses to start and instructs the operator to delete the sessions DB.
+Sessions-DB schema additions MUST bump `SESSION_SCHEMA_EPOCH` at `src/elspeth/web/sessions/models.py:56` from `3` to `4`. Phase 18 already bumped this from `2` to `3` as part of its remediation cohort (commit `3dee19f8d` and prior); Phase 6 continues the discipline by bumping again for its own schema-change cohort. The sentinel is validated at startup by `_assert_schema_sentinels()` in `src/elspeth/web/sessions/schema.py:112`: if the DB's `PRAGMA user_version` doesn't match the constant, the service refuses to start and instructs the operator to delete the sessions DB.
 
 This is the **mechanical trigger** for the DB-delete operator action documented in `project_db_migration_policy` (memory). Without the bump, live deployments at epoch 2 pass validation and crash mid-request on the first INSERT to the new table — the exact silent-corruption mode the sentinel exists to prevent. The Phase 18 defect-pass finding `elspeth-c03e9bfcf8` filed the same bug class against the Landscape DB's `SQLITE_SCHEMA_EPOCH`; Phase 6 must not repeat it on the sessions DB.
 
@@ -371,8 +406,8 @@ def test_session_fk_cascades_on_delete() -> None:
             conn.commit()
 
 
-def test_session_schema_epoch_bumped_to_3() -> None:
-    """Phase 6 schema-change cohort: SESSION_SCHEMA_EPOCH must bump from 2 to 3.
+def test_session_schema_epoch_bumped_to_4() -> None:
+    """Phase 6 schema-change cohort: SESSION_SCHEMA_EPOCH must bump from 3 to 4.
 
     Per project_db_migration_policy, bumping the epoch is the mechanical signal
     that triggers the operator's DB-delete action on next deploy. Without the
@@ -381,7 +416,7 @@ def test_session_schema_epoch_bumped_to_3() -> None:
     """
     from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH
 
-    assert SESSION_SCHEMA_EPOCH == 3
+    assert SESSION_SCHEMA_EPOCH == 4
 
 
 def test_update_trigger_blocks_mutation() -> None:
@@ -434,7 +469,7 @@ def test_delete_trigger_blocks_removal() -> None:
 
 - [ ] **Step 2: Run to fail.**
 - [ ] **Step 3: Implementation.** Add the `composer_completion_events_table` definition to `src/elspeth/web/sessions/models.py` alongside `proposal_events_table` and `interpretation_events_table`. No migration script — per `project_phase9_sqlite_only`, the Phase 9 migration runner owns schema evolution; for now, DB delete on redeploy is the documented operator action.
-  - Bump `SESSION_SCHEMA_EPOCH = 3` in `src/elspeth/web/sessions/models.py` (currently `2` at line 55). The validator at `web/sessions/schema.py:140` enforces this against `PRAGMA user_version`; existing deployments will refuse startup until the sessions DB is deleted, matching the documented operator action.
+  - Bump `SESSION_SCHEMA_EPOCH = 4` in `src/elspeth/web/sessions/models.py` (currently `3` at line 56 — Phase 18 already bumped 2→3). The validator `_assert_schema_sentinels()` at `web/sessions/schema.py:112` enforces this against `PRAGMA user_version`; existing deployments will refuse startup until the sessions DB is deleted, matching the documented operator action.
   - Add the two trigger DDL strings to `src/elspeth/web/sessions/models.py` adjacent to the existing interpretation-events trigger registrations. Add both to `_REQUIRED_SQLITE_TRIGGERS` so the startup validator catches missing triggers.
 - [ ] **Step 4: Run to pass.**
 - [ ] **Step 5: Commit.** `feat(web/sessions): add composer_completion_events_table + append-only triggers + bump SESSION_SCHEMA_EPOCH (Phase 6 schema-change cohort)`.
@@ -767,6 +802,8 @@ class ShareTokenSigner:
 
 Three response models, all strict + extra-forbid. `SharedInspectResponse` reuses the Phase 2 `AuditReadinessSnapshot` model verbatim — the wire shape 19b consumes includes `audit_readiness`.
 
+**Post-Phase-18 merge fact (verified 2026-05-19).** The Phase-2 `AuditReadinessSnapshot` model was extended by Phase 18 (5b) to include an `llm_interpretations` row as the fifth member of the closed `ReadinessRowId` enum (`web/audit_readiness/models.py:14–21`). The snapshot service already aggregates `interpretation_events_table` rows server-side at snapshot-build time (`web/audit_readiness/service.py:218–262`) to populate this row's status, summary, and detail. **Phase 6 does not need to add this aggregation** — calling the existing snapshot service yields the row automatically. The wire field stays `audit_readiness: AuditReadinessSnapshot` and the reviewer in the shared view sees the same six-row panel the owner sees, sourced server-side.
+
 - [ ] **Step 1: Failing test.**
 
 ```python
@@ -871,30 +908,41 @@ The `audit_readiness` field is **load-bearing**: 19b Task 8 mounts `<SharedAudit
 
 **Files:** `web/shareable_reviews/service.py`, `tests/unit/web/shareable_reviews/test_service.py`.
 
-The service owns: validating the session is in a runnable state, freezing the composition snapshot, writing the snapshot blob to the payload store and obtaining the digest, signing the token, writing the audit event row to `composer_completion_events_table`, and resolving an inbound token to a read-only snapshot.
+The service owns: validating the session is in a runnable state, freezing the composition snapshot, **freezing the audit-readiness snapshot at mark-time and embedding it in the blob**, writing the blob to the payload store and obtaining the digest, signing the token, writing the audit event row to `composer_completion_events_table`, and resolving an inbound token to a read-only snapshot.
 
 **Methods:**
 
 - `mark_ready_for_review(session_id: UUID, user_id: str) -> MarkReadyForReviewResponse`
 - `get_shareable_link(session_id: UUID, user_id: str) -> ShareableLinkResponse` — always mints a fresh token over the current (session, state); content-addressing makes this idempotent at the blob level even though the token strings differ.
-- `resolve_token(token: str, requesting_user_id: str) -> SharedInspectResponse` — validates token, reads the snapshot blob from the payload store by digest, fetches the Phase 2 audit-readiness snapshot for the resolved state, returns the response. Recipient auth happens at the route level; this method assumes auth has succeeded.
+- `resolve_token(token: str, requesting_user_id: str) -> SharedInspectResponse` — validates token, reads the snapshot blob from the payload store by digest, returns the response with `audit_readiness` read directly from the frozen blob. Recipient auth happens at the route level; this method assumes auth has succeeded.
 
-**Snapshot blob shape:** the snapshot is canonical-JSON `{pipeline_metadata, composition_snapshot, yaml, created_by_user_id, created_at}`. The `payload_digest` is `sha256:<hex>` of the canonical bytes. The blob is stored under the payload store's normal retention policy.
+**Snapshot blob shape (load-bearing — frozen-at-mark-time discipline):** the snapshot is canonical-JSON `{pipeline_metadata, composition_snapshot, yaml, audit_readiness, created_by_user_id, created_at}`. The `payload_digest` is `sha256:<hex>` of the canonical bytes. The blob is stored under the payload store's normal retention policy.
+
+**Why `audit_readiness` is frozen into the blob, not fetched fresh at resolve time** (decided 2026-05-19, post-Phase-18 merge):
+
+1. **Audit-trail integrity.** Per CLAUDE.md auditability: "Every decision must be traceable to source data, configuration, and code version." A shareable review must show the reviewer exactly what the owner saw at the moment of mark-for-review. A fresh fetch at resolve-time would let the snapshot drift if validation state changes between mark and resolve (a transform's plugin trust class is re-classified, a secret expires, the underlying composition is unwittingly mutated). The reviewer would then see a different readiness panel than the owner ever did, and the audit record would not match the share artifact.
+2. **Content-addressing.** The `payload_digest` is the SHA-256 of the blob. Freezing `audit_readiness` into the blob means the digest captures the readiness fingerprint too; `composer_completion_events_table.payload_digest` becomes an evidentially complete reference. With a fresh fetch, the digest only covers the composition shape, and "what readiness signal accompanied this share?" requires a separate audit query.
+3. **Non-owner permission boundary.** The Phase-2 snapshot service signature is `ReadinessService.build(session_id, user_id, ...)` (`web/audit_readiness/service.py:198`). The `user_id` parameter feeds `validate_state(state, user_id=user_id)` and `_scoped_secret_resolver.list_refs(user_id)`. Whether these accept an arbitrary authenticated user_id (the reviewer's) or require owner identity is implementation-dependent — and fragile to future changes. Freezing the snapshot at mark-time uses the owner's user_id (the snapshot the owner saw and approved), and `resolve_token` never needs to call the snapshot service at all. The permission question disappears.
+
+**Mark-time audit-readiness invariant.** `mark_ready_for_review` calls `ReadinessService.build(session_id, user_id)` once, embeds the returned `AuditReadinessSnapshot` in the blob, then computes the digest. **The composition must pass validation before marking** (existing rule), but additionally any readiness row whose `status == "error"` should produce `CompositionNotRunnableError` — sharing a known-broken readiness state would be share-theatre. `status == "warning"` (e.g. `llm_interpretations` with pending review) is permitted; the reviewer can see the warning. Tests must cover both gates explicitly.
 
 **Validation contract:** `mark_ready_for_review` requires the composition to pass validation (per design doc 09 "Conditions"). It calls `ExecutionService.validate(session_id)` and refuses with a typed `CompositionNotRunnableError` if `is_valid is False`. The route translates this to a 409.
 
-**Audit-event recording:** on success, `mark_ready_for_review` inserts a `mark_ready_for_review` row into `composer_completion_events_table` with `(id, session_id, composition_state_id, event_type, actor, created_at, payload_digest, expires_at)`. The insert is **sync, crash-on-failure** — if the audit write fails, the entire request fails and no token is returned to the caller. This matches CLAUDE.md audit primacy.
+**Audit-event recording (audit-first ordering):** the request handler computes the snapshot bytes and `payload_digest` first, then **inserts the audit row before writing the blob**. Sequence: (1) build snapshot dict in memory; (2) canonical-JSON-serialize and compute `payload_digest`; (3) `connection.execute(composer_completion_events_table.insert().values(...))` with `(id, session_id, composition_state_id, event_type='mark_ready_for_review', actor, created_at, payload_digest, expires_at)`; (4) write blob to payload store; (5) sign token; (6) return. The insert is **sync, crash-on-failure** — if the audit write fails, no blob is ever written and no token is returned. If the blob write fails after the audit insert, the audit row stands as honest evidence of the attempt; no token is returned; no orphan blob exists. This matches CLAUDE.md audit primacy verbatim — see §"Audit-event recording" for the full rationale.
 
 - [ ] **Step 1: Failing tests.** Cover:
-    1. `mark_ready_for_review` happy path: writes blob, records audit event, returns token + digest.
+    1. `mark_ready_for_review` happy path: writes blob (with frozen `audit_readiness`), records audit event, returns token + digest.
     2. `mark_ready_for_review` raises `CompositionNotRunnableError` when validation fails.
-    3. `mark_ready_for_review` propagates audit-write failures (no token returned, no orphan blob exposed via API).
-    4. `get_shareable_link` mints a fresh token every call; two calls on an unchanged state yield identical `payload_digest`.
-    5. `resolve_token` returns the snapshot for a valid token, including the populated `audit_readiness` field.
-    6. `resolve_token` raises `InvalidToken` for tampered/expired tokens.
-    7. `resolve_token` raises `ResourceNotFound` if the payload store has expired the blob (token verifies but blob is gone).
+    3. `mark_ready_for_review` raises `CompositionNotRunnableError` when any readiness row has `status == "error"` (the new mark-time gate documented above).
+    4. `mark_ready_for_review` succeeds when readiness rows have `status == "warning"` (e.g. `llm_interpretations` with pending review) — warning is not a blocker; the reviewer sees the warning.
+    5. `mark_ready_for_review` propagates audit-write failures (no token returned, no orphan blob exposed via API).
+    6. `get_shareable_link` mints a fresh token every call; two calls on an unchanged state yield identical `payload_digest`.
+    7. `resolve_token` returns the snapshot for a valid token; `audit_readiness` is read **directly from the frozen blob** (not fetched fresh) — assert by mutating the live readiness state between mark and resolve, then assert resolve still returns the mark-time view.
+    8. `resolve_token` raises `InvalidToken` for tampered/expired tokens.
+    9. `resolve_token` raises `ResourceNotFound` if the payload store has expired the blob (token verifies but blob is gone).
+   10. `resolve_token` does **not** call `ReadinessService.build()` (proves no permission-boundary coupling). Verify via mock-call-count assertion on the injected readiness service.
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Inject `SessionServiceProtocol`, `ExecutionService`, `ShareTokenSigner`, `WebSettings`, the **sessions-DB connection** (for writing to `composer_completion_events_table` — same connection used by `proposal_events_table` writes; find via grep `proposal_events_table.insert()` in `web/` to identify the existing injection site and reuse the pattern), the **payload store** (existing infrastructure; from `app.state`), and the **Phase 2 audit-readiness service** (to populate `audit_readiness` on resolve).
+- [ ] **Step 3: Implementation.** Inject `SessionServiceProtocol`, `ExecutionService`, `ShareTokenSigner`, `WebSettings`, the **sessions-DB connection** (for writing to `composer_completion_events_table` — same connection used by `proposal_events_table` writes; find via grep `proposal_events_table.insert()` in `web/` to identify the existing injection site and reuse the pattern), the **payload store** (existing infrastructure; from `app.state`), and the **Phase 2 audit-readiness service** (called at mark-time only, to freeze the snapshot into the blob — never called from `resolve_token`).
 - [ ] **Step 4: Run to pass.**
 - [ ] **Step 5: Commit.** `feat(web/shareable_reviews): add ShareableReviewService with mark/get/resolve over payload store + sessions-DB audit`.
 
@@ -958,85 +1006,76 @@ app.include_router(create_shareable_reviews_router())
 
 ---
 
-## Task 8: Plugin narrative-summary ClassVar declaration
+## Task 8: Plugin narrative-summary opt-in via `capability_tags`
 
-**Files:** `plugins/infrastructure/base.py`, `plugins/transforms/batch_classifier_metrics.py`, `plugins/transforms/batch_distribution_profile.py`, tests in `tests/unit/plugins/`.
+**Files:** `plugins/transforms/batch_classifier_metrics.py`, `plugins/transforms/batch_distribution_profile.py`, tests in `tests/unit/plugins/`.
 
-Per roadmap §E3 verdict (c) + (b) bootstrap: `supports_narrative_summary` is declared as `ClassVar[bool]` on the plugin Protocol that `BaseTransform` implements. Bootstrap declares the flag `True` on the two batch transforms.
+**Mechanism (revised 2026-05-19 per multi-reviewer adjudication B6).** `BaseTransform` already exposes `capability_tags: tuple[str, ...]` (`plugins/infrastructure/base.py:190`) as an **open-vocabulary discovery channel**. Its docstring at `base.py:197–214` names discovery affordances as the primary use case ("filter chips, opt-in feature flags, presence/absence checks in the frontend"). The catalog already serializes it to the wire at `web/catalog/service.py:333,345`. Phase 6's narrative-summary opt-in is exactly this shape.
 
-**Protocol vs base class:** Phase 6 puts the `ClassVar[bool]` on the **Protocol** that `BaseTransform` adheres to. If a plugin-facing Protocol does not yet exist in `infrastructure/`, this task introduces it as a `typing.Protocol` with `supports_narrative_summary: ClassVar[bool]`, and `BaseTransform` declares the attribute as `ClassVar[bool] = False`. The runtime class attribute on `BaseTransform` provides the default; the Protocol pins the contract for any future non-`BaseTransform` plugin.
-
-- [ ] **Step 1: Failing test.**
+**Phase 6 declares opt-in by tagging:**
 
 ```python
-"""Tests for supports_narrative_summary ClassVar declaration on transforms."""
+# plugins/transforms/batch_classifier_metrics.py
+class BatchClassifierMetrics(BaseTransform):
+    capability_tags = ("narrative-summary",)
+    # ... existing class body ...
+```
 
-from typing import ClassVar, get_type_hints
+**No `ClassVar[bool]`, no Protocol modification, no catalog-response extension, no TypeScript type-extension, no new frontend hook field.** The tag is consumed in Phase 6B by `useNarrativeMode` via `capability_tags.includes("narrative-summary")` on the existing wire shape.
 
-from elspeth.plugins.infrastructure.base import BaseTransform
+**Why this is the right shape (3 reasons):**
+
+1. `capability_tags` is *already* an "open vocabulary" infrastructure designed for exactly this use case. Adding a `ClassVar[bool]` for each new opt-in would create N parallel discovery channels where one already exists. Systems reviewer's W1 ("first of a family of ClassVar booleans") is moot.
+2. The catalog already serializes `capability_tags`. Phase 6 adds zero new fields to the wire.
+3. A future opt-in (e.g. "supports-streaming-results") is a one-line plugin change with no infrastructure work — matching the `feedback_default_is_fix_not_ticket` discipline.
+
+- [ ] **Step 1: Failing tests.**
+
+```python
+"""Tests for narrative-summary capability_tags membership on the bootstrap transforms."""
+
 from elspeth.plugins.transforms.batch_classifier_metrics import BatchClassifierMetrics
 from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
 
 
-def test_basetransform_default_false() -> None:
-    assert BaseTransform.supports_narrative_summary is False
+def test_batch_classifier_metrics_tags_narrative_summary() -> None:
+    assert "narrative-summary" in BatchClassifierMetrics.capability_tags
 
 
-def test_batch_classifier_metrics_opts_in() -> None:
-    assert BatchClassifierMetrics.supports_narrative_summary is True
+def test_batch_distribution_profile_tags_narrative_summary() -> None:
+    assert "narrative-summary" in BatchDistributionProfile.capability_tags
 
 
-def test_batch_distribution_profile_opts_in() -> None:
-    assert BatchDistributionProfile.supports_narrative_summary is True
+def test_narrative_summary_tag_on_real_plugin_instance() -> None:
+    """Q5 (quality reviewer): integration-grade assertion using a real plugin instance.
 
-
-def test_attribute_is_classvar() -> None:
-    """The attribute MUST be declared ClassVar[bool] per roadmap §E3 verdict (c)."""
-    # The flag is a per-class declaration, not a per-instance field. ClassVar
-    # makes that intent explicit and prevents the dataclass machinery from
-    # treating it as an instance field.
-    hints = get_type_hints(BaseTransform, include_extras=True)
-    annotation = hints.get("supports_narrative_summary")
-    # ClassVar[bool] shows up in get_type_hints with the ClassVar wrapper preserved
-    # when include_extras=True. Assert the wrapper is present.
-    assert annotation is not None
-    assert str(annotation).startswith("typing.ClassVar"), (
-        f"Expected ClassVar[bool], got {annotation!r}"
-    )
+    CLAUDE.md mandates that integration tests use ``from_plugin_instances()``.
+    For Phase 6's narrative-mode trigger, the assertion is equivalent to: instantiate
+    a pipeline containing a tagged transform, then read the tag off the plugin
+    instance. This catches the failure mode where the class attribute is correct
+    but is lost through some metaclass-style wrapping.
+    """
+    plugin = BatchClassifierMetrics(name="t1")
+    assert "narrative-summary" in plugin.capability_tags
 ```
 
 - [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Add the ClassVar declaration to `BaseTransform` adjacent to `is_batch_aware` at base.py:179, with a docstring explaining the contract: "When True, the composer's Run-pipeline result rendering surfaces this plugin's output as a narrative summary rather than a table preview. The plugin's output schema MUST include a `summary` field carrying the narrative text. Bootstrap pair: `batch_classifier_metrics` and `batch_distribution_profile`."
+- [ ] **Step 3: Implementation.** Add `capability_tags = ("narrative-summary",)` as a class-level declaration on each bootstrap transform. Match the existing style for class-level declarations in the same file.
 
-```python
-from typing import ClassVar
-
-class BaseTransform:
-    # ...
-    is_batch_aware: bool = False
-    supports_narrative_summary: ClassVar[bool] = False  # roadmap §E3 verdict (c)
-```
-
-Set `supports_narrative_summary: ClassVar[bool] = True` on each of the two bootstrap transforms.
-
-The docstring is load-bearing: it pins the wire contract the frontend consumes in Phase 6B. If a future plugin opts in without producing a `summary` field, the frontend renders an empty narrative — name this in the docstring.
+The docstring of `BaseTransform.capability_tags` already documents the open-vocabulary discipline. Phase 6 does not extend the docstring — the `"narrative-summary"` tag's wire-contract semantics (plugin output schema must include a `summary` field) are documented at the bootstrap-plugin site in the per-class docstring of `BatchClassifierMetrics`/`BatchDistributionProfile`.
 
 - [ ] **Step 4: Run to pass.**
-- [ ] **Step 5: Commit.** `feat(plugins): declare supports_narrative_summary as ClassVar[bool] + opt in the two batch transforms`.
+- [ ] **Step 5: Commit.** `feat(plugins): tag batch_classifier_metrics + batch_distribution_profile with capability_tags=("narrative-summary",) — narrative opt-in via existing open-vocabulary channel`.
 
 ---
 
-## Task 9: Surface `supports_narrative_summary` in plugin catalog API
+## Task 9: DELETED (folded into existing capability_tags catalog surface)
 
-**Files:** `web/catalog/` (verify file path during step 1), `tests/integration/web/test_catalog_narrative_field.py`.
+**Status:** Removed 2026-05-19 per multi-reviewer adjudication B6.
 
-The frontend reads plugin metadata via the catalog endpoint to decide whether to render a narrative summary. The flag must be in the response.
+The catalog response already serializes `capability_tags` at `web/catalog/service.py:333,345`. Phase 6's narrative-summary opt-in rides this existing serialization with zero new infrastructure. Task 8 above completes the work that Task 9 was meant to surface; nothing further is required on the backend.
 
-- [ ] **Step 1: Failing test.** Hit the existing catalog endpoint and assert `supports_narrative_summary` is present on every transform entry, and is `True` for the two bootstrap plugins.
-- [ ] **Step 2: Run to fail.**
-- [ ] **Step 3: Implementation.** Find the catalog response builder (grep `is_batch_aware` in `web/catalog/`; the new field follows the same surfacing pattern). Add the field to the response model and the projection.
-- [ ] **Step 4: Run to pass.**
-- [ ] **Step 5: Commit.** `feat(web/catalog): expose supports_narrative_summary on transform metadata`.
+Downstream renumbering: subsequent tasks remain numbered 10–12 to keep cross-references stable; the gap at "Task 9" is intentional and documents the simplification.
 
 ---
 
@@ -1080,7 +1119,7 @@ The frontend reads plugin metadata via the catalog endpoint to decide whether to
 19b adds:
 1. `CompletionBar.tsx` in the side rail with three buttons (Save-for-review, Run-pipeline, Export-YAML — three verbs, not four).
 2. Save-for-review confirmation + shareable-link display.
-3. Result-rendering refactor: detect pipeline plugins with `supports_narrative_summary=True` → narrative summary (consuming Phase 5b interpretation events as the overlay); else existing table preview.
+3. Result-rendering refactor: detect pipeline plugins whose `capability_tags` includes `"narrative-summary"` → narrative summary (consuming Phase 5b interpretation events as the overlay); else existing table preview.
 4. Export YAML top-level button (the existing `YamlView.tsx` drawer stays).
 5. `#/shared/{token}` route + read-only inspect view consuming `SharedInspectResponse` (including `audit_readiness`).
 
@@ -1088,12 +1127,41 @@ Backend wire contracts that 19b consumes:
 - `MarkReadyForReviewResponse` shape (Task 4).
 - `ShareableLinkResponse` shape (Task 4).
 - `SharedInspectResponse` shape including `audit_readiness: AuditReadinessSnapshot` (Task 4).
-- `supports_narrative_summary` on the catalog response (Task 9).
+- `capability_tags` on the catalog response (already present pre-Phase-6 — see `web/catalog/service.py:333,345`). Phase 6 adds no new wire field; Phase 6B reads existing data.
 - Existing `GET /state/yaml` route (no shape change; Task 7 only adds the audit-event side effect).
 
 ---
 
 ## Review history
+
+**2026-05-19 — Multi-reviewer Go/No-Go panel applied (CONDITIONAL → GO)**
+
+Four reviewers (reality / architecture / quality / systems) returned CONDITIONAL GO with nine blockers. All nine resolved in-document:
+
+- **B1 (epoch already 3):** Task 1 + §Audit-event recording corrected to bump SESSION_SCHEMA_EPOCH from `3` to `4` (Phase 18 already shipped the 2→3 bump). Location citation corrected from `schema.py:55` to `models.py:56`. Validator function name corrected from `_assert_schema_version` (does not exist) to `_assert_schema_sentinels` (line 112 in `web/sessions/schema.py`). Test name updated to `test_session_schema_epoch_bumped_to_4`.
+- **B2 (function name):** all four occurrences of `_assert_schema_version` replaced with `_assert_schema_sentinels`; line citation corrected from 140–143 to 112.
+- **B3 (false signing-primitive precedent):** §"Signing primitive" reframed — `hmac.compare_digest` is new discipline in the signer (constant-time compare required by Python `hmac` docs), not a reuse from `exporter.py:142` which uses `.hexdigest()` and has no compare. Real ELSPETH-internal precedents named: `core/payload_store.py:111,163` and `web/blobs/service.py:759`.
+- **B6 (highest-leverage simplification — capability_tags substitution):** Task 8 fully rewritten to use existing `BaseTransform.capability_tags` open-vocabulary channel rather than a new `ClassVar[bool]`. Task 9 deleted (catalog already serializes `capability_tags` at `web/catalog/service.py:333,345`). Goal/Scope/File-structure/Sibling-work-preview/Risks references all switched from `supports_narrative_summary` to `"narrative-summary" in capability_tags`. Eliminates: a Protocol modification, a new catalog field, a new TypeScript type extension, a new frontend hook field, and the systems reviewer's W1 ("first of a family of ClassVar booleans"). Plugin E2E test specified per Q5.
+- **B7 (audit-primacy ordering inversion):** §"Audit-event recording" and Task 5 reordered. New canonical sequence: build snapshot → canonical-JSON-serialize → compute payload_digest → **audit insert** → blob write → sign token → return. The earlier "blob first, retention reaps orphans" framing inverted CLAUDE.md primacy and is removed. Task 5's failing-tests list grew to cover audit-first ordering explicitly.
+- **B8 (operator-gate the DB-delete cohort):** OPERATOR ACTION block added at the top of the document, before Task 1. Names the destructive shared-state operation explicitly per `feedback_operator_gate_destructive_actions`.
+- **B9 (staging-config gate for `shareable_link_signing_key`):** OPERATOR ACTION block pairs the staging-DB delete with the signing-key prerequisite. `openssl rand -base64 32` generation step named. Service-crash-at-startup failure mode named.
+
+Non-blocking recommended fixes also applied:
+
+- "Trust `rg`, not the line number" note added at the top of the file.
+- HMAC+blob rationale reframed: drop "avoids schema-change cohort" (false — Task 1 *is* a schema-change cohort). Replaced with the three real motivations: no DB round-trip on verify, self-contained portable token, separation of capability surface from audit surface.
+
+**Phase 18 merge reconciliation (continued — earlier same-day pass)**
+
+**2026-05-19 — Post-Phase-18 merge reconciliation**
+
+- Phase 18 (5b) merged to RC5.2 (commit `3dee19f8d`). The validation review at `/home/john/.claude/plans/docs-composer-ux-redesign-2026-05-please-dazzling-dove.md` §B Check 1 was wrong on one point: 5b did *not* leave `AuditReadinessSnapshot` unchanged. 5b extended the closed `ReadinessRowId` enum with `"llm_interpretations"` (`web/audit_readiness/models.py:14–21`) and added a model-validator clause that requires all six rows to be present, and 5b's snapshot service (`web/audit_readiness/service.py:218–262`) now performs the server-side `interpretation_events_table` aggregation that the validation review's adjudicated Issue A (b) verdict had proposed Phase 6 implement. The work is structurally pre-done.
+- Task 4 §"Post-Phase-18 merge fact" added — names the closed enum and the service line range that Phase 6 inherits.
+- Task 5 redesigned around frozen-at-mark-time `audit_readiness` in the snapshot blob (was: fresh fetch at resolve-time). Three rationales recorded: audit-trail integrity (the reviewer must see the owner's mark-time view, not drift), content-addressing (the `payload_digest` becomes evidentially complete), and non-owner permission boundary collapse (`resolve_token` never calls `ReadinessService.build()` and therefore never needs reviewer-vs-owner permission reasoning).
+- Task 5 mark-time gate strengthened: `mark_ready_for_review` now raises `CompositionNotRunnableError` when any readiness row has `status == "error"` (sharing a known-broken readiness state would be share-theatre). `status == "warning"` is permitted; the reviewer sees the warning.
+- Task 5 tests grew by four cases: warning-permitted, error-blocked, frozen-not-fresh (mutate readiness between mark and resolve; assert resolve still returns the mark-time view), and resolve-never-calls-ReadinessService-build (mock-call-count assertion).
+- Blob shape updated: `{pipeline_metadata, composition_snapshot, yaml, audit_readiness, created_by_user_id, created_at}` (was: without `audit_readiness`). Cross-coupled to the `payload_digest` definition.
+- 19b sibling edits applied in parallel: Task 6 (narrative overlay) pinned to a wall-clock run-filter on `interpretationEventsStore`; Task 8 (`SharedAuditReadinessPanel`) rewritten to iterate `snapshot.rows` (was: `snapshot.checks`, which was a pre-merge guess at the field name); the snapshot's actual `ReadinessRow` shape replaces the placeholder fixture.
 
 **2026-05-18 — Path A adjudication applied (false-premise correction)**
 

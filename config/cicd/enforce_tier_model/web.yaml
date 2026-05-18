@@ -49,7 +49,7 @@ allow_hits:
   reason: "Tier 3 boundary \u2014 plugin_type from URL path parameter, lookup in constant dict"
   safety: Returns None on miss, handled by 404 response
   expires: null
-- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=c2b299b5af04fa75
+- key: web/config.py:R5:WebSettings:_reject_blank_path_strings:fp=1d4fbdc28be0b96a
   owner: architecture
   reason: "Pydantic before-validator at Tier 3 config boundary \u2014 isinstance(v, str) distinguishes raw YAML string input\
     \ (which may be all-whitespace) from already-coerced Path values or None, rejecting blank strings before Pydantic's str\u2192\
@@ -427,7 +427,7 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=871776fa3f817d23
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=8697347d710d77a5
   owner: web-composer
   reason: "Narrow OSError around storage_path.write_bytes(old_content) rollback \u2014 disk faults during post-replace divergence\
     \ rollback expected; programmer bugs still propagate"
@@ -435,13 +435,13 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=61bbdd70d4bfd8c0
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=2568244a2f3b77af
   owner: web-composer
   reason: "Narrow OSError around tombstone restore after a failed blob delete \u2014 compensation disk faults must not bury\
     \ the primary DB exception"
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=f6efca749d6531e6
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=a116a31977d63ffe
   owner: web-composer
   reason: "Tier-3 trust boundary \u2014 UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure\
     \ mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content). Failure\
@@ -451,7 +451,7 @@ allow_hits:
     lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the audit-bound facts.warnings
     tuple; integrity guards (status=ready, hash match) remain authoritative.
   expires: null
-- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=cc0c68adfd809d81
+- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=4d464bfbeb7d95ce
   owner: web-composer
   reason: "Preview proof boundary \u2014 ExpressionEvaluationError from evaluating a gate condition against bounded observed-CSV\
     \ sample rows is the exact runtime failure class this proof diagnostic exists to catch."
@@ -817,7 +817,7 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan blob_id and target session_id;
     storage file unlinked best-effort; primary copy exception remains the headline
   expires: null
-- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=423e39669c8b7ee1
+- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=d4935431c3b38c9a
   owner: web-sessions
   reason: Type check for envelope format in composition state deserialization
   safety: Handles both raw and enveloped formats
@@ -1091,17 +1091,17 @@ allow_hits:
   reason: "Tier 3 \u2014 fingerprint key from deployment environment; os.environ.get followed by check-and-crash"
   safety: Missing key raises RuntimeError immediately; no silent default
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=49b76afcf88c1ee5
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=334a67901a99cb89
   owner: web-sessions
   reason: "derived_from_map.get() on seed_id \u2014 seed may not exist in derived_from_map (states without derived_from parents)"
   safety: Returns None, while-loop terminates naturally
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=074b5853226bd7fb
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=f3fbf22e1022d9e6
   owner: web-sessions
   reason: "derived_from_map.get() traversing parent chain \u2014 parent may reference state outside session or not in map"
   safety: Returns None, terminates transitive closure walk
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=61e124284cb3b0a0
+- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=02043aefb828c388
   owner: web-sessions
   reason: "source_to_copied_assistant_id.get() in \xA714.6 fork sweep \u2014 looks up the new id minted for an in-slice assistant.\
     \ None means the source row's parent assistant is OUTSIDE the [:fork_idx] slice, which is detected immediately and converted\
@@ -1111,20 +1111,20 @@ allow_hits:
   safety: None return is checked on the next line; raises RuntimeError before the batch insert can fire so the FK never silently
     fails.
   expires: null
-- key: web/composer/skills/__init__.py:R6:load_deployment_skill:fp=a7cf6bcf22cab117
+- key: web/composer/skills/__init__.py:R6:load_deployment_skill:fp=edd927a95648e236
   owner: web-composer
   reason: "Deployment skill is optional \u2014 FileNotFoundError is expected when deployment skill is absent. PermissionError/IsADirectoryError\
     \ now propagate (operator misconfiguration)."
   safety: Returns empty string for absent file only (not a fabricated default). Core skill always loads (crash on missing).
     Only the deployment overlay is optional. Size guard rejects oversized files.
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=c49dc33776e31c6d
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=5634b8eb9840a256
   owner: web-composer
   reason: "Function receives multiple dict shapes \u2014 to_dict() output always has \"source\", but component dicts from\
     \ _execute_get_pipeline_state do not. .get() handles the absent-key case (no-op early return)."
   safety: "Returns input unchanged when \"source\" key absent \u2014 no data loss or fabrication"
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=4547676dcdc7cd9a
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=256f8f772f9f4ef8
   owner: web-composer
   reason: "Source dict from DB records (CompositionStateRecord.source) may lack \"options\" \u2014 _state_response wraps deep_thaw(state.source)\
     \ which is raw JSON from the DB. Not all source shapes include \"options\"."
@@ -1166,7 +1166,7 @@ allow_hits:
   safety: Returns bool; scalar arms are skipped explicitly; the rev-3 W8a path routes Annotated[scalar, Sensitive()] arms
     through _has_sensitive instead so Sensitive markers on scalar Union arms still emit a node.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:fp=fb96e3bb449fe9a6
+- key: web/composer/redaction.py:R5:_redact_via_schema:fp=be6376f6aa29f5c4
   owner: web-composer
   reason: "Marker-class discrimination over Annotated metadata tuple \u2014 identical to _has_sensitive/_count_sensitive (spec\
     \ \xA74.2.5). _SensitiveMarker is a sentinel class introduced by Sensitive(); the only way to detect it inside an Annotated\
@@ -1174,7 +1174,7 @@ allow_hits:
   safety: "Markers are constructed at module load from Python typing primitives \u2014 never from external input. Mismatched\
     \ metadata entries fall through to the skip branch."
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=501f6d7c97464118
+- key: web/composer/redaction.py:R5:_redact_via_schema:_apply:fp=62ed45ad12063d2c
   owner: web-composer
   reason: "Tier-1 invariant guard immediately before raising AuditIntegrityError \u2014 the summarizer contract (spec \xA7\
     4.2.6) requires str return; a non-str return means a summarizer is misimplemented and the audit record would be poisoned.\
@@ -1185,7 +1185,7 @@ allow_hits:
   safety: Raises AuditIntegrityError with the path and the offending type name so the operator can identify the misbehaving
     summarizer.
   expires: null
-- key: web/composer/redaction.py:R5:_redact_via_policy:fp=2788fa9ea9e657d1
+- key: web/composer/redaction.py:R5:_redact_via_policy:fp=8dece4c2db439e42
   owner: web-composer
   reason: "Tier-1 invariant guard immediately before raising AuditIntegrityError \u2014 declarative-branch counterpart of\
     \ the _redact_via_schema._apply isinstance guard. The summarizer contract (spec \xA74.2.6) requires str return for both\

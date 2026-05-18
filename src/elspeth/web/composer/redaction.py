@@ -822,6 +822,33 @@ class SetSourceArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _summarize_interpretation_term(text: str) -> str:
+    """Summarizer for ``request_interpretation_review.user_term`` and
+    ``request_interpretation_review.llm_draft`` (Phase 5b Task 5, F-34).
+
+    Returns the input collapsed to a fixed-form ``<interpretation-term:N-chars>``
+    or ``<interpretation-term:N-chars:truncated>`` shape where ``N`` is the
+    code-point length of the original string. The fixed-form scalar is
+    structurally distinguishable from the raw value at every reachable
+    input (including the empty string) so the redaction-completeness
+    property test can assert ``redacted_value != raw_value`` uniformly.
+
+    The 64-character truncation guard documented in the spec is preserved
+    via the ``:truncated`` suffix when the original exceeded the cap —
+    auditors can distinguish "long value redacted" from "short value
+    redacted" without seeing either. The authoritative value of the term
+    still lives in the ``interpretation_events`` row (``user_term`` /
+    ``llm_draft`` columns); the audit-side row in
+    ``chat_messages.tool_calls`` carries only this fixed-form scalar.
+
+    Naming follows ``_summarize_inline_blob_content`` (American
+    spelling). Contract: MUST NOT raise on any reachable input; MUST
+    return ``str``.
+    """
+    truncated = ":truncated" if len(text) > 64 else ""
+    return f"<interpretation-term:{len(text)}-chars{truncated}>"
+
+
 def _summarize_inline_blob_content(content: str) -> str:
     """Summarizer for blob-content fields (``create_blob.content``,
     ``update_blob.content``) — spec §4.2.6, plan Task 13 / rev-2 M.10.
@@ -944,6 +971,37 @@ class UpdateBlobArgumentsModel(BaseModel):
 
     blob_id: str
     content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _RequestInterpretationReviewRedactionModel(BaseModel):
+    """Redaction-bearing argument model for ``request_interpretation_review``
+    (Phase 5b Task 5, F-34).
+
+    The tool is a session-aware async handler; this model is the persistence-
+    boundary redaction declaration registered in :data:`MANIFEST` so the
+    audit-side ``chat_messages.tool_calls`` row carries summarised content
+    rather than the LLM-supplied raw text.
+
+    ``user_term`` is not strictly a secret — it's a word the user typed —
+    but it could carry PII if the user typed something like ``"rate how
+    cool this transaction involving Jane Doe is"``. ``llm_draft`` is the
+    model's draft and may quote or paraphrase user content. Both fields
+    carry :class:`Sensitive` with :func:`_summarize_interpretation_term`
+    so the truncated form lands in the tool-call column (the full value
+    is still in ``interpretation_events_table.user_term`` /
+    ``interpretation_events_table.llm_draft`` — the authoritative row).
+
+    ``affected_node_id`` is structural metadata (a short identifier) and
+    is not marked :class:`Sensitive`. ``extra="forbid"`` ensures a
+    misrouted argument shape fails fast at the persistence boundary
+    rather than silently accepting an unknown key.
+    """
+
+    affected_node_id: str
+    user_term: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+    llm_draft: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2619,6 +2677,11 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 handles_no_sensitive_data_reason_struct=_WIRE_SECRET_REF_REASON,
             )
         ),
+        # Phase 5b Task 5 — request_interpretation_review (session-aware async tool).
+        # Type-driven entry; both LLM-supplied content fields carry a 64-char
+        # truncation summariser so the persistence-boundary row in
+        # chat_messages.tool_calls cannot leak unbounded user/LLM text.
+        "request_interpretation_review": ToolRedaction(argument_model=_RequestInterpretationReviewRedactionModel),
         # Wave 5 (Task 16g) — request_advisor_hint (intercepted at service.py:2103).
         "request_advisor_hint": ToolRedaction(
             policy=ToolRedactionPolicy(

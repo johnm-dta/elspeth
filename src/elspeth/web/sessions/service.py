@@ -2205,6 +2205,79 @@ class SessionServiceImpl:
 
         return cast(InterpretationEventRecord, await self._run_sync(_sync))
 
+    async def record_auto_interpreted_no_surfaces_event(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Write an AUTO_INTERPRETED_NO_SURFACES row (Phase 5b Task 5, F-6).
+
+        Triggered by the compose loop when the per-term or per-day
+        ``request_interpretation_review`` rate cap is hit and the LLM
+        is expected to bake the interpretation directly into the prompt
+        template without surfacing it for review. The row records that
+        the LLM *was* consulted (provenance fields populated) but no
+        surface was produced (interpretation surface fields NULL).
+
+        Validates against ``ck_interpretation_events_no_surfaces_shape``:
+        the five interpretation-surface fields (composition_state_id,
+        affected_node_id, tool_call_id, user_term, llm_draft) MUST be
+        NULL; the four LLM provenance fields (model_identifier,
+        model_version, provider, composer_skill_hash) MUST be NOT NULL.
+
+        ``choice`` is set to ``OPTED_OUT`` because the resolve semantics
+        are "no further user action required" — the rate cap is the
+        resolution. ``resolved_at`` equals ``created_at`` because the
+        row is born resolved. ``arguments_hash`` is NULL because the
+        ``INTERPRETATION_HASH_DOMAIN_V1`` field set has no values for
+        this row shape (the surface fields it hashes over are all NULL).
+
+        Telemetry: NONE — composition-time user decisions are
+        audit-primary; no ephemeral operational signal required.
+        """
+        now = self._ensure_utc(created_at) if created_at is not None else self._now()
+        sid = str(session_id)
+        event_id = str(uuid.uuid4())
+
+        def _sync() -> InterpretationEventRecord:
+            with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                conn.execute(
+                    insert(interpretation_events_table).values(
+                        id=event_id,
+                        session_id=sid,
+                        composition_state_id=None,
+                        affected_node_id=None,
+                        tool_call_id=None,
+                        user_term=None,
+                        llm_draft=None,
+                        accepted_value=None,
+                        choice=InterpretationChoice.OPTED_OUT.value,
+                        created_at=now,
+                        resolved_at=now,
+                        actor=actor,
+                        model_identifier=model_identifier,
+                        model_version=model_version,
+                        provider=provider,
+                        composer_skill_hash=composer_skill_hash,
+                        arguments_hash=None,
+                        hash_domain_version=None,
+                        interpretation_source=InterpretationSource.AUTO_INTERPRETED_NO_SURFACES.value,
+                        runtime_model_identifier_at_resolve=None,
+                        runtime_model_version_at_resolve=None,
+                        resolved_prompt_template_hash=None,
+                    )
+                )
+                row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
+                return _interpretation_event_record_from_row(row)
+
+        return cast(InterpretationEventRecord, await self._run_sync(_sync))
+
     async def add_message(
         self,
         session_id: UUID,

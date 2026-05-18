@@ -27,6 +27,7 @@ from elspeth.web.composer.tools import (
     _MUTATION_TOOLS,
     _SECRET_DISCOVERY_TOOLS,
     _SECRET_MUTATION_TOOLS,
+    _SESSION_AWARE_TOOL_HANDLERS,
 )
 
 
@@ -47,6 +48,13 @@ def collect_registry_names() -> frozenset[str]:
     request_advisor_hint is intercepted at service.py:2070 before
     execute_tool() is called, so it never appears in the six dispatch
     dicts. It requires a MANIFEST entry and is enumerated here explicitly.
+
+    Phase 5b Task 5: ``_SESSION_AWARE_TOOL_HANDLERS`` is the seventh
+    dispatch dict — session-aware async tools that are intercepted in
+    the compose loop ahead of ``execute_tool`` (same pattern as
+    ``request_advisor_hint``). Every name here requires a MANIFEST
+    entry; the redaction policy applies regardless of which dispatch
+    surface the tool lands on.
     """
     return frozenset(
         set(_DISCOVERY_TOOLS)
@@ -55,6 +63,7 @@ def collect_registry_names() -> frozenset[str]:
         | set(_BLOB_MUTATION_TOOLS)
         | set(_SECRET_DISCOVERY_TOOLS)
         | set(_SECRET_MUTATION_TOOLS)
+        | set(_SESSION_AWARE_TOOL_HANDLERS)
         | {"request_advisor_hint"}  # advisor escape hatch — intercepted at service.py
     )
 

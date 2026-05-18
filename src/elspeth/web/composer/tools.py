@@ -10,6 +10,7 @@ L3 (web/composer/state, web/catalog/protocol).
 from __future__ import annotations
 
 import ast
+import asyncio
 import csv
 import hmac
 import io
@@ -18,11 +19,11 @@ import os
 import re
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Final, TypedDict, cast
 from uuid import UUID, uuid4
 
 from opentelemetry import metrics
@@ -30,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, delete, func, select, update
 
+from elspeth.contracts.composer_interpretation import InterpretationEventRecord
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
@@ -93,6 +95,10 @@ from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
+from elspeth.web.validation import _reject_credential_shaped_content, _validate_accepted_value_content
+
+if TYPE_CHECKING:
+    pass
 
 # Module-level OTel counter for authoring validation outcomes in preview_pipeline.
 # Attributes: outcome (valid | invalid)
@@ -1572,6 +1578,50 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "required": ["name"],
             },
         },
+        # Phase 5b Task 5 — composer-LLM-callable tool surface for surfacing an
+        # interpretation of a subjective or under-specified term for user review.
+        # The description below is normative documentation for the LLM (mirrored
+        # in the composer skill markdown) and is reviewed by the audit panel as
+        # part of the request_interpretation_review event row's provenance.
+        #
+        # Position note: this tool is inserted BEFORE ``wire_secret_ref`` so
+        # the trailing tool name remains ``wire_secret_ref`` — the Anthropic
+        # cache-marker test (``test_trailing_tool_name_is_locked``) pins the
+        # trailing position to preserve prompt-cache stability across deploys.
+        {
+            "name": "request_interpretation_review",
+            "description": (
+                "Ask the user to review your interpretation of a subjective or "
+                "underspecified term they used. Call this BEFORE you finalise "
+                "the prompt template for any LLM transform whose prompt depends "
+                "on the term. Surface ONE term per call. The composition state "
+                "MUST already contain the affected LLM transform (call upsert_node "
+                "first) and its prompt_template MUST contain the placeholder "
+                "{{interpretation:<term>}}. The user will see your draft and "
+                "either accept it or amend it. Do not call this for concrete "
+                "operators (e.g., 'rate 1-10') or for terms the user already "
+                "defined in the conversation."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["affected_node_id", "user_term", "llm_draft"],
+                "properties": {
+                    "affected_node_id": {
+                        "type": "string",
+                        "description": "node_id of the LLM transform whose prompt template depends on this term",
+                    },
+                    "user_term": {
+                        "type": "string",
+                        "description": "The user-provided term, verbatim (e.g., 'cool', 'important', 'risky')",
+                    },
+                    "llm_draft": {
+                        "type": "string",
+                        "description": "Your draft interpretation of the term, in your own words, suitable to embed as a phrase in the prompt template",
+                    },
+                },
+            },
+        },
         {
             "name": "wire_secret_ref",
             "description": "Place a secret reference marker in the pipeline config. The secret will be resolved at execution time.",
@@ -1594,6 +1644,39 @@ def get_tool_definitions() -> list[dict[str, Any]]:
 
 
 # --- Tool Registry ---
+
+# Dual-registry invariant (F-18, Phase 5b Task 5):
+# ELSPETH dispatches composer tools through TWO disjoint registries.
+#
+#   ``_DISCOVERY_TOOLS`` / ``_MUTATION_TOOLS`` (and the blob/secret peer
+#   registries) hold state-pure SYNCHRONOUS handlers. They never touch
+#   the session DB write surface, never await; ``execute_tool`` calls
+#   them inline inside a worker thread.
+#
+#   ``_SESSION_AWARE_TOOL_HANDLERS`` holds ASYNC handlers that need a
+#   session_id, tool_call_id, and service-method callable. They are NOT
+#   reached through ``execute_tool``; the compose loop intercepts them
+#   ahead of ``run_sync_in_worker(execute_tool, ...)`` and awaits them
+#   directly (precedent: ``request_advisor_hint`` interception at
+#   service.py around line 2820).
+#
+# **Invariant (F-18):**
+#   * Every tool name in ``get_tool_definitions()`` appears in EXACTLY
+#     one registry across all of: ``_DISCOVERY_TOOLS``, ``_MUTATION_TOOLS``,
+#     ``_BLOB_DISCOVERY_TOOLS``, ``_BLOB_MUTATION_TOOLS``,
+#     ``_SECRET_DISCOVERY_TOOLS``, ``_SECRET_MUTATION_TOOLS``,
+#     ``_SESSION_AWARE_TOOL_HANDLERS``.
+#   * Every handler in ``_SESSION_AWARE_TOOL_HANDLERS`` satisfies
+#     ``asyncio.iscoroutinefunction(h) is True``.
+#   * Every handler in the sync registries satisfies
+#     ``asyncio.iscoroutinefunction(h) is False``.
+#
+# The invariant is mechanically asserted at module import below (after
+# all registries are populated) and a runtime test
+# (``test_request_interpretation_review_tool.py::test_dual_registry_invariant``)
+# re-checks it so a future regression — for example, dropping an async
+# tool into the sync registry by copy-paste — is caught structurally
+# rather than producing silent "coroutine was never awaited" warnings.
 
 # Unified handler signature: (arguments, state, catalog, data_dir) -> ToolResult.
 # Handlers that don't need all parameters ignore them.
@@ -1666,6 +1749,32 @@ class _SetOutputArgumentsModel(BaseModel):
 
 class _RemoveOutputArgumentsModel(BaseModel):
     sink_name: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _RequestInterpretationReviewArgumentsModel(BaseModel):
+    """Tier-3 trust-boundary model for the ``request_interpretation_review`` tool.
+
+    All three fields are LLM-supplied and constrained mechanically:
+
+    * ``affected_node_id`` — short identifier; 256-char cap matches the wire
+      cap used by ``upsert_node.id``.
+    * ``user_term`` and ``llm_draft`` — capped at 8192 chars to defend against
+      pathological inputs that would distend the audit row beyond the
+      schema's 8192-byte expectation (see ``interpretation_events_table``
+      column definitions; the schema-level body limit also bounds these
+      at the ASGI boundary).
+
+    ``extra="forbid"`` rejects unknown keys structurally so a misrouted
+    argument shape (e.g., the LLM passing ``id`` instead of
+    ``affected_node_id``) fails fast with a clear ARG_ERROR rather than
+    silently dropping the typo and validating a partial payload.
+    """
+
+    affected_node_id: str = Field(min_length=1, max_length=256)
+    user_term: str = Field(min_length=1, max_length=8192)
+    llm_draft: str = Field(min_length=1, max_length=8192)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -6614,3 +6723,405 @@ def execute_tool(
         return _inject_prior_validation(result, prior)
 
     return _failure_result(state, f"Unknown tool: {tool_name}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 5b Task 5 — request_interpretation_review (session-aware async tool)
+# ---------------------------------------------------------------------------
+#
+# This is the first session-aware async composer tool. Unlike the state-pure
+# handlers above, ``_handle_request_interpretation_review`` AWAITS the
+# session-service writer (``create_pending_interpretation_event``) and the
+# session-service reader (``list_interpretation_events``) needed by the
+# rate-limit check. It cannot live in ``_DISCOVERY_TOOLS`` / ``_MUTATION_TOOLS``
+# because those registries hold synchronous handlers; ``execute_tool`` is
+# called inside ``run_sync_in_worker(...)`` and cannot ``await`` anything.
+#
+# Dispatch contract (mirrors the ``request_advisor_hint`` precedent at
+# ``web/composer/service.py`` around line 2820): the compose loop intercepts
+# the tool name BEFORE ``run_sync_in_worker(execute_tool, ...)`` and awaits
+# the handler in this registry directly. The audit envelope opened by
+# ``begin_dispatch_or_arg_error`` covers the dispatch on both success and
+# ARG_ERROR paths.
+
+# Regex for detecting placeholders of the form ``{{interpretation:<term>}}``
+# inside a prompt_template string. Used by both the per-tool boundary check
+# (``_assert_affected_llm_node`` — confirms the LLM's draft is being staged
+# against a transform that actually has the placeholder) and the runtime
+# pre-execution detector (``_detect_unresolved_interpretation_placeholders``
+# — F-17). The capture group is the term itself, used to surface which
+# placeholder is unresolved.
+#
+# The pattern accepts whitespace inside the braces (``{{ interpretation : cool }}``)
+# because LLM drafts vary. The captured term is trimmed by the caller before
+# comparison so leading/trailing whitespace on the term does not cause a
+# false negative.
+_INTERPRETATION_PLACEHOLDER_RE: Final[re.Pattern[str]] = re.compile(r"\{\{\s*interpretation\s*:\s*([^{}]+?)\s*\}\}")
+
+
+def _assert_affected_llm_node(
+    state: CompositionState,
+    affected_node_id: str,
+    user_term: str,
+) -> None:
+    """Tier-3 boundary check on the LLM-supplied ``affected_node_id``.
+
+    Raises :class:`ToolArgumentError` with an actionable message when:
+
+    * the node does not exist in ``state.nodes``;
+    * the node's plugin kind is not ``llm``;
+    * the node's ``prompt_template`` does not contain a placeholder of the
+      form ``{{interpretation:<user_term>}}``.
+
+    Each branch raises ARG_ERROR (not a Tier-1 crash) because the LLM is
+    expected to recover by calling ``upsert_node`` to add the placeholder
+    and re-staging the tool call. A crash here would conflate "LLM made
+    a recoverable mistake" with "we have a bug in our own code".
+
+    The placeholder check is lenient on whitespace inside the braces but
+    strict on the term value: the term inside the placeholder must equal
+    ``user_term`` after both sides are stripped. This avoids false
+    positives where the LLM staged a review for ``"important"`` but the
+    transform's placeholder is ``{{interpretation:cool}}``.
+    """
+    node = next((n for n in state.nodes if n.id == affected_node_id), None)
+    if node is None:
+        known = sorted(n.id for n in state.nodes)
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected=f"id of an existing LLM transform (known ids: {known!r})",
+            actual_type=f"unknown id {affected_node_id!r}",
+        )
+    plugin = node.plugin
+    if plugin != "llm":
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected="id of a node whose plugin is 'llm'",
+            actual_type=f"node {affected_node_id!r} has plugin={plugin!r}",
+        )
+    options = node.options if node.options else {}
+    prompt_template = options.get("prompt_template") if isinstance(options, Mapping) else None
+    if not isinstance(prompt_template, str) or not prompt_template:
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected=f"node {affected_node_id!r} to declare options.prompt_template (str) containing {{{{interpretation:{user_term}}}}}",
+            actual_type=f"options.prompt_template is {type(prompt_template).__name__}",
+        )
+    matched_terms = [match.group(1).strip() for match in _INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template)]
+    if user_term.strip() not in matched_terms:
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected=(
+                f"node {affected_node_id!r} prompt_template to contain placeholder "
+                f"{{{{interpretation:{user_term}}}}} (found placeholders for: {matched_terms!r})"
+            ),
+            actual_type="missing placeholder",
+        )
+
+
+def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> list[str]:
+    """Return the list of terms with unresolved ``{{interpretation:…}}`` placeholders.
+
+    F-17 runtime detector — invoked at the boundary between composition and
+    execution. ``nodes`` is a mapping of node-id to a node dict whose
+    ``options.prompt_template`` field is inspected. Non-LLM nodes are
+    skipped. The return value is a list of placeholder terms (deduplicated
+    by insertion order); an empty list means the pipeline is safe to
+    execute.
+
+    Standalone (no compose-loop state) so the helper is testable in
+    isolation. Production callers (the executor / preview path) raise
+    ``RuntimeError`` and emit the
+    ``interpretation_placeholder_unresolved_at_runtime`` operational
+    telemetry signal with each ``node_id`` and ``term`` (NOT the prompt
+    template value — that may carry user content).
+    """
+    unresolved: dict[str, None] = {}  # ordered set
+    for node in nodes.values():
+        if not isinstance(node, Mapping):
+            continue
+        if node.get("kind") != "llm":
+            continue
+        options = node.get("options")
+        prompt_template = options.get("prompt_template") if isinstance(options, Mapping) else None
+        if not isinstance(prompt_template, str):
+            continue
+        for match in _INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
+            unresolved[match.group(1).strip()] = None
+    return list(unresolved.keys())
+
+
+def _utc_day_start(now: datetime) -> datetime:
+    """Return the UTC-midnight start of the calendar day containing ``now``.
+
+    F-30 fixed-window helper. The rate-limit window is the *calendar day in
+    UTC*, not a sliding 24-hour window — simpler for operators to reason
+    about and produces predictable reset behaviour ("the counter resets at
+    UTC midnight"). The caller compares ``event.created_at >= utc_day_start(now)``.
+    """
+    aware_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    aware_now_utc = aware_now.astimezone(UTC)
+    return aware_now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+async def _check_interpretation_rate_limits(
+    *,
+    session_id: UUID,
+    user_term: str,
+    composition_state_id: UUID,
+    list_events_fn: Callable[..., Awaitable[list[InterpretationEventRecord]]],
+    per_term_cap: int,
+    per_session_day_cap: int,
+    now: datetime,
+) -> None:
+    """Enforce the two per-session interpretation-review rate limits (F-30/F-31).
+
+    Two structural limits apply, in order:
+
+    1. **Per-term cap (default 3):** the same ``(session_id, user_term)`` pair,
+       scoped to the active ``composition_state_id`` branch, may be surfaced
+       at most ``per_term_cap`` times before the LLM must fall back to
+       AUTO_INTERPRETED_NO_SURFACES. Counted against rows that are NOT
+       AUTO_INTERPRETED_OPT_OUT shape (those have NULL ``user_term``) and
+       whose ``composition_state_id`` matches.
+
+    2. **Per-session-day cap (default 10):** the session may make at most
+       ``per_session_day_cap`` ``request_interpretation_review`` invocations
+       per UTC calendar day. The window starts at UTC midnight (NOT a
+       sliding 24-hour window) so the reset behaviour is predictable.
+
+    On cap exceeded: raises :class:`ToolArgumentError`. The compose loop
+    catches this and is expected (per the composer skill) to fall back to
+    a non-LLM interpretation with ``interpretation_source =
+    'auto_interpreted_no_surfaces'``.
+
+    Async because ``list_events_fn`` (the injected
+    ``list_interpretation_events`` service method) is async — it reads the
+    session DB. A sync helper would force a blocking ``asyncio.run(...)``
+    inside an already-async caller, which deadlocks.
+
+    The cap values are injected as kwargs (not read from settings inside
+    the helper) so this function is testable without a live settings
+    object. Production callers thread ``WebSettings.composer_interpretation_*``
+    in.
+    """
+    events = await list_events_fn(session_id, status="all")
+    # Per-term cap — count rows for this composition branch with matching user_term.
+    per_term_count = sum(
+        1
+        for event in events
+        if event.composition_state_id == composition_state_id and event.user_term is not None and event.user_term == user_term
+    )
+    if per_term_count >= per_term_cap:
+        raise ToolArgumentError(
+            argument="user_term",
+            expected=f"at most {per_term_cap} interpretation requests per term in this composition",
+            actual_type=(
+                f"term {user_term!r} would be surfaced {per_term_count + 1} times — use a direct "
+                f"interpretation in the prompt template instead"
+            ),
+        )
+    # Per-session-day cap — UTC-midnight fixed window. Only rows with
+    # populated ``user_term`` (i.e. not opt-out skeletons) count toward the
+    # invocation budget; opt-out is a different action with its own row.
+    day_start = _utc_day_start(now)
+    per_day_count = sum(1 for event in events if event.user_term is not None and event.created_at >= day_start)
+    if per_day_count >= per_session_day_cap:
+        raise ToolArgumentError(
+            argument="user_term",
+            expected=f"at most {per_session_day_cap} interpretation requests per session per UTC day",
+            actual_type=(
+                f"session would record {per_day_count + 1} requests today — the compose loop should "
+                f"fall back to auto-interpretation (AUTO_INTERPRETED_NO_SURFACES)"
+            ),
+        )
+
+
+async def _handle_request_interpretation_review(
+    arguments: object,
+    state: CompositionState,
+    *,
+    session_id: UUID,
+    composition_state_id: UUID,
+    tool_call_id: str,
+    now: datetime,
+    per_term_cap: int,
+    per_session_day_cap: int,
+    model_identifier: str,
+    model_version: str,
+    provider: str,
+    composer_skill_hash: str,
+    create_pending_interpretation_event: Callable[..., Awaitable[InterpretationEventRecord]],
+    list_interpretation_events: Callable[..., Awaitable[list[InterpretationEventRecord]]],
+) -> ToolResult:
+    """Stage a pending interpretation event for user review (Phase 5b Task 5).
+
+    Returns a SUCCESS :class:`ToolResult` whose ``data`` payload signals
+    the frontend to surface the review affordance. Does NOT advance
+    composition state version — state mutation happens at /resolve time
+    when the user accepts or amends the draft.
+
+    Async because it awaits the injected service methods. Registered in
+    :data:`_SESSION_AWARE_TOOL_HANDLERS` (NOT the synchronous
+    :data:`_MUTATION_TOOLS` registry — see the dual-registry invariant
+    documented at the registry block above).
+    """
+    parsed = cast(
+        _RequestInterpretationReviewArgumentsModel,
+        _validate_mutation_arguments(
+            _RequestInterpretationReviewArgumentsModel,
+            arguments,
+            "request_interpretation_review arguments",
+        ),
+    )
+    # F-34 credential prefilter: Tier-3 boundary check before any DB write.
+    # ``_reject_credential_shaped_content`` raises ``ValueError``; we wrap
+    # as ToolArgumentError so the compose loop's ARG_ERROR routing catches
+    # it (a bare ValueError would land in the plugin-crash catch-all and
+    # mis-classify the failure as a Tier-1 plugin bug).
+    for field_name, field_value in (("user_term", parsed.user_term), ("llm_draft", parsed.llm_draft)):
+        try:
+            _reject_credential_shaped_content(field_value)
+        except ValueError as exc:
+            raise ToolArgumentError(
+                argument=field_name,
+                expected="content that does not match a known credential shape",
+                actual_type="credential-shaped content rejected at the tool boundary",
+            ) from exc
+    # F-2 prompt-injection guard on llm_draft. Applied BEFORE the DB write
+    # so a poisoned draft (e.g. ``{{system:override}}``) cannot enter the
+    # audit row and reach the accepted_as_drafted resolution path where it
+    # would be embedded directly into the prompt template.
+    try:
+        _validate_accepted_value_content(parsed.llm_draft)
+    except ValueError as exc:
+        raise ToolArgumentError(
+            argument="llm_draft",
+            expected="content without template metacharacters, control characters, or credential patterns",
+            actual_type="rejected by accepted-value content validator",
+        ) from exc
+    # Rate-limit gate. Cap-exceeded raises ToolArgumentError; the compose
+    # loop is expected to react by writing an AUTO_INTERPRETED_NO_SURFACES
+    # event (handled in service.py — see ``record_auto_interpreted_no_surfaces_event``).
+    await _check_interpretation_rate_limits(
+        session_id=session_id,
+        user_term=parsed.user_term,
+        composition_state_id=composition_state_id,
+        list_events_fn=list_interpretation_events,
+        per_term_cap=per_term_cap,
+        per_session_day_cap=per_session_day_cap,
+        now=now,
+    )
+    # Tier-3 boundary check on the LLM-supplied affected_node_id. Three
+    # branches (missing node / wrong kind / missing placeholder) all raise
+    # ARG_ERROR so the LLM can retry after fixing the prompt template.
+    _assert_affected_llm_node(state, parsed.affected_node_id, parsed.user_term)
+    # Persist the pending row. The service method re-validates affected_node_id
+    # under the session write lock (defence in depth — the compose-state could
+    # in principle race with another writer; the service is the authoritative
+    # consistency gate).
+    event = await create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=composition_state_id,
+        affected_node_id=parsed.affected_node_id,
+        tool_call_id=tool_call_id,
+        user_term=parsed.user_term,
+        llm_draft=parsed.llm_draft,
+        model_identifier=model_identifier,
+        model_version=model_version,
+        provider=provider,
+        composer_skill_hash=composer_skill_hash,
+    )
+    return ToolResult(
+        success=True,
+        updated_state=state,  # no state change yet — /resolve advances version
+        validation=state.validate(),
+        affected_nodes=(parsed.affected_node_id,),
+        data={
+            "_kind": "interpretation_review_pending",
+            "event_id": str(event.id),
+            "affected_node_id": parsed.affected_node_id,
+            "user_term": parsed.user_term,
+            "llm_draft": parsed.llm_draft,
+            "message": (
+                f"Interpretation review staged for '{parsed.user_term}'. "
+                f"Waiting for user acceptance/amendment before the pipeline can finalise."
+            ),
+        },
+    )
+
+
+# Session-aware async tool handler registry (Phase 5b Task 5).
+# See the dual-registry invariant documented at the registry block above
+# (search for "Dual-registry invariant (F-18, Phase 5b Task 5)").
+SessionAwareToolHandler = Callable[..., Awaitable[ToolResult]]
+
+_SESSION_AWARE_TOOL_HANDLERS: dict[str, SessionAwareToolHandler] = {
+    "request_interpretation_review": _handle_request_interpretation_review,
+}
+
+
+def is_session_aware_tool(name: str) -> bool:
+    """Return True if the tool requires async dispatch with session context.
+
+    Session-aware tools are intercepted in the compose loop BEFORE
+    ``execute_tool`` is called — they cannot be dispatched through the
+    synchronous worker because they await session-service methods.
+    """
+    return name in _SESSION_AWARE_TOOL_HANDLERS
+
+
+# Dual-registry invariant assertions (F-18). These execute at module import,
+# so a regression — for example, copy-pasting an async handler into a sync
+# registry — fails the build before any compose() call could trigger silent
+# "coroutine was never awaited" warnings.
+_all_tools_v2 = (
+    set(_DISCOVERY_TOOLS)
+    | set(_MUTATION_TOOLS)
+    | set(_BLOB_DISCOVERY_TOOLS)
+    | set(_BLOB_MUTATION_TOOLS)
+    | set(_SECRET_DISCOVERY_TOOLS)
+    | set(_SECRET_MUTATION_TOOLS)
+    | set(_SESSION_AWARE_TOOL_HANDLERS)
+)
+assert len(_all_tools_v2) == (
+    len(_DISCOVERY_TOOLS)
+    + len(_MUTATION_TOOLS)
+    + len(_BLOB_DISCOVERY_TOOLS)
+    + len(_BLOB_MUTATION_TOOLS)
+    + len(_SECRET_DISCOVERY_TOOLS)
+    + len(_SECRET_MUTATION_TOOLS)
+    + len(_SESSION_AWARE_TOOL_HANDLERS)
+), (
+    "Tool registry overlap detected — a tool name appears in more than one of _DISCOVERY_TOOLS / _MUTATION_TOOLS / blob / secret / _SESSION_AWARE_TOOL_HANDLERS"
+)
+
+# Every session-aware handler must be a coroutine function. A sync function
+# accidentally registered here would silently return a non-Awaitable; the
+# compose-loop ``await`` would crash with TypeError at the worst time.
+for _name, _handler in _SESSION_AWARE_TOOL_HANDLERS.items():
+    assert asyncio.iscoroutinefunction(_handler), (
+        f"_SESSION_AWARE_TOOL_HANDLERS[{_name!r}] is not async; sync handlers belong in _MUTATION_TOOLS / _DISCOVERY_TOOLS instead."
+    )
+
+# Every sync-registry handler must NOT be a coroutine. Catches the reverse
+# regression: an async handler dropped into the sync dispatch path that
+# would return a coroutine object as if it were a ToolResult.
+#
+# The six sync registries have heterogeneous handler value-types (the blob
+# and secret registries carry handlers with extra session-context kwargs),
+# so the local ``_sync_registry`` is typed broadly as
+# ``Mapping[str, Callable[..., Any]]`` for the duration of this check.
+_sync_registries_for_check: tuple[tuple[str, Mapping[str, Callable[..., Any]]], ...] = (
+    ("_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _DISCOVERY_TOOLS)),
+    ("_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _MUTATION_TOOLS)),
+    ("_BLOB_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _BLOB_DISCOVERY_TOOLS)),
+    ("_BLOB_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _BLOB_MUTATION_TOOLS)),
+    ("_SECRET_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_DISCOVERY_TOOLS)),
+    ("_SECRET_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_MUTATION_TOOLS)),
+)
+for _sync_registry_name, _sync_registry in _sync_registries_for_check:
+    for _name, _handler in _sync_registry.items():
+        assert not asyncio.iscoroutinefunction(_handler), (
+            f"{_sync_registry_name}[{_name!r}] is async; async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
+        )

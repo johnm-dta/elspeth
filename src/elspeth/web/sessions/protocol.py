@@ -782,6 +782,44 @@ class SessionServiceProtocol(Protocol):
         """
         ...
 
+    async def record_auto_interpreted_no_surfaces_event(
+        self,
+        *,
+        session_id: UUID,
+        actor: str,
+        model_identifier: str,
+        model_version: str,
+        provider: str,
+        composer_skill_hash: str,
+        created_at: datetime | None = None,
+    ) -> InterpretationEventRecord:
+        """Write an AUTO_INTERPRETED_NO_SURFACES row (Phase 5b Task 5, F-6).
+
+        Called by the compose loop when the per-term or per-day rate cap
+        is hit for ``request_interpretation_review``: the LLM is expected
+        to fall back to baking the interpretation directly into the prompt
+        template without surfacing it for review. This writer records the
+        fact in the audit trail so an auditor can distinguish "user opted
+        out" from "rate cap exhausted" via ``interpretation_source``.
+
+        Row shape (see ``ck_interpretation_events_no_surfaces_shape``):
+        * ``interpretation_source = 'auto_interpreted_no_surfaces'``
+        * ``choice = 'opted_out'`` (semantics: resolved-at-write — there
+          is no pending surface to acknowledge)
+        * Interpretation-surface fields are NULL: ``composition_state_id``,
+          ``affected_node_id``, ``tool_call_id``, ``user_term``,
+          ``llm_draft`` (the rejected request never produced a surface).
+        * LLM provenance fields MUST be populated — the composer LLM
+          that triggered the rate cap is fully identifiable from the
+          compose-loop snapshot.
+        * ``arguments_hash`` is NULL because the
+          ``INTERPRETATION_HASH_DOMAIN_V1`` set requires
+          surface fields that don't exist for this row shape.
+        * ``resolved_at`` equals ``created_at`` (the rate-cap event is
+          itself a resolution).
+        """
+        ...
+
     async def add_message(
         self,
         session_id: UUID,

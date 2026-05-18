@@ -144,6 +144,11 @@
     "sensitive_path_count": 5,
     "shape": "declarative"
   },
+  "request_interpretation_review": {
+    "hash": "a44eddbfea420d5b984e414e36e46a1fc9d5ea3431b2c6a410fa4738ea4fa35f",
+    "sensitive_path_count": 2,
+    "shape": "type_driven"
+  },
   "set_metadata": {
     "hash": "e9adb16a2a8634efefd5ca357030bf20f0effe8884e8cfcd479a15509793ccdc",
     "sensitive_path_count": 1,

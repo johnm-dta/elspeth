@@ -367,6 +367,8 @@ class TestSecretKeyGuard:
         assert settings.secret_key == "change-me-in-production"
 
     def test_custom_secret_key_allowed_on_any_host(self) -> None:
+        # DC-2 FIX-L: non-loopback hosts also need a non-weak signing key.
+        # Uniform-byte placeholders are rejected by the weak-key validator.
         settings = WebSettings(
             host="0.0.0.0",
             secret_key="my-real-secret",
@@ -374,7 +376,7 @@ class TestSecretKeyGuard:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
-            shareable_link_signing_key=b"\x00" * 32,
+            shareable_link_signing_key=b"\xab\xcd" * 16,
         )
         assert settings.secret_key == "my-real-secret"
 

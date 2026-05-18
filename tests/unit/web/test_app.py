@@ -515,10 +515,19 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS", "10")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS", "85.0")
         monkeypatch.setenv("ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE", "10")
-        # Phase 6A required: shareable_link_signing_key. The env-loader
-        # passes the raw string through; Pydantic coerces str → bytes via
-        # utf-8. 32 bytes is the validator floor.
-        monkeypatch.setenv("ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY", "0" * 32)
+        # Phase 6A required: shareable_link_signing_key.
+        #
+        # DC-2 FIX-L: env-var ingestion now requires the value to be a
+        # base64-encoded string (the documented ``openssl rand -base64 32``
+        # recipe). The model's ``mode="before"`` validator decodes it
+        # explicitly — no utf-8 multibyte ambiguity. 32 raw bytes decoded
+        # is the validator floor; a 44-char base64 string satisfies it.
+        import base64
+
+        monkeypatch.setenv(
+            "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY",
+            base64.b64encode(b"\x00" * 32).decode("ascii"),
+        )
 
     def test_parses_json_tuple_values(self, monkeypatch) -> None:
         """JSON-encoded lists are converted to tuples for tuple-typed fields."""

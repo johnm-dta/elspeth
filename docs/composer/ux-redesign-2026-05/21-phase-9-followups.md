@@ -147,7 +147,37 @@ follow-up entries listed below.
   explicit acknowledgment" as a Phase-9 pointer until resolved —
   do not silently delete it; the deferral itself is the artifact.
 
-### 4. B3 cohort (c) — Performance instrumentation in shipped phases
+### 4. `[all]` extra missing prometheus deps — resolver conflict with azure-monitor-opentelemetry-exporter
+
+- **Class:** Decision deferral (dependency hygiene; pin-conflict resolution).
+- **Trigger:** Phase 8a-3 (B1-r3 MeterProvider) added
+  `opentelemetry-exporter-prometheus>=0.62b0,<1` and
+  `prometheus_client>=0.21,<1` to the `webui` extra in
+  `pyproject.toml`. They were intentionally **omitted from the
+  `all` extra** because `azure-monitor-opentelemetry-exporter`
+  pins `opentelemetry-sdk==1.40` exactly while
+  `opentelemetry-exporter-prometheus` requires `>=1.41`. The
+  packages are runtime-compatible (Prometheus exporter b62 works
+  fine with OTel SDK 1.41.x) but the resolver rejects the
+  declared metadata.
+- **Current workaround:** Developers running `.[all]` must
+  separately `uv pip install
+  'opentelemetry-exporter-prometheus>=0.62b0,<1' 'prometheus_client>=0.21,<1'`.
+  Documented in a comment block inside `pyproject.toml`'s `all`
+  extra. The `webui` extra alone installs cleanly.
+- **Closure paths (pick one in Phase 9):**
+  1. Wait for `azure-monitor-opentelemetry-exporter` to relax its
+     OTel SDK pin upstream. Track the upstream issue and re-add
+     to `[all]` once it lands.
+  2. Drop `azure-monitor-opentelemetry-exporter` from the `[all]`
+     extra (move to a dedicated `azure-monitor` extra) so `[all]`
+     can include Prometheus.
+  3. File an upstream fix or pin override.
+- **Definition of done:** `uv pip install -e ".[all]"` installs
+  both the Azure exporter and the Prometheus exporter together,
+  with no manual second `uv pip install` step.
+
+### 5. B3 cohort (c) — Performance instrumentation in shipped phases
 
 - **Class:** Performance instrumentation.
 - **Trigger:** Two perf signals were identified during the

@@ -177,7 +177,49 @@ follow-up entries listed below.
   both the Azure exporter and the Prometheus exporter together,
   with no manual second `uv pip install` step.
 
-### 5. B3 cohort (c) — Performance instrumentation in shipped phases
+### 5. Finding-7 self-healing-on-PATCH behavior reversed by B2 prior-load
+
+- **Class:** Decision deferral / behavioral change disclosure.
+- **Trigger:** Phase 8a-2 (B2 service-signature reshape, commit
+  `417276bc2`) added a `_row_to_prefs` prior-load inside
+  `preferences/service.py::update_composer_preferences` so the route
+  has `prior.default_mode` in scope for the future Phase 8b
+  account-level telemetry emit. As a side effect, a corrupt stored
+  `default_composer_mode` row (CHECK constraint bypassed via PRAGMA
+  manipulation or external mutation) that previously could be
+  overwritten by a valid PATCH body now raises
+  `CorruptPreferencesError` on the prior load, returning 500.
+- **Why the change is the right answer per CLAUDE.md:** B1's audit
+  payload now records `prior_trust_mode` honestly; from a corrupt
+  prior row, no honest record is possible. Coercing or recovering
+  would be silent fabrication (CLAUDE.md §"Three-Tier Trust Model"
+  — Tier 1 data crashes on anomaly; the audit trail is the legal
+  record). The operator's documented recovery path is delete-the-DB
+  (`project_db_migration_policy.md` memory) or row-level repair.
+- **What was deliberate before:** the pre-B2 architecture (test
+  `test_patch_returns_written_values_not_a_reread`, write-path
+  docstring) codified that a PATCH on a corrupt row should self-heal:
+  the new write replaced the corrupt value without surfacing the
+  prior corruption. That choice prioritised operator UX over Tier-1
+  consistency.
+- **Operator-visible implication:** rows that became corrupt before
+  Phase 8 (e.g., from a PRAGMA-bypassed write in a prior session) now
+  return 500 on the next PATCH instead of self-healing. Recovery is:
+  identify the row, delete it (or delete the preferences DB), and
+  PATCH again.
+- **Phase 9 question:** is the Tier-1 alignment the right long-term
+  answer, or should a one-shot "promote corrupt prior to NULL + fire
+  audit event" recovery path exist? The corrupt-row scenario should
+  be empirically rare (CHECK is enforced; the only known cause is
+  PRAGMA manipulation), so the Tier-1 answer is probably correct.
+  But the design question deserves an explicit gate rather than
+  silent inheritance.
+- **Closure path:** Phase 9 either (a) confirms the Tier-1 answer
+  and removes this entry, or (b) designs and adds a corrupt-prior
+  recovery seam (with audit event). Either way, the operator's
+  decision should be recorded against this entry.
+
+### 6. B3 cohort (c) — Performance instrumentation in shipped phases
 
 - **Class:** Performance instrumentation.
 - **Trigger:** Two perf signals were identified during the

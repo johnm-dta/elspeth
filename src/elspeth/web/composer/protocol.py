@@ -577,7 +577,7 @@ class ToolArgumentError(Exception):
     audit, without leaking into the LLM echo.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"argument", "expected", "actual_type"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"argument", "expected", "actual_type", "code"})
 
     def __init__(
         self,
@@ -585,6 +585,7 @@ class ToolArgumentError(Exception):
         argument: str,
         expected: str,
         actual_type: str,
+        code: str | None = None,
     ) -> None:
         # Reject empty strings at construction time: a blank field
         # would produce a nonsensical LLM echo ("'' must be , got ")
@@ -601,6 +602,17 @@ class ToolArgumentError(Exception):
         self.argument = argument
         self.expected = expected
         self.actual_type = actual_type
+        # Optional internal discriminant for compose-loop dispatch logic. The
+        # ``code`` field is operator-controlled (a fixed string constant chosen
+        # by the handler raising the exception, e.g.
+        # ``"RATE_CAP_PER_TERM"``) — it is NEVER an LLM- or user-supplied
+        # value and is NOT included in ``args[0]`` / the LLM echo. The
+        # compose loop reads it to distinguish branches that need extra
+        # bookkeeping (write an AUTO_INTERPRETED_NO_SURFACES row, emit
+        # operational telemetry) from generic ARG_ERROR. ``None`` means
+        # "no specific dispatch hook" — the default for all existing
+        # raise sites pre Phase 5b Task 5 follow-on.
+        self.code = code
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the three declared attributes; exception-chain

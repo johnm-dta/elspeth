@@ -130,6 +130,14 @@ class _SessionsTelemetry:
     tool_call_cap_exceeded_total: _Counter
     audit_grade_view_total: _Counter
     audit_access_log_write_failed_total: _Counter
+    # Phase 5b Task 5 follow-on (F-15). Counts ``request_interpretation_review``
+    # invocations rejected by the per-term or per-session-day rate cap. Carries
+    # attributes ``{"cap_type": "per_term" | "per_session_day", "session_id":
+    # str}`` (NO ``user_term`` — Tier-3 / PII risk). Operational telemetry,
+    # not audit-primary: the AUTO_INTERPRETED_NO_SURFACES interpretation_events
+    # row written alongside is the legal record. Telemetry exists so the
+    # operator notices unusual cap-breach rates without trawling the audit DB.
+    interpretation_rate_cap_exceeded_total: _Counter
 
 
 def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemetry:
@@ -151,6 +159,7 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             tool_call_cap_exceeded_total=_FakeCounter(),
             audit_grade_view_total=_FakeCounter(),
             audit_access_log_write_failed_total=_FakeCounter(),
+            interpretation_rate_cap_exceeded_total=_FakeCounter(),
         )
 
     # Production wiring against the real OTel meter. The ``_Meter``
@@ -165,4 +174,5 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         tool_call_cap_exceeded_total=meter.create_counter("composer.tool_call_cap_exceeded_total"),
         audit_grade_view_total=meter.create_counter("composer.audit.audit_grade_view_total"),
         audit_access_log_write_failed_total=meter.create_counter("composer.audit.audit_access_log_write_failed_total"),
+        interpretation_rate_cap_exceeded_total=meter.create_counter("composer.interpretation_rate_cap_exceeded_total"),
     )

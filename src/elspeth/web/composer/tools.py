@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, TypedDict, cast
 from uuid import UUID, uuid4
 
@@ -6851,6 +6852,26 @@ def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> 
     return list(unresolved.keys())
 
 
+# Rate-cap discriminant codes carried on ``ToolArgumentError.code`` so the
+# compose loop can branch on the cap type without parsing the message. These
+# are fixed string constants — never substituted with LLM/user-supplied
+# content — so they are safe to read into telemetry attributes.
+RATE_CAP_PER_TERM_CODE: Final[str] = "RATE_CAP_PER_TERM"
+RATE_CAP_PER_SESSION_DAY_CODE: Final[str] = "RATE_CAP_PER_SESSION_DAY"
+
+# Mapping from rate-cap discriminant code → telemetry ``cap_type`` attribute
+# value (per the F-15 spec at docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md
+# §"Telemetry posture (F-15)"). Both keys MUST appear; the absence of a
+# mapping is caught by the ``test_rate_cap_codes_map_to_telemetry_cap_type``
+# parity test in tests/unit/web/composer/test_request_interpretation_review_tool.py.
+RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        RATE_CAP_PER_TERM_CODE: "per_term",
+        RATE_CAP_PER_SESSION_DAY_CODE: "per_session_day",
+    }
+)
+
+
 def _utc_day_start(now: datetime) -> datetime:
     """Return the UTC-midnight start of the calendar day containing ``now``.
 
@@ -6920,6 +6941,12 @@ async def _check_interpretation_rate_limits(
                 f"term {user_term!r} would be surfaced {per_term_count + 1} times — use a direct "
                 f"interpretation in the prompt template instead"
             ),
+            # Compose-loop discriminant (Phase 5b Task 5 follow-on, F-6):
+            # the rate-cap branch is the trigger for the
+            # AUTO_INTERPRETED_NO_SURFACES writer + F-15 telemetry. The
+            # ``code`` field lets the loop distinguish this exception from a
+            # generic ARG_ERROR without grepping the message string.
+            code=RATE_CAP_PER_TERM_CODE,
         )
     # Per-session-day cap — UTC-midnight fixed window. Only rows with
     # populated ``user_term`` (i.e. not opt-out skeletons) count toward the
@@ -6934,6 +6961,8 @@ async def _check_interpretation_rate_limits(
                 f"session would record {per_day_count + 1} requests today — the compose loop should "
                 f"fall back to auto-interpretation (AUTO_INTERPRETED_NO_SURFACES)"
             ),
+            # See per-term cap above for the ``code`` field rationale.
+            code=RATE_CAP_PER_SESSION_DAY_CODE,
         )
 
 

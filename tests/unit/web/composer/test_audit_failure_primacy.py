@@ -336,6 +336,11 @@ async def test_compose_loop_rejects_unwind_audit_failure_without_plugin_crash(
         async def persist_compose_turn_async(self, **_kwargs: Any) -> AuditOutcome:
             return AuditOutcome(assistant_id=None, unwind_audit_failed=True)
 
+        async def upsert_skill_markdown_history(self, **_kwargs: Any) -> bool:
+            # Phase 5b Task 5 follow-on (F-5c). Mock satisfies the protocol
+            # so the compose-loop entry-time upsert is a no-op.
+            return False
+
     composer_service_with_real_sessions._sessions_service = _ImpossibleOutcomeSessionsService()
 
     with pytest.raises(AuditIntegrityError) as exc_info:

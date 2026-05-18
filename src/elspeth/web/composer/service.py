@@ -55,6 +55,7 @@ from elspeth.web.composer import yaml_generator
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
 from elspeth.web.composer.audit import (
     BufferingRecorder,
+    DispatchAudit,
     begin_dispatch,
     begin_dispatch_or_arg_error,
     canonicalize_pydantic_cause,
@@ -80,14 +81,17 @@ from elspeth.web.composer.protocol import (
     ToolArgumentError,
 )
 from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
+from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, load_skill_with_hash
 from elspeth.web.composer.state import CompositionState, ValidationSummary
 from elspeth.web.composer.state_claim_grounding import (
     check_state_claim_grounding,
     compose_grounded_message,
 )
 from elspeth.web.composer.tools import (
+    _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_REACTIVE,
     ADVISOR_TRIGGER_VALUES,
+    RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     RuntimePreflight,
     ToolResult,
     _sync_list_blobs,
@@ -98,6 +102,7 @@ from elspeth.web.composer.tools import (
     is_cacheable_discovery_tool,
     is_discovery_tool,
     is_mutation_tool,
+    is_session_aware_tool,
 )
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.runtime_preflight import (
@@ -1102,6 +1107,27 @@ _PROVIDER_REQUIRED_ENV_KEYS: dict[str, tuple[str, ...]] = {
 
 
 @dataclass(frozen=True, slots=True)
+class _SessionAwareDispatchOutcome:
+    """Return value of ``_dispatch_session_aware_tool``.
+
+    Carries the post-dispatch signals the compose loop needs to update
+    its loop-local accounting:
+
+    - ``result``: the SUCCESS ``ToolResult`` when the handler returned
+      cleanly; ``None`` when the dispatch ended in an ARG_ERROR path
+      (rate cap or generic) — the audit record was already written and
+      the LLM-facing tool message already appended to ``llm_messages``.
+    - ``is_discovery``: whether the loop should charge this turn to the
+      discovery or composition budget. Session-aware tools that mutate
+      composition state report ``False`` so they count as composition
+      turns regardless of the success/failure shape.
+    """
+
+    result: ToolResult | None
+    is_discovery: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _CachedDiscoveryPayload:
     """State-independent portion of a cacheable discovery tool result."""
 
@@ -1244,6 +1270,35 @@ class ComposerServiceImpl:
         self._phase3_last_redacted_tool_rows: tuple[RedactedToolRow, ...] = ()
         self._phase3_last_audit_outcome: AuditOutcome | None = None
 
+        # Phase 5b Task 5 follow-on (F-5a). Re-read the composer skill
+        # markdown from disk and assert its SHA-256 still matches the
+        # ``PIPELINE_COMPOSER_SKILL_HASH`` captured atomically at module
+        # import. A mismatch means the on-disk file was edited after the
+        # LRU cache populated — the LLM would be prompted with the cached
+        # (older) text while any audit row written this process would
+        # record that older hash. The audit trail and the actual file
+        # would then disagree, which is an operator-actionable Tier-1
+        # anomaly. The assertion raises ``RuntimeError`` with restart
+        # guidance. Performed once per service instantiation; subsequent
+        # in-process drift is bounded by the LRU cache lifetime (process
+        # death restarts the cache).
+        from elspeth.web.composer.prompts import (
+            PIPELINE_COMPOSER_SKILL_HASH,
+            PIPELINE_COMPOSER_SKILL_NAME,
+        )
+
+        assert_skill_hash_unchanged_on_disk(
+            PIPELINE_COMPOSER_SKILL_NAME,
+            PIPELINE_COMPOSER_SKILL_HASH,
+        )
+        self._composer_skill_hash: str = PIPELINE_COMPOSER_SKILL_HASH
+        self._composer_skill_name: str = PIPELINE_COMPOSER_SKILL_NAME
+        # Phase 5b F-5c gate: ensures the first ``compose()`` call upserts
+        # the skill markdown into ``skill_markdown_history`` exactly once
+        # per service instance. Subsequent compose() calls observe the
+        # flag set and skip the upsert.
+        self._skill_markdown_history_upserted: bool = False
+
     async def _run_one_turn_for_test(
         self,
         *,
@@ -1300,6 +1355,7 @@ class ComposerServiceImpl:
             tool_outcomes=tuple(self._phase3_last_tool_outcomes),
             persisted_assistant_tool_calls=tuple(self._phase3_last_redacted_assistant_tool_calls),
             persisted_tool_row_content=tuple(row.content for row in self._phase3_last_redacted_tool_rows),
+            tool_invocations=result.tool_invocations,
         )
 
     def _serialize_response_via_walker(
@@ -1369,6 +1425,58 @@ class ComposerServiceImpl:
         if self._sessions_service is None:
             raise RuntimeError("sessions_service not wired")
         return self._sessions_service
+
+    async def _maybe_upsert_skill_markdown_history(self) -> None:
+        """Best-effort first-use upsert of the composer skill markdown (F-5c).
+
+        On the first ``_compose_loop`` entry of this service instance,
+        archive the exact skill markdown text into
+        ``skill_markdown_history`` keyed by SHA-256. Subsequent calls are
+        a cheap in-process branch (flag check) and never touch the DB.
+
+        No-op when ``sessions_service`` is not wired (CLI / unit-test
+        paths) — the upsert is meaningful only on deployments that
+        persist interpretation events. Per-instance flag, not per-process:
+        a service rebuild (test fixture, lifespan restart) re-runs the
+        upsert on the new instance, which is harmless under
+        ``INSERT OR IGNORE``.
+
+        Failures are NOT silenced: the upsert is best-effort with
+        respect to the audit-event row (we don't gate the interpretation
+        write on it succeeding), but a real DB failure here indicates
+        the session DB is unreachable, in which case the broader compose
+        loop is also unable to function — letting the exception escape
+        surfaces the failure at the start of the request instead of
+        midway through.
+        """
+        if self._skill_markdown_history_upserted:
+            return
+        if self._sessions_service is None:
+            return
+        # Re-read the in-memory cached text (the same atomic pair fed to
+        # the LLM). ``load_skill_with_hash`` is @lru_cache'd so this is a
+        # cheap dict hit; the assert in __init__ already verified the
+        # on-disk file still matches.
+        text, sha256_hex = load_skill_with_hash(self._composer_skill_name)
+        # Defensive Tier-1 consistency check: the cached hash on the
+        # service instance and the hash returned by the cache MUST agree.
+        # A mismatch would mean a race between this method and a manual
+        # cache invalidation; the audit trail's join semantics would
+        # break.
+        if sha256_hex != self._composer_skill_hash:
+            raise RuntimeError(
+                f"Composer skill hash drift detected: service instance cached "
+                f"{self._composer_skill_hash!r} but load_skill_with_hash now returns "
+                f"{sha256_hex!r}. The LRU cache was invalidated mid-process; restart "
+                f"elspeth-web.service so the in-memory skill prompt and the audit "
+                f"row's composer_skill_hash agree."
+            )
+        await self._sessions_service.upsert_skill_markdown_history(
+            skill_hash=sha256_hex,
+            filename=f"{self._composer_skill_name}.md",
+            content=text,
+        )
+        self._skill_markdown_history_upserted = True
 
     def get_availability(self) -> ComposerAvailability:
         """Return the boot-time composer availability snapshot."""
@@ -2192,6 +2300,15 @@ class ComposerServiceImpl:
                 guided-mode exit; the layered transition prompt is used.
         """
         initial_version = state.version
+        # Phase 5b Task 5 follow-on (F-5c). On the first compose-loop entry
+        # of this service instance, upsert the composer skill markdown into
+        # ``skill_markdown_history`` so an auditor inspecting a future
+        # interpretation_events row can join via ``composer_skill_hash``
+        # to retrieve the exact text the LLM was prompted with. The
+        # ``INSERT OR IGNORE`` semantics make repeated calls cheap; we
+        # still gate behind a per-instance flag so steady-state compose()
+        # calls don't churn the connection pool.
+        await self._maybe_upsert_skill_markdown_history()
         llm_messages = self._build_messages(messages, state, message, guided_terminal)
         tools = self._get_litellm_tools()
         # Per-call audit recorder. Surfaced on ComposerResult and on
@@ -3108,6 +3225,44 @@ class ComposerServiceImpl:
                     )
                     continue
 
+                # Session-aware async tool dispatch (Phase 5b Task 5 follow-on).
+                #
+                # ``_SESSION_AWARE_TOOL_HANDLERS`` holds handlers that AWAIT
+                # session-service writers/readers; they cannot be dispatched
+                # through the sync ``run_sync_in_worker(execute_tool, ...)``
+                # path because execute_tool() is sync. The compose loop
+                # intercepts these tool names BEFORE the generic dispatch
+                # and awaits the handler directly, then routes the result
+                # through the same audit envelope discipline as the sync
+                # path (finish_success / finish_arg_error / finish_plugin_crash).
+                #
+                # Currently registered: ``request_interpretation_review``
+                # (Phase 5b Task 5). Adding another session-aware tool
+                # extends ``_SESSION_AWARE_TOOL_HANDLERS`` and the per-tool
+                # kwarg-build dict below; no new dispatch branch is needed.
+                if is_session_aware_tool(tool_name):
+                    session_aware_outcome = await self._dispatch_session_aware_tool(
+                        tool_name=tool_name,
+                        tool_call_id=tool_call.id,
+                        arguments=arguments,
+                        state=state,
+                        audit=audit,
+                        recorder=recorder,
+                        session_id=session_id,
+                        current_state_id=current_state_id,
+                        response=response,
+                        llm_messages=llm_messages,
+                        anti_anchor=anti_anchor,
+                    )
+                    if session_aware_outcome.is_discovery:
+                        turn_has_discovery = True
+                    else:
+                        turn_has_mutation = True
+                    if session_aware_outcome.result is not None:
+                        state = session_aware_outcome.result.updated_state
+                        last_validation = session_aware_outcome.result.validation
+                    continue
+
                 # Precompute runtime preflight for preview_pipeline outside
                 # the general side-effectful tool worker. This keeps
                 # execute_tool() synchronous and bounds the async I/O cost
@@ -3960,6 +4115,246 @@ class ComposerServiceImpl:
 
         return None
 
+    async def _dispatch_session_aware_tool(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        state: CompositionState,
+        audit: DispatchAudit,
+        recorder: BufferingRecorder,
+        session_id: str | None,
+        current_state_id: str | None,
+        response: Any,
+        llm_messages: list[dict[str, Any]],
+        anti_anchor: AntiAnchorTracker,
+    ) -> _SessionAwareDispatchOutcome:
+        """Dispatch a session-aware async composer tool (Phase 5b Task 5 follow-on).
+
+        Mirrors the structural envelope discipline of ``dispatch_with_audit``
+        used for the sync ``execute_tool`` path:
+
+        * SUCCESS → ``finish_success`` and a serialized ToolResult appended
+          to ``llm_messages``.
+        * ARG_ERROR (generic) → ``finish_arg_error`` and the standard
+          ``_arg_error_payload`` echo.
+        * ARG_ERROR with ``code in RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE``
+          (F-6 / F-15) → emit ``interpretation_rate_cap_exceeded`` operational
+          telemetry, await ``record_auto_interpreted_no_surfaces_event`` to
+          write the AUTO_INTERPRETED_NO_SURFACES audit row, THEN
+          ``finish_arg_error`` and echo the standard ARG_ERROR payload so
+          the LLM is nudged into the fallback path from the composer
+          skill (bake the interpretation directly into the prompt
+          template).
+        * Plugin crash → propagate; outer compose loop wraps with
+          ``ComposerPluginCrashError`` exactly as for the sync path.
+
+        Pre-conditions:
+
+        * ``session_id`` is not None — session-aware tools are reachable
+          only from authenticated compose-loop calls. ``RuntimeError`` is
+          raised on a missing session id (interpreter-level invariant,
+          not Tier-3).
+        * ``current_state_id`` is not None for tools that need a
+          composition_state foreign key (currently every session-aware
+          tool). The handler's ``ToolArgumentError`` discipline already
+          validates ``affected_node_id`` against the in-memory state, but
+          the persisted row needs the FK to the composition_states row.
+
+        Per-tool dispatch is performed by reading the handler from
+        ``_SESSION_AWARE_TOOL_HANDLERS`` and awaiting it with the
+        keyword-arguments dict built by ``_build_session_aware_kwargs``.
+        Adding a new session-aware tool extends that dict; this dispatch
+        method itself does not need to change shape.
+        """
+        if session_id is None:
+            # Compose-loop invariant: session-aware tools are advertised
+            # to the LLM only when the loop is running against a
+            # persisted session. Reaching this branch with no
+            # ``session_id`` means the LLM somehow named a session-aware
+            # tool in an unsaved-session compose call. That is a
+            # plumbing bug, not a Tier-3 LLM error, so crash with a
+            # diagnostic message.
+            raise RuntimeError(
+                f"Session-aware tool {tool_name!r} dispatched without a session_id. "
+                f"_get_litellm_tools() should not advertise session-aware tools to "
+                f"the LLM on unsaved-session compose calls."
+            )
+        if current_state_id is None:
+            # Same invariant: the AUTO_INTERPRETED_NO_SURFACES writer
+            # and the create_pending_interpretation_event writer need
+            # the composition_states FK. The first compose() turn for a
+            # never-saved session has no row yet; the route is expected
+            # to persist an initial state before invoking compose().
+            raise RuntimeError(
+                f"Session-aware tool {tool_name!r} dispatched with no current_state_id. "
+                f"The composition_states row must be persisted before the LLM is given "
+                f"access to session-aware tools."
+            )
+
+        handler = _SESSION_AWARE_TOOL_HANDLERS[tool_name]
+        kwargs = self._build_session_aware_kwargs(
+            tool_name=tool_name,
+            arguments=arguments,
+            state=state,
+            session_id=session_id,
+            current_state_id=current_state_id,
+            tool_call_id=tool_call_id,
+            response=response,
+        )
+
+        try:
+            result = await handler(**kwargs)
+        except ToolArgumentError as exc:
+            # Two sub-paths: rate-cap (write F-6 row + emit F-15 telemetry
+            # BEFORE raising the LLM-facing ARG_ERROR) vs. generic
+            # ARG_ERROR (no extra side effects, standard echo).
+            cap_type = (
+                RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE[exc.code]
+                if exc.code is not None and exc.code in RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE
+                else None
+            )
+            if cap_type is not None:
+                # F-15 telemetry FIRST (the spec is explicit: emit BEFORE
+                # the ARG_ERROR returns). Operational-only — no
+                # ``user_term`` attribute, PII risk.
+                self._telemetry.interpretation_rate_cap_exceeded_total.add(
+                    1,
+                    attributes={
+                        "cap_type": cap_type,
+                        "session_id": session_id,
+                    },
+                )
+                # F-6 writer SECOND. Best-effort with respect to the
+                # interpretation_events row for the rejected call — the
+                # handler already declined to insert a row, so this
+                # AUTO_INTERPRETED_NO_SURFACES row is the only record of
+                # the cap event. Exceptions here are NOT swallowed: a DB
+                # failure at this site is a Tier-1 audit anomaly.
+                sessions_service = self._require_sessions_service()
+                await sessions_service.record_auto_interpreted_no_surfaces_event(
+                    session_id=UUID(session_id),
+                    # ``audit.actor`` is the loop-local ``composer-web:user-…``
+                    # actor string assembled at the top of ``_compose_loop``;
+                    # it is the truthful caller identity for this dispatch
+                    # and matches the audit envelope's ``actor`` field.
+                    actor=audit.actor,
+                    model_identifier=self._model,
+                    model_version=_safe_response_model(response) or self._model,
+                    provider=self._availability.provider or "unknown",
+                    composer_skill_hash=self._composer_skill_hash,
+                )
+
+            # Audit envelope: ARG_ERROR. Truthful — the handler returned
+            # a ToolArgumentError; the rate-cap subtype is recorded
+            # elsewhere (F-6 row + F-15 telemetry).
+            arg_error_payload = _arg_error_payload(exc, tool_name)
+            recorder.record(
+                finish_arg_error(
+                    audit,
+                    error_class="ToolArgumentError",
+                    error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
+                    error_payload=arg_error_payload,
+                )
+            )
+            anti_anchor.record_failure(tool_name, audit.arguments_hash)
+            llm_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps(arg_error_payload),
+                }
+            )
+            # Session-aware tools currently all carry composition-state
+            # mutation intent (interpretation review stages a future
+            # /resolve patch). Count toward composition turns regardless
+            # of the SUCCESS/ARG_ERROR outcome, matching the sync
+            # ARG_ERROR handling for mutation tools.
+            return _SessionAwareDispatchOutcome(result=None, is_discovery=False)
+
+        # SUCCESS path. The handler returned a clean ToolResult; record
+        # ``finish_success`` and serialise the result for the LLM. The
+        # ``result_payload`` matches the sync path's ToolResult.to_dict()
+        # so the audit table's ``result_canonical`` column is shape-
+        # consistent across dispatch paths.
+        recorder.record(
+            finish_success(
+                audit,
+                result_payload=result.to_dict(),
+                version_after=result.updated_state.version,
+            )
+        )
+        # Don't claim mutation success when the handler intentionally
+        # returns state.version unchanged (interpretation_review_pending
+        # stages a future /resolve patch; the version advances at
+        # resolve-time, not at staging-time). Treat as a structural
+        # success for anti-anchor tracking but not as a version-advance
+        # mutation.
+        if result.updated_state.version > state.version:
+            anti_anchor.record_success()
+        llm_messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": _serialize_tool_result(result),
+            }
+        )
+        return _SessionAwareDispatchOutcome(result=result, is_discovery=False)
+
+    def _build_session_aware_kwargs(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        state: CompositionState,
+        session_id: str,
+        current_state_id: str,
+        tool_call_id: str,
+        response: Any,
+    ) -> dict[str, Any]:
+        """Build the kwarg dict for a session-aware tool handler.
+
+        Each session-aware tool's handler signature is closed-form
+        (Phase 5b Task 5 documents the contract); the kwargs differ per
+        tool because the injected service methods and snapshot fields
+        vary. Adding a new session-aware tool adds a branch here.
+        """
+        if tool_name == "request_interpretation_review":
+            sessions_service = self._require_sessions_service()
+            return {
+                "arguments": arguments,
+                "state": state,
+                "session_id": UUID(session_id),
+                "composition_state_id": UUID(current_state_id),
+                "tool_call_id": tool_call_id,
+                "now": datetime.now(UTC),
+                "per_term_cap": self._settings.composer_interpretation_rate_limit_per_term,
+                "per_session_day_cap": self._settings.composer_interpretation_rate_limit_per_session_day,
+                "model_identifier": self._model,
+                # ``model_version`` is the actual provider-returned model
+                # string (``response.model``) when available; LiteLLM
+                # populates this for Anthropic/OpenAI with the dated
+                # variant (e.g. ``claude-opus-4-7-20260101``). When the
+                # provider does not return one we fall back to the
+                # requested identifier — keeps the column NOT NULL
+                # without fabricating a value.
+                "model_version": _safe_response_model(response) or self._model,
+                "provider": self._availability.provider or "unknown",
+                "composer_skill_hash": self._composer_skill_hash,
+                "create_pending_interpretation_event": sessions_service.create_pending_interpretation_event,
+                "list_interpretation_events": sessions_service.list_interpretation_events,
+            }
+        # Defensive: a session-aware tool registered without a kwarg
+        # branch here would silently fail at dispatch. Crash loudly so
+        # the registration is wired completely before the LLM can
+        # invoke it.
+        raise RuntimeError(
+            f"_build_session_aware_kwargs has no branch for {tool_name!r}; "
+            f"every entry in _SESSION_AWARE_TOOL_HANDLERS must add a kwarg-build "
+            f"branch here."
+        )
+
     async def _call_advisor_with_audit(
         self,
         arguments: dict[str, Any],
@@ -4654,6 +5049,10 @@ class ComposeLoopTestResult:
     persisted_assistant_row: Any | None = None
     persisted_assistant_tool_calls: tuple[Any, ...] = ()
     persisted_tool_row_content: tuple[Any, ...] = ()
+    # Phase 5b Task 5 follow-on: the buffered per-call audit invocations
+    # so dispatch-branch tests can assert recorder state without
+    # touching the persistence machinery directly.
+    tool_invocations: tuple[Any, ...] = ()
 
     @property
     def tool_outcomes_for_assertion(self) -> tuple[Any, ...]:

@@ -19,6 +19,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
@@ -43,6 +44,7 @@ from elspeth.web.sessions.models import (
     proposal_events_table,
     runs_table,
     sessions_table,
+    skill_markdown_history_table,
 )
 from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
@@ -2204,6 +2206,64 @@ class SessionServiceImpl:
                 return _interpretation_event_record_from_row(row)
 
         return cast(InterpretationEventRecord, await self._run_sync(_sync))
+
+    async def upsert_skill_markdown_history(
+        self,
+        *,
+        skill_hash: str,
+        filename: str,
+        content: str,
+        first_seen_at: datetime | None = None,
+    ) -> bool:
+        """Best-effort INSERT-OR-IGNORE into ``skill_markdown_history`` (F-5c).
+
+        Called once per ``(skill_hash, compose_loop_init)`` so a forensic
+        auditor can reconstruct the exact composer skill text that was in
+        memory when any ``interpretation_events.composer_skill_hash``
+        column was populated. The hash is the primary key, so subsequent
+        upserts with the same hash collapse via ``INSERT OR IGNORE`` —
+        no row is duplicated.
+
+        **Best-effort, not transactional.** This writer is intentionally
+        decoupled from the interpretation-event row write (per the spec
+        at docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md
+        §"skill_markdown_history upsert (F-5c)"). Storage cost is
+        bounded — one row per distinct deploy of the skill markdown.
+
+        Returns ``True`` when a row was inserted, ``False`` when the row
+        already existed (the upsert was a no-op). Callers MAY use the
+        return value for telemetry, but they MUST NOT branch on it for
+        correctness: the table's contents are an audit-archive, not a
+        coordination surface.
+
+        Trust tier: the ``skill_hash`` / ``filename`` / ``content`` triple
+        is operator-supplied (drawn from the on-disk skill file the
+        operator deployed). It is Tier-1 data on insert — we crash on any
+        DB-side anomaly. The caller's discipline (passing values from
+        ``load_skill_with_hash``) ensures atomic consistency.
+        """
+        now = self._ensure_utc(first_seen_at) if first_seen_at is not None else self._now()
+
+        def _sync() -> bool:
+            stmt = (
+                sqlite_insert(skill_markdown_history_table)
+                .values(
+                    hash=skill_hash,
+                    filename=filename,
+                    content=content,
+                    first_seen_at=now,
+                )
+                .on_conflict_do_nothing(index_elements=[skill_markdown_history_table.c.hash])
+            )
+            with self._engine.begin() as conn:
+                result = conn.execute(stmt)
+                # ``rowcount`` is 1 on INSERT, 0 on conflict-ignored. The
+                # SQLite driver returns the actual statement rowcount here
+                # — no synthetic value substitution, so this is a
+                # truthful insert-vs-ignored signal.
+                return int(result.rowcount) == 1
+
+        return cast(bool, await self._run_sync(_sync))
 
     async def record_auto_interpreted_no_surfaces_event(
         self,

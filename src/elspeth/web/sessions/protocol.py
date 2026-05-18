@@ -782,6 +782,28 @@ class SessionServiceProtocol(Protocol):
         """
         ...
 
+    async def upsert_skill_markdown_history(
+        self,
+        *,
+        skill_hash: str,
+        filename: str,
+        content: str,
+        first_seen_at: datetime | None = None,
+    ) -> bool:
+        """Best-effort INSERT-OR-IGNORE into ``skill_markdown_history`` (F-5c).
+
+        Captures the exact composer-skill markdown text the LLM was
+        prompted with so a forensic auditor can reconstruct it from the
+        ``composer_skill_hash`` recorded on later interpretation event
+        rows. Hash is the primary key; subsequent calls with the same
+        hash are no-ops.
+
+        Returns ``True`` when a row was inserted, ``False`` when it
+        already existed. Best-effort only — NOT transactional with the
+        interpretation-event row write.
+        """
+        ...
+
     async def record_auto_interpreted_no_surfaces_event(
         self,
         *,

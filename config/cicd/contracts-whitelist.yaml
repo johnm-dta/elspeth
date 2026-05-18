@@ -686,6 +686,20 @@ allowed_dict_patterns:
   # message shape ({role, content, ...}) which is inherently dynamic.
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_proof_repair:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._attempt_empty_state_uploaded_blob_repair:llm_messages (list)"
+  # Phase 5b Task 5 follow-on: session-aware async tool dispatch. The
+  # ``arguments`` dict is Tier-3 LLM-supplied JSON; the per-handler
+  # Pydantic boundary inside the tool surface validates the shape. The
+  # ``llm_messages`` list is the OpenAI chat-completion list shared with
+  # the rest of the compose loop, with the same {role, content, ...}
+  # shape exemption that the proof-repair path already enjoys. The
+  # ``_build_session_aware_kwargs`` return is a dict[str, Any] because
+  # each handler in ``_SESSION_AWARE_TOOL_HANDLERS`` accepts a
+  # heterogeneous kwarg set (state, service-method references, snapshot
+  # scalars) that cannot be reduced to a single TypedDict.
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._dispatch_session_aware_tool:arguments"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._dispatch_session_aware_tool:llm_messages (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_session_aware_kwargs:arguments"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_session_aware_kwargs:return"
   # Blob sync helpers — return dicts for tool response payloads
   - "src/elspeth/web/composer/tools.py:_sync_list_blobs:return (list)"
   # Secret tool handlers — same pattern as above, LLM-provided arguments

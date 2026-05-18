@@ -427,7 +427,7 @@ allow_hits:
     rejects malformed trigger.condition values before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=8697347d710d77a5
+- key: web/composer/tools.py:R6:_execute_update_blob:fp=f505d80e1ea517f8
   owner: web-composer
   reason: "Narrow OSError around storage_path.write_bytes(old_content) rollback \u2014 disk faults during post-replace divergence\
     \ rollback expected; programmer bugs still propagate"
@@ -435,13 +435,13 @@ allow_hits:
     commit exception remains the headline.  Pre-replace failures bypass the rollback branch entirely (verified by test_primary_db_exception_before_replace_propagates_without_rollback
     and test_quota_breach_returns_failure_without_touching_storage).
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=2568244a2f3b77af
+- key: web/composer/tools.py:R6:_execute_delete_blob:fp=0ead256de1fa3e7f
   owner: web-composer
   reason: "Narrow OSError around tombstone restore after a failed blob delete \u2014 compensation disk faults must not bury\
     \ the primary DB exception"
   safety: Rollback failure is attached as add_note() on primary_exc and the original delete failure is re-raised unchanged
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=a116a31977d63ffe
+- key: web/composer/tools.py:R6:_execute_inspect_source:fp=9c04f74d38e08d70
   owner: web-composer
   reason: "Tier-3 trust boundary \u2014 UUID(blob_id) coercion of caller-supplied string. ValueError is the documented failure\
     \ mode for malformed UUIDs and falls back to blob_uuid=None (an optional identity field on inspect_blob_content). Failure\
@@ -451,7 +451,7 @@ allow_hits:
     lookup). The blob_id_not_uuid warning surfaces the offending id (truncated to 64 chars) into the audit-bound facts.warnings
     tuple; integrity guards (status=ready, hash match) remain authoritative.
   expires: null
-- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=4d464bfbeb7d95ce
+- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=8563720d6cf4b613
   owner: web-composer
   reason: "Preview proof boundary \u2014 ExpressionEvaluationError from evaluating a gate condition against bounded observed-CSV\
     \ sample rows is the exact runtime failure class this proof diagnostic exists to catch."
@@ -817,7 +817,7 @@ allow_hits:
   safety: Cleanup failure attached as RecoveryFailed[<type>] note on primary_exc with orphan blob_id and target session_id;
     storage file unlinked best-effort; primary copy exception remains the headline
   expires: null
-- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=d4935431c3b38c9a
+- key: web/sessions/service.py:R5:SessionServiceImpl:_unwrap_envelope:fp=af35972ce0901ce0
   owner: web-sessions
   reason: Type check for envelope format in composition state deserialization
   safety: Handles both raw and enveloped formats
@@ -832,26 +832,26 @@ allow_hits:
     \ \u2014 production code never imports observed_value."
   safety: Raises TypeError with explicit error message naming the invariant violation; no silent fallback or coerced default
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=2e857941a547dad7
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=7ee2c93a12121587
   owner: web-sessions
   reason: "Narrow OSError during staged blob-directory restore after archive rollback \u2014 compensation disk faults must\
     \ not bury the primary archive failure"
   safety: Restore failure is attached via add_note() to primary_exc and the original archive exception is re-raised unchanged
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=c96c3752dac3ec68
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=8eed51c7bfa31b9c
   owner: web-sessions
   reason: "Narrow OSError around post-commit quarantine purge \u2014 once session rows are deleted, staged blob cleanup is\
     \ best-effort only"
   safety: Returns after leaving the staged directory in quarantine for manual cleanup; it does not fabricate a rollback or
     mask the already-completed archive
   expires: null
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=35c2176238d8226c
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=7ab613e217d167f5
   owner: web-sessions
   reason: "Best-effort quarantine-root cleanup after staged blob purge \u2014 the parent directory may still contain other\
     \ files or be recreated concurrently"
   safety: Failing to remove the parent leaves only a manual-cleanup directory behind; session archival has already succeeded
   expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=0647f4cde2dc9fec
+- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=a912b3f395eb7fb7
   owner: web-sessions
   reason: "Async-loop discriminator \u2014 narrow ``except RuntimeError`` around\n``asyncio.get_running_loop()`` to detect\
     \ whether the calling\nthread has a running event loop. The standard library raises\n``RuntimeError`` precisely when there\
@@ -1091,17 +1091,17 @@ allow_hits:
   reason: "Tier 3 \u2014 fingerprint key from deployment environment; os.environ.get followed by check-and-crash"
   safety: Missing key raises RuntimeError immediately; no silent default
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=334a67901a99cb89
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=52069fb990b5b3fa
   owner: web-sessions
   reason: "derived_from_map.get() on seed_id \u2014 seed may not exist in derived_from_map (states without derived_from parents)"
   safety: Returns None, while-loop terminates naturally
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=f3fbf22e1022d9e6
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=d835b2c4cb73f300
   owner: web-sessions
   reason: "derived_from_map.get() traversing parent chain \u2014 parent may reference state outside session or not in map"
   safety: Returns None, terminates transitive closure walk
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=02043aefb828c388
+- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=d7ddb6c8121be8aa
   owner: web-sessions
   reason: "source_to_copied_assistant_id.get() in \xA714.6 fork sweep \u2014 looks up the new id minted for an in-slice assistant.\
     \ None means the source row's parent assistant is OUTSIDE the [:fork_idx] slice, which is detected immediately and converted\
@@ -1587,379 +1587,379 @@ allow_hits:
   safety: Unexpected exceptions are re-raised. Known exception text is never surfaced to the UI; downstream validation treats
     absent facts as unknown/fail-closed where required.
   expires: null
-- key: web/composer/service.py:R5:_litellm_completion_supports_param:fp=0ebca23ffff51245
+- key: web/composer/service.py:R5:_litellm_completion_supports_param:fp=7045b9ce4cd1d3db
   owner: web-composer
   reason: Tier 3 LiteLLM supported-parameter metadata boundary; provider metadata must be list-shaped before treating seed
     as supported.
   safety: Malformed or absent metadata conservatively omits the seed request parameter instead of fabricating support.
   expires: null
-- key: web/composer/service.py:R5:_provider_details_payload:fp=f1113fcf21b93aa3
+- key: web/composer/service.py:R5:_provider_details_payload:fp=6dc3edbf866ab26d
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R2:_provider_details_payload:fp=c14e31e1430b729f
+- key: web/composer/service.py:R2:_provider_details_payload:fp=08052f5394709bdf
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=4024f36f08e45410
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=894c948adbad047a
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R5:_token_usage_from_response:fp=650232e06c97ab4e
+- key: web/composer/service.py:R5:_token_usage_from_response:fp=8b671bcf6f36c181
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=7993ba40f246a6a2
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=85d323d02f6b0129
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=437ea8d140a65f7f
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=bab3651384ef1768
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=37668dfca673d3dc
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=e66454c812058649
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=f4cf07e43f6cf2e1
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=b61b085c90bd7489
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=f2317e36323669ff
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=4e8346e8adbed2b3
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=3a8f6b8b18fcaf9a
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=12ea8fbbd964fece
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R5:_token_usage_from_response:fp=ed26b920b0d37a5f
+- key: web/composer/service.py:R5:_token_usage_from_response:fp=4ee16c46aee22411
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R5:_token_usage_from_response:fp=9d64f42176e8b048
+- key: web/composer/service.py:R5:_token_usage_from_response:fp=9bea2e9b6edb2fff
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R5:_token_usage_from_response:fp=0e679c7720a8bffb
+- key: web/composer/service.py:R5:_token_usage_from_response:fp=6cbac0c24450b419
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=3740d118a3ba8fda
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=7e67e9f59d784298
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=e5e0037a00426245
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=8c33e392a5d1902e
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=3368cfe165449fab
+- key: web/composer/service.py:R1:_token_usage_from_response:fp=9510e0cac0ddaf42
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=ea1424401bb67250
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=d3e07cf8705ce5f8
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=a400394289b778c6
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=d39f1a1f5c101ff1
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=c314e6ce9c3c8fa2
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=dcbc9c8399584569
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=fbcc8d88f0bfb699
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=873aface18ee044c
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=cbfa21917fefd2b1
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=2cc45c63b76f2c82
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=1ba8fd4469efeefd
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=2b6e23cc74fc452b
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=6f61363a7952e60b
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=d0f3e8fc4b6fc272
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=53192504a7fc603a
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=aa97266b7a8aba2d
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=d4e2fe0eb143edb5
+- key: web/composer/service.py:R2:_token_usage_from_response:fp=73af4b65bcd58b16
   owner: composer-audit
   reason: Tier 3 LiteLLM usage metadata boundary; provider usage objects may be absent, mapping-shaped, object-shaped, or
     omit optional cache and reasoning fields.
   safety: Missing or malformed counters are normalized to None by TokenUsage.from_dict; no zeroes or costs are fabricated.
   expires: null
-- key: web/composer/service.py:R2:_provider_cost_from_response:fp=894c948adbad047a
+- key: web/composer/service.py:R2:_provider_cost_from_response:fp=ac808107f741299f
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_provider_cost_from_response:fp=8b671bcf6f36c181
+- key: web/composer/service.py:R5:_provider_cost_from_response:fp=40cd795f76de2aad
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R2:_provider_cost_from_response:fp=cdd637f463e7cf6d
+- key: web/composer/service.py:R2:_provider_cost_from_response:fp=8377a7ce5c242033
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R2:_safe_response_model:fp=dce981ca3870d6a8
+- key: web/composer/service.py:R2:_safe_response_model:fp=1e3f4722fed5cda2
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_safe_response_model:fp=2eee57e4f821687a
+- key: web/composer/service.py:R5:_safe_response_model:fp=bab0e68873f9e307
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R2:_safe_provider_request_id:fp=e3d7c93a55d0c2dc
+- key: web/composer/service.py:R2:_safe_provider_request_id:fp=a02105006cfadf34
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_safe_provider_request_id:fp=872982f9358e3722
+- key: web/composer/service.py:R5:_safe_provider_request_id:fp=666ef1328a25ca95
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_response_field:fp=e32322a344b22b7a
+- key: web/composer/service.py:R5:_response_field:fp=e2f7625ab57a0c15
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R1:_response_field:fp=2daed99be5d734e2
+- key: web/composer/service.py:R1:_response_field:fp=2dfc9dabf04660ff
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R2:_response_field:fp=c22ad8a3bdfee53a
+- key: web/composer/service.py:R2:_response_field:fp=a834a656ff0a3a41
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_first_response_message:fp=6e5cb0456beb1d9b
+- key: web/composer/service.py:R5:_first_response_message:fp=907f91cd34dc7952
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=080810ab7c1e48dd
+- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=79545ceab4728e2e
   owner: composer-audit
   reason: Tier 3 provider artifact normalization boundary; reasoning details may be nested mappings, sequences, model objects,
     or opaque provider classes.
   safety: Values are recursively reduced to JSON-safe audit artifacts or repr(value); raw provider objects are not stored.
   expires: null
-- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=78dd21ea9c6fc616
+- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=88d5abad9aea7a3c
   owner: composer-audit
   reason: Tier 3 provider artifact normalization boundary; reasoning details may be nested mappings, sequences, model objects,
     or opaque provider classes.
   safety: Values are recursively reduced to JSON-safe audit artifacts or repr(value); raw provider objects are not stored.
   expires: null
-- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=e055c31d141cc314
+- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=c1b1ecd726808ae2
   owner: composer-audit
   reason: Tier 3 provider artifact normalization boundary; reasoning details may be nested mappings, sequences, model objects,
     or opaque provider classes.
   safety: Values are recursively reduced to JSON-safe audit artifacts or repr(value); raw provider objects are not stored.
   expires: null
-- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=5c63fea75033e3ac
+- key: web/composer/service.py:R5:_json_safe_provider_artifact:fp=73fdaa922167a0b7
   owner: composer-audit
   reason: Tier 3 provider artifact normalization boundary; reasoning details may be nested mappings, sequences, model objects,
     or opaque provider classes.
   safety: Values are recursively reduced to JSON-safe audit artifacts or repr(value); raw provider objects are not stored.
   expires: null
-- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=e691ff14ecb34910
+- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=60cfb91a783d4491
   owner: composer-audit
   reason: Tier 3 provider artifact normalization boundary; reasoning details may be nested mappings, sequences, model objects,
     or opaque provider classes.
   safety: Values are recursively reduced to JSON-safe audit artifacts or repr(value); raw provider objects are not stored.
   expires: null
-- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=fa27eacf07c1a88c
+- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=ce7111d9a5defc82
   owner: composer-audit
   reason: Tier 3 provider artifact normalization boundary; reasoning details may be nested mappings, sequences, model objects,
     or opaque provider classes.
   safety: Values are recursively reduced to JSON-safe audit artifacts or repr(value); raw provider objects are not stored.
   expires: null
-- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=6b48935e4803d9d5
+- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=c2efaf7f2d359638
   owner: composer-audit
   reason: Tier 3 provider artifact normalization boundary; reasoning details may be nested mappings, sequences, model objects,
     or opaque provider classes.
   safety: Values are recursively reduced to JSON-safe audit artifacts or repr(value); raw provider objects are not stored.
   expires: null
-- key: web/composer/service.py:R5:_reasoning_metadata_from_response:fp=8d20bf4d260ae3e1
+- key: web/composer/service.py:R5:_reasoning_metadata_from_response:fp=46ba725c620dfd9f
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_reasoning_metadata_from_response:fp=851f513d8d678076
+- key: web/composer/service.py:R5:_reasoning_metadata_from_response:fp=1be1aaa2749c50c3
   owner: composer-audit
   reason: Tier 3 LiteLLM response metadata boundary; provider adapters expose optional metadata under provider-specific dict
     and object shapes.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent or malformed fields stay None.
   expires: null
-- key: web/composer/service.py:R5:_supports_anthropic_prompt_cache_markers:fp=19d3337d41a38016
+- key: web/composer/service.py:R5:_supports_anthropic_prompt_cache_markers:fp=b1f727772be6e587
   owner: composer-cache-markers
   reason: Provider-detection predicate for prompt-cache marker support; model identifiers may be absent or malformed before
     settings are finalized.
   safety: Non-string input returns False and the LiteLLM call proceeds without cache markers.
   expires: null
-- key: web/composer/service.py:R1:_apply_anthropic_cache_markers:fp=d1ea73fc7ed12117
+- key: web/composer/service.py:R1:_apply_anthropic_cache_markers:fp=f0f9cee3265cd902
   owner: composer-cache-markers
   reason: Prompt-cache marker transform scans message dicts whose role field may be absent during composer message construction.
   safety: Missing role leaves that message unmarked; the transform still preserves the original payload shape.
   expires: null
-- key: web/composer/service.py:R5:_optional_ancestor_present:fp=cd168d92a0fcea39
+- key: web/composer/service.py:R5:_optional_ancestor_present:fp=ef4bb8dd55f08889
   owner: composer-walker
   reason: Tier 3 LLM tool-call argument walker distinguishes absent optional ancestors from present malformed nested values.
   safety: Malformed shapes become structured argument errors returned to the LLM, not crashes or silent tool execution.
   expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=b40b2de22b761c6a
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=a17fd57dcffbffe1
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache for an existing
     result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=51eabaf0516fd95d
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=e6b60ca1b3c28b60
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache for an existing
     result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=2535b64b650b0684
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=086cc17294c3cc81
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache for an existing
     result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=f2d7038c7aa69a5d
+- key: web/composer/service.py:R5:ComposerServiceImpl:_cached_runtime_preflight:fp=f031c8c1e9196758
   owner: web-composer
   reason: Runtime preflight cache dispatch narrows RuntimePreflightEntry and checks an internal per-compose cache for an existing
     result.
   safety: ValidationResult and RuntimePreflightFailure are handled explicitly; cache misses run the coordinator path.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=c80102e23cbe1f64
+- key: web/composer/service.py:R5:ComposerServiceImpl:_compose_loop:fp=d08cbedb64c715cd
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as bounded tool
     results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=e5a56f4528681966
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=ff296764fe1859b0
   owner: composer-advisor
   reason: Tier 3 LLM tool-call and advisor boundary; malformed tool arguments or provider failures are converted into structured
     composer feedback.
   safety: Tool execution is skipped on argument errors; advisor/provider failures are audited and returned as bounded tool
     results.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=681da04f98711c55
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=732ab6092e430f80
   owner: composer-progress-persistence
   reason: Tier 3 plugin execution boundary; plugin bugs are captured for durable compose-turn audit before propagation.
   safety: AuditIntegrityError and interpreter-invariant exceptions re-raise before this catch; ordinary plugin crashes are captured
     as ComposerPluginCrashError after recording the failing tool outcome.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=5264d98c4bc21a7e
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=7b1c3eb381501587
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor budget or
     constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=6f6af1703c7610d7
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=41a38f3e94f312f7
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor budget or
     constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=fa5c365b1e3d1029
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=700a0d0bd8f9d737
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor budget or
     constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=44874f1e4af89d0d
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=7d88389113894fc9
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor budget or
     constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=5e2622149bcc9cb8
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=e4b816648fc0bd31
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor budget or
     constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=4439ff59ff3319de
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=51f4f87da978cdb6
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor budget or
     constructing prompts.
   safety: Invalid shapes return ARG_ERROR payloads and no outbound advisor call is made.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=9bbc12ba245a100f
+- key: web/composer/service.py:R5:ComposerServiceImpl:_validate_advisor_arguments:fp=8c4599d81b049f13
   owner: composer-advisor
   reason: Tier 3 advisor tool-call boundary; LLM-provided arguments must be type-checked before spending advisor budget or
     constructing prompts.
@@ -2047,7 +2047,7 @@ allow_hits:
   safety: The guard emits only the secret_ref name marker and never resolves or logs the secret value; invalid shapes remain
     unknown for the guard.
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=968941aef0c4d639
+- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=6187bc54ae3ce004
   owner: web-sessions
   reason: "ContextVar.get() \u2014 false-positive R1 match on the method name. ContextVar exposes .get() as the SOLE read\
     \ API for its current value; there is no contextvar[key] subscript alternative. The tier-model rule's \"Access dict keys\
@@ -2056,7 +2056,7 @@ allow_hits:
   safety: Returns the frozenset value (default empty if no token has been set in this context), feeding directly into the
     "not in" membership check. No KeyError is possible from a ContextVar read.
   expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=72253e39f80e07da
+- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=7dae696704a5ccf2
   owner: web-sessions
   reason: "ContextVar.get() \u2014 false-positive R1 match on the method name. Same as the _assert_session_write_lock_held\
     \ entry above; ContextVar.get() is the only read API. Used to read the current set of held locks, union with the new (id(conn),\
@@ -2610,17 +2610,17 @@ allow_hits:
   reason: "CompositionState serialization must preserve the two validated coalesce branch shapes so transformed recipe output keys survive DB/YAML round trips."
   safety: Mapping branches are deep-thawed to plain dict; sequence branches serialize as list; no cross-shape coercion occurs.
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_try_apply_freeform_recipe_intent:fp=805bcee716243189
+- key: web/composer/service.py:R5:ComposerServiceImpl:_try_apply_freeform_recipe_intent:fp=d9c933a345fbd6e2
   owner: web-composer
   reason: "Tier-3 freeform recipe routing boundary; recipe slots originate from user prose and tool execution returns a generic tool result payload that must be mapping-shaped before commit_apply_recipe consumes it."
   safety: Non-success or non-mapping create_recipe_arguments results abort deterministic routing and fall back to the normal LLM compose path; no partial recipe commit occurs.
   expires: null
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=bfee6368e4007424
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=69b92be123cbbaf9
   owner: web-composer
   reason: Composer tool-result audit boundary -- result_canonical is canonical JSON from our own audit row but tool data may legitimately omit data when the last non-discovery tool was not a proposal-producing mutation.
   safety: Missing or malformed data returns False, so pending-proposal resume only triggers when the audited tool result explicitly carries proposal data.
   expires: null
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=a3e30b71bacec861
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=167c08598bfb6fde
   owner: web-composer
   reason: Composer tool-result audit boundary -- proposal status is optional inside generic tool result payloads and is probed only to detect APPROVAL_REQUIRED.
   safety: Missing or malformed status returns False; no approval state is fabricated and normal compose flow continues.

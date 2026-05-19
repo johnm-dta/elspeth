@@ -10,6 +10,9 @@ separately under Filigree issue `elspeth-8843308cfe`.
 For the toolchain decision, see
 [ADR-023: Custom Python Static Analyzer for ELSPETH-Specific CI Invariants](../docs/architecture/adr/023-custom-python-ci-analyzer.md).
 
+For the rule taxonomy and lifecycle rationale, see
+[the elspeth-lints rationale](../docs/elspeth-lints/rationale.md).
+
 For the implementation order, see
 [the elspeth-lints master implementation order](../docs/plans/2026-05-19-elspeth-lints-master-implementation-order.md).
 

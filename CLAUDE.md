@@ -155,6 +155,9 @@ Pipelines compile to DAGs. Linear pipelines are degenerate DAGs (single `continu
 
 **Package management:** Use `uv` for ALL package management. Never use `pip` directly.
 
+For ELSPETH-specific CI analyzer rationale, rule taxonomy, and lifecycle policy,
+see [docs/elspeth-lints/rationale.md](docs/elspeth-lints/rationale.md).
+
 ```bash
 # Environment setup
 uv venv && source .venv/bin/activate

@@ -4,6 +4,9 @@ This guide is for adding a new ELSPETH-specific static-analysis rule. Do not add
 new `scripts/cicd/enforce_*.py` scripts; the meta gate rejects unmanifested
 bespoke enforcers during the migration window.
 
+Before proposing a new rule, read [the rationale](rationale.md) for the rule
+taxonomy, severity policy, allowlist discipline, and lifecycle expectations.
+
 ## Add A Rule
 
 1. Create a rule package under `elspeth-lints/src/elspeth_lints/rules/`.

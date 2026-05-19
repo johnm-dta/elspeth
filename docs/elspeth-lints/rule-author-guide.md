@@ -6,12 +6,13 @@ bespoke enforcers during the migration window.
 
 ## Add A Rule
 
-1. Create a module under `elspeth-lints/src/elspeth_lints/rules/`.
+1. Create a rule package under `elspeth-lints/src/elspeth_lints/rules/`.
 2. Implement the `Rule` protocol from `elspeth_lints.core.protocols`.
-3. Export a `RULE` object from the module.
+3. Export a `RULE` object from the package.
 4. Add that object to `BUILTIN_RULES` in
    `elspeth-lints/src/elspeth_lints/rules/__init__.py`.
-5. Add focused fixtures and tests under `tests/unit/elspeth_lints/`.
+5. Add `examples_violation` and `examples_clean` fixtures under the rule
+   package, plus focused tests under `tests/unit/elspeth_lints/`.
 6. If the rule ports an existing `scripts/cicd/enforce_*.py` check, add or
    update the entry in `config/cicd/lint_migration_status.yaml`.
 
@@ -106,3 +107,24 @@ For installed-package proof:
 uv pip install --python .venv/bin/python -e ./elspeth-lints
 .venv/bin/elspeth-lints check --rules nothing --root /tmp
 ```
+
+## Worked Example
+
+`plugin_contract.options_metadata` is the v1.0 pilot rule. It demonstrates the
+expected package shape:
+
+```text
+elspeth-lints/src/elspeth_lints/rules/plugin_contract/options_metadata/
+├── __init__.py
+├── metadata.py
+├── rule.py
+└── fixtures/
+    ├── examples_violation/
+    └── examples_clean/
+```
+
+The legacy script `scripts/cicd/enforce_options_metadata.py` still runs in CI,
+while `config/cicd/lint_migration_status.yaml` keeps the new rule in `shadow`
+with JSON commands for the parity harness. Use this port as the reference for
+metadata placement, fixture counts, command wiring, and protocol-compatible
+runtime dependencies.

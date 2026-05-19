@@ -53,9 +53,28 @@ rules:
     status: pending
     migration_issue: null
   - old_script: scripts/cicd/enforce_options_metadata.py
-    new_rule: null
-    status: pending
+    new_rule: plugin_contract.options_metadata
+    status: shadow
     migration_issue: elspeth-8e8b49d58e
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_plugin_hashes.py
     new_rule: null
     status: pending

@@ -69,6 +69,12 @@ jobs:
       - name: Enforce plugin options metadata
         run: uv run python scripts/cicd/enforce_options_metadata.py
 
+      - name: Shadow plugin options metadata elspeth-lints rule
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules plugin_contract.options_metadata \
+            --root .
+
       - name: Forbid new bespoke CI enforcers
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -80,7 +86,7 @@ jobs:
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
-            --rules meta.no-new-bespoke-cicd-enforcer \
+            --rules meta.no-new-bespoke-cicd-enforcer,plugin_contract.options_metadata \
             --root . \
             --format sarif > elspeth-lints.sarif
           status=$?

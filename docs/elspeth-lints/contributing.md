@@ -36,6 +36,11 @@ fixtures/examples_violation/01_repo_shape/
 fixtures/examples_violation/01_repo_shape.expected.json
 ```
 
+Runtime-backed whole-repository rules may include `_fixture_rule.py` inside a
+directory fixture to provide a fixture-local `RULE` object, such as a rule
+instance wired to a fake plugin manager. That hook is for fixture dependency
+injection only; it does not extend the production `Rule` protocol.
+
 The shared test `tests/unit/elspeth_lints/test_all_rule_fixtures.py` fails when a
 rule has no fixtures, when a clean fixture emits findings, or when a violation
 fixture does not match its expected JSON. It also checks that

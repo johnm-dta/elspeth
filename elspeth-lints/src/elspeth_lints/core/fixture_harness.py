@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ast
 import importlib
+import importlib.util
 import json
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,24 +121,48 @@ def _is_fixture_item(path: Path) -> bool:
 
 
 def _run_fixture_case(case: RuleFixtureCase) -> list[Finding]:
+    rule = _rule_for_case(case)
     root = case.fixture_path if case.fixture_path.is_dir() else case.fixture_path.parent
     context = RuleContext(root=root)
-    if case.rule.scope == RuleScope.WHOLE_REPO:
-        return list(case.rule.analyze(ast.Module(body=[], type_ignores=[]), root, context))
+    if rule.scope == RuleScope.WHOLE_REPO:
+        return list(rule.analyze(ast.Module(body=[], type_ignores=[]), root, context))
 
     findings: list[Finding] = []
     if case.fixture_path.is_file():
         parsed = parse_python_file(case.fixture_path)
         if isinstance(parsed, PythonSyntaxError):
             raise AssertionError(f"{case.name}: fixture has syntax error: {parsed.message}")
-        findings.extend(case.rule.analyze(parsed.tree, parsed.path, context))
+        findings.extend(rule.analyze(parsed.tree, parsed.path, context))
         return findings
 
     for parsed in walk_python_files(case.fixture_path):
         if isinstance(parsed, PythonSyntaxError):
             raise AssertionError(f"{case.name}: fixture has syntax error: {parsed.message}")
-        findings.extend(_run_incremental_rule(case.rule, parsed, context))
+        findings.extend(_run_incremental_rule(rule, parsed, context))
     return findings
+
+
+def _rule_for_case(case: RuleFixtureCase) -> Rule:
+    if not case.fixture_path.is_dir():
+        return case.rule
+    fixture_rule_path = case.fixture_path / "_fixture_rule.py"
+    if not fixture_rule_path.exists():
+        return case.rule
+    return _load_fixture_rule(fixture_rule_path)
+
+
+def _load_fixture_rule(path: Path) -> Rule:
+    module_name = f"_elspeth_lints_fixture_{abs(hash(path))}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"{path}: could not load fixture rule module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    rule = getattr(module, "RULE", None)
+    if not isinstance(rule, Rule):
+        raise AssertionError(f"{path}: fixture module must expose a Rule-compatible RULE object")
+    return rule
 
 
 def _run_incremental_rule(rule: Rule, parsed: ParsedPythonFile, context: RuleContext) -> Iterable[Finding]:

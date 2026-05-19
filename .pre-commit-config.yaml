@@ -74,6 +74,13 @@ repos:
         files: ^(scripts/cicd/enforce_.*\.py|config/cicd/lint_migration_status\.yaml|elspeth-lints/src/elspeth_lints/rules/meta_no_new_bespoke_cicd_enforcer/)
         pass_filenames: false
 
+      - id: elspeth-lints-options-metadata-shadow
+        name: elspeth-lints plugin options metadata shadow
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules plugin_contract.options_metadata --root .
+        language: system
+        files: ^(src/elspeth/plugins/|config/cicd/enforce_options_metadata/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/options_metadata/)
+        pass_filenames: false
+
       - id: enforce-tier-model
         name: Enforce Tier Model
         entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*" --exclude "web/frontend/node_modules"

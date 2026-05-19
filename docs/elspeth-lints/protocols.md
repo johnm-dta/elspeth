@@ -1,5 +1,14 @@
 # elspeth-lints Protocols
 
+**Protocol surface version:** `v1.0`
+
+`v1.0` is frozen by the `plugin_contract.options_metadata` pilot port. Changes
+to the `Rule` signature, `Finding` fields, `RuleMetadata`, the allowlist schema,
+or the `elspeth-lints check` CLI contract require a separate interface-evolution
+task with an explicit compatibility plan. Additive helper utilities under
+`elspeth_lints.core` remain allowed when later rule ports need shared AST or
+fingerprint support.
+
 `elspeth-lints` rules implement the structural `Rule` protocol from
 `elspeth_lints.core.protocols`. The protocol is intentionally small so rule
 ports stay comparable during the migration from `scripts/cicd/enforce_*.py`.
@@ -9,7 +18,8 @@ ports stay comparable during the migration from `scripts/cicd/enforce_*.py`.
 Every rule exposes:
 
 - `id`: stable rule id used by CLI selection, allowlists, reports, and parity
-  manifests.
+  manifests. Built-in rules use dotted category identifiers such as
+  `plugin_contract.options_metadata`.
 - `scope`: `RuleScope.INCREMENTAL` for per-Python-file AST rules, or
   `RuleScope.WHOLE_REPO` for manifest and repository-shape checks.
 - `metadata`: `RuleMetadata` with reviewer-facing name, description, severity,

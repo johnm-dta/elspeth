@@ -298,6 +298,7 @@ warn_unreachable = true
 show_error_codes = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
+exclude = "elspeth-lints/src/elspeth_lints/rules/.*/fixtures/"
 
 [[tool.mypy.overrides]]
 # Third-party modules without inline type information (no py.typed marker

@@ -20,6 +20,18 @@ def test_enforce_metadata_succeeds_on_current_plugins() -> None:
     assert result.returncode == 0, f"Lint failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
 
 
+def test_enforce_metadata_json_mode_succeeds_on_current_plugins() -> None:
+    """The legacy script can emit JSON findings for shadow-mode parity."""
+    result = subprocess.run(
+        [sys.executable, "scripts/cicd/enforce_options_metadata.py", "check", "--root", ".", "--format", "json"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[4],
+    )
+    assert result.returncode == 0, f"Lint failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert result.stdout == "[]\n"
+
+
 def test_enforce_metadata_fails_on_missing_title() -> None:
     """A config field without title is reported with a stable identifier."""
     from scripts.cicd.enforce_options_metadata import run_metadata_lint

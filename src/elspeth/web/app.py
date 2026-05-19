@@ -63,6 +63,7 @@ from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
+from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
@@ -464,6 +465,24 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
                     "tool_responses_persisted": failed_turn.tool_responses_persisted or 0,
                     "transcript_url": None,
                 },
+            },
+        )
+
+    @app.exception_handler(AuditStoryIntegrityError)
+    async def _audit_story_integrity_error_handler(_request: Request, exc: AuditStoryIntegrityError) -> JSONResponse:
+        # Sibling shape to ``_audit_integrity_error_handler`` above. The
+        # named-type discriminator was getting flattened to bare
+        # ``RuntimeError`` at the route boundary (sessions/routes.py),
+        # which routed the failure to FastAPI's default 500 handler and
+        # destroyed the ``error_type`` discriminator that incident-response
+        # code switches on. The route's wrap was removed in the same
+        # change that registered this handler; both halves of the fix are
+        # load-bearing.
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "audit_story_integrity_error",
+                "detail": str(exc),
             },
         )
 

@@ -5254,7 +5254,14 @@ def create_session_router() -> APIRouter:
         if run.session_id != session.id:
             raise HTTPException(status_code=404, detail="Run not found")
         if run.landscape_run_id is None:
-            raise RuntimeError(f"Run {run_id} has no Landscape run id; audit story cannot be reconstructed")
+            # Sessions-DB run row exists but was never linked to a Landscape
+            # run — same Tier-1 audit-DB invariant violation as the failure
+            # modes inside ``AuditStoryService``. Promoting to the named type
+            # routes both code paths through the single
+            # ``AuditStoryIntegrityError`` handler in ``app.py`` so the
+            # response carries the ``error_type`` discriminator that
+            # incident-response code switches on.
+            raise AuditStoryIntegrityError(f"Run {run_id} has no Landscape run id; audit story cannot be reconstructed")
         landscape_run_id = run.landscape_run_id
 
         settings = request.app.state.settings
@@ -5270,10 +5277,12 @@ def create_session_router() -> APIRouter:
                 session_id=str(session.id),
             )
 
-        try:
-            return await run_sync_in_worker(_load_story)
-        except AuditStoryIntegrityError as exc:
-            raise RuntimeError(f"Run {run_id} audit story is incomplete") from exc
+        # Let ``AuditStoryIntegrityError`` propagate unflattened — the FastAPI
+        # exception handler in ``app.py`` matches on the named type and
+        # returns a structured 500. Catching it here and re-raising as bare
+        # ``RuntimeError`` would route the failure to FastAPI's default
+        # handler and erase the discriminator.
+        return await run_sync_in_worker(_load_story)
 
     @router.get("/{session_id}/state")
     async def get_current_state(

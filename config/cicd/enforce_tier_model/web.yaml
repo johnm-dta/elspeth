@@ -125,7 +125,7 @@ allow_hits:
   reason: Tier 3 boundary — preferred_username is optional in Entra tokens, falls back to sub
   safety: Default is payload['sub'] which is required
   expires: null
-- key: web/app.py:R6:_settings_from_env:fp=e4e148d4148170fa
+- key: web/app.py:R6:_settings_from_env:fp=f622b32423095020
   owner: web-app
   reason: Tier 3 boundary — env var value that isn't valid JSON is treated as plain string (the common case)
   safety: JSONDecodeError caught only to fall back to raw string; no silent data loss
@@ -406,12 +406,12 @@ allow_hits:
 
     '
   expires: null
-- key: web/app.py:R1:create_app:fp=9365103fc42764a6
+- key: web/app.py:R1:create_app:fp=3a67f2bb0ce65155
   owner: web-app
   reason: Tier 3 — os.environ.get() for optional WEB_CONCURRENCY env var
   safety: Defaults to "1" when absent
   expires: null
-- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=cd1fc6b36fd4f30a
+- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=8cd10b4814a04b8b
   owner: web-app
   reason: Tier 3 — request.headers.get('content-length') reads an optional HTTP header from untrusted client input; absent header means no declared size and the request
     proceeds to per-field Pydantic caps which are the actual guarantee.
@@ -419,12 +419,12 @@ allow_hits:
     with a 413 before any handler or downstream middleware touches the body. The Pydantic per-field caps (SendMessageRequest.content 64 KiB, _InlineBlobModel.content
     256 KiB) remain the binding contract.
   expires: null
-- key: web/app.py:R1:create_app:fp=c26022949f7432a1
+- key: web/app.py:R1:create_app:fp=858b6e456117d804
   owner: web-app
   reason: Tier 3 — os.environ.get() for optional ELSPETH_ENV
   safety: Returns None when absent; only used for test guard
   expires: null
-- key: web/app.py:R4:create_app:_prometheus_metrics:fp=ebf0f0dc127607e8
+- key: web/app.py:R4:create_app:_prometheus_metrics:fp=94a895a2b67d9708
   owner: web-app
   reason: 'Tier 3 — public ``/metrics`` scrape endpoint. ``generate_latest()``
     walks the global Prometheus REGISTRY and runs collector code we do
@@ -500,7 +500,7 @@ allow_hits:
     fabricating heartbeat or terminal payloads.
   safety: Closes with 1011 and exits the loop; programming and infrastructure errors outside the validation/integrity union still propagate to the outer handler.
   expires: null
-- key: web/app.py:R7:lifespan:fp=69b9f33b81a45b92
+- key: web/app.py:R7:lifespan:fp=fdeb1deaef000238
   owner: web-execution
   reason: contextlib.suppress(CancelledError) is the expected shutdown path for the periodic orphan cleanup task
   safety: Clean cancellation during app shutdown; no error suppression
@@ -518,7 +518,7 @@ allow_hits:
     is unaffected — this path runs on the SUCCESS branch where the handler returned a result and the state was already advanced. The _canonicalization_error key is
     an internal sentinel name reserved by the audit subsystem (composer_mcp/server.py and web/composer/audit.py — single source of truth).
   expires: null
-- key: web/app.py:R6:_periodic_orphan_cleanup:fp=3dcd49b1d72a91a2
+- key: web/app.py:R6:_periodic_orphan_cleanup:fp=03ca889808d4d96e
   owner: web-execution
   reason: Audit/IO-cleanup narrow catch — except (SQLAlchemyError, OSError) absorbs recoverable failures of cancel_all_orphaned_runs (transient DB loss, lock contention,
     SQLite file I/O) so the periodic loop retries on the next interval. Catch is intentionally narrow; programmer-bug exceptions (AttributeError from a drifted attribute
@@ -595,7 +595,7 @@ allow_hits:
   reason: YAML navigation — source key may be absent in generated YAML
   safety: Returns None; source path rewriting skipped
   expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=825cc9870131a160
+- key: web/app.py:R2:create_app:_request_id:fp=6f321989856b7905
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
 

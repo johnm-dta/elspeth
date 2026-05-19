@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.app import create_app
 from elspeth.web.config import WebSettings
+from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
 from elspeth.web.sessions.protocol import AuditAccessLogWriteError, StaleComposeStateError
 
 
@@ -103,3 +104,31 @@ async def test_audit_access_log_write_error_handler_returns_static_500(tmp_path:
     body = json.loads(response.body)
     assert body["error_type"] == "audit_access_log_write_failed"
     assert "hidden db path" not in response.body.decode()
+
+
+@pytest.mark.asyncio
+async def test_audit_story_integrity_error_handler_returns_structured_500(tmp_path: Path) -> None:
+    # The audit-story route in ``sessions/routes.py`` raises
+    # ``AuditStoryIntegrityError`` (a sibling of ``AuditIntegrityError``)
+    # when either (a) the session-runs row never got a landscape_run_id,
+    # or (b) the Landscape projection itself is incomplete (missing rows,
+    # NULL llm_call_count, non-bool seeded_from_cache, etc.). The named
+    # type carries the discriminator that lets the handler return a
+    # structured ``error_type`` body — without it, incident-response code
+    # would have to string-grep the message. This test guards two
+    # regressions: the handler going missing, and the route flattening
+    # the named exception back to bare ``RuntimeError`` (which would
+    # bypass this handler).
+    app = create_app(_settings(tmp_path))
+    handler = app.exception_handlers[AuditStoryIntegrityError]
+
+    response = await handler(
+        cast(Request, object()),
+        AuditStoryIntegrityError("Landscape run 'abc-123' has NULL llm_call_count"),
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 500
+    body = json.loads(response.body)
+    assert body["error_type"] == "audit_story_integrity_error"
+    assert body["detail"] == "Landscape run 'abc-123' has NULL llm_call_count"

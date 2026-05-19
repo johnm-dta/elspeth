@@ -2245,24 +2245,6 @@ class TestPostCompletionExceptionRecovery:
         ]
         assert post_terminal_logs == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "elspeth-879f6de6bd known gap (sister to "
-            "test_post_completion_get_run_probe_failure_falls_through). When the "
-            "post-completion probe fails (SQLAlchemyError) AND the audit row is "
-            "genuinely terminal, the recovery's fall-through "
-            "update_run_status('failed', ...) call hits LEGAL_RUN_TRANSITIONS in "
-            "production and raises IllegalRunTransitionError. The narrow "
-            "``except (SQLAlchemyError, OSError)`` around that recovery "
-            "update_run_status call catches only those two; "
-            "IllegalRunTransitionError (a ValueError subclass) escapes and "
-            "shadows the original SSE-crash RuntimeError into __context__. "
-            "Closing the gap requires either fail-closed-on-probe semantics or "
-            "absorbing IllegalRunTransitionError in the recovery's narrow catch. "
-            "When fixed, this test xpasses and the marker can be removed."
-        ),
-    )
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")
     @patch("elspeth.web.execution.preflight.instantiate_plugins_from_config")
@@ -2343,10 +2325,17 @@ class TestPostCompletionExceptionRecovery:
         )
 
         run_id = str(uuid4())
-        # Correct behaviour (asserted): the SSE-crash RuntimeError surfaces.
-        # Today's broken behaviour (xfail): IllegalRunTransitionError surfaces
-        # instead, with the original RuntimeError demoted to __context__.
+        # Closes the elspeth-879f6de6bd gap: the IllegalRunTransitionError
+        # raised by the fall-through update_run_status('failed', ...) against
+        # an already-terminal row is now caught narrowly in
+        # ``ExecutionServiceImpl._run_pipeline``'s BaseException recovery
+        # (branch 3 — see the prelude comment block at that site).  The
+        # narrow catch promotes the run into the audit-primacy stance via
+        # ``irte.current_status`` as in-band proof of terminality, so the
+        # original SSE-crash RuntimeError surfaces and the ``failed`` SSE
+        # broadcast is suppressed.
         with (
+            patch("elspeth.web.execution.service.slog") as mock_slog,
             patch(
                 "elspeth.web.execution.service.load_run_accounting_from_db",
                 return_value=_run_accounting_for_status(RunStatus.COMPLETED),
@@ -2354,6 +2343,27 @@ class TestPostCompletionExceptionRecovery:
             pytest.raises(RuntimeError, match="simulated SSE crash"),
         ):
             service._run_pipeline(run_id, "source:\n  plugin: csv", threading.Event())
+
+        # Audit-primacy completion: branch 3 must NOT have broadcast a
+        # ``failed`` SSE event (the audit row is in a real terminal status
+        # — broadcasting ``failed`` would contradict it).  The branch-3 log
+        # ``post_exception_recovery_aborted_run_terminal`` is the
+        # SRE-discoverable resolution of the probe-failure ambiguity.
+        recovery_aborted_logs = [
+            c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_exception_recovery_aborted_run_terminal"
+        ]
+        assert len(recovery_aborted_logs) == 1, f"branch-3 recovery slog must fire exactly once; got {len(recovery_aborted_logs)}"
+        # The probe-failure slog still fires upstream — the IRTE catch is
+        # the *resolution*, not a replacement for the probe-failure record.
+        probe_failed_logs = [c for c in mock_slog.error.call_args_list if c.args and c.args[0] == "post_exception_run_state_probe_failed"]
+        assert len(probe_failed_logs) == 1, f"probe-failure slog must still fire upstream of the IRTE catch; got {len(probe_failed_logs)}"
+        # Three update_run_status attempts: running, completed, failed (the
+        # third one raises IRTE which is caught).  The attempt is recorded
+        # on the mock even though the side_effect raised.
+        statuses = [c.kwargs.get("status") for c in mock_session_service.update_run_status.call_args_list]
+        assert statuses == ["running", "completed", "failed"], (
+            f"branch-3 recovery path must attempt the failed update (caught by IRTE); got {statuses}"
+        )
 
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.preflight.ExecutionGraph")

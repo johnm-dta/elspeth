@@ -73,9 +73,16 @@ class _TestViolation(DeclarationContractViolation):
     payload_schema = _TestPayload
 
 
+class _FakeViolation(DeclarationContractViolation):
+    """Test-only subclass matching _FakeContract's payload schema."""
+
+    payload_schema = _FakePayload
+
+
 class _FakeContract(DeclarationContract):
     name = "fake_declaration"
     payload_schema: type = _FakePayload
+    violation_class: type[DeclarationContractViolation] = _FakeViolation
 
     def applies_to(self, plugin: object) -> bool:
         # Direct attribute access — NOT getattr with default (CLAUDE.md).
@@ -227,6 +234,7 @@ def test_contract_claiming_no_dispatch_sites_rejected() -> None:
     class _NoSites(DeclarationContract):
         name = "no_sites"
         payload_schema = _FakePayload
+        violation_class = _FakeViolation
 
         def applies_to(self, p):
             return False
@@ -264,10 +272,42 @@ def test_missing_payload_schema_registration_preserves_exception_chain() -> None
     assert isinstance(exc_info.value.__cause__, AttributeError)
 
 
+def test_non_declaration_contract_violation_class_rejected() -> None:
+    """Registration rejects declaration contracts wired to legacy exception families."""
+
+    class _LegacyViolationContract(DeclarationContract):
+        name = "legacy_violation_contract"
+        payload_schema = _FakePayload
+        violation_class = FrameworkBugError
+
+        def applies_to(self, plugin: object) -> bool:
+            return False
+
+        @implements_dispatch_site("post_emission_check")
+        def post_emission_check(
+            self,
+            inputs: PostEmissionInputs,
+            outputs: PostEmissionOutputs,
+        ) -> None:
+            raise AssertionError("not reached")
+
+        @classmethod
+        def negative_example(cls) -> ExampleBundle:
+            raise NotImplementedError
+
+        @classmethod
+        def positive_example_does_not_apply(cls) -> ExampleBundle:
+            raise NotImplementedError
+
+    with pytest.raises(TypeError, match="violation_class"):
+        register_declaration_contract(_LegacyViolationContract())
+
+
 def test_default_dispatch_methods_raise_framework_bug() -> None:
     class _PassiveContract(DeclarationContract):
         name = "passive_contract"
         payload_schema = _FakePayload
+        violation_class = _FakeViolation
 
         def applies_to(self, plugin: object) -> bool:
             return False
@@ -379,7 +419,7 @@ def test_violation_payload_secrets_scrubbed() -> None:
         run_id="r",
         row_id="rw",
         token_id="tk",
-        payload={"api_key": "sk-abcdef1234567890abcdef1234567890"},
+        payload={"api_key": "sk-abcdef1234567890abcdef1234567890"},  # secret-scan: allow-this-line
         message="m",
     )
     # to_audit_dict reads contract_name, so attach before inspecting.
@@ -564,6 +604,7 @@ def test_negative_example_bundle_helper_collects_all_claimed_sites() -> None:
     class _MultiSiteContract(DeclarationContract):
         name = "multi_site_examples"
         payload_schema: type = _FakePayload
+        violation_class = _FakeViolation
 
         def applies_to(self, plugin: object) -> bool:
             return False
@@ -607,6 +648,7 @@ def test_shadowed_undecorated_override_rejected() -> None:
     class _BaseMarkedContract(DeclarationContract):
         name = "base_marked"
         payload_schema: type = _FakePayload
+        violation_class = _FakeViolation
 
         def applies_to(self, plugin: object) -> bool:
             return False
@@ -639,6 +681,7 @@ def test_negative_example_bundle_helper_requires_every_claimed_site() -> None:
     class _MissingCoverageContract(DeclarationContract):
         name = "missing_site_example"
         payload_schema: type = _FakePayload
+        violation_class = _FakeViolation
 
         def applies_to(self, plugin: object) -> bool:
             return False
@@ -843,6 +886,7 @@ def test_dispatcher_attaches_contract_name_from_registry() -> None:
 
         name = "authentic_contract_name"
         payload_schema: type = _AttackerPayload
+        violation_class = _AttackerViolation
 
         def applies_to(self, plugin: object) -> bool:
             return True

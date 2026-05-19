@@ -144,6 +144,7 @@ class _SecretRoundTripViolation(DeclarationContractViolation):
 class _SecondaryPreEmissionContract(DeclarationContract):
     name = "secondary_declared_required_test"
     payload_schema: type = _SecondaryPayload
+    violation_class: type[_SecondaryPreEmissionViolation] = _SecondaryPreEmissionViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(plugin.declared_input_fields)
@@ -192,6 +193,7 @@ class _SecondaryPreEmissionContract(DeclarationContract):
 class _SecretPreEmissionContract(DeclarationContract):
     name = "declared_required_fields_secret_roundtrip"
     payload_schema: type = _SecretPayload
+    violation_class: type[_SecretRoundTripViolation] = _SecretRoundTripViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return True

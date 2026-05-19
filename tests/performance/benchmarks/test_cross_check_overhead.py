@@ -318,6 +318,10 @@ class _NoopPayload(TypedDict):
     reason: str
 
 
+class _NoopViolation(DeclarationContractViolation):
+    payload_schema = _NoopPayload
+
+
 class _SkipContract(DeclarationContract):
     """applies_to-returns-False stub for dispatcher scaling benchmarks.
 
@@ -328,6 +332,7 @@ class _SkipContract(DeclarationContract):
     """
 
     payload_schema: type = _NoopPayload
+    violation_class: type[_NoopViolation] = _NoopViolation
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -374,6 +379,7 @@ class _ApplicableContract(DeclarationContract):
     """
 
     payload_schema: type = _ApplicablePayload
+    violation_class: type[_ApplicableViolation] = _ApplicableViolation
 
     def __init__(self, name: str) -> None:
         self.name = name

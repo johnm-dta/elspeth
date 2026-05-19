@@ -466,7 +466,7 @@ jobs:
             --frozen \
             --all-extras \
             --no-emit-project \
-            --format requirements.txt \
+            --format requirements-txt \
             --output-file requirements-audit.txt
           uv run --with "pip-audit>=2.9,<3" pip-audit \
             --strict \

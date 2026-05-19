@@ -1157,6 +1157,20 @@ class TestWebScrapeDeclaredOutputFields:
         assert transform.declared_output_fields
 
 
+class TestWebScrapeDeclaredInputFields:
+    """Tests for declared_input_fields — static external-call preconditions."""
+
+    def test_url_field_is_declared_as_static_input_requirement(self) -> None:
+        transform = WebScrapeTransform(_base_config())
+
+        assert transform.declared_input_fields == frozenset({"url"})
+
+    def test_url_field_is_merged_with_explicit_required_input_fields(self) -> None:
+        transform = WebScrapeTransform(_base_config(required_input_fields=["tenant_id"]))
+
+        assert transform.declared_input_fields == frozenset({"url", "tenant_id"})
+
+
 # ===========================================================================
 # allowed_hosts config validation
 # ===========================================================================

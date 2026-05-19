@@ -113,6 +113,10 @@ class RAGRetrievalConfig(TransformDataConfig):
             )
         return v
 
+    @property
+    def declared_input_fields(self) -> frozenset[str]:
+        return super().declared_input_fields | frozenset({self.query_field})
+
     @model_validator(mode="after")
     def validate_query_modes(self) -> Self:
         if self.query_template and self.query_pattern:

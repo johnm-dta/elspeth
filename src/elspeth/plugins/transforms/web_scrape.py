@@ -161,6 +161,10 @@ class WebScrapeConfig(TransformDataConfig):
             raise ValueError(f"{info.field_name} must not be empty")
         return v
 
+    @property
+    def declared_input_fields(self) -> frozenset[str]:
+        return super().declared_input_fields | frozenset({self.url_field})
+
     @model_validator(mode="after")
     def _reject_field_collisions(self) -> "WebScrapeConfig":
         if self.content_field == self.fingerprint_field:

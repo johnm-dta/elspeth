@@ -86,6 +86,16 @@ class TestTransformLifecycle:
         )
         assert transform.declared_output_fields == expected
 
+    def test_query_field_is_declared_as_static_input_requirement(self):
+        transform = _make_transform()
+
+        assert transform.declared_input_fields == frozenset({"question"})
+
+    def test_query_field_is_merged_with_explicit_required_input_fields(self):
+        transform = _make_transform(required_input_fields=["tenant_id"])
+
+        assert transform.declared_input_fields == frozenset({"question", "tenant_id"})
+
     def test_output_schema_config_guaranteed_fields(self):
         transform = _make_transform()
         assert transform._output_schema_config is not None

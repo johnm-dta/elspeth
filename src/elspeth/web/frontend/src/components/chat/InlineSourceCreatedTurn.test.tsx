@@ -52,7 +52,9 @@ describe("InlineSourceCreatedTurn", () => {
 
   it("renders the filename, MIME type, and row count for a verbatim source", () => {
     render(<InlineSourceCreatedTurn summary={verbatim} onEdit={vi.fn()} />);
-    expect(screen.getByRole("heading", { name: "Source file" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Source file" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText(/chat\.csv/)).toBeInTheDocument();
     expect(screen.getByText(/text\/csv/)).toBeInTheDocument();
     expect(screen.getByText(/1 row/)).toBeInTheDocument();

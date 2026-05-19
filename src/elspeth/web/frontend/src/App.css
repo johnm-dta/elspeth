@@ -3892,6 +3892,17 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
+.graph-view-shell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.graph-view-canvas {
+  width: 100%;
+  height: 100%;
+}
+
 .graph-node-content {
   display: flex;
   flex-direction: column;
@@ -3929,6 +3940,133 @@ summary:focus-visible {
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+
+.graph-config-panel {
+  position: absolute;
+  top: var(--space-md);
+  right: var(--space-md);
+  z-index: 2;
+  display: grid;
+  gap: var(--space-md);
+  width: min(360px, calc(100% - 2 * var(--space-md)));
+  max-height: calc(100% - 2 * var(--space-md));
+  overflow: auto;
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-paper);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+
+.graph-config-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.graph-config-panel-header h3 {
+  margin: var(--space-xs) 0 0;
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-tight);
+}
+
+.graph-config-plugin {
+  margin: var(--space-2xs) 0 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.graph-config-close {
+  flex: 0 0 auto;
+  min-width: 32px;
+  min-height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.graph-config-section {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.graph-config-section h4 {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+  text-transform: uppercase;
+}
+
+.graph-config-rows,
+.graph-config-nested {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+}
+
+.graph-config-rows > div,
+.graph-config-nested > div {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-xs) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.graph-config-rows dt,
+.graph-config-nested dt {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.graph-config-rows dd,
+.graph-config-nested dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  word-break: break-word;
+}
+
+.graph-config-list {
+  display: grid;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding-left: var(--space-md);
+}
+
+.graph-config-empty-value {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-style: italic;
+}
+
+@media (max-width: 760px) {
+  .graph-config-panel {
+    top: auto;
+    right: var(--space-sm);
+    bottom: var(--space-sm);
+    left: var(--space-sm);
+    width: auto;
+    max-height: min(45%, 360px);
+  }
+
+  .graph-config-rows > div,
+  .graph-config-nested > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2xs);
+  }
 }
 
 /* ---------------------------------------------------------------------------

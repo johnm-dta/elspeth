@@ -99,7 +99,6 @@ export function InlineSourceCreatedTurn({
       className="inline-source-created-turn"
     >
       <header className="inline-source-created-turn-header">
-        <h3 className="inline-source-created-turn-title">Source file</h3>
         <dl className="inline-source-created-turn-facts">
           <div>
             <dt>Filename</dt>

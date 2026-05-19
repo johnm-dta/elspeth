@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { GraphView } from "./GraphView";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { CompositionProposal, CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
@@ -16,6 +17,7 @@ vi.mock("@xyflow/react", () => ({
     fitView,
     onInit,
     fitViewOptions,
+    onNodeClick,
   }: any) => (
     <div
       data-testid="react-flow"
@@ -29,7 +31,12 @@ vi.mock("@xyflow/react", () => ({
       data-fit-view-options={fitViewOptions ? JSON.stringify(fitViewOptions) : ""}
     >
       {nodes?.map((n: any) => (
-        <div key={n.id} data-testid={`node-${n.id}`} style={n.style}>
+        <div
+          key={n.id}
+          data-testid={`node-${n.id}`}
+          style={n.style}
+          onClick={(event) => onNodeClick?.(event, n)}
+        >
           {typeof n.data?.label === "string" ? n.data.label : n.data?.label}
         </div>
       ))}
@@ -198,6 +205,45 @@ describe("GraphView", () => {
     render(<GraphView />);
 
     expect(screen.getByText("pending #1")).toBeInTheDocument();
+  });
+
+  it("opens a structured plugin configuration panel when a graph node is clicked", async () => {
+    const user = userEvent.setup();
+    useSessionStore.setState({
+      compositionState: makeState({
+        nodes: [
+          makeNode({
+            id: "colour_lookup",
+            node_type: "transform",
+            plugin: "llm",
+            options: {
+              prompt: "Find colours",
+              output_schema: {
+                fields: ["url", "colours"],
+              },
+            },
+          }),
+        ],
+      }),
+    });
+
+    render(<GraphView />);
+    await user.click(screen.getByTestId("node-colour_lookup"));
+
+    const panel = screen.getByRole("complementary", {
+      name: /colour_lookup configuration/i,
+    });
+    expect(panel).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("heading", { name: /colour_lookup config/i }),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("llm")).toBeInTheDocument();
+    expect(within(panel).getByText("prompt")).toBeInTheDocument();
+    expect(within(panel).getByText("Find colours")).toBeInTheDocument();
+    expect(within(panel).getByText("output_schema")).toBeInTheDocument();
+    expect(within(panel).getByText("fields")).toBeInTheDocument();
+    expect(within(panel).getByText("url")).toBeInTheDocument();
+    expect(within(panel).queryByText(/^\{.*\}$/)).not.toBeInTheDocument();
   });
 
   it("renders edge labels for on_success", () => {

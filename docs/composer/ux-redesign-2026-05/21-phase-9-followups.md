@@ -289,6 +289,45 @@ follow-up entries listed below.
   prompt in the chat input. Cards with `"csv_upload"` or `"api_source"`
   continue to populate the text input.
 
+### 8. Task 4 — "Show archived" toggle is dormant at runtime (backend soft-delete not implemented)
+
+- **Class:** Decision deferral.
+- **Trigger:** Phase 8c-4 added `archived?: boolean` to the `Session`
+  frontend type and implemented a "Show archived" checkbox in
+  `HeaderSessionSwitcher`. The toggle works correctly in tests (seeded
+  via `setState`) but is dormant at runtime because:
+  - `GET /api/sessions` does not return archived sessions. The backend
+    `archive_session()` in `sessions/service.py` physically deletes the
+    row; `list_sessions()` has no `include_archived` parameter.
+  - `SessionRecord` has no `archived` field.
+  - The frontend `Session` type's `archived?: boolean` field is never
+    populated from real API responses.
+- **What's needed for the toggle to be functional at runtime:**
+  1. Change `archive_session()` in `sessions/service.py` to soft-delete
+     (set an `archived_at` timestamp column instead of deleting the row).
+     This is a schema change — requires a DB delete per
+     `project_db_migration_policy.md`.
+  2. Add `include_archived: bool = False` query parameter to
+     `GET /api/sessions` route; filter on it in `list_sessions()`.
+  3. Return `archived: bool` in `SessionResponse` (the pydantic model
+     used by `_session_response()`).
+  4. Update the frontend `Session` type: `archived` becomes
+     non-optional (`archived: boolean`).
+  5. Update `sessionStore.archiveSession`: the store action currently
+     filters the archived session out of `state.sessions`; with
+     soft-delete, it should keep the session but mark `archived: true`.
+- **What is correct today:** The filter predicate, show-archived
+  checkbox, Q9 error handling (await + catch + `role="alert"`), and
+  the `archived?: boolean` type annotation are all correct and fully
+  tested. No frontend rework is needed when the backend extends.
+- **Closure path:** Phase 9 schema/backend pass implements soft-delete.
+  The frontend changes in Step 4-5 above are the only frontend
+  rework needed.
+- **Definition of done:** Archived sessions appear in the switcher
+  when "Show archived" is checked; active sessions are hidden when
+  unchecked. The `GET /api/sessions?include_archived=true` probe
+  returns at least one archived session in a fresh staging DB.
+
 ---
 
 ## A11y findings deferred from Phase 8 Task 7

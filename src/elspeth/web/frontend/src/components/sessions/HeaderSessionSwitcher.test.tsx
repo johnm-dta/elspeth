@@ -213,4 +213,92 @@ describe("HeaderSessionSwitcher", () => {
     expect(createSession).not.toHaveBeenCalled();
     expect(renameSession).not.toHaveBeenCalled();
   });
+
+  // ── Phase 8.4 filter + archive polish ──────────────────────────────────────
+
+  it("renders a session filter input", async () => {
+    render(<HeaderSessionSwitcher />);
+    await userEvent.click(screen.getByRole("button", { name: /first/i }));
+    expect(
+      screen.getByRole("textbox", { name: /find a session/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("filters sessions by title (case-insensitive substring)", async () => {
+    useSessionStore.setState({
+      sessions: [
+        { id: "s1", title: "Tender review", updated_at: "2026-05-15T00:00:00Z" } as never,
+        { id: "s2", title: "Weather monitor", updated_at: "2026-05-14T00:00:00Z" } as never,
+        { id: "s3", title: "Document QA pipeline", updated_at: "2026-05-13T00:00:00Z" } as never,
+      ],
+      activeSessionId: "s1",
+    } as never);
+
+    const user = userEvent.setup();
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /tender review/i }));
+    await user.type(screen.getByRole("textbox", { name: /find a session/i }), "weather");
+
+    expect(screen.getByRole("menuitem", { name: /^weather monitor$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^tender review$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^document qa pipeline$/i })).not.toBeInTheDocument();
+  });
+
+  it("hides archived sessions by default and shows them when toggled", async () => {
+    useSessionStore.setState({
+      sessions: [
+        { id: "s1", title: "Active session", updated_at: "2026-05-15T00:00:00Z" } as never,
+        { id: "s2", title: "Old archived session", updated_at: "2026-05-14T00:00:00Z", archived: true } as never,
+      ],
+      activeSessionId: "s1",
+    } as never);
+
+    const user = userEvent.setup();
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /active session/i }));
+
+    // Archived session is hidden by default.
+    expect(screen.getByRole("menuitem", { name: /^active session$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^old archived session$/i })).not.toBeInTheDocument();
+
+    // Toggle shows the archived session.
+    await user.click(screen.getByRole("checkbox", { name: /show archived/i }));
+    expect(screen.getByRole("menuitem", { name: /^old archived session$/i })).toBeInTheDocument();
+  });
+
+  // Q9: backend archive failure must surface an error region AND preserve the
+  // row in the active list. Without this test an optimistic-UI implementation
+  // that removes the row before awaiting the network response would ship
+  // undetected — the row would disappear even though the backend state is
+  // unchanged.
+  it("surfaces a backend archive failure via the error region and preserves the row", async () => {
+    const archiveSession = vi.fn().mockRejectedValue(new Error("backend unavailable"));
+    useSessionStore.setState({
+      sessions: [
+        { id: "s1", title: "Tender review", updated_at: "2026-05-15T00:00:00Z" } as never,
+      ],
+      activeSessionId: "s1",
+      archiveSession,
+    } as never);
+
+    const user = userEvent.setup();
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /tender review/i }));
+
+    // Click the Archive menuitem to open the confirmation dialog.
+    await user.click(screen.getByRole("menuitem", { name: /^archive tender review$/i }));
+    // Confirm the archive in the dialog — this closes the menu and triggers the
+    // async archive call.
+    await user.click(screen.getByRole("button", { name: /^archive$/i }));
+
+    // Error region must appear (menu is now closed; error renders outside menu).
+    const alert = await screen.findByRole("alert");
+    expect(alert).toBeInTheDocument();
+    expect(alert.textContent).toMatch(/could not archive|backend unavailable|unable to archive/i);
+
+    // Reopen the menu to verify the row is still present — the session must
+    // not have been removed from the store (no optimistic removal on failure).
+    await user.click(screen.getByRole("button", { name: /tender review/i }));
+    expect(screen.getByRole("menuitem", { name: /^tender review$/i })).toBeInTheDocument();
+  });
 });

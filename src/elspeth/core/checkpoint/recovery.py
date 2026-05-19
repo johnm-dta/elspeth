@@ -178,10 +178,18 @@ class RecoveryManager:
         if not check.can_resume:
             return None
 
-        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        try:
+            checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        except IncompatibleCheckpointError:
+            return None
         if checkpoint is None:
             return None
 
+        topology_check = CheckpointCompatibilityValidator().validate(checkpoint, graph)
+        if not topology_check.can_resume:
+            return None
+
+        self.verify_contract_integrity(run_id)
         restored_states = self._restore_checkpoint_states(checkpoint)
 
         return ResumePoint(

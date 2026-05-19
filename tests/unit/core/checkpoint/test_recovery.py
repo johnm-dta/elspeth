@@ -1150,10 +1150,34 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
 ) -> None:
     run_id = "run-latest-checkpoint"
     graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        token_id="tok-0",
+        node_id="checkpoint-node",
+        sequence_number=99,
+        graph=graph,
+    )
+
+    # Force can_resume to succeed so we exercise the second get_latest_checkpoint call path.
+    monkeypatch.setattr(recovery_manager, "can_resume", lambda _run_id, _graph: type("Check", (), {"can_resume": True})())
+    point = recovery_manager.get_resume_point(run_id, graph)
+
+    assert point is not None
+    assert point.sequence_number == 99
+
+
+def test_get_resume_point_revalidates_checkpoint_loaded_after_can_resume(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "run-latest-checkpoint-revalidate"
+    graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
     with db.connection() as conn:
         conn.execute(
             checkpoints_table.insert().values(
-                checkpoint_id="cp-later",
+                checkpoint_id="cp-later-incompatible",
                 run_id=run_id,
                 token_id="tok-0",
                 node_id="checkpoint-node",
@@ -1166,12 +1190,10 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
             )
         )
 
-    # Force can_resume to succeed so we exercise the second get_latest_checkpoint call path.
+    # Simulate a checkpoint appearing after can_resume validated an earlier checkpoint.
     monkeypatch.setattr(recovery_manager, "can_resume", lambda _run_id, _graph: type("Check", (), {"can_resume": True})())
-    point = recovery_manager.get_resume_point(run_id, graph)
 
-    assert point is not None
-    assert point.sequence_number == 99
+    assert recovery_manager.get_resume_point(run_id, graph) is None
 
 
 def test_get_unprocessed_rows_excludes_diverted_rows(

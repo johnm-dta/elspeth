@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import insert, inspect, text
+from sqlalchemy import create_mock_engine, insert, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from elspeth.web.sessions.engine import create_session_engine
@@ -33,6 +33,18 @@ def test_initialize_session_schema_creates_current_schema_without_alembic_table(
     assert "rows_routed_failure" in run_columns
     assert "content_hash" in {column["name"] for column in inspector.get_columns("blobs")}
     assert "ck_blobs_ready_hash" in {check["name"] for check in inspector.get_check_constraints("blobs")}
+
+
+def test_sqlite_trigger_ddl_is_not_emitted_for_postgres_schema() -> None:
+    """SQLite trigger bodies must not leak into PostgreSQL schema bootstrap."""
+    emitted: list[str] = []
+    engine = create_mock_engine("postgresql://", lambda sql, *_, **__: emitted.append(str(sql)))
+
+    metadata.create_all(engine)
+
+    assert any("CREATE TABLE chat_messages" in statement for statement in emitted)
+    assert not any("CREATE TRIGGER" in statement for statement in emitted)
+    assert not any("SELECT RAISE" in statement for statement in emitted)
 
 
 def test_initialize_session_schema_is_idempotent_for_current_schema() -> None:

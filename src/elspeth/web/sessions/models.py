@@ -831,11 +831,15 @@ skill_markdown_history_table = Table(
 # deletion. A missing chat row makes blob lineage unverifiable even if the
 # blob FK never existed, so the trigger is unconditional.
 #
-# ``IF NOT EXISTS`` makes the DDL idempotent across repeated
+# ``IF NOT EXISTS`` makes the SQLite DDL idempotent across repeated
 # ``metadata.create_all`` calls. ``event.listen`` is **table-scoped**, not
 # metadata-scoped, so the trigger DDL fires only when this specific table
 # is created (not on every metadata.create_all() call for tables that
-# already exist).
+# already exist). The DDL bodies below are SQLite trigger syntax and must
+# stay guarded by ``execute_if(dialect="sqlite")``; PostgreSQL schema
+# portability is proved by its table/check/index DDL and the explicit
+# testcontainer lane, while SQLite trigger presence is validated in
+# sessions.schema.
 event.listen(
     interpretation_events_table,
     "after_create",
@@ -852,7 +856,7 @@ event.listen(
         "    ) THEN RAISE(ABORT, 'interpretation_events: resolved rows are immutable') "
         "  END; "
         "END;"
-    ),
+    ).execute_if(dialect="sqlite"),
 )
 
 event.listen(
@@ -867,7 +871,7 @@ event.listen(
         "BEGIN "
         "  SELECT RAISE(ABORT, 'interpretation_events: resolved rows are append-only'); "
         "END;"
-    ),
+    ).execute_if(dialect="sqlite"),
 )
 
 # Phase 6A — completion-event triggers.
@@ -889,7 +893,7 @@ event.listen(
         "BEGIN "
         "  SELECT RAISE(ABORT, 'composer_completion_events is append-only; UPDATE is forbidden'); "
         "END;"
-    ),
+    ).execute_if(dialect="sqlite"),
 )
 
 event.listen(
@@ -901,7 +905,7 @@ event.listen(
         "BEGIN "
         "  SELECT RAISE(ABORT, 'composer_completion_events is append-only; DELETE is forbidden'); "
         "END;"
-    ),
+    ).execute_if(dialect="sqlite"),
 )
 
 event.listen(
@@ -913,7 +917,7 @@ event.listen(
         "BEGIN "
         "  SELECT RAISE(ABORT, 'chat_messages.content is append-only'); "
         "END;"
-    ),
+    ).execute_if(dialect="sqlite"),
 )
 
 event.listen(
@@ -927,7 +931,7 @@ event.listen(
         "BEGIN "
         "  SELECT RAISE(ABORT, 'chat_messages rows are append-only'); "
         "END;"
-    ),
+    ).execute_if(dialect="sqlite"),
 )
 
 runs_table = Table(

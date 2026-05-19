@@ -88,8 +88,7 @@ def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
                 break
         if match_idx is None:
             return (
-                f"required node chain {chain} not satisfied in order; "
-                f"missing '{needle}' after position {cursor}; node plugins: {plugins}"
+                f"required node chain {chain} not satisfied in order; missing '{needle}' after position {cursor}; node plugins: {plugins}"
             )
         cursor = match_idx + 1
     return None
@@ -137,10 +136,7 @@ def _check_observed_columns(state: Any, columns: list[str]) -> str | None:
                 declared_names.add(name)
     missing = [c for c in columns if c.lower() not in declared_names]
     if missing:
-        return (
-            f"fixed source schema omits observed columns {missing}; "
-            f"declared fields: {sorted(declared_names)}"
-        )
+        return f"fixed source schema omits observed columns {missing}; declared fields: {sorted(declared_names)}"
     return None
 
 
@@ -175,14 +171,76 @@ def _check_numeric_handling(state: Any, field: str) -> str | None:
             for conv in options.get("conversions") or []:
                 if not isinstance(conv, dict):
                     continue
-                if (conv.get("field") or "").lower() == field.lower() and (
-                    conv.get("to") or ""
-                ).lower() in {"int", "float"}:
+                if (conv.get("field") or "").lower() == field.lower() and (conv.get("to") or "").lower() in {"int", "float"}:
                     return None
-    return (
-        f"field '{field}' has no numeric handling: "
-        f"neither source schema declares it int/float nor any type_coerce converts it"
-    )
+    return f"field '{field}' has no numeric handling: neither source schema declares it int/float nor any type_coerce converts it"
+
+
+def _check_options_keys(
+    container: Any,
+    required: list[str],
+    forbidden: list[str],
+    container_label: str,
+) -> str | None:
+    """Return an AMBER reason if a container's options dict misses required or contains forbidden keys.
+
+    Supports nested-key paths separated by '.', e.g. 'schema.mode' checks
+    options['schema']['mode']. Used by the hint-uptake scenarios authored
+    in Phase 1 of composer-jit-hints (csv-headerless-input,
+    database-sink-upsert-mode) — see plan file for the rationale.
+    """
+    if not isinstance(container, dict):
+        return f"{container_label} not present on final state"
+    options = container.get("options")
+    if not isinstance(options, dict):
+        return f"{container_label}.options missing or wrong shape"
+
+    def _lookup(path: str) -> tuple[bool, Any]:
+        node: Any = options
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return False, None
+            node = node[part]
+        return True, node
+
+    missing = [k for k in required if not _lookup(k)[0]]
+    present = [k for k in forbidden if _lookup(k)[0]]
+    if not missing and not present:
+        return None
+    parts: list[str] = []
+    if missing:
+        parts.append(f"{container_label}.options missing required keys: {missing}")
+    if present:
+        parts.append(f"{container_label}.options contains forbidden keys: {present}")
+    return "; ".join(parts)
+
+
+def _check_options_key_value(
+    container: Any,
+    key_path: str,
+    allowed_values: list[Any],
+    container_label: str,
+) -> str | None:
+    """Return an AMBER reason if container.options[key_path] is not in allowed_values.
+
+    Same nested-key path convention as _check_options_keys. None of the
+    declared values is a valid AMBER outcome only if the key is present
+    AND its value is in the allowed set — the absence of the key is its
+    own AMBER reason.
+    """
+    if not isinstance(container, dict):
+        return f"{container_label} not present on final state"
+    options = container.get("options")
+    if not isinstance(options, dict):
+        return f"{container_label}.options missing or wrong shape"
+    node: Any = options
+    for part in key_path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return f"{container_label}.options.{key_path} not set (expected one of {allowed_values})"
+        node = node[part]
+    if node not in allowed_values:
+        return f"{container_label}.options.{key_path} = {node!r} (expected one of {allowed_values})"
+    return None
 
 
 def _check_max_repair_turns(state: Any, max_turns: int) -> str | None:
@@ -197,8 +255,7 @@ def _check_max_repair_turns(state: Any, max_turns: int) -> str | None:
     meta = state.get("composer_meta")
     if not isinstance(meta, dict) or "repair_turns_used" not in meta:
         return (
-            f"composer_meta.repair_turns_used not present in state; "
-            f"convergence-bar repair-turn check (max={max_turns}) cannot be verified"
+            f"composer_meta.repair_turns_used not present in state; convergence-bar repair-turn check (max={max_turns}) cannot be verified"
         )
     used = meta["repair_turns_used"]
     if not isinstance(used, int):
@@ -208,9 +265,7 @@ def _check_max_repair_turns(state: Any, max_turns: int) -> str | None:
     return None
 
 
-def score(
-    scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any
-) -> dict[str, Any]:
+def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) -> dict[str, Any]:
     """Score a captured composer-rgr run. Pure function — no I/O.
 
     Returns a dict with verdict (RED/AMBER/GREEN), red_reasons, amber_reasons,
@@ -240,13 +295,9 @@ def score(
     if phrase_hits:
         red_reasons.append(f"forbidden passivity phrases in final message: {phrase_hits}")
 
-    credential_hits = [
-        p for p in red.get("credential_misnarration_phrases", []) if p in final_body
-    ]
+    credential_hits = [p for p in red.get("credential_misnarration_phrases", []) if p in final_body]
     if credential_hits:
-        red_reasons.append(
-            f"credential misnarration phrases in final message: {credential_hits}"
-        )
+        red_reasons.append(f"credential misnarration phrases in final message: {credential_hits}")
 
     amber_reasons: list[str] = []
 
@@ -262,10 +313,7 @@ def score(
                     ok = True
                     break
             if not ok:
-                amber_reasons.append(
-                    f"no expected node combo present (need one of {kind_groups}); "
-                    f"found node plugins {node_plugins}"
-                )
+                amber_reasons.append(f"no expected node combo present (need one of {kind_groups}); found node plugins {node_plugins}")
 
         chain = green.get("must_have_node_chain_in_order")
         if isinstance(chain, list) and chain:
@@ -291,6 +339,59 @@ def score(
         if out_count < min_outputs:
             amber_reasons.append(f"only {out_count} outputs (need >= {min_outputs})")
 
+        # Hint-uptake asserters (Phase 1 of composer-jit-hints).
+        # These check that the LLM applied a discovery-time hint
+        # without being told. Required/forbidden keys on the
+        # source/output options encode the hint's intended effect.
+        source_keys_req = green.get("must_have_options_keys_for_source") or []
+        source_keys_forb = green.get("must_not_have_options_keys_for_source") or []
+        if source_keys_req or source_keys_forb:
+            r = _check_options_keys(
+                state.get("source"),
+                list(source_keys_req),
+                list(source_keys_forb),
+                container_label="source",
+            )
+            if r is not None:
+                amber_reasons.append(r)
+        # By-name output (sink) option-key checks: green spec is a list
+        # of {sink_name, required, forbidden} entries so a scenario can
+        # constrain multiple sinks if needed.
+        for entry in green.get("must_have_options_keys_for_output") or []:
+            sink_name = entry.get("sink_name")
+            if not isinstance(sink_name, str):
+                continue
+            outputs_list = state.get("outputs")
+            target = None
+            if isinstance(outputs_list, list):
+                target = next((o for o in outputs_list if isinstance(o, dict) and o.get("name") == sink_name), None)
+            elif isinstance(outputs_list, dict):
+                target = outputs_list.get(sink_name)
+            r = _check_options_keys(
+                target,
+                list(entry.get("required") or ()),
+                list(entry.get("forbidden") or ()),
+                container_label=f"output[{sink_name!r}]",
+            )
+            if r is not None:
+                amber_reasons.append(r)
+        # By-name output option-value checks.
+        for entry in green.get("must_have_options_value_for_output") or []:
+            sink_name = entry.get("sink_name")
+            key_path = entry.get("key")
+            allowed = entry.get("allowed_values") or []
+            if not (isinstance(sink_name, str) and isinstance(key_path, str)):
+                continue
+            outputs_list = state.get("outputs")
+            target = None
+            if isinstance(outputs_list, list):
+                target = next((o for o in outputs_list if isinstance(o, dict) and o.get("name") == sink_name), None)
+            elif isinstance(outputs_list, dict):
+                target = outputs_list.get(sink_name)
+            r = _check_options_key_value(target, key_path, list(allowed), container_label=f"output[{sink_name!r}]")
+            if r is not None:
+                amber_reasons.append(r)
+
     max_repair = green.get("max_repair_turns")
     if isinstance(max_repair, int):
         repair_reason = _check_max_repair_turns(state, max_repair)
@@ -309,8 +410,6 @@ def score(
             "final_content_preview": (final.get("content") or "")[:300],
             "is_valid": is_valid,
             "state_node_count": len(state.get("nodes", [])) if isinstance(state, dict) else None,
-            "state_output_count": (
-                len(state.get("outputs", [])) if isinstance(state, dict) else None
-            ),
+            "state_output_count": (len(state.get("outputs", [])) if isinstance(state, dict) else None),
         },
     }

@@ -136,7 +136,7 @@ class TelemetryManager:
         # Store exception for fail_on_total=True to re-raise on flush()
         # Widened from TelemetryExporterError to Exception to also capture
         # FrameworkBugError/AuditIntegrityError from background thread.
-        self._stored_exception: Exception | None = None
+        self._stored_exception: object | None = None
 
         # Thread coordination
         self._shutdown_event = threading.Event()
@@ -508,6 +508,9 @@ class TelemetryManager:
         # Re-raise stored exception from background thread (fail_on_total=True)
         if self._stored_exception is not None:
             exc = self._stored_exception
+            if not isinstance(exc, BaseException):
+                self._stored_exception = None
+                raise TypeError(f"Stored telemetry exception is not raiseable: {type(exc).__name__}")
             try:
                 raise exc
             finally:

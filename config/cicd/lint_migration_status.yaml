@@ -18,29 +18,8 @@ rules:
     migration_issue: null
   - old_script: scripts/cicd/enforce_audit_evidence_nominal.py
     new_rule: audit_evidence.nominal_base
-    status: shadow
+    status: deleted
     migration_issue: elspeth-64d67da0de
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_audit_evidence_nominal"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_component_type.py
     new_rule: plugin_contract.component_type
     status: deleted
@@ -75,54 +54,12 @@ rules:
     migration_issue: elspeth-a3f6004c83
   - old_script: scripts/cicd/enforce_guard_symmetry.py
     new_rule: audit_evidence.guard_symmetry
-    status: shadow
+    status: deleted
     migration_issue: elspeth-64d67da0de
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_guard_symmetry"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_gve_attribution.py
     new_rule: audit_evidence.gve_attribution
-    status: shadow
+    status: deleted
     migration_issue: elspeth-64d67da0de
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_gve_attribution"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_options_metadata.py
     new_rule: plugin_contract.options_metadata
     status: deleted
@@ -133,29 +70,8 @@ rules:
     migration_issue: elspeth-90576d9826
   - old_script: scripts/cicd/enforce_tier_1_decoration.py
     new_rule: audit_evidence.tier_1_decoration
-    status: shadow
+    status: deleted
     migration_issue: elspeth-64d67da0de
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --file
-      - "{root}/src/elspeth/contracts/errors.py"
-      - --allowlist
-      - "{root}/config/cicd/enforce_tier_1_decoration"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_tier_model.py
     new_rule: null
     status: pending

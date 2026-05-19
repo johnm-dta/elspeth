@@ -143,6 +143,21 @@ def test_tier_1_decoration_accepts_caller_module_name(tmp_path: Path) -> None:
     assert findings == []
 
 
+def test_tier_1_decoration_accepts_qualified_decorator(tmp_path: Path) -> None:
+    findings = _tier_1_findings_from_file(
+        tmp_path,
+        """
+        import elspeth.contracts.tier_registry as reg
+
+        @reg.tier_1_error(reason="ok", caller_module=__name__)
+        class QualifiedError(Exception):
+            pass
+        """,
+    )
+
+    assert findings == []
+
+
 def test_tier_1_decoration_accepts_tier_2_comment(tmp_path: Path) -> None:
     findings = _tier_1_findings_from_file(
         tmp_path,
@@ -154,6 +169,33 @@ def test_tier_1_decoration_accepts_tier_2_comment(tmp_path: Path) -> None:
     )
 
     assert findings == []
+
+
+def test_tier_1_decoration_rejects_tier_2_comment_without_justification(tmp_path: Path) -> None:
+    findings = _tier_1_findings_from_file(
+        tmp_path,
+        """
+        # TIER-2:
+        class EmptyJustificationError(Exception):
+            pass
+        """,
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "EmptyJustificationError" in findings[0].message
+
+
+def test_tier_1_decoration_checks_violation_suffix(tmp_path: Path) -> None:
+    findings = _tier_1_findings_from_file(
+        tmp_path,
+        """
+        class WeirdViolation(Exception):
+            pass
+        """,
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "WeirdViolation" in findings[0].message
 
 
 def test_tier_1_decoration_reports_bad_caller_module_shapes(tmp_path: Path) -> None:

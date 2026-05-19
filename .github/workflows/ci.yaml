@@ -84,7 +84,7 @@ jobs:
             --rules immutability.freeze_guards,immutability.frozen_annotations \
             --root src/elspeth
 
-      - name: Shadow audit-evidence elspeth-lints rules
+      - name: Run audit-evidence elspeth-lints rules
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution \
@@ -299,78 +299,6 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # Stage 2a: Audit Evidence Nominal Enforcement
-  # ===========================================================================
-  enforce-audit-evidence-nominal:
-    name: Enforce Audit Evidence Nominal
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: pip install pyyaml
-
-      - name: Run audit evidence nominal enforcement
-        run: |
-          python scripts/cicd/enforce_audit_evidence_nominal.py check \
-            --root src/elspeth \
-            --allowlist config/cicd/enforce_audit_evidence_nominal
-
-  # ===========================================================================
-  # Stage 2a: Tier-1 Decoration Enforcement
-  # ===========================================================================
-  enforce-tier-1-decoration:
-    name: Enforce Tier-1 Decoration
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: pip install pyyaml
-
-      - name: Run tier-1 decoration enforcement
-        run: |
-          python scripts/cicd/enforce_tier_1_decoration.py check \
-            --file src/elspeth/contracts/errors.py \
-            --allowlist config/cicd/enforce_tier_1_decoration
-
-  # ===========================================================================
-  # Stage 2a: Guard Symmetry Enforcement
-  # ===========================================================================
-  enforce-guard-symmetry:
-    name: Enforce Guard Symmetry
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: pip install pyyaml
-
-      - name: Run guard symmetry enforcement
-        run: |
-          python scripts/cicd/enforce_guard_symmetry.py check \
-            --root src/elspeth \
-            --allowlist config/cicd/enforce_guard_symmetry
-
-  # ===========================================================================
   # Stage 2a: SlotType / guided.ts cross-language mirror check
   # ===========================================================================
   check-slot-type-cross-language:
@@ -441,9 +369,6 @@ jobs:
     needs:
       - lint
       - enforce-tier-model
-      - enforce-audit-evidence-nominal
-      - enforce-tier-1-decoration
-      - enforce-guard-symmetry
       - contract-enforcement
       - check-slot-type-cross-language
       - parity-check
@@ -576,9 +501,6 @@ jobs:
     needs:
       - lint
       - enforce-tier-model
-      - enforce-audit-evidence-nominal
-      - enforce-tier-1-decoration
-      - enforce-guard-symmetry
       - contract-enforcement
       - parity-check
     steps:
@@ -808,9 +730,6 @@ jobs:
     needs:
       - lint
       - enforce-tier-model
-      - enforce-audit-evidence-nominal
-      - enforce-tier-1-decoration
-      - enforce-guard-symmetry
       - contract-enforcement
       - check-slot-type-cross-language
       - parity-check
@@ -828,18 +747,6 @@ jobs:
           fi
           if [[ "${{ needs.enforce-tier-model.result }}" != "success" ]]; then
             echo "Tier model enforcement job failed"
-            exit 1
-          fi
-          if [[ "${{ needs.enforce-audit-evidence-nominal.result }}" != "success" ]]; then
-            echo "Audit evidence nominal enforcement job failed"
-            exit 1
-          fi
-          if [[ "${{ needs.enforce-tier-1-decoration.result }}" != "success" ]]; then
-            echo "Tier-1 decoration enforcement job failed"
-            exit 1
-          fi
-          if [[ "${{ needs.enforce-guard-symmetry.result }}" != "success" ]]; then
-            echo "Guard symmetry enforcement job failed"
             exit 1
           fi
           if [[ "${{ needs.contract-enforcement.result }}" != "success" ]]; then

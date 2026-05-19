@@ -1,7 +1,9 @@
-# Hooks scan the FULL codebase (pass_filenames: false), not just staged files.
-# This ensures ALL files pass the same checks as CI, not just files you edited.
-# The types: [python] filter acts as a trigger gate — hooks only run when at
-# least one Python file is staged, but then check the entire scope.
+# Pre-commit is the fast changed-file gate; PR CI is the full-codebase gate.
+# Incremental hooks receive the filenames selected by pre-commit. Whole-repo
+# policy checks are enforced by CI and run locally only when their rule,
+# allowlist, or policy metadata changes.
+# The repo-local no-stash dispatcher invokes `pre-commit run --files <staged>`;
+# do not replace it with `--all-files`, which collapses this contract.
 # Hooks are CHECK-ONLY — they do NOT auto-fix or modify files.
 #
 # Hook stages installed by `pre-commit install`.  Includes commit-msg for the
@@ -27,14 +29,11 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.4
     hooks:
-      # Linter - scans full codebase, check only (no --fix)
+      # Linter - changed files only, check only (no --fix)
       - id: ruff
-        args: [src/, tests/, scripts/, examples/, elspeth-lints/src/]
-        pass_filenames: false
-      # Formatter - scans full codebase, check only (no reformat)
+      # Formatter - changed files only, check only (no reformat)
       - id: ruff-format
-        args: [--check, src/, tests/, scripts/, examples/, elspeth-lints/src/]
-        pass_filenames: false
+        args: [--check]
 
   - repo: local
     hooks:
@@ -47,25 +46,21 @@ repos:
         name: Secret-pattern scan (refuses commit if credential-shaped strings detected)
         entry: scripts/git-hooks/pre-commit-secret-scan.sh
         language: system
-        # pass_filenames: false because the local .git/hooks/pre-commit invokes
-        # `pre-commit run --all-files` (see header in that file: avoids the
-        # stash/unstash mechanism that has caused unstaged-work loss).  All
-        # other hooks compensate via pass_filenames: false + fixed-directory
-        # scanning.  This script is designed for staged-files-only operation;
-        # with no args it falls back to
-        # `git diff --cached --name-only --diff-filter=AM`, which is exactly
-        # the scope we want — newly-added/modified content per commit, not the
-        # whole repo (which would force per-line allow markers on every
-        # documented placeholder URL).
+        # pass_filenames: false because the script scans staged content itself.
+        # This keeps the secret gate tied to the commit, even when the no-stash
+        # dispatcher passes the staged path list to the rest of pre-commit.
+        # With no args it falls back to `git diff --cached --name-only
+        # --diff-filter=AM`, which is exactly the scope we want: newly-added or
+        # modified content per commit, not the whole repo.
         pass_filenames: false
         always_run: true
 
       - id: mypy
         name: mypy
-        entry: .venv/bin/mypy src/elspeth elspeth-lints/src
+        entry: .venv/bin/mypy
         language: system
         types: [python]
-        pass_filenames: false
+        files: ^(src/elspeth/|elspeth-lints/src/).*\.py$
 
       - id: elspeth-lints-no-new-bespoke-enforcers
         name: elspeth-lints forbids new bespoke CI enforcers
@@ -78,49 +73,63 @@ repos:
         name: elspeth-lints plugin options metadata
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules plugin_contract.options_metadata --root .
         language: system
-        files: ^(src/elspeth/plugins/|config/cicd/enforce_options_metadata/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/options_metadata/)
+        files: ^(config/cicd/enforce_options_metadata/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/options_metadata/)
         pass_filenames: false
 
       - id: elspeth-lints-plugin-contract
         name: elspeth-lints plugin contract
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules plugin_contract.component_type,plugin_contract.plugin_hashes --root src/elspeth
         language: system
-        files: ^(src/elspeth/plugins/|config/cicd/enforce_component_type/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/(component_type|plugin_hashes)/)
+        files: ^(config/cicd/enforce_component_type/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/(component_type|plugin_hashes)/)
         pass_filenames: false
 
-      - id: elspeth-lints-immutability
-        name: elspeth-lints immutability
-        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules immutability.freeze_guards,immutability.frozen_annotations --root src/elspeth
+      - id: elspeth-lints-freeze-guards
+        name: elspeth-lints freeze guards
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules immutability.freeze_guards --root src/elspeth
         language: system
-        files: ^(src/elspeth/|config/cicd/enforce_freeze_guards/|config/cicd/enforce_frozen_annotations/|elspeth-lints/src/elspeth_lints/rules/immutability/)
+        files: ^(config/cicd/enforce_freeze_guards/|elspeth-lints/src/elspeth_lints/rules/immutability/freeze_guards/)
         pass_filenames: false
+
+      - id: elspeth-lints-frozen-annotations-incremental
+        name: elspeth-lints frozen annotations (changed files)
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules immutability.frozen_annotations --root src/elspeth --files
+        language: system
+        types: [python]
+        files: ^src/elspeth/.*\.py$
 
       - id: elspeth-lints-audit-evidence
         name: elspeth-lints audit-evidence
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution --root src/elspeth
         language: system
-        files: ^(src/elspeth/|config/cicd/enforce_audit_evidence_nominal/|config/cicd/enforce_tier_1_decoration/|config/cicd/enforce_guard_symmetry/|config/cicd/enforce_gve_attribution/|elspeth-lints/src/elspeth_lints/rules/audit_evidence/)
+        files: ^(config/cicd/enforce_audit_evidence_nominal/|config/cicd/enforce_tier_1_decoration/|config/cicd/enforce_guard_symmetry/|config/cicd/enforce_gve_attribution/|elspeth-lints/src/elspeth_lints/rules/audit_evidence/)
         pass_filenames: false
 
-      - id: elspeth-lints-composer
-        name: elspeth-lints composer
+      - id: elspeth-lints-composer-policy
+        name: elspeth-lints composer policy
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules 'composer/*' --root src/elspeth
         language: system
-        files: ^(src/elspeth/web/|config/cicd/enforce_composer_(catch_order|exception_channel)/|elspeth-lints/src/elspeth_lints/rules/composer/)
+        files: ^(config/cicd/enforce_composer_(catch_order|exception_channel)/|elspeth-lints/src/elspeth_lints/rules/composer/)
         pass_filenames: false
+
+      - id: elspeth-lints-composer-incremental
+        name: elspeth-lints composer (changed files)
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules 'composer/*' --root src/elspeth --files
+        language: system
+        types: [python]
+        files: ^src/elspeth/web/.*\.py$
 
       - id: elspeth-lints-contract-manifest
         name: elspeth-lints contract manifest
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.contract_manifest --root src/elspeth
         language: system
-        files: ^(src/elspeth/|config/cicd/enforce_contract_manifest/|elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/)
+        files: ^(config/cicd/enforce_contract_manifest/|elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/)
         pass_filenames: false
 
       - id: elspeth-lints-manifest-inventory
         name: elspeth-lints manifest inventory
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.symbol_inventory,manifest.test_to_source_mapping --root .
         language: system
-        files: ^(src/elspeth/|tests/|config/cicd/(symbol_inventory|test_to_source_mapping)/|elspeth-lints/src/elspeth_lints/rules/manifest/(symbol_inventory|test_to_source_mapping)/)
+        files: ^(config/cicd/(symbol_inventory|test_to_source_mapping)/|elspeth-lints/src/elspeth_lints/rules/manifest/(symbol_inventory|test_to_source_mapping)/)
         pass_filenames: false
 
       - id: elspeth-lints-trust-tier
@@ -128,14 +137,14 @@ repos:
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
         language: system
         types: [python]
-        files: ^(src/elspeth/|config/cicd/enforce_tier_model/|elspeth-lints/src/elspeth_lints/rules/trust_tier/)
+        files: ^(config/cicd/enforce_tier_model/|elspeth-lints/src/elspeth_lints/rules/trust_tier/)
         pass_filenames: false
 
       - id: check-contracts
         name: Check Contracts
         entry: .venv/bin/python -m scripts.check_contracts
         language: system
-        types: [python]
+        files: ^(src/elspeth/core/config\.py|src/elspeth/contracts/config/|scripts/check_contracts\.py|tests/unit/core/test_config_alignment\.py)$
         pass_filenames: false
 
       - id: check-slot-type-cross-language

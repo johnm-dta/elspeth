@@ -433,10 +433,10 @@ RC-5 makes several assurance mechanisms product-visible:
   boundaries, component types, guard symmetry, contract manifests, composer
   exception channels, catch ordering, audit-evidence typing, and (since
   Phase 8) telemetry-backfill cohort-attribution trailers on commits that
-  touch code semantically owned by a different phase.  Fresh clones must
-  install the commit-msg dispatcher with
-  `scripts/git-hooks/install-commit-msg-dispatcher.sh` in addition to the
-  usual `pre-commit install`.
+  touch code semantically owned by a different phase. Fresh clones should
+  install the no-stash staged-file pre-commit dispatcher with
+  `scripts/git-hooks/install-pre-commit-dispatcher.sh`, then install the
+  commit-msg dispatcher with `scripts/git-hooks/install-commit-msg-dispatcher.sh`.
 - **Secret discipline:** runtime secrets are resolved at execution boundaries,
   fingerprinted for audit, and not persisted as raw values in pipeline state.
 

@@ -2,17 +2,15 @@
 # Install the commit-msg dispatcher for the Phase 8 B4-r3
 # telemetry-backfill cohort-attribution rule.
 #
-# Why this is a separate install script (rather than `pre-commit install`):
-# the project sets `core.hooksPath` (so the existing custom pre-commit
-# wrapper works), and `pre-commit install` refuses to install when
-# core.hooksPath is set.  This script writes a tiny dispatcher into the
-# real hooks directory; the dispatcher then execs the worktree-local
-# `.githooks/commit-msg-telemetry-backfill` script which is the
-# version-controlled enforcement logic.
+# Why this is a separate install script: the project may set core.hooksPath so
+# the active hook directory is not the default `.git/hooks` path. This script
+# writes a tiny dispatcher into the real hooks directory; the dispatcher then
+# execs the worktree-local `.githooks/commit-msg-telemetry-backfill` script,
+# which is the version-controlled enforcement logic.
 #
 # Fresh-clone setup steps for full local enforcement:
-#     1. pre-commit install                                      # pre-commit hooks
-#     2. scripts/git-hooks/install-commit-msg-dispatcher.sh      # this script (commit-msg)
+#     1. scripts/git-hooks/install-pre-commit-dispatcher.sh      # pre-commit
+#     2. scripts/git-hooks/install-commit-msg-dispatcher.sh      # commit-msg
 #
 # CI runs an equivalent predicate against PR commits as a backstop, so
 # the rule is enforced even for contributors who skip step 2.

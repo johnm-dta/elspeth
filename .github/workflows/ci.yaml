@@ -66,10 +66,7 @@ jobs:
       - name: Type check (mypy)
         run: uv run mypy src/ elspeth-lints/src/
 
-      - name: Enforce plugin options metadata
-        run: uv run python scripts/cicd/enforce_options_metadata.py
-
-      - name: Shadow plugin options metadata elspeth-lints rule
+      - name: Run plugin options metadata elspeth-lints rule
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules plugin_contract.options_metadata \

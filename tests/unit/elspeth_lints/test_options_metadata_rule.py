@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 from pydantic import BaseModel, Field
 
 from elspeth_lints.rules.plugin_contract.options_metadata import RULE
-from elspeth_lints.rules.plugin_contract.options_metadata.rule import OptionsMetadataRule, collect_metadata_findings
+from elspeth_lints.rules.plugin_contract.options_metadata.rule import (
+    OptionsMetadataRule,
+    collect_metadata_findings,
+    load_options_metadata_allowlist,
+)
 
 
 def test_options_metadata_rule_reports_missing_title() -> None:
@@ -37,6 +47,44 @@ def test_options_metadata_rule_uses_legacy_identifier_allowlist() -> None:
     )
 
     assert findings == []
+
+
+def test_options_metadata_allowlist_requires_reason(tmp_path: Path) -> None:
+    allowlist = tmp_path / "allowlist.yaml"
+    allowlist.write_text(
+        'entries:\n  - id: "source/metadata_gap:missing_title"\n    reason: ""\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="reason"):
+        load_options_metadata_allowlist(allowlist)
+
+
+def test_options_metadata_cli_json_mode_succeeds_on_current_plugins() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "elspeth_lints.core.cli",
+            "check",
+            "--rules",
+            "plugin_contract.options_metadata",
+            "--root",
+            ".",
+            "--format",
+            "json",
+        ],
+        cwd=project_root,
+        env={"PYTHONPATH": str(project_root / "elspeth-lints" / "src")},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == []
 
 
 def test_registered_rule_is_production_rule() -> None:

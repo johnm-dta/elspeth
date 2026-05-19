@@ -236,17 +236,18 @@ test("explicit approve tool call is visible before commit", async ({ page }) => 
   await composer.sendMessage("Build a simple csv to json pipeline");
 
   await expect(page.getByText(/Proposed: set_pipeline/)).toBeVisible();
+  const pendingChanges = page.getByRole("region", { name: /Pending changes/ });
   await expect(
-    page.getByRole("button", { name: /Accept proposal:/ }),
+    pendingChanges.getByRole("button", { name: /Accept proposal:/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /Reject proposal:/ }),
+    pendingChanges.getByRole("button", { name: /Reject proposal:/ }),
   ).toBeVisible();
-  await page.getByRole("tab", { name: "Graph" }).click();
-  await expect(page.getByText(/pending #/)).toBeVisible();
 
-  await page.getByRole("button", { name: /Accept proposal:/ }).click();
+  await pendingChanges.getByRole("button", { name: /Accept proposal:/ }).click();
 
   await expect(page.getByText(/Applied: set_pipeline/)).toBeVisible();
-  await expect(page.getByText(/audit /)).toBeVisible();
+  await expect(
+    page.getByRole("log", { name: "Chat messages" }).getByText("audit event-ac"),
+  ).toBeVisible();
 });

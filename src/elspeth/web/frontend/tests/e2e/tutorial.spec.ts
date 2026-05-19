@@ -230,6 +230,17 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
       return;
     }
 
+    if (path === `/api/sessions/${tutorialSession.id}/interpretations/opt_out` && method === "POST") {
+      await route.fulfill({
+        json: {
+          session_id: tutorialSession.id,
+          interpretation_review_disabled: true,
+          opted_out_at: "2026-05-19T12:00:02Z",
+        },
+      });
+      return;
+    }
+
     if (path === `/api/sessions/${tutorialSession.id}/validate` && method === "POST") {
       await route.fulfill({
         json: {

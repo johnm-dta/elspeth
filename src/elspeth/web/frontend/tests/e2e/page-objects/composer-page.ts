@@ -22,7 +22,7 @@ export class ComposerPage {
 
   async createSession(_title: string): Promise<void> {
     await this.page.getByRole("button", { name: /session switcher/i }).click();
-    await this.page.getByRole("menuitem", { name: /new session/i }).click();
+    await this.page.getByRole("menuitem", { name: "+ New session" }).click();
     await this.waitForChatReady();
   }
 

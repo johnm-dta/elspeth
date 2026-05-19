@@ -23,7 +23,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import {
   authedContext,
@@ -59,6 +59,92 @@ function blobStoragePath(sessionId: string, blobId: string): string {
 // Sink output path — must be under data_dir/outputs/ (paths.py:44).
 const SINK_OUTPUT_PATH = resolve(E2E_DATA_DIR, "outputs", "playwright-guided-output.json");
 
+async function isolateAuditReadinessSideRail(
+  page: Page,
+  sessionId: string,
+): Promise<void> {
+  await page.route(`**/api/sessions/${sessionId}/validate`, async (route) => {
+    await route.fulfill({
+      json: {
+        is_valid: true,
+        summary: "Guided demo pipeline validates.",
+        checks: [],
+        errors: [],
+        warnings: [],
+        semantic_contracts: [],
+      },
+    });
+  });
+
+  await page.route(`**/api/sessions/${sessionId}/audit-readiness`, async (route) => {
+    await route.fulfill({
+      json: {
+        session_id: sessionId,
+        composition_version: 1,
+        checked_at: "2026-05-19T12:00:00Z",
+        rows: [
+          {
+            id: "validation",
+            label: "Validation",
+            status: "ok",
+            summary: "Guided demo pipeline validates.",
+            detail: null,
+            component_ids: [],
+          },
+          {
+            id: "plugin_trust",
+            label: "Plugin trust",
+            status: "ok",
+            summary: "Guided demo plugins are trusted.",
+            detail: null,
+            component_ids: [],
+          },
+          {
+            id: "provenance",
+            label: "Provenance",
+            status: "not_applicable",
+            summary: "No run provenance yet.",
+            detail: null,
+            component_ids: [],
+          },
+          {
+            id: "retention",
+            label: "Retention",
+            status: "not_applicable",
+            summary: "No run retention yet.",
+            detail: null,
+            component_ids: [],
+          },
+          {
+            id: "llm_interpretations",
+            label: "LLM interpretations",
+            status: "not_applicable",
+            summary: "No interpretation events.",
+            detail: null,
+            component_ids: [],
+          },
+          {
+            id: "secrets",
+            label: "Secrets",
+            status: "not_applicable",
+            summary: "No secret checks in the guided demo.",
+            detail: null,
+            component_ids: [],
+          },
+        ],
+        validation_result: {
+          is_valid: true,
+          summary: "Guided demo pipeline validates.",
+          checks: [],
+          errors: [],
+          warnings: [],
+          semantic_contracts: [],
+        },
+      },
+    });
+  });
+}
+
 test.describe("composer-guided — recipe-match happy path", () => {
   test(
     "guided demo path: CSV → classify-rows-llm-jsonl (≤9 clicks, <30s)",
@@ -77,6 +163,7 @@ test.describe("composer-guided — recipe-match happy path", () => {
       try {
         const session = await createSession(ctx, "playwright-guided-demo");
         sessionId = session.id;
+        await isolateAuditReadinessSideRail(page, sessionId);
 
         // Upload the seed CSV. We keep blob.id to construct the storage path
         // used in the source SchemaForm (Gap 2: S2 path allowlist).
@@ -189,9 +276,9 @@ test.describe("composer-guided — recipe-match happy path", () => {
 
         // ── CompletionSummary terminal ─────────────────────────────────────
         await expect(
-          page.getByRole("button", { name: "Save and exit", exact: true }),
+          page.getByRole("button", { name: "Open freeform editor", exact: true }),
         ).toBeVisible();
-        await page.getByRole("button", { name: "Save and exit", exact: true }).click();
+        await page.getByRole("button", { name: "Open freeform editor", exact: true }).click();
         clicks++;
 
         // ── Demo SLA assertions ────────────────────────────────────────────

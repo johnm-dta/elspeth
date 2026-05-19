@@ -164,13 +164,64 @@ describe("light theme colour contrast", () => {
   });
 });
 
+describe("disabled button contrast", () => {
+  // The .btn:disabled / .btn[aria-disabled="true"] rule was migrated off
+  // opacity:0.4 (which silently fails contrast against any non-white chrome)
+  // to a tokenised background+text pair. We use --color-bg (page background)
+  // rather than --color-surface-elevated because the latter is too close in
+  // luminance to --color-text-muted in the dark theme (3.84:1, fails AA).
+  // The chosen pair passes AA in both themes (dark 4.78:1, light 6.32:1).
+  // These assertions are the design system's gate: if a future colour rebalance
+  // pushes the pair below AA, this test fails before the regression ships.
+  it("keeps --color-text-muted on --color-bg at AA in the dark theme", () => {
+    const text = extractRootToken("--color-text-muted");
+    const surface = extractRootToken("--color-bg");
+    expect(contrastRatio(text, surface)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps --color-text-muted on --color-bg at AA in the light theme", () => {
+    const text = extractLightThemeToken("--color-text-muted");
+    const surface = extractLightThemeToken("--color-bg");
+    expect(contrastRatio(text, surface)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("verifies .btn:disabled uses the token pair rather than opacity dimming", () => {
+    // Inspect the .btn rule body to confirm we did not regress to opacity:0.4
+    // when the design system was simplified. The presence of color/background
+    // declarations in the disabled selector is the load-bearing signal.
+    const disabledMatch = /\.btn:disabled,\s*\n\s*\.btn\[aria-disabled="true"\]\s*\{([\s\S]*?)\n\}/.exec(appCss);
+    expect(disabledMatch, ".btn:disabled rule must exist with token-based colours").not.toBeNull();
+    const body = disabledMatch![1];
+    expect(body).toContain("background-color: var(--color-bg)");
+    expect(body).toContain("color: var(--color-text-muted)");
+    expect(body).not.toMatch(/opacity:\s*0\.[0-9]+/);
+  });
+});
+
 describe("base interaction tokens", () => {
   it("uses a 16px base font size token", () => {
     expect(appCss).toMatch(/--font-size-base:\s*16px;/);
   });
 
-  it("sets the base button hit target to at least 44px", () => {
-    expect(extractCssRule(".btn")).toMatch(/min-height:\s*44px;/);
+  it("sets the base button hit target to at least 44px via --size-control", () => {
+    // .btn composes --size-control rather than redeclaring the literal 44px.
+    // We verify both the composition AND the token's resolved value so a
+    // future maintainer can't silently drop --size-control below the WCAG
+    // 2.5.5 AAA floor.
+    expect(extractCssRule(".btn")).toMatch(/min-height:\s*var\(--size-control\);/);
+    expect(appCss).toMatch(/--size-control:\s*44px;/);
+  });
+
+  it("sets the compact button hit target via --size-control-compact (≥WCAG 2.5.8 AA)", () => {
+    // .btn-compact is the chrome-row variant (header buttons, dense toolbars).
+    // It MUST clear the WCAG 2.5.8 AA floor of 24×24 — we enforce ≥32px so the
+    // hit target stays comfortable on touch screens.
+    expect(extractCssRule(".btn-compact")).toMatch(
+      /min-height:\s*var\(--size-control-compact\);/,
+    );
+    const compactMatch = /--size-control-compact:\s*(\d+)px;/.exec(appCss);
+    expect(compactMatch, "--size-control-compact must be defined").not.toBeNull();
+    expect(Number.parseInt(compactMatch![1], 10)).toBeGreaterThanOrEqual(32);
   });
 
   it("uses solid primary button tokens instead of low-alpha text-on-tint styling", () => {

@@ -1,5 +1,6 @@
 // src/components/chat/ChatInput.tsx
 import {
+  useId,
   useState,
   useCallback,
   useEffect,
@@ -42,6 +43,11 @@ export function ChatInput({
   onChange: controlledOnChange,
   placeholder,
 }: ChatInputProps) {
+  // Stable id for the keyboard-hint element, wired into the textarea's
+  // aria-describedby so screen readers announce "Shift+Enter for new line"
+  // alongside the textarea label. useId keeps it stable across renders and
+  // unique per ChatInput instance.
+  const hintId = useId();
   // Support both controlled and uncontrolled modes
   const [internalText, setInternalText] = useState("");
   const isControlled = controlledValue !== undefined;
@@ -217,6 +223,7 @@ export function ChatInput({
           onKeyDown={handleKeyDown}
           placeholder={effectivePlaceholder}
           aria-label="Message input"
+          aria-describedby={hintId}
           rows={2}
           className="chat-input-textarea"
         />
@@ -272,12 +279,17 @@ export function ChatInput({
           onClick={handleSend}
           disabled={!canSend}
           aria-label="Send message"
+          aria-keyshortcuts="Enter"
           className="chat-input-send-btn"
         >
           Send
         </button>
       </div>
-      <div className="chat-input-hint" aria-hidden="true">
+      {/* Hint is the textarea's aria-describedby target — DO NOT mark it
+          aria-hidden, that masks it for some screen readers despite the
+          describedby reference. Visible to sighted users, announced after the
+          textarea's label by AT. */}
+      <div id={hintId} className="chat-input-hint">
         Shift+Enter for new line
       </div>
     </div>

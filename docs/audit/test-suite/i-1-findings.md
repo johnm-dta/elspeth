@@ -143,10 +143,14 @@ Implements `PluginContext` with only `record_validation_error`. If `PluginContex
 
 ## Filed filigree issues
 
-| ID | Title | Type | Priority |
-|---|---|---|---|
-| `elspeth-ae9f541775` | tests/integration/audit/ — 26 of 32 files bypass production code paths (false-confidence integration coverage) | epic | P1 |
-| `elspeth-4a013f9833` | tests/integration/audit/test_fixes.py — regression-dump file unanimously flagged for deletion/dispersal | task | P2 |
+### Remediation status
+
+- 2026-05-20: `elspeth-4a013f9833` resolved. The salvageable `ExecutionGraph` typed-edge, `ExecutionError.to_dict()`, and built-in plugin `node_id` assertions were moved to unit/plugin contract homes, and `tests/integration/audit/test_fixes.py` was deleted.
+
+| ID | Title | Type | Priority | Status |
+|---|---|---|---|---|
+| `elspeth-ae9f541775` | tests/integration/audit/ — 26 of 32 files bypass production code paths (false-confidence integration coverage) | epic | P1 | Open |
+| `elspeth-4a013f9833` | tests/integration/audit/test_fixes.py — regression-dump file unanimously flagged for deletion/dispersal | task | P2 | Closed 2026-05-20 |
 
 ### Existing issue updated
 

@@ -470,7 +470,7 @@ export function AuditReadinessPanel() {
             </button>
             <button
               type="button"
-              className="btn audit-readiness-action-btn"
+              className="btn btn-primary audit-readiness-action-btn"
               onClick={() => setExplainOpen(true)}
               aria-label="Explain what this pipeline will record"
             >

@@ -1,0 +1,1 @@
+::error file=src/example.py,line=7,col=3,title=demo.rule::Demo finding

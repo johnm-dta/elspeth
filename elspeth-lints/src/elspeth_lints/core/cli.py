@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import argparse
 import ast
-import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from elspeth_lints.core.ast_walker import ParsedPythonFile, PythonSyntaxError, walk_python_files
+from elspeth_lints.core.emitters.github import render_github
+from elspeth_lints.core.emitters.json import render_json
+from elspeth_lints.core.emitters.sarif import render_sarif
+from elspeth_lints.core.emitters.text import render_text
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope
 from elspeth_lints.core.registry import DEFAULT_REGISTRY, RuleRegistry
 
@@ -47,7 +50,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
     requested_rules = _parse_rules(args.rules)
     if not requested_rules:
-        return _emit_findings([], output_format=args.format)
+        return _emit_findings([], output_format=args.format, rules=[])
 
     available = set(registry.ids())
     unknown = sorted(set(requested_rules).difference(available))
@@ -81,7 +84,7 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
                 continue
             findings.extend(_run_rules(item, incremental_rules, context=context))
 
-    return _emit_findings(findings, output_format=args.format)
+    return _emit_findings(findings, output_format=args.format, rules=selected_rules)
 
 
 def _parse_rules(raw: str) -> tuple[str, ...]:
@@ -107,30 +110,15 @@ def _run_dump_edges(args: argparse.Namespace) -> int:
     raise ValueError(f"unknown dump-edges format: {args.format}")
 
 
-def _emit_findings(findings: list[Finding], *, output_format: str) -> int:
+def _emit_findings(findings: list[Finding], *, output_format: str, rules: list[Rule]) -> int:
     if output_format == "json":
-        payload = [
-            {
-                "rule_id": finding.rule_id,
-                "file_path": finding.file_path,
-                "line": finding.line,
-                "column": finding.column,
-                "message": finding.message,
-                "fingerprint": finding.fingerprint,
-                "severity": finding.severity.value,
-                "suggestion": finding.suggestion,
-            }
-            for finding in findings
-        ]
-        sys.stdout.write(json.dumps(payload, sort_keys=True))
-        sys.stdout.write("\n")
+        sys.stdout.write(render_json(findings))
     elif output_format == "text":
-        for finding in findings:
-            sys.stdout.write(f"{finding.file_path}:{finding.line}:{finding.column}: {finding.rule_id}: {finding.message}\n")
-    elif output_format in {"sarif", "github"}:
-        if findings:
-            sys.stderr.write(f"{output_format} output is not implemented in the skeleton package\n")
-            return 2
+        sys.stdout.write(render_text(findings))
+    elif output_format == "github":
+        sys.stdout.write(render_github(findings))
+    elif output_format == "sarif":
+        sys.stdout.write(render_sarif(findings, metadata=[rule.metadata for rule in rules]))
     else:
         raise ValueError(f"unknown output format: {output_format}")
     return 1 if findings else 0

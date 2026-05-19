@@ -76,6 +76,10 @@ elspeth-lints check \
 elspeth-lints dump-edges --root . --format json
 ```
 
+`check --format sarif` emits SARIF 2.1.0 with `runs[].tool.driver.rules`
+populated from `RuleMetadata` and `runs[].results[]` populated from `Finding`.
+GitHub workflow-command output is available with `--format github`.
+
 Exit codes:
 
 - `0`: no findings, command succeeded.

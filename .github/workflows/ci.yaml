@@ -75,6 +75,27 @@ jobs:
             --rules meta.no-new-bespoke-cicd-enforcer \
             --root .
 
+      - name: Emit elspeth-lints SARIF artifact
+        if: always()
+        run: |
+          set +e
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules meta.no-new-bespoke-cicd-enforcer \
+            --root . \
+            --format sarif > elspeth-lints.sarif
+          status=$?
+          if [[ "$status" -gt 1 ]]; then
+            exit "$status"
+          fi
+
+      - name: Upload elspeth-lints SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: elspeth-lints-sarif
+          path: elspeth-lints.sarif
+          retention-days: 7
+
   # ===========================================================================
   # Stage 1b: elspeth-lints parity harness
   # ===========================================================================

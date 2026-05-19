@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -224,6 +224,26 @@ class CatalogServiceImpl:
 
         available = self._available_names(plugin_type)
         raise ValueError(f"Unknown {plugin_type} plugin: {name}. Available: {available}")
+
+    def post_call_hints(
+        self,
+        *,
+        plugin_type: PluginKind,
+        plugin_name: str,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Dispatch postscript-hint resolution to the plugin's classmethod.
+
+        ``_get_plugin_class`` raises ``ValueError`` for unknown plugins;
+        we let that propagate so callers see the same error shape as
+        ``get_schema``.
+        """
+        plugin_cls = self._get_plugin_class(plugin_type, plugin_name)
+        return plugin_cls.get_post_call_hints(
+            tool_name=tool_name,
+            config_snapshot=config_snapshot,
+        )
 
     # -- Private helpers --
 

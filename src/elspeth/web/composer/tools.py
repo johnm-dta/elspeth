@@ -399,6 +399,13 @@ class ToolResult:
         prior_validation: Validation from before the mutation. When set,
             to_dict() includes a ``validation_delta`` showing new and
             resolved entries so the agent can focus on what changed.
+        post_call_hints: Forward-looking coaching hints from the plugin
+            that was just configured. Resolved by the catalog from
+            ``BaseX.get_post_call_hints`` (see
+            ``contracts/plugin_assistance.py``). Advisory only — not
+            part of any audit hash. ``to_dict`` emits this field
+            *only when non-empty* so existing tool consumers see no
+            schema change.
     """
 
     success: bool
@@ -408,9 +415,10 @@ class ToolResult:
     data: Any = None
     prior_validation: ValidationSummary | None = None
     runtime_preflight: ValidationResult | None = None
+    post_call_hints: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "affected_nodes")
+        freeze_fields(self, "affected_nodes", "post_call_hints")
         if self.data is not None:
             freeze_fields(self, "data")
 
@@ -455,6 +463,9 @@ class ToolResult:
                 self.prior_validation,
                 self.validation,
             )
+
+        if self.post_call_hints:
+            result["post_call_hints"] = list(self.post_call_hints)
 
         return result
 
@@ -1855,13 +1866,86 @@ def _handle_get_expression_grammar(
 # Mutation tool handler wrappers (normalize 2/3-arg handlers to 4-arg)
 
 
+def _attach_post_call_hints(
+    result: ToolResult,
+    catalog: CatalogService,
+    *,
+    plugin_type: PluginKind,
+    tool_name: str,
+    plugin_name: str | None,
+    config_snapshot: Mapping[str, object],
+) -> ToolResult:
+    """Resolve postscript hints from the catalog and attach them to a successful result.
+
+    No-ops when the mutation failed (we don't second-guess validation
+    errors with coaching), when ``plugin_name`` is ``None`` (gates,
+    coalesces — no plugin to resolve against), or when the plugin's
+    ``get_post_call_hints`` returns an empty tuple (no hint to attach,
+    so emit a result that doesn't carry the optional field at all).
+
+    See ``contracts/plugin_assistance.py`` for the discipline and
+    ``ToolResult.to_dict`` for the emission rule.
+    """
+    if not result.success or plugin_name is None:
+        return result
+    hints = catalog.post_call_hints(
+        plugin_type=plugin_type,
+        plugin_name=plugin_name,
+        tool_name=tool_name,
+        config_snapshot=config_snapshot,
+    )
+    if not hints:
+        return result
+    return replace(result, post_call_hints=hints)
+
+
+def _handle_set_source(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    result = _execute_set_source(arguments, state, catalog, data_dir)
+    if result.updated_state.source is None:
+        return result
+    return _attach_post_call_hints(
+        result,
+        catalog,
+        plugin_type="source",
+        tool_name="set_source",
+        plugin_name=result.updated_state.source.plugin,
+        config_snapshot=result.updated_state.source.options,
+    )
+
+
 def _handle_upsert_node(
     arguments: dict[str, Any],
     state: CompositionState,
     catalog: CatalogService,
     data_dir: str | None = None,
 ) -> ToolResult:
-    return _execute_upsert_node(arguments, state, catalog)
+    result = _execute_upsert_node(arguments, state, catalog)
+    # The node may be a gate or coalesce (plugin=None) — _attach handles
+    # that case. Extract the node identity from validated args so we
+    # look up the right entry on the post-mutation state.
+    try:
+        validated = _UpsertNodeArgumentsModel.model_validate(arguments)
+    except PydanticValidationError:
+        # Validation failed inside _execute_upsert_node; the result
+        # carries the failure. Skip hint resolution.
+        return result
+    node_id = validated.id
+    node = next((n for n in result.updated_state.nodes if n.id == node_id), None)
+    if node is None:
+        return result
+    return _attach_post_call_hints(
+        result,
+        catalog,
+        plugin_type="transform",
+        tool_name="upsert_node",
+        plugin_name=node.plugin,
+        config_snapshot=node.options,
+    )
 
 
 def _handle_upsert_edge(
@@ -2066,8 +2150,18 @@ def _mutation_result(
     *,
     prior_validation: ValidationSummary | None = None,
     data: Any = None,
+    post_call_hints: tuple[str, ...] = (),
 ) -> ToolResult:
-    """Build a ToolResult for a successful mutation."""
+    """Build a ToolResult for a successful mutation.
+
+    ``post_call_hints`` is the (possibly empty) tuple returned by the
+    catalog's ``post_call_hints`` method for the just-configured
+    plugin. Tool handlers compute it before calling here so the hint
+    surface participates in the same envelope as ``validation`` and
+    ``affected_nodes``. See ``contracts/plugin_assistance.py`` for
+    the discipline; ``ToolResult.to_dict`` emits the field only when
+    non-empty.
+    """
     validation = new_state.validate()
     return ToolResult(
         success=True,
@@ -2076,6 +2170,7 @@ def _mutation_result(
         affected_nodes=affected,
         prior_validation=prior_validation,
         data=data,
+        post_call_hints=post_call_hints,
     )
 
 
@@ -5083,7 +5178,17 @@ def _handle_patch_source_options(
     catalog: CatalogService,
     data_dir: str | None = None,
 ) -> ToolResult:
-    return _execute_patch_source_options(arguments, state, data_dir)
+    result = _execute_patch_source_options(arguments, state, data_dir)
+    if result.updated_state.source is None:
+        return result
+    return _attach_post_call_hints(
+        result,
+        catalog,
+        plugin_type="source",
+        tool_name="patch_source_options",
+        plugin_name=result.updated_state.source.plugin,
+        config_snapshot=result.updated_state.source.options,
+    )
 
 
 def _node_routing_option_patch_error(patch: Mapping[str, Any]) -> str | None:
@@ -5200,7 +5305,25 @@ def _handle_patch_node_options(
     catalog: CatalogService,
     data_dir: str | None = None,
 ) -> ToolResult:
-    return _execute_patch_node_options(arguments, state)
+    result = _execute_patch_node_options(arguments, state)
+    if not result.success:
+        return result
+    try:
+        validated = PatchNodeOptionsArgumentsModel.model_validate(arguments)
+    except PydanticValidationError:
+        return result
+    node_id = validated.node_id
+    node = next((n for n in result.updated_state.nodes if n.id == node_id), None)
+    if node is None:
+        return result
+    return _attach_post_call_hints(
+        result,
+        catalog,
+        plugin_type="transform",
+        tool_name="patch_node_options",
+        plugin_name=node.plugin,
+        config_snapshot=node.options,
+    )
 
 
 def _execute_patch_output_options(
@@ -5275,7 +5398,25 @@ def _handle_patch_output_options(
     catalog: CatalogService,
     data_dir: str | None = None,
 ) -> ToolResult:
-    return _execute_patch_output_options(arguments, state, data_dir)
+    result = _execute_patch_output_options(arguments, state, data_dir)
+    if not result.success:
+        return result
+    try:
+        validated = PatchOutputOptionsArgumentsModel.model_validate(arguments)
+    except PydanticValidationError:
+        return result
+    sink_name = validated.sink_name
+    output = next((o for o in result.updated_state.outputs if o.name == sink_name), None)
+    if output is None:
+        return result
+    return _attach_post_call_hints(
+        result,
+        catalog,
+        plugin_type="sink",
+        tool_name="patch_output_options",
+        plugin_name=output.plugin,
+        config_snapshot=output.options,
+    )
 
 
 # --- Source-reset and validation-explanation handlers ---
@@ -6476,7 +6617,7 @@ _CACHEABLE_DISCOVERY_TOOLS: frozenset[str] = frozenset(_DISCOVERY_TOOLS.keys()) 
 }
 
 _MUTATION_TOOLS: dict[str, ToolHandler] = {
-    "set_source": _execute_set_source,
+    "set_source": _handle_set_source,
     "upsert_node": _handle_upsert_node,
     "upsert_edge": _handle_upsert_edge,
     "remove_node": _handle_remove_node,

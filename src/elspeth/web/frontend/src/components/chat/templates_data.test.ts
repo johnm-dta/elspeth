@@ -1,7 +1,10 @@
 /**
- * Audit-domain exemplars sourced from README.md lines 560-571; the empty-state chat consumes this.
- * Update discipline — if README.md's table changes, update this file and
- * the snapshot in `templates_data.test.ts` in the same PR.
+ * Tests for templates_data — pins the README.md §"Example Use Cases" mapping.
+ *
+ * The id-snapshot test here is a change-detector: any PR that reorders or
+ * renames entries in templates_data.ts will break here, not silently in a
+ * downstream consumer. That's intentional — see templates_data.ts for the
+ * update-discipline comment.
  */
 
 import { describe, expect, it } from "vitest";

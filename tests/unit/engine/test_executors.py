@@ -224,6 +224,14 @@ def _make_factory() -> MagicMock:
     return factory
 
 
+def _single_complete_node_state_kwargs(factory: MagicMock, *, status: NodeStateStatus) -> dict[str, Any]:
+    """Assert the node under test recorded exactly one terminal node-state completion."""
+    factory.execution.complete_node_state.assert_called_once()
+    kwargs = factory.execution.complete_node_state.call_args.kwargs
+    assert kwargs["status"] == status
+    return kwargs
+
+
 def _make_span_factory() -> SpanFactory:
     """Create a real SpanFactory with no tracer — all spans are no-ops."""
     return SpanFactory()
@@ -1483,10 +1491,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        # Verify FAILED state was recorded before raising
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_fork_destination_creates_children(self) -> None:
         """Config gate with 'fork' destination creates child tokens."""
@@ -1572,8 +1577,7 @@ class TestGateExecutor:
                 token_manager=None,
             )
 
-        statuses = [call.kwargs.get("status") for call in factory.execution.complete_node_state.call_args_list]
-        assert NodeStateStatus.FAILED in statuses
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_missing_route_resolution_fails_closed(self) -> None:
         """Missing route resolution mapping raises MissingEdgeError (no fallback)."""
@@ -1598,9 +1602,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_exception_records_failed_and_reraises(self) -> None:
         """Exception during config gate eval records FAILED and re-raises.
@@ -1632,9 +1634,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_runtime_error_in_dispatch_records_failed_state(self) -> None:
         """RuntimeError during dispatch records FAILED state (Phase 0 fix #8).
@@ -1685,11 +1685,7 @@ class TestGateExecutor:
                 token_manager=None,  # Triggers OrchestrationInvariantError in dispatch
             )
 
-        # Verify FAILED status was recorded (the fix ensures this)
-        statuses = [call.kwargs.get("status") for call in factory.execution.complete_node_state.call_args_list]
-        assert NodeStateStatus.FAILED in statuses, (
-            "Node state should be FAILED when dispatch raises any Exception, not just MissingEdgeError"
-        )
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     # --- Error routing edge cases (exd audit) ---
 
@@ -1753,15 +1749,8 @@ class TestGateExecutor:
 
         executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # Find the COMPLETED call (not the begin_node_state call)
-        completed_call = None
-        for call in factory.execution.complete_node_state.call_args_list:
-            if call.kwargs.get("status") == NodeStateStatus.COMPLETED:
-                completed_call = call
-                break
-
-        assert completed_call is not None, "Expected a COMPLETED node state call"
-        context_after = completed_call.kwargs.get("context_after")
+        completed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.COMPLETED)
+        context_after = completed_kwargs.get("context_after")
         assert context_after is not None, "context_after should be set on success path"
 
         # Verify it's the right DTO with correct values
@@ -1794,10 +1783,8 @@ class TestGateExecutor:
         with pytest.raises(MissingEdgeError):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # The FAILED call should not have context_after
-        failed_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert failed_call.kwargs.get("status") == NodeStateStatus.FAILED
-        assert "context_after" not in failed_call.kwargs
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert "context_after" not in failed_kwargs
 
     # Note: test_post_dispatch_failure_marks_state_failed_via_guard was removed
     # because gate.py now reuses input_hash for output_hash (gates don't modify
@@ -5228,14 +5215,10 @@ class TestGateExecutorExecutionErrorFieldRename:
         with pytest.raises(ExpressionEvaluationError):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # Find the FAILED call to complete_node_state
-        failed_calls = [
-            call for call in factory.execution.complete_node_state.call_args_list if call.kwargs.get("status") == NodeStateStatus.FAILED
-        ]
-        assert len(failed_calls) >= 1, "Expected at least one FAILED node state call"
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
         # Extract the error argument — it should be an ExecutionError
-        error_obj = failed_calls[0].kwargs.get("error")
+        error_obj = failed_kwargs.get("error")
         assert error_obj is not None, "error kwarg should be set on FAILED state"
         assert isinstance(error_obj, ExecutionError)
 
@@ -5272,12 +5255,9 @@ class TestGateExecutorExecutionErrorFieldRename:
         with pytest.raises(ValueError, match="unknown_route"):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        failed_calls = [
-            call for call in factory.execution.complete_node_state.call_args_list if call.kwargs.get("status") == NodeStateStatus.FAILED
-        ]
-        assert len(failed_calls) >= 1
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
-        error_obj = failed_calls[0].kwargs.get("error")
+        error_obj = failed_kwargs.get("error")
         assert isinstance(error_obj, ExecutionError)
 
         # Verify serialization: 'type' key with value 'ValueError'

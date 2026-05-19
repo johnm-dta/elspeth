@@ -281,6 +281,13 @@ Filed:
 
 - `elspeth-314eb3552e`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-314eb3552e` resolved. GateExecutor audit-state tests now
+  assert exactly one `complete_node_state` call for the node under test before
+  checking terminal status, failure error payloads, and success
+  `context_after`.
+
 ### UENG-8 — Boundary source/sink skip tests do not satisfy role detection
 
 Evidence:

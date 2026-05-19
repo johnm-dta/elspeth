@@ -651,6 +651,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools.py:_execute_remove_output:args"
   # Handler wrappers normalize signatures for the tool registry (Sub-4x).
   # Arguments are LLM-provided JSON dicts — inherently dynamic.
+  - "src/elspeth/web/composer/tools.py:_handle_set_source:arguments"
   - "src/elspeth/web/composer/tools.py:_handle_list_sources:arguments"
   - "src/elspeth/web/composer/tools.py:_handle_list_transforms:arguments"
   - "src/elspeth/web/composer/tools.py:_handle_list_sinks:arguments"

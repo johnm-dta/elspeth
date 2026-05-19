@@ -38,7 +38,16 @@ defaults:
     # validation). All three entries bounded 2026-08-20 to force
     # re-evaluation; if the structured schema-field shape stabilises into
     # a Pydantic model at the boundary, the whole block retires.
-    max_allow_hits: 414
+    #
+    # Bumped from 414 → 415 on 2026-05-20 (net +1) to accommodate the
+    # ``WebScrapeTransform.get_post_call_hints`` Tier-3 isinstance guard
+    # introduced by the composer-jit-hints Phase 1 work. The override
+    # narrows the LLM-supplied ``text_separator`` config value before
+    # the substring check that decides whether to emit the
+    # newline-collapse coaching hint. Same trust boundary semantics as
+    # the existing ``WebScrapeHTTPConfig._validate_allowed_hosts`` R5
+    # entry — config_snapshot is unvalidated LLM-supplied options.
+    max_allow_hits: 415
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -57,7 +66,11 @@ defaults:
     # Bumped from 504 → 507 on 2026-05-20 for the
     # ``_declared_field_name`` helper bump as ``max_allow_hits`` above
     # (net +3).
-    max_total_entries: 507
+    #
+    # Bumped from 507 → 508 on 2026-05-20 for the same composer-jit-hints
+    # Phase 1 ``WebScrapeTransform.get_post_call_hints`` bump as
+    # ``max_allow_hits`` above (net +1).
+    max_total_entries: 508
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

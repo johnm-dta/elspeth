@@ -164,7 +164,7 @@ class LineExplode(BaseTransform):
     name = "line_explode"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2bf6fedc84a2eb4c"
+    source_file_hash: str | None = "sha256:f586c7efbb342c87"
     config_model = LineExplodeConfig
     creates_tokens = True
 
@@ -211,6 +211,17 @@ class LineExplode(BaseTransform):
     ) -> PluginAssistance | None:
         from elspeth.contracts.plugin_assistance import PluginAssistance
 
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="line_explode",
+                issue_code=None,
+                summary="Deaggregate a string field by splitting on newlines — emits one row per non-empty line.",
+                composer_hints=(
+                    "source_field must contain newline-framed text — empty/compact text yields a single row with the whole content.",
+                    "Producer compatibility: web_scrape with format: 'markdown' or text_separator: '\\n' works; format: 'text' with whitespace separator does NOT.",
+                    "If you need to split on a non-newline delimiter, use field_mapper + value_transform first to insert newlines.",
+                ),
+            )
         if issue_code != "line_explode.source_field.line_framed_text":
             return None
         return PluginAssistance(

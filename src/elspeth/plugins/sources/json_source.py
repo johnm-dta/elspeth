@@ -19,6 +19,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
@@ -146,7 +147,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:42878f4e566994f3"
+    source_file_hash: str | None = "sha256:af07fcdc3bef7b61"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -611,3 +612,38 @@ class JSONSource(BaseSource):
     def close(self) -> None:
         """Release resources (no-op for JSON source)."""
         pass
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="json",
+                issue_code=None,
+                summary="Load rows from a JSON file. Supports JSON-array and JSONL (newline-delimited) formats; can target a nested array via data_key.",
+                composer_hints=(
+                    "Format auto-detects from extension (.json vs .jsonl); set 'format' explicitly only if extension is misleading.",
+                    "JSON arrays nested under a key require 'data_key'; otherwise the top-level value must be an array.",
+                    "Same schema-mode rules as csv: default to 'observed' unless the user asked to project to a smaller schema.",
+                    "JSONL is resumable, line-by-line; JSON-array is loaded into memory in one pass — pick JSONL for large inputs.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        if "schema" not in config_snapshot:
+            return ()
+        schema = config_snapshot["schema"]
+        if not isinstance(schema, Mapping):
+            return ()
+        if "mode" in schema and schema["mode"] == "fixed":
+            return (
+                "You declared schema.mode: 'fixed'. Did you call inspect_source first? "
+                "Fixed mode drops every row whose keys don't exactly match the declared fields.",
+            )
+        return ()

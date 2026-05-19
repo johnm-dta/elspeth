@@ -1590,10 +1590,19 @@ class TestWebScrapeAssistance:
 
         assert WebScrapeTransform.get_agent_assistance(issue_code="nope.unknown") is None
 
-    def test_returns_none_when_no_issue_code(self):
+    def test_returns_discovery_assistance_when_no_issue_code(self):
+        """Phase 1 dual-use: issue_code=None returns discovery-time hints (Jam-1)."""
         from elspeth.plugins.transforms.web_scrape import WebScrapeTransform
 
-        assert WebScrapeTransform.get_agent_assistance(issue_code=None) is None
+        result = WebScrapeTransform.get_agent_assistance(issue_code=None)
+        assert result is not None
+        assert result.plugin_name == "web_scrape"
+        assert result.issue_code is None
+        assert result.composer_hints  # non-empty
+        # web_scrape's discovery-time hints document the SSRF guard and the
+        # audit recording — those are the load-bearing properties.
+        joined = "\n".join(result.composer_hints)
+        assert "audit" in joined.lower()
 
     def test_assistance_does_not_leak_secret_options(self):
         """Sentinel test: configured option values must not bleed into assistance prose.

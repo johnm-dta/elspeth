@@ -16,6 +16,7 @@ from pydantic import Field, model_validator
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -116,7 +117,7 @@ class FieldMapper(BaseTransform):
     name = "field_mapper"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8399af51f4a2a967"
+    source_file_hash: str | None = "sha256:109c6e5e91f4c140"
     config_model = FieldMapperConfig
 
     @classmethod
@@ -328,3 +329,18 @@ class FieldMapper(BaseTransform):
     def close(self) -> None:
         """No resources to release."""
         pass
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="field_mapper",
+                issue_code=None,
+                summary="Rename, drop, or reorder row fields. Stateless and shape-changing — declares new field names in output_schema.",
+                composer_hints=(
+                    "Use 'mapping' to rename; 'drop' to discard; 'include' to whitelist; 'rename_only' to skip drop semantics.",
+                    "Renames are pure transformations — no coercion happens here. Use type_coerce for type changes.",
+                    "If the downstream consumer expects a specific field name not in the source, field_mapper is the right tool.",
+                ),
+            )
+        return None

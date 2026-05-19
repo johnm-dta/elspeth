@@ -106,7 +106,7 @@ class BatchDistributionProfile(BaseTransform):
     name = "batch_distribution_profile"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4bd99532931573f2"
+    source_file_hash: str | None = "sha256:54f0ba3185f28300"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
@@ -173,6 +173,17 @@ class BatchDistributionProfile(BaseTransform):
     ) -> PluginAssistance | None:
         from elspeth.contracts.plugin_assistance import PluginAssistance
 
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="batch_distribution_profile",
+                issue_code=None,
+                summary="Aggregate numeric descriptive statistics — mean, stddev, quartiles, optionally per group. Numeric-only; categorical counts go to batch_top_k.",
+                composer_hints=(
+                    "value_field must be int or float. Strings (theme/category names) belong in batch_top_k, not here.",
+                    "group_by partitions by a categorical field; omit it for a single distribution over all rows.",
+                    "Words like 'distribution', 'theme frequency', 'category counts' usually mean batch_top_k unless the user clearly wants numeric stats.",
+                ),
+            )
         if issue_code != "batch_distribution_profile.value_field.numeric":
             return None
         return PluginAssistance(

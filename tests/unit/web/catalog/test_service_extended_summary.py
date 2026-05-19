@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from elspeth.contracts.enums import AuditCharacteristic, Determinism
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.web.catalog.service import CatalogServiceImpl
 
 
@@ -40,6 +41,14 @@ class _BareTransform:
     @classmethod
     def get_config_model(cls) -> Any:
         return None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> Any:
+        return None
+
+    @classmethod
+    def get_post_call_hints(cls, *, tool_name: str, config_snapshot: Any) -> tuple[str, ...]:
+        return ()
 
 
 class _FilledSource:
@@ -72,6 +81,14 @@ class _FilledSource:
     def get_config_model(cls) -> Any:
         return None
 
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> Any:
+        return None
+
+    @classmethod
+    def get_post_call_hints(cls, *, tool_name: str, config_snapshot: Any) -> tuple[str, ...]:
+        return ()
+
 
 class _FakePluginManager:
     def __init__(self, sources, transforms, sinks):
@@ -103,6 +120,77 @@ def test_bare_plugin_summary_uses_defaults() -> None:
     # transform kind-default. The catalog suppresses default-derived flags
     # so an unfilled, default-determinism transform shows nothing.
     assert s.audit_characteristics == ()
+
+
+class _HintedTransform:
+    """A transform that publishes discovery-time composer_hints.
+
+    Exercises the JIT-hints Phase 1 surface: ``_to_summary`` and
+    ``_build_schema_info`` must pull the hint tuple out of the plugin's
+    ``get_agent_assistance(issue_code=None)`` return.
+    """
+
+    name = "hinted"
+    determinism = Determinism.DETERMINISTIC
+    plugin_version = "1.0.0"
+    source_file_hash: str | None = None
+    usage_when_to_use: ClassVar[str | None] = None
+    usage_when_not_to_use: ClassVar[str | None] = None
+    example_use: ClassVar[str | None] = None
+    capability_tags: ClassVar[tuple[str, ...]] = ()
+    audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset()
+    config_model = None
+    is_batch_aware = False
+
+    @classmethod
+    def get_config_schema(cls) -> dict[str, Any]:
+        return {}
+
+    @classmethod
+    def get_config_model(cls) -> Any:
+        return None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="hinted",
+                issue_code=None,
+                summary="A transform with discovery-time hints.",
+                composer_hints=(
+                    "First imperative.",
+                    "Second imperative.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(cls, *, tool_name: str, config_snapshot: Any) -> tuple[str, ...]:
+        return ()
+
+
+def test_summary_carries_discovery_composer_hints() -> None:
+    """PluginSummary.composer_hints reflects get_agent_assistance(issue_code=None)."""
+    pm = _FakePluginManager(sources=[], transforms=[_HintedTransform], sinks=[])
+    svc = CatalogServiceImpl(pm)  # type: ignore[arg-type]
+    [s] = svc.list_transforms()
+    assert s.composer_hints == ("First imperative.", "Second imperative.")
+
+
+def test_summary_empty_hints_when_plugin_does_not_override() -> None:
+    """A plugin that returns None from get_agent_assistance gets empty composer_hints."""
+    pm = _FakePluginManager(sources=[], transforms=[_BareTransform], sinks=[])
+    svc = CatalogServiceImpl(pm)  # type: ignore[arg-type]
+    [s] = svc.list_transforms()
+    assert s.composer_hints == ()
+
+
+def test_schema_info_carries_discovery_composer_hints() -> None:
+    """PluginSchemaInfo.composer_hints mirrors PluginSummary.composer_hints."""
+    pm = _FakePluginManager(sources=[], transforms=[_HintedTransform], sinks=[])
+    svc = CatalogServiceImpl(pm)  # type: ignore[arg-type]
+    info = svc.get_schema("transform", "hinted")
+    assert info.composer_hints == ("First imperative.", "Second imperative.")
 
 
 def test_filled_source_summary_propagates_all_fields() -> None:

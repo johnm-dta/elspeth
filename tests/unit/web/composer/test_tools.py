@@ -6882,6 +6882,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "web_scrape",
                 "issue_code": "web_scrape.content.compact_text",
             },
@@ -6892,6 +6893,7 @@ class TestGetPluginAssistance:
         # ToolResult.to_dict deep-thaws ``data`` for LLM consumption; tests
         # exercise the wire shape rather than the frozen in-memory form.
         payload = result.to_dict()["data"]
+        assert payload["plugin_type"] == "transform"
         assert payload["plugin_name"] == "web_scrape"
         assert payload["issue_code"] == "web_scrape.content.compact_text"
         assert "summary" in payload
@@ -6915,6 +6917,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "line_explode",
                 "issue_code": "line_explode.source_field.line_framed_text",
             },
@@ -6934,6 +6937,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "batch_distribution_profile",
                 "issue_code": "batch_distribution_profile.value_field.numeric",
             },
@@ -6956,6 +6960,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "web_scrape",
                 "issue_code": "web_scrape.unrecognized.code",
             },
@@ -6977,6 +6982,7 @@ class TestGetPluginAssistance:
         result = execute_tool(
             "get_plugin_assistance",
             {
+                "plugin_type": "transform",
                 "plugin_name": "no_such_plugin_xyz",
                 "issue_code": "anything",
             },
@@ -6985,6 +6991,76 @@ class TestGetPluginAssistance:
         )
         assert result.success is False
         assert "no_such_plugin_xyz" in result.data["error"]
+
+    def test_invalid_plugin_type_returns_failure(self) -> None:
+        """plugin_type is validated up-front; mistyped value surfaces as failure."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transformer",  # typo
+                "plugin_name": "web_scrape",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "transformer" in result.data["error"]
+
+    def test_dispatches_to_source_family(self) -> None:
+        """plugin_type='source' looks up the plugin via get_source_by_name."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        # csv source has no assistance yet — discovery returns explicit None payload
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "source",
+                "plugin_name": "csv",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["plugin_type"] == "source"
+        assert payload["plugin_name"] == "csv"
+
+    def test_dispatches_to_sink_family(self) -> None:
+        """plugin_type='sink' looks up the plugin via get_sink_by_name."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "sink",
+                "plugin_name": "json",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["plugin_type"] == "sink"
+        assert payload["plugin_name"] == "json"
+
+    def test_omitting_issue_code_returns_discovery_payload(self) -> None:
+        """Discovery-time mode: ``issue_code`` may be omitted entirely."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "web_scrape",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["issue_code"] is None
 
 
 # ---------------------------------------------------------------------------

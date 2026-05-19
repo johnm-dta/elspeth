@@ -22,6 +22,7 @@ from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, S
 from elspeth.contracts.contexts import LifecycleContext, SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.clients.dataverse import (
@@ -180,7 +181,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a9a481b1e8d2a27e"
+    source_file_hash: str | None = "sha256:6dc5b9ec7c49e11b"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -714,3 +715,19 @@ class DataverseSource(BaseSource):
         if self._client is not None:
             self._client.close()
             self._client = None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="dataverse",
+                issue_code=None,
+                summary="Load rows from a Microsoft Dataverse entity via OData. Paginated, credential-scoped, with audit-recorded query.",
+                composer_hints=(
+                    "Tier-3 boundary: record what Dataverse provided. Don't infer absent fields from siblings — record None and let consumers decide.",
+                    "Authentication is per-environment via DataverseAuthConfig — credentials wire through the secrets store, never inline in YAML.",
+                    "Choose query_mode 'fetchxml' for complex filters, 'odata' for simple field selection.",
+                    "The audit trail records the exact OData/FetchXML query, page count, and quarantine count — verify these are visible before declaring success.",
+                ),
+            )
+        return None

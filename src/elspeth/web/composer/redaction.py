@@ -1905,15 +1905,18 @@ _EXPLAIN_VALIDATION_ERROR_REASON = HandlesNoSensitiveDataReason(
 
 
 _GET_PLUGIN_ASSISTANCE_REASON = HandlesNoSensitiveDataReason(
-    sensitive_data_locations=("plugin-published assistance text — registry-side guidance keyed by issue_code",),
+    sensitive_data_locations=(
+        "plugin-published assistance text — registry-side guidance keyed by issue_code or, for discovery, plugin identity",
+    ),
     why_arguments_safe=(
-        "get_plugin_assistance arguments are two scalar strings (plugin_name, issue_code) "
-        "selecting plugin-published guidance; neither carries operator data, and unknown "
-        "values surface as a tool-failure result rather than passing payload to the handler."
+        "get_plugin_assistance arguments are three enum/scalar strings (plugin_type ∈ "
+        "{source, transform, sink}, plugin_name, optional issue_code) selecting "
+        "plugin-published guidance; none carry operator data, and unknown values surface "
+        "as a tool-failure result rather than passing payload to the handler."
     ),
     why_responses_safe=(
         "Response is the plugin's published guidance struct (summary, suggested_fixes, "
-        "example_before, example_after); it is documentation authored at plugin packaging "
+        "examples, composer_hints); it is documentation authored at plugin packaging "
         "time, carries no session payload, and contains no credentials or row content."
     ),
 )

@@ -449,3 +449,91 @@ def test_verdict_precedence(verdict_inputs: dict[str, list[str]], expected: str)
         assert expected == "AMBER"
     else:
         assert expected == "GREEN"
+
+
+# --------------------------------------------------------------------------
+# Hint-uptake asserters (composer-jit-hints Phase 1)
+# --------------------------------------------------------------------------
+
+
+class TestSourceOptionKeyAsserters:
+    """must_have_options_keys_for_source / must_not_have_options_keys_for_source."""
+
+    def test_green_when_required_source_keys_present(self) -> None:
+        state = _state_valid()
+        state["source"] = {"plugin": "csv", "options": {"columns": ["a", "b"], "schema": {"mode": "observed"}}}
+        result = score(
+            scenario=_scenario(green={"must_have_options_keys_for_source": ["columns"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "GREEN"
+
+    def test_amber_when_required_source_key_missing(self) -> None:
+        state = _state_valid()  # source has no 'columns'
+        result = score(
+            scenario=_scenario(green={"must_have_options_keys_for_source": ["columns"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("columns" in r for r in result["amber_reasons"])
+
+    def test_amber_when_forbidden_source_key_present(self) -> None:
+        state = _state_valid()
+        state["source"] = {"plugin": "csv", "options": {"schema": {"fields": ["id: int"], "mode": "fixed"}}}
+        result = score(
+            scenario=_scenario(green={"must_not_have_options_keys_for_source": ["schema.fields"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("schema.fields" in r for r in result["amber_reasons"])
+
+
+class TestOutputOptionAsserters:
+    """must_have_options_value_for_output — by-name output (sink) value pinning."""
+
+    def test_green_when_sink_write_mode_matches(self) -> None:
+        state = _state_valid()
+        state["outputs"] = [{"name": "customers", "plugin": "database", "options": {"write_mode": "upsert"}}]
+        result = score(
+            scenario=_scenario(
+                green={
+                    "must_have_options_value_for_output": [{"sink_name": "customers", "key": "write_mode", "allowed_values": ["upsert"]}]
+                }
+            ),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "GREEN"
+
+    def test_amber_when_sink_write_mode_is_wrong(self) -> None:
+        state = _state_valid()
+        state["outputs"] = [{"name": "customers", "plugin": "database", "options": {"write_mode": "insert"}}]
+        result = score(
+            scenario=_scenario(
+                green={
+                    "must_have_options_value_for_output": [{"sink_name": "customers", "key": "write_mode", "allowed_values": ["upsert"]}]
+                }
+            ),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("write_mode" in r for r in result["amber_reasons"])
+
+    def test_amber_when_sink_option_key_missing(self) -> None:
+        state = _state_valid()
+        state["outputs"] = [{"name": "customers", "plugin": "database", "options": {}}]
+        result = score(
+            scenario=_scenario(
+                green={
+                    "must_have_options_value_for_output": [{"sink_name": "customers", "key": "write_mode", "allowed_values": ["upsert"]}]
+                }
+            ),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("write_mode" in r for r in result["amber_reasons"])

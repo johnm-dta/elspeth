@@ -801,14 +801,53 @@ class BaseTransform(ABC):
         *,
         issue_code: str | None = None,
     ) -> PluginAssistance | None:
-        """Return deterministic guidance keyed by an issue code.
+        """Return deterministic guidance for this plugin.
 
-        Default returns None: the plugin offers no specific guidance.
-        Override to return a PluginAssistance instance describing fixes
-        for this plugin's issue codes. Validators attach the issue
-        code; the plugin owns the prose.
+        Dual-use by ``issue_code``:
+
+        * ``issue_code is None`` — discovery-time guidance for an LLM
+          or operator selecting this plugin. Override to return a
+          ``PluginAssistance`` with a one-line ``summary`` of what the
+          plugin does and 1-5 short ``composer_hints`` imperatives
+          (≤140 chars each). ``suggested_fixes`` and ``examples`` may
+          be empty.
+        * ``issue_code is not None`` — failure-time guidance. The
+          validator attached the code; the plugin owns the prose.
+          Return a ``PluginAssistance`` with ``suggested_fixes`` and,
+          where useful, before/after ``examples``.
+
+        Default returns None for both branches: the plugin offers no
+        guidance. The catalog uses the ``None`` return as a signal to
+        emit empty ``composer_hints`` on the discovery DTO.
         """
         return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set config.
+
+        Called by the composer MCP tool layer after a successful
+        mutation (``set_source``, ``upsert_node``, ``patch_*_options``).
+        The plugin inspects its *own* configuration and returns 0-N
+        short imperatives the operator/LLM should consider before
+        moving on. Examples: "you declared schema.mode: fixed — did
+        you call inspect_source first?" or "your prompt contains a
+        subjective term — did you call request_interpretation_review?"
+
+        Two-parameter contract is deliberate. Plugins do not see
+        composer state or sibling nodes — cross-node concerns belong
+        in the validator subsystem. Hints are local to the plugin's
+        own config.
+
+        Default returns an empty tuple. Same audit-hash discipline as
+        ``get_agent_assistance``: advisory coaching, not contract.
+        """
+        return ()
 
 
 class BaseSink(ABC):
@@ -1195,6 +1234,30 @@ class BaseSink(ABC):
         """
         self._on_complete_called = True
 
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        """Return deterministic guidance for this sink. See ``BaseTransform.get_agent_assistance``."""
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set sink config.
+
+        See ``BaseTransform.get_post_call_hints`` for the full contract.
+        Sinks typically hint on collision policy, write mode (insert /
+        upsert / replace), and serialization format choices.
+        """
+        return ()
+
 
 class BaseSource(ABC):
     """Base class for source plugins.
@@ -1500,3 +1563,29 @@ class BaseSource(ABC):
             is a dict mapping original header name → final field name.
         """
         return None  # Default: no field resolution metadata
+
+    # === Composer assistance hooks ===
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        """Return deterministic guidance for this source. See ``BaseTransform.get_agent_assistance``."""
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set source config.
+
+        See ``BaseTransform.get_post_call_hints`` for the full contract.
+        Sources typically hint on Tier 3 absence-vs-fabrication semantics,
+        schema-mode selection, and encoding handling.
+        """
+        return ()

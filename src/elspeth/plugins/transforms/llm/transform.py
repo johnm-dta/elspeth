@@ -33,6 +33,7 @@ from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.errors import FrameworkBugError, RuntimePreflightFailedError
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.value_source import register_value_source_plugin
@@ -1039,7 +1040,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3282a958a2d4c7d7"
+    source_file_hash: str | None = "sha256:96a0bf5d7e76ee4d"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1569,6 +1570,57 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
 
         self._recorder = None
         self._shutdown_event = None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="llm",
+                issue_code=None,
+                summary="Call an LLM provider (Azure OpenAI or OpenRouter) on each row and write the response into a field. Tracks model identity, token usage, and finish reason in the audit trail.",
+                composer_hints=(
+                    "Call list_models before pinning 'model:' — deployments don't all ship the same providers.",
+                    "Subjective user terms (cool, risky, relevant, good) MUST trigger request_interpretation_review before the build is final.",
+                    "Token-usage and model-ID fields are appended automatically as <response_field>_usage / _model — don't hand-add them.",
+                    "If the input came from web_scrape or any external source, route through azure_content_safety first.",
+                    "max_concurrency and per_minute_rate_limit interact — neither bounds the other; set both when the provider has hard rate caps.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        # Subjective term in prompt → flag interpretation review.
+        if "prompt_template" in config_snapshot:
+            prompt_template = config_snapshot["prompt_template"]
+            if isinstance(prompt_template, str):
+                subjective_terms = ("cool", "good", "bad", "risky", "interesting", "relevant", "appropriate")
+                text = prompt_template.lower()
+                triggered = [term for term in subjective_terms if term in text]
+                if triggered:
+                    hints.append(
+                        f"Your prompt contains subjective term(s) {triggered!r}. Call request_interpretation_review before finalising — operators need to confirm the LLM's interpretation matches their intent."
+                    )
+        # Manual _usage / _model field declared by hand → tell them it's automatic.
+        if "response_field" in config_snapshot and "output_schema" in config_snapshot:
+            response_field = config_snapshot["response_field"]
+            output_schema = config_snapshot["output_schema"]
+            if isinstance(response_field, str) and isinstance(output_schema, Mapping) and "fields" in output_schema:
+                fields = output_schema["fields"]
+                if isinstance(fields, Sequence):
+                    manual_appendix = {f"{response_field}_usage", f"{response_field}_model"}
+                    declared = {field.split(":", 1)[0].strip() if isinstance(field, str) else "" for field in fields}
+                    if manual_appendix & declared:
+                        hints.append(
+                            f"You declared {sorted(manual_appendix & declared)!r} in the schema, but token-usage and model-ID fields are appended automatically. Remove them from output_schema.fields."
+                        )
+        return tuple(hints)
 
 
 # Register opt-in for value-source compliance: the typed Pydantic config

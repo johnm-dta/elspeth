@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -225,6 +225,26 @@ class CatalogServiceImpl:
         available = self._available_names(plugin_type)
         raise ValueError(f"Unknown {plugin_type} plugin: {name}. Available: {available}")
 
+    def post_call_hints(
+        self,
+        *,
+        plugin_type: PluginKind,
+        plugin_name: str,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Dispatch postscript-hint resolution to the plugin's classmethod.
+
+        ``_get_plugin_class`` raises ``ValueError`` for unknown plugins;
+        we let that propagate so callers see the same error shape as
+        ``get_schema``.
+        """
+        plugin_cls = self._get_plugin_class(plugin_type, plugin_name)
+        return plugin_cls.get_post_call_hints(
+            tool_name=tool_name,
+            config_snapshot=config_snapshot,
+        )
+
     # -- Private helpers --
 
     def _populate_schema_cache(self, plugin_type: PluginKind, classes: Sequence[PluginClass]) -> None:
@@ -255,7 +275,25 @@ class CatalogServiceImpl:
             description=description,
             json_schema=json_schema,
             knob_schema=cast(dict[str, Any], knob_schema),
+            composer_hints=self._discovery_composer_hints(plugin_cls),
         )
+
+    def _discovery_composer_hints(self, plugin_cls: PluginClass) -> tuple[str, ...]:
+        """Pull discovery-time composer_hints from a plugin's assistance hook.
+
+        Calls ``plugin_cls.get_agent_assistance(issue_code=None)`` and
+        returns ``assistance.composer_hints`` when populated, else an
+        empty tuple. The hook is part of the plugin contract (defined on
+        BaseTransform, BaseSink, BaseSource — see
+        ``plugins/infrastructure/base.py``); any plugin that doesn't
+        override it returns ``None`` here, which the catalog renders as
+        empty hints. Advisory coaching only — not part of any audit
+        hash; see ``contracts/plugin_assistance.py`` for the discipline.
+        """
+        assistance = plugin_cls.get_agent_assistance(issue_code=None)
+        if assistance is None:
+            return ()
+        return assistance.composer_hints
 
     def _knob_schema(self, plugin_cls: PluginClass, *, plugin_type: PluginKind, name: str) -> KnobSchema:
         try:
@@ -344,6 +382,7 @@ class CatalogServiceImpl:
             example_use=example_use,
             capability_tags=capability_tags,
             audit_characteristics=audit_characteristics,
+            composer_hints=self._discovery_composer_hints(plugin_cls),
         )
 
     def _catalog_schema(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> dict[str, Any]:

@@ -168,6 +168,64 @@ describe("ChatPanel", () => {
     expect(screen.queryByText("Working on: convert HTML into JSON")).not.toBeInTheDocument();
   });
 
+  it("coalesces consecutive assistant rows into one agent turn bubble", () => {
+    // Reproduces the live shape at session a8afd33e: one user prompt + seven
+    // assistant rows (six with single tool_calls, one orphan empty) + a final
+    // answer row. The backend persists each LLM round-trip as its own row
+    // (Tier-1 audit doctrine), but the chat panel must render the user-visible
+    // turn — one user bubble + one agent bubble carrying the aggregated tool
+    // calls and the final answer.
+    const session: Session = {
+      id: "session-coalesce",
+      title: "Coalesce session",
+      created_at: "2026-05-19T00:00:00Z",
+      updated_at: "2026-05-19T00:00:00Z",
+    };
+    const mkMsg = (overrides: Partial<ChatMessage> & { id: string; role: ChatMessage["role"] }): ChatMessage => ({
+      session_id: session.id,
+      content: "",
+      tool_calls: null,
+      created_at: "2026-05-19T00:00:00Z",
+      ...overrides,
+    }) as ChatMessage;
+    const tc = (name: string, id = name) => ({ id, type: "function", function: { name, arguments: "{}" } });
+
+    const messages: ChatMessage[] = [
+      mkMsg({ id: "u1", role: "user", content: "create a list of 5 government web pages..." }),
+      mkMsg({ id: "a1", role: "assistant", tool_calls: [tc("list_models"), tc("get_plugin_schema", "g1")] }),
+      mkMsg({ id: "a2", role: "assistant", tool_calls: [tc("create_blob")] }),
+      mkMsg({ id: "a3", role: "assistant", tool_calls: [tc("set_pipeline")] }),
+      mkMsg({ id: "a4", role: "assistant", tool_calls: [tc("patch_node_options")] }),
+      mkMsg({ id: "a5", role: "assistant", tool_calls: [tc("preview_pipeline", "p1")] }),
+      mkMsg({ id: "a6", role: "assistant" }),
+      mkMsg({ id: "a7", role: "assistant", tool_calls: [tc("preview_pipeline", "p2")] }),
+      mkMsg({ id: "a8", role: "assistant", content: "Built a workflow that fetches each page and rates it." }),
+    ];
+
+    useSessionStore.setState({
+      activeSessionId: session.id,
+      sessions: [session],
+      messages,
+    });
+
+    render(<ChatPanel />);
+
+    // One bubble per turn: 1 user + 1 agent = 2 — not 9 (the audit row count).
+    const bubbles = screen.getAllByTestId("message-bubble");
+    expect(bubbles).toHaveLength(2);
+
+    // Agent turn carries the final content from the LAST row in the turn,
+    // not from any intermediate empty-content row.
+    expect(
+      screen.getByText("Built a workflow that fetches each page and rates it."),
+    ).toBeInTheDocument();
+
+    // User turn still renders its own bubble.
+    expect(
+      screen.getByText("create a list of 5 government web pages..."),
+    ).toBeInTheDocument();
+  });
+
   it("passes matching and stale proposal state to message bubbles", () => {
     const session: Session = {
       id: "session-1",

@@ -25,6 +25,7 @@ from elspeth.contracts.declaration_contracts import (
     BatchFlushInputs,
     BatchFlushOutputs,
     DeclarationContract,
+    DeclarationContractViolation,
     DispatchSite,
     ExampleBundle,
     _clear_registry_for_tests,
@@ -52,9 +53,14 @@ class _CountingPayload(TypedDict):
     token_id: str
 
 
+class _CountingViolation(DeclarationContractViolation):
+    payload_schema = _CountingPayload
+
+
 class _CountingContract(DeclarationContract):
     name = "counting_test_contract"
     payload_schema: type = _CountingPayload
+    violation_class: type[_CountingViolation] = _CountingViolation
     invocations: ClassVar[list[tuple[str, frozenset[str]]]] = []
 
     def applies_to(self, plugin: Any) -> bool:

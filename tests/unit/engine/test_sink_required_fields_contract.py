@@ -113,6 +113,7 @@ class _SecondaryBoundaryViolation(DeclarationContractViolation):
 class _SecondaryBoundaryContract(DeclarationContract):
     name: ClassVar[str] = "secondary_sink_boundary_test"
     payload_schema: ClassVar[type] = _SecondaryPayload
+    violation_class: ClassVar[type[_SecondaryBoundaryViolation]] = _SecondaryBoundaryViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(plugin.declared_required_fields)

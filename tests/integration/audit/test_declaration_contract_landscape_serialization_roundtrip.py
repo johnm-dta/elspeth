@@ -160,6 +160,7 @@ def _record_failure(
 class _RoundTripContract(DeclarationContract):
     name = "test_roundtrip"
     payload_schema: type = _RoundTripPayload
+    violation_class: type[_RoundTripViolation] = _RoundTripViolation
 
     def applies_to(self, plugin: object) -> bool:
         return True
@@ -199,6 +200,7 @@ class _RoundTripContract(DeclarationContract):
 class _SecretContract(DeclarationContract):
     name = "secret_test"
     payload_schema: type = _SecretPayload
+    violation_class: type[_SecretViolation] = _SecretViolation
 
     def applies_to(self, plugin: object) -> bool:
         return True
@@ -211,7 +213,7 @@ class _SecretContract(DeclarationContract):
             run_id=inputs.run_id,
             row_id=inputs.row_id,
             token_id=inputs.token_id,
-            payload={"api_key": "sk-abcdef1234567890abcdef1234567890"},
+            payload={"api_key": "sk-abcdef1234567890abcdef1234567890"},  # secret-scan: allow-this-line
             message="secret test",
         )
 
@@ -235,6 +237,7 @@ class _SecretContract(DeclarationContract):
 class _SecretMessageContract(DeclarationContract):
     name = "secret_message_test"
     payload_schema: type = _SecretMessagePayload
+    violation_class: type[_SecretMessageViolation] = _SecretMessageViolation
 
     def applies_to(self, plugin: object) -> bool:
         return True
@@ -274,6 +277,7 @@ class _SecretMessageContract(DeclarationContract):
 class _AggregateChildContractA(DeclarationContract):
     name = "contract_a"
     payload_schema: type = _AggregateChildPayload
+    violation_class: type[_AggregateChildViolationA] = _AggregateChildViolationA
 
     def applies_to(self, plugin: object) -> bool:
         return True
@@ -308,6 +312,7 @@ class _AggregateChildContractA(DeclarationContract):
 class _AggregateChildContractB(DeclarationContract):
     name = "contract_b"
     payload_schema: type = _AggregateChildPayload
+    violation_class: type[_AggregateChildViolationB] = _AggregateChildViolationB
 
     def applies_to(self, plugin: object) -> bool:
         return True

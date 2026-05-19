@@ -162,6 +162,7 @@ class _SecretRoundTripViolation(DeclarationContractViolation):
 class _SecretRoundTripContract(DeclarationContract):
     name = "schema_config_mode_secret_roundtrip"
     payload_schema: type = _SecretPayload
+    violation_class: type[_SecretRoundTripViolation] = _SecretRoundTripViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return True

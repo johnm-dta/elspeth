@@ -112,6 +112,7 @@ class _SecondaryPreEmissionViolation(DeclarationContractViolation):
 class _SecondaryPreEmissionContract(DeclarationContract):
     name = "secondary_declared_required_test"
     payload_schema: type = _SecondaryPayload
+    violation_class: type[_SecondaryPreEmissionViolation] = _SecondaryPreEmissionViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(plugin.declared_input_fields)

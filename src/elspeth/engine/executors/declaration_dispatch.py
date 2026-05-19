@@ -39,16 +39,10 @@ orchestration body.
 
 Catch scope (see ``_dispatch``):
 
-    * ``DeclarationContractViolation`` — primary audit-evidence base.
-    * ``PluginContractViolation`` — ``PassThroughContractViolation`` inherits
-      this and predates the ADR-010 DCV hierarchy. Catching it here is
-      required for audit-complete — otherwise pass-through's raise would
-      short-circuit the loop and shadow every later contract on the same
-      row. ``PluginContractViolation`` does not support
-      ``_attach_contract_name`` (no C4 one-shot flag); the authoritative
-      contract name is carried in its 9-key ``to_audit_dict()`` payload
-      (``transform`` + ``transform_node_id``) for the single specific
-      exception class.
+    * ``DeclarationContractViolation`` — the required audit-evidence base for
+      every declaration adopter. Registration rejects contracts wired to
+      legacy non-DCV exception families so future adopters fail loudly instead
+      of bypassing dispatcher attribution.
 
 Non-audit-evidence exceptions (plugin bugs raising arbitrary exceptions
 from ``applies_to`` or the dispatch method) propagate UNMODIFIED per the
@@ -78,7 +72,7 @@ from elspeth.contracts.declaration_contracts import (
     _mark_aggregate_dispatched,
     registered_declaration_contracts_for_site,
 )
-from elspeth.contracts.errors import FrameworkBugError, PluginContractViolation
+from elspeth.contracts.errors import FrameworkBugError
 
 
 def _serialize_plugin_name(plugin: Any) -> str:
@@ -139,15 +133,6 @@ def _dispatch(
             # entry. Contracts cannot supply contract_name at construction.
             _attach_contract_name_from_dispatcher(exc, contract.name)
             violations.append(exc)
-        except PluginContractViolation as exc:
-            # PassThroughContractViolation inherits PluginContractViolation
-            # (predates the ADR-010 DCV hierarchy — see ADR-010
-            # §Consequences → §Neutral). Under audit-complete we must catch
-            # it here or it would short-circuit the loop and shadow every
-            # later contract on the same row. The exception carries its own
-            # 9-key to_audit_dict so the aggregate can surface it without
-            # _attach_contract_name.
-            violations.append(exc)
 
     if not violations:
         return
@@ -157,10 +142,9 @@ def _dispatch(
         # id(raised) == id(violations[0]) — i.e. no aggregation-of-one
         # wrapper that would break triage SQL filtering by exception_type.
         #
-        # AuditEvidenceBase is an ABC that children (DeclarationContractViolation,
-        # PluginContractViolation) mix with RuntimeError — every collected
-        # violation is a BaseException subclass by construction. mypy cannot
-        # narrow this through the ABC, so annotate at the raise site.
+        # AuditEvidenceBase is an ABC that DCV children mix with RuntimeError.
+        # Every collected violation is a BaseException subclass by construction;
+        # mypy cannot narrow this through the ABC, so annotate at the raise site.
         raise violations[0]  # type: ignore[misc]  # AuditEvidenceBase children are RuntimeError subclasses
 
     aggregate = AggregateDeclarationContractViolation(

@@ -99,6 +99,7 @@ class DeclaredRequiredFieldsContract(DeclarationContract):
 
     name: ClassVar[str] = "declared_required_fields"
     payload_schema: ClassVar[type] = DeclaredRequiredInputFieldsPayload
+    violation_class: ClassVar[type[DeclaredRequiredInputFieldsViolation]] = DeclaredRequiredInputFieldsViolation
 
     def applies_to(self, plugin: Any) -> bool:
         typed_plugin = require_declared_input_fields_plugin(plugin)

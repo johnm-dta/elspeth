@@ -172,6 +172,7 @@ class _SecretRoundTripViolation(DeclarationContractViolation):
 class _SecondaryBoundaryContract(DeclarationContract):
     name: ClassVar[str] = "secondary_sink_boundary_test"
     payload_schema: ClassVar[type] = _SecondaryPayload
+    violation_class: ClassVar[type[_SecondaryBoundaryViolation]] = _SecondaryBoundaryViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(plugin.declared_required_fields)
@@ -220,6 +221,7 @@ class _SecondaryBoundaryContract(DeclarationContract):
 class _SecretBoundaryContract(DeclarationContract):
     name: ClassVar[str] = "sink_required_fields_secret_roundtrip"
     payload_schema: ClassVar[type] = _SecretPayload
+    violation_class: ClassVar[type[_SecretRoundTripViolation]] = _SecretRoundTripViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return True

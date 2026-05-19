@@ -10,6 +10,7 @@ from elspeth.contracts.declaration_contracts import (
     BoundaryInputs,
     BoundaryOutputs,
     DeclarationContract,
+    DeclarationContractViolation,
     ExampleBundle,
     _clear_registry_for_tests,
     _restore_registry_snapshot_for_tests,
@@ -25,6 +26,10 @@ from elspeth.engine.executors.source_guaranteed_fields import SourceGuaranteedFi
 
 class _Payload(TypedDict):
     note: str
+
+
+class _Violation(DeclarationContractViolation):
+    payload_schema = _Payload
 
 
 def _contract(fields: tuple[str, ...]) -> SchemaContract:
@@ -48,6 +53,7 @@ def _contract(fields: tuple[str, ...]) -> SchemaContract:
 class _BoundaryOnlyContract(DeclarationContract):
     name: ClassVar[str] = "boundary_only_test"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_Violation]] = _Violation
     invoked: ClassVar[int] = 0
 
     def applies_to(self, plugin: Any) -> bool:
@@ -69,6 +75,7 @@ class _BoundaryOnlyContract(DeclarationContract):
 class _PostEmissionOnlyContract(DeclarationContract):
     name: ClassVar[str] = "post_only_test"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_Violation]] = _Violation
     invoked: ClassVar[int] = 0
 
     def applies_to(self, plugin: Any) -> bool:

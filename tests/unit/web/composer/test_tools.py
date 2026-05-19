@@ -9215,7 +9215,7 @@ class TestPreviewProofStep:
         self,
         *,
         schema_mode: str = "fixed",
-        fields: tuple[str, ...] = (),
+        fields: tuple[object, ...] = (),
         on_validation_failure: str = "discard",
     ):
         """Build a state with a CSV blob source via the composer tool API."""
@@ -9399,6 +9399,28 @@ class TestPreviewProofStep:
             session_engine=self.engine,
             session_id=self.session_id,
         )
+        codes = [d["code"] for d in result.data["proof_diagnostics"]]
+        assert "csv_fixed_schema_omits_observed_columns" not in codes
+
+    def test_fixed_csv_with_structured_fields_does_not_crash_or_block(self) -> None:
+        state = self._state_with_csv_source(
+            schema_mode="fixed",
+            fields=(
+                {"name": "order_id", "field_type": "str"},
+                {"name": "customer", "field_type": "str"},
+                {"name": "price", "field_type": "float"},
+            ),
+            on_validation_failure="discard",
+        )
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+        assert result.success is True
         codes = [d["code"] for d in result.data["proof_diagnostics"]]
         assert "csv_fixed_schema_omits_observed_columns" not in codes
 

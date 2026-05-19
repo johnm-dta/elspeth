@@ -39,6 +39,7 @@ _MAX_ROWS: Final[int] = 100
 SourceKind = Literal["csv", "jsonl", "json", "text", "unknown"]
 
 InferredType = Literal["int", "float", "bool", "str", "null"]
+DeclaredFieldSpec = str | Mapping[str, Any]
 
 
 _URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"\bhttps?://[^\s<>\"']+")
@@ -676,9 +677,20 @@ def facts_from_dict(d: Mapping[str, Any]) -> SourceInspectionFacts:
         raise InvariantError(f"facts_from_dict: malformed record {d!r}") from exc
 
 
+def _declared_field_name(field: DeclaredFieldSpec) -> str | None:
+    if isinstance(field, str):
+        name = field.split(":", 1)[0].strip()
+        return name or None
+    name_raw = field.get("name")
+    if isinstance(name_raw, str):
+        name = name_raw.strip()
+        return name or None
+    return None
+
+
 def derive_extra_column_risk(
     facts: SourceInspectionFacts,
-    declared_fields: tuple[str, ...] | None,
+    declared_fields: tuple[DeclaredFieldSpec, ...] | None,
 ) -> tuple[str, ...]:
     """Return observed headers absent from a declared fixed schema.
 
@@ -689,6 +701,6 @@ def derive_extra_column_risk(
     """
     if declared_fields is None or facts.observed_headers is None:
         return ()
-    declared_lower = {f.split(":", 1)[0].strip().lower() for f in declared_fields}
+    declared_lower = {name.lower() for field in declared_fields if (name := _declared_field_name(field)) is not None}
     missing = tuple(h for h in facts.observed_headers if h.lower() not in declared_lower)
     return missing

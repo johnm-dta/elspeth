@@ -19,6 +19,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 from uuid import uuid4
 
 import pytest
@@ -499,6 +500,15 @@ class TestDeriveExtraColumnRisk:
     def test_all_declared_no_risk(self) -> None:
         f = self._facts_with_headers(("id", "name", "price"))
         declared = ("id: int", "name: str", "price: float")
+        assert derive_extra_column_risk(f, declared) == ()
+
+    def test_structured_declared_fields_no_risk(self) -> None:
+        f = self._facts_with_headers(("id", "name", "price"))
+        declared = (
+            MappingProxyType({"name": "id", "field_type": "str"}),
+            MappingProxyType({"name": "name", "field_type": "str"}),
+            MappingProxyType({"name": "price", "field_type": "float"}),
+        )
         assert derive_extra_column_risk(f, declared) == ()
 
     def test_missing_column_returned(self) -> None:

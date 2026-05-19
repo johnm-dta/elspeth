@@ -22,6 +22,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import TabularSourceDataConfig
@@ -562,3 +563,39 @@ class CSVSource(BaseSource):
             self._field_resolution.resolution_mapping,
             self._field_resolution.normalization_version,
         )
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="csv",
+                issue_code=None,
+                summary="Load tabular data from a CSV file. Coerces strings to declared types at the Tier-3 boundary; quarantines malformed rows.",
+                composer_hints=(
+                    "Default schema.mode to 'observed' unless the user explicitly asked to project to a smaller schema.",
+                    "Call inspect_source before declaring schema.mode: 'fixed' — fixed mode silently drops rows that don't match.",
+                    "Confirm the file has a header row; headerless inputs need an explicit 'columns' list, not 'fields'.",
+                    "Excel-exported CSVs are often cp1252 or have a UTF-16 BOM — verify encoding before pinning schema.",
+                    "Set on_validation_failure: 'quarantine' (route to a sink) or 'discard' (drop with audit). Default is 'discard'.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        # Trigger: operator/LLM declared a fixed schema without first
+        # observing the actual columns. The validator can't catch this
+        # because the schema is *structurally* valid — it's just likely
+        # to be wrong.
+        schema = config_snapshot.get("schema")
+        if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
+            return (
+                "You declared schema.mode: 'fixed'. Did you call inspect_source first? "
+                "Fixed mode drops every row whose columns don't exactly match the declared fields.",
+            )
+        return ()

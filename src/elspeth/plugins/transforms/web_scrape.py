@@ -16,6 +16,7 @@ Audit Trail:
 """
 
 import ipaddress
+from collections.abc import Mapping
 from ipaddress import IPv4Network, IPv6Network
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -453,6 +454,19 @@ class WebScrapeTransform(BaseTransform):
             PluginAssistanceExample,
         )
 
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="web_scrape",
+                issue_code=None,
+                summary="Fetch a URL over HTTP(S) with SSRF protection, audit recording, and content-fingerprinting for change detection. Output formats: html, text, markdown.",
+                composer_hints=(
+                    "URLs MUST include explicit scheme (http:// or https://). Bare hostnames are rejected by the SSRF guard at fetch time.",
+                    "http.abuse_contact and http.scraping_reason are mandatory and recorded in the audit trail — operator must declare them, not the model.",
+                    "If the scraped content feeds an LLM, route through azure_content_safety first — external content is Tier 3.",
+                    "format: 'markdown' preserves line structure for downstream line_explode; 'text' with non-newline separator collapses lines (issue web_scrape.content.compact_text).",
+                    "The plugin records fingerprint, status, and timing per fetch — verify these surface in audit before declaring success.",
+                ),
+            )
         if issue_code != "web_scrape.content.compact_text":
             return None
         return PluginAssistance(
@@ -480,6 +494,24 @@ class WebScrapeTransform(BaseTransform):
                 ),
             ),
         )
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        # format=text with whitespace separator → flag the compact_text issue.
+        fmt = config_snapshot.get("format")
+        sep = config_snapshot.get("text_separator")
+        if fmt == "text" and isinstance(sep, str) and "\n" not in sep:
+            hints.append(
+                "format: 'text' with a non-newline text_separator collapses page lines into one string. "
+                "Downstream line_explode cannot recover boundaries. Either set text_separator: '\\n' or switch format: 'markdown'."
+            )
+        return tuple(hints)
 
     def forward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
         """Inject a deterministic public-IP URL for invariant probing."""

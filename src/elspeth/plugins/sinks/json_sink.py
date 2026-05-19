@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal
 
@@ -18,6 +19,7 @@ from pydantic import Field, model_validator
 from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.header_modes import HeaderMode
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 
 if TYPE_CHECKING:
@@ -480,3 +482,40 @@ class JSONSink(BaseSink):
 
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
         set_resume_field_resolution(self, resolution_mapping)
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="json",
+                issue_code=None,
+                summary="Write rows as JSON-array or JSONL (newline-delimited). Configurable collision_policy, encoding, and on_write_failure routing.",
+                composer_hints=(
+                    "Choose format: 'jsonl' for resumable output. JSON-array rewrites the entire file on every checkpoint — not resumable.",
+                    "collision_policy: 'fail' (default), 'auto_increment', or 'overwrite'. Pick deliberately — accidental overwrite destroys prior runs.",
+                    "Set on_write_failure to a quarantine sink (or 'discard') so single-row write errors don't crash the run.",
+                    "path templating supports {run_id}, {date}, {sink_name} — use these to avoid collision in concurrent or scheduled runs.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        fmt = config_snapshot.get("format")
+        if fmt == "json":
+            hints.append(
+                "format: 'json' (array mode) rewrites the entire file at every checkpoint and is not resumable. "
+                "If the run might be interrupted or long-running, switch to format: 'jsonl'."
+            )
+        # No on_write_failure declared → flag.
+        if "on_write_failure" not in config_snapshot:
+            hints.append(
+                "on_write_failure is not set. The default routes write errors to 'discard'; set it to a quarantine sink if write failures should be audited rather than dropped."
+            )
+        return tuple(hints)

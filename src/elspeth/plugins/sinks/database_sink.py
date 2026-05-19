@@ -26,6 +26,7 @@ from elspeth.contracts import ArtifactDescriptor, CallStatus, CallType, Determin
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.url import SanitizedDatabaseUrl
 from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
@@ -597,3 +598,39 @@ class DatabaseSink(BaseSink):
             self._table = None
             self._metadata = None
             self._table_replaced = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="database",
+                issue_code=None,
+                summary="Write rows to a SQL table (Postgres, SQLite, SQL Server) via SQLAlchemy. Write modes: insert, upsert, replace.",
+                composer_hints=(
+                    "write_mode: 'insert' (default, append-only), 'upsert' (requires unique key constraint), 'replace' (drops + recreates table at run start — destructive).",
+                    "url is sanitised and audit-recorded — never put credentials inline; use the secrets store.",
+                    "Schema fields map to column types: string→TEXT, int→Integer, float→Float, bool→Boolean. Other types need explicit type_coerce upstream.",
+                    "table-replace mode is irreversible mid-run. Confirm with the operator before declaring 'replace' on existing data.",
+                    "on_write_failure routing applies per-row; the connection itself failing crashes the run.",
+                ),
+            )
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        write_mode = config_snapshot.get("write_mode")
+        if write_mode == "replace":
+            hints.append(
+                "write_mode: 'replace' DROPS and recreates the target table at run start. Confirm with the operator that the existing data is expendable before running."
+            )
+        elif write_mode == "upsert":
+            hints.append(
+                "write_mode: 'upsert' requires a unique constraint on the target table for the merge key. Verify the constraint exists before running, or the upsert will degenerate to insert."
+            )
+        return tuple(hints)

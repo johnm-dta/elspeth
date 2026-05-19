@@ -1,21 +1,24 @@
 #!/bin/bash
-# deploy-vm.sh - Deploy ELSPETH to a Linux VM
+# deploy-vm.sh - Deploy an ELSPETH container image to a Linux VM
 #
 # This script updates the ELSPETH Docker image on a VM and runs verification.
 # Since ELSPETH is a CLI tool (not a daemon), deployment simply updates the
 # image that will be used for the next invocation.
 #
+# This is not the source-checkout systemd/Caddy deployment used by
+# elspeth.foundryside.dev.
+#
 # Usage:
 #   ./deploy-vm.sh <image-tag>
 #   ./deploy-vm.sh sha-abc123f
 #   ./deploy-vm.sh v0.1.0
-#   ./deploy-vm.sh latest
 #
 # Environment Variables:
-#   DEPLOY_DIR   - Deployment directory (default: /srv/elspeth)
-#   REGISTRY     - Container registry (default: ghcr.io/johnm-dta)
-#   SKIP_BACKUP  - Skip database backup (default: false)
-#   SKIP_SMOKE   - Skip smoke tests (default: false)
+#   DEPLOY_DIR          - Deployment directory (default: /srv/elspeth)
+#   REGISTRY            - Container registry (default: ghcr.io/johnm-dta)
+#   SKIP_BACKUP         - Skip database backup (default: false)
+#   SKIP_SMOKE          - Skip smoke tests (default: false)
+#   ALLOW_MUTABLE_TAG   - Allow mutable tags such as latest (default: false)
 #
 # Exit Codes:
 #   0 - Success
@@ -35,6 +38,7 @@ DEPLOY_DIR="${DEPLOY_DIR:-/srv/elspeth}"
 REGISTRY="${REGISTRY:-ghcr.io/johnm-dta}"
 SKIP_BACKUP="${SKIP_BACKUP:-false}"
 SKIP_SMOKE="${SKIP_SMOKE:-false}"
+ALLOW_MUTABLE_TAG="${ALLOW_MUTABLE_TAG:-false}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -64,18 +68,19 @@ show_usage() {
     echo "Examples:"
     echo "  $0 sha-abc123f    # Deploy specific commit"
     echo "  $0 v0.1.0         # Deploy release version"
-    echo "  $0 latest         # Deploy latest (not recommended for production)"
     echo ""
     echo "Environment Variables:"
-    echo "  DEPLOY_DIR   Deployment directory (default: /srv/elspeth)"
-    echo "  REGISTRY     Container registry (default: ghcr.io/johnm-dta)"
-    echo "  SKIP_BACKUP  Skip database backup (default: false)"
-    echo "  SKIP_SMOKE   Skip smoke tests (default: false)"
+    echo "  DEPLOY_DIR          Deployment directory (default: /srv/elspeth)"
+    echo "  REGISTRY            Container registry (default: ghcr.io/johnm-dta)"
+    echo "  SKIP_BACKUP         Skip database backup (default: false)"
+    echo "  SKIP_SMOKE          Skip smoke tests (default: false)"
+    echo "  ALLOW_MUTABLE_TAG   Allow mutable tags such as latest (default: false)"
 }
 
 backup_database() {
     local backup_dir="$DEPLOY_DIR/backups"
-    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
 
     mkdir -p "$backup_dir"
 
@@ -84,8 +89,12 @@ backup_database() {
         cp "$DEPLOY_DIR/state/landscape.db" "$backup_dir/landscape_${timestamp}.db"
         log_info "Backup created: $backup_dir/landscape_${timestamp}.db"
 
-        # Keep only last 5 backups
-        ls -t "$backup_dir"/landscape_*.db 2>/dev/null | tail -n +6 | xargs -r rm
+        # Keep only last 5 backups.
+        find "$backup_dir" -maxdepth 1 -type f -name "landscape_*.db" -printf "%T@ %p\0" \
+            | sort -zrn \
+            | tail -z -n +6 \
+            | cut -z -d " " -f 2- \
+            | xargs -0 -r rm
     else
         log_warn "No database found to backup"
     fi
@@ -96,14 +105,18 @@ rollback() {
     log_error "Deployment failed! Rolling back to: $previous_tag"
 
     if [[ "$previous_tag" != "none" ]]; then
-        sed -i "s/IMAGE_TAG=.*/IMAGE_TAG=$previous_tag/" "$DEPLOY_DIR/.env"
+        if grep -q '^IMAGE_TAG=' "$DEPLOY_DIR/.env"; then
+            sed -i "s/IMAGE_TAG=.*/IMAGE_TAG=$previous_tag/" "$DEPLOY_DIR/.env"
+        else
+            echo "IMAGE_TAG=$previous_tag" >> "$DEPLOY_DIR/.env"
+        fi
         docker compose -f "$DEPLOY_DIR/docker-compose.yaml" pull
         log_info "Rolled back to $previous_tag"
     else
         log_error "No previous image to rollback to"
     fi
 
-    exit 1
+    # Callers exit with context-specific status codes after rollback.
 }
 
 # =============================================================================
@@ -114,6 +127,12 @@ rollback() {
 if [[ -z "$IMAGE_TAG" ]]; then
     log_error "Missing required argument: image-tag"
     show_usage
+    exit 1
+fi
+
+if [[ "$IMAGE_TAG" == "latest" && "$ALLOW_MUTABLE_TAG" != "true" ]]; then
+    log_error "Mutable tag 'latest' is not allowed. Use sha-<commit> or v* tags."
+    log_error "Set ALLOW_MUTABLE_TAG=true only for an explicitly documented non-production drill."
     exit 1
 fi
 
@@ -133,8 +152,11 @@ fi
 
 if [[ ! -f ".env" ]]; then
     log_warn ".env file not found, creating with defaults"
-    echo "IMAGE_TAG=latest" > .env
+    echo "IMAGE_TAG=$IMAGE_TAG" > .env
     echo "REGISTRY=$REGISTRY" >> .env
+elif ! grep -q '^IMAGE_TAG=' .env; then
+    log_warn ".env missing IMAGE_TAG, adding requested image tag"
+    echo "IMAGE_TAG=$IMAGE_TAG" >> .env
 fi
 
 # =============================================================================
@@ -160,7 +182,11 @@ fi
 # =============================================================================
 
 log_info "Updating image tag..."
-sed -i "s/IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" .env
+if grep -q '^IMAGE_TAG=' .env; then
+    sed -i "s/IMAGE_TAG=.*/IMAGE_TAG=$IMAGE_TAG/" .env
+else
+    echo "IMAGE_TAG=$IMAGE_TAG" >> .env
+fi
 
 log_info "Pulling new image..."
 if ! docker compose pull; then

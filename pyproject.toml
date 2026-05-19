@@ -23,9 +23,9 @@ dependencies = [
     "textual>=7.5,<8",  # TUI framework with breaking changes in major versions
 
     # Configuration
-    "dynaconf>=3.2,<4",  # Configuration management
+    "dynaconf>=3.2.13,<4",  # Configuration management
     "pydantic>=2.13,<3",  # Data validation with v2 API
-    "python-dotenv>=1.2,<2",  # .env file loading
+    "python-dotenv>=1.2.2,<2",  # .env file loading
     "pyyaml>=6.0,<7",  # YAML parsing
 
     # Plugin system
@@ -63,13 +63,13 @@ dependencies = [
     "pyrate-limiter>=3.9,<4",  # Rate limiting (requires max_delay parameter)
 
     # Diffing (for verify mode)
-    "deepdiff>=8.6,<9",  # Deep comparison for data structures
+    "deepdiff>=8.6.2,<9",  # Deep comparison for data structures
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0,<10",  # Testing framework
-    "pytest-cov>=4.1,<6",  # Coverage plugin
+    "pytest>=9.0.3,<10",  # Testing framework
+    "pytest-cov>=7,<8",  # Coverage plugin
     "pytest-asyncio>=1.3,<2",  # Async test support
     "pytest-dotenv>=0.5,<1",  # Load .env for integration tests
     "pytest-timeout>=2.4,<3",  # Test timeouts for stress tests
@@ -101,7 +101,7 @@ llm = [
     "jinja2>=3.1,<4",  # Template engine for prompts
     "httpx>=0.28,<1",  # HTTP client (inherited from main deps)
     "openai>=2.36,<3",  # OpenAI SDK
-    "litellm>=1.83,<2",  # Multi-provider LLM interface
+    "litellm>=1.83.10,<2",  # Multi-provider LLM interface
 ]
 
 azure = [
@@ -140,11 +140,11 @@ webui = [
     "fastapi>=0.136,<1",
     "uvicorn[standard]>=0.46,<1",
     "PyJWT[crypto]>=2.12,<3",
-    "python-multipart>=0.0.20",
+    "python-multipart>=0.0.27",
     "websockets>=14.2,<15",
     "httpx>=0.28,<1",
     "bcrypt>=4.3,<5",
-    "litellm>=1.83,<2",
+    "litellm>=1.83.10,<2",
 ]
 
 tracing-langfuse = [
@@ -163,8 +163,8 @@ tracing = [
 
 all = [
     # dev dependencies
-    "pytest>=9.0,<10",
-    "pytest-cov>=4.1,<6",
+    "pytest>=9.0.3,<10",
+    "pytest-cov>=7,<8",
     "pytest-asyncio>=1.3,<2",
     "pytest-dotenv>=0.5,<1",
     "pytest-timeout>=2.4,<3",
@@ -188,7 +188,7 @@ all = [
     # llm dependencies
     "jinja2>=3.1,<4",
     "openai>=2.36,<3",
-    "litellm>=1.83,<2",
+    "litellm>=1.83.10,<2",
     # azure dependencies
     "azure-storage-blob>=12.28,<13",
     "azure-identity>=1.25,<2",
@@ -210,7 +210,7 @@ all = [
     "fastapi>=0.136,<1",
     "uvicorn[standard]>=0.46,<1",
     "PyJWT[crypto]>=2.12,<3",
-    "python-multipart>=0.0.20",
+    "python-multipart>=0.0.27",
     "websockets>=14.2,<15",
     "httpx>=0.28,<1",
     "bcrypt>=4.3,<5",

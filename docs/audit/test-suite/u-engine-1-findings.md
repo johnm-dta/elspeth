@@ -395,6 +395,14 @@ Filed:
 
 - `elspeth-eb12769648`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-eb12769648` resolved. Failsink cleanup tests now map
+  opened primary/failsink node states to expected state IDs, assert exact
+  FAILED/COMPLETED cleanup attempts and successful terminalizations, and verify
+  cleanup error phase/context for reset, result-type, begin-state, and mid-loop
+  audit-recording failures.
+
 ### UENG-11 — SinkExecutor artifact registration test checks only call count
 
 Evidence:

@@ -1286,31 +1286,38 @@ def get_tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "get_plugin_assistance",
             "description": (
-                "Retrieve plugin-owned guidance for a specific issue code. "
-                "When validation surfaces a semantic_contracts entry with a "
-                "requirement_code (e.g. 'line_explode.source_field.line_framed_text'), "
-                "call this tool with the consumer plugin name and that requirement_code "
-                "to get the structured fix guidance the plugin published — summary, "
-                "suggested_fixes, and example before/after configurations. The skill "
-                "no longer hardcodes plugin-specific framing advice; it lives on the "
-                "plugin and is exposed here."
+                "Retrieve plugin-owned guidance for a source, transform, or sink. "
+                "Two modes by ``issue_code``:\n"
+                "  * Omit ``issue_code`` (or pass null) to get discovery-time guidance "
+                "    — a summary of the plugin and composer_hints. (The same hints "
+                "    are also carried on list_sources / list_transforms / list_sinks / "
+                "    get_plugin_schema responses; this tool is the explicit path.)\n"
+                "  * Pass an ``issue_code`` (validators emit these as requirement_code "
+                "    on semantic_contracts entries) to get failure-time guidance — "
+                "    summary, suggested_fixes, and example before/after configurations."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "plugin_type": {
+                        "type": "string",
+                        "enum": ["source", "transform", "sink"],
+                        "description": "Plugin family. 'source', 'transform', or 'sink'.",
+                    },
                     "plugin_name": {
                         "type": "string",
-                        "description": "Transform plugin name (e.g. 'web_scrape', 'line_explode').",
+                        "description": "Plugin name (e.g. 'csv', 'web_scrape', 'database').",
                     },
                     "issue_code": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": (
-                            "Stable issue identifier owned by the plugin. Validators "
-                            "emit these as requirement_code on semantic_contracts entries."
+                            "Optional. Stable issue identifier owned by the plugin "
+                            "for failure-time guidance. Omit or pass null for "
+                            "discovery-time guidance."
                         ),
                     },
                 },
-                "required": ["plugin_name", "issue_code"],
+                "required": ["plugin_type", "plugin_name"],
             },
         },
         {
@@ -5651,40 +5658,50 @@ def _execute_get_plugin_assistance(
     catalog: CatalogService,
     data_dir: str | None = None,
 ) -> ToolResult:
-    """Return plugin-owned guidance for a specific issue code.
+    """Return plugin-owned guidance for a source, transform, or sink.
 
-    Plugins (transforms only — ``get_agent_assistance`` lives on
-    ``BaseTransform``) publish deterministic ``PluginAssistance`` records
-    keyed by issue code. The semantic validator emits ``requirement_code``
-    values like ``line_explode.source_field.line_framed_text``; the agent
-    can echo that code into this tool to retrieve the structured fix prose
-    + example before/after configs without the skill having to mirror them.
+    Dual-use by ``issue_code``:
 
-    When the plugin has no assistance for the requested code, returns
-    success with a "no assistance published" payload (summary=None,
-    empty suggestion list) rather than failing — the absence is itself
-    a useful signal to the agent.
+    * ``issue_code is None`` (or absent) — discovery-time guidance. The
+      plugin returns a one-line ``summary`` and ``composer_hints``
+      (same surface that list_* and get_plugin_schema already carry).
+    * ``issue_code is not None`` — failure-time guidance. The
+      semantic validator emits ``requirement_code`` values like
+      ``line_explode.source_field.line_framed_text``; the agent echoes
+      that code in to retrieve ``suggested_fixes`` + example
+      before/after configs.
 
-    Unknown plugin name raises ``PluginNotFoundError`` from the manager,
-    which surfaces here as a tool failure with the original message
-    so the agent can correct the call.
+    When the plugin has no assistance to publish, returns success with
+    a "no assistance published" payload (summary=None, empty lists)
+    rather than failing — the absence is itself a useful signal.
+
+    Unknown plugin name or invalid plugin_type surfaces here as a tool
+    failure with the original message so the agent can correct the call.
     """
-    from elspeth.plugins.infrastructure.base import BaseTransform
     from elspeth.plugins.infrastructure.manager import (
         PluginNotFoundError,
         get_shared_plugin_manager,
     )
 
+    plugin_type_raw = args["plugin_type"]
     plugin_name = args["plugin_name"]
-    issue_code = args["issue_code"]
+    issue_code = args.get("issue_code")
+
+    if plugin_type_raw not in ("source", "transform", "sink"):
+        return _failure_result(
+            state,
+            f"Unknown plugin_type: {plugin_type_raw!r}. Must be one of: 'source', 'transform', 'sink'.",
+        )
+    plugin_type: PluginKind = plugin_type_raw
 
     manager = get_shared_plugin_manager()
     try:
-        # Assistance only lives on transforms today (BaseTransform.get_agent_assistance).
-        # If a future Phase teaches sources/sinks to publish assistance,
-        # this dispatch can branch on a plugin_type arg — for now, keeping
-        # the surface minimal matches plugin-as-system-code reality.
-        plugin_cls = cast(type[BaseTransform], manager.get_transform_by_name(plugin_name))
+        if plugin_type == "source":
+            plugin_cls: Any = manager.get_source_by_name(plugin_name)
+        elif plugin_type == "transform":
+            plugin_cls = manager.get_transform_by_name(plugin_name)
+        else:
+            plugin_cls = manager.get_sink_by_name(plugin_name)
     except PluginNotFoundError as exc:
         return _failure_result(state, str(exc))
 
@@ -5692,6 +5709,7 @@ def _execute_get_plugin_assistance(
 
     if assistance is None:
         payload: dict[str, Any] = {
+            "plugin_type": plugin_type,
             "plugin_name": plugin_name,
             "issue_code": issue_code,
             "summary": None,
@@ -5702,6 +5720,7 @@ def _execute_get_plugin_assistance(
         return _discovery_result(state, payload)
 
     payload = {
+        "plugin_type": plugin_type,
         "plugin_name": assistance.plugin_name,
         "issue_code": assistance.issue_code,
         "summary": assistance.summary,

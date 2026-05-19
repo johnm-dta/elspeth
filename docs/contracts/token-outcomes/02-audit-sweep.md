@@ -1,119 +1,158 @@
 # Audit Sweep: Token Outcome Gaps
 
-This sweep is the primary gap detector. Run it after a completed run to find
-missing outcomes, mismatched sink states, and missing required fields.
+Current as of 2026-05-20.
+
+Run these read-only checks after a run reaches a terminal run status. The checks
+target the ADR-019 two-axis token outcome model.
 
 ## Preconditions
 
-- Run status is COMPLETED or FAILED (not RUNNING).
-- Aggregation buffers have been flushed at end-of-source.
+- The run is no longer actively processing.
+- End-of-source aggregation and coalesce flushes have run.
+- Use `completed`, not the retired `is_terminal` column.
+- Join `nodes` with both `node_id` and `run_id`.
 
-## Safety rule for joins
-
-The nodes table uses a composite key `(node_id, run_id)`.
-When joining node_states to nodes, join on BOTH keys or filter by
-`node_states.run_id` directly.
-
-## Core queries
-
-### 1) Tokens missing terminal outcome
+## 1. Tokens Missing A Completed Outcome
 
 ```sql
 SELECT t.token_id, t.row_id
 FROM tokens t
-JOIN rows r ON r.row_id = t.row_id
 LEFT JOIN token_outcomes o
-  ON o.token_id = t.token_id AND o.is_terminal = 1
-WHERE r.run_id = :run_id
+  ON o.run_id = t.run_id
+ AND o.token_id = t.token_id
+ AND o.completed = 1
+WHERE t.run_id = :run_id
   AND o.token_id IS NULL;
 ```
 
-### 2) Duplicate terminal outcomes (should be empty)
+This should be empty after a run is terminal.
+
+## 2. Duplicate Completed Outcomes
 
 ```sql
-SELECT token_id, COUNT(*) AS terminal_count
+SELECT run_id, token_id, COUNT(*) AS completed_count
 FROM token_outcomes
-WHERE is_terminal = 1
-GROUP BY token_id
+WHERE run_id = :run_id
+  AND completed = 1
+GROUP BY run_id, token_id
 HAVING COUNT(*) > 1;
 ```
 
-### 3) Required fields missing for outcomes
+This should be impossible unless the partial unique index was bypassed or the
+database is corrupt.
+
+## 3. Illegal Non-Terminal Rows
 
 ```sql
-SELECT outcome_id, token_id, outcome
+SELECT outcome_id, token_id, outcome, path, completed
 FROM token_outcomes
-WHERE
-  (outcome IN ('completed','routed') AND sink_name IS NULL)
-  OR (outcome IN ('failed','quarantined') AND error_hash IS NULL)
-  OR (outcome = 'forked' AND fork_group_id IS NULL)
-  OR (outcome = 'coalesced' AND join_group_id IS NULL)
-  OR (outcome = 'expanded' AND expand_group_id IS NULL)
-  OR (outcome IN ('buffered','consumed_in_batch') AND batch_id IS NULL);
+WHERE run_id = :run_id
+  AND completed = 0
+  AND NOT (outcome IS NULL AND path = 'buffered');
 ```
 
-### 4) COMPLETED outcome without completed sink node_state
+## 4. Illegal Completed Rows
 
 ```sql
-SELECT o.token_id
-FROM token_outcomes o
-JOIN rows r ON r.run_id = o.run_id
-LEFT JOIN node_states ns
-  ON ns.token_id = o.token_id AND ns.run_id = o.run_id
-LEFT JOIN nodes n
-  ON n.node_id = ns.node_id AND n.run_id = ns.run_id
-WHERE o.run_id = :run_id
-  AND o.outcome = 'completed'
-  AND NOT (n.node_type = 'sink' AND ns.status = 'completed');
+SELECT outcome_id, token_id, outcome, path, completed
+FROM token_outcomes
+WHERE run_id = :run_id
+  AND completed = 1
+  AND (
+    outcome IS NULL
+    OR (outcome, path) NOT IN (
+      ('success', 'default_flow'),
+      ('success', 'gate_routed'),
+      ('success', 'gate_discarded'),
+      ('failure', 'on_error_routed'),
+      ('success', 'filter_dropped'),
+      ('success', 'coalesced'),
+      ('failure', 'unrouted'),
+      ('failure', 'quarantined_at_source'),
+      ('transient', 'sink_fallback_to_failsink'),
+      ('failure', 'sink_discarded'),
+      ('transient', 'fork_parent'),
+      ('transient', 'expand_parent'),
+      ('transient', 'batch_consumed')
+    )
+  );
 ```
 
-### 5) Completed sink node_state without COMPLETED outcome
+## 5. Required Discriminator Fields Missing
+
+```sql
+SELECT outcome_id, token_id, outcome, path
+FROM token_outcomes
+WHERE run_id = :run_id
+  AND (
+    (path IN ('default_flow', 'gate_routed') AND sink_name IS NULL)
+    OR (path = 'on_error_routed' AND (sink_name IS NULL OR error_hash IS NULL))
+    OR (path = 'coalesced' AND join_group_id IS NULL)
+    OR (path IN ('unrouted', 'quarantined_at_source') AND error_hash IS NULL)
+    OR (path = 'sink_fallback_to_failsink' AND (sink_name IS NULL OR error_hash IS NULL))
+    OR (path = 'sink_discarded' AND (sink_name IS NULL OR error_hash IS NULL OR sink_name <> '__discard__'))
+    OR (path = 'fork_parent' AND fork_group_id IS NULL)
+    OR (path = 'expand_parent' AND expand_group_id IS NULL)
+    OR (path IN ('batch_consumed', 'buffered') AND batch_id IS NULL)
+  );
+```
+
+## 6. Sink Success Without Completed Sink State
+
+```sql
+SELECT o.token_id, o.path, o.sink_name
+FROM token_outcomes o
+LEFT JOIN node_states ns
+  ON ns.run_id = o.run_id
+ AND ns.token_id = o.token_id
+LEFT JOIN nodes n
+  ON n.run_id = ns.run_id
+ AND n.node_id = ns.node_id
+ AND n.node_type = 'sink'
+ AND ns.status = 'completed'
+WHERE o.run_id = :run_id
+  AND o.completed = 1
+  AND o.outcome = 'success'
+  AND o.sink_name IS NOT NULL
+  AND n.node_id IS NULL;
+```
+
+## 7. Completed Sink State Without Success Outcome
 
 ```sql
 SELECT DISTINCT ns.token_id
 FROM node_states ns
 JOIN nodes n
-  ON n.node_id = ns.node_id AND n.run_id = ns.run_id
+  ON n.run_id = ns.run_id
+ AND n.node_id = ns.node_id
 LEFT JOIN token_outcomes o
-  ON o.token_id = ns.token_id AND o.is_terminal = 1 AND o.outcome = 'completed'
+  ON o.run_id = ns.run_id
+ AND o.token_id = ns.token_id
+ AND o.completed = 1
+ AND o.outcome = 'success'
+ AND o.sink_name IS NOT NULL
 WHERE ns.run_id = :run_id
   AND n.node_type = 'sink'
   AND ns.status = 'completed'
   AND o.token_id IS NULL;
 ```
 
-### 6) Fork children missing parent links
+## 8. Fork Or Expand Children Missing Parent Links
 
 ```sql
-SELECT t.token_id
+SELECT t.token_id, t.row_id, t.fork_group_id, t.expand_group_id
 FROM tokens t
-LEFT JOIN token_parents p ON p.token_id = t.token_id
-WHERE t.fork_group_id IS NOT NULL
+LEFT JOIN token_parents p
+  ON p.token_id = t.token_id
+WHERE t.run_id = :run_id
+  AND (t.fork_group_id IS NOT NULL OR t.expand_group_id IS NOT NULL)
   AND p.token_id IS NULL;
 ```
 
-### 7) Expand children missing parent links
+## What To Do With Results
 
-```sql
-SELECT t.token_id
-FROM tokens t
-LEFT JOIN token_parents p ON p.token_id = t.token_id
-WHERE t.expand_group_id IS NOT NULL
-  AND p.token_id IS NULL;
-```
-
-## Interpretation guide
-
-- Missing terminal outcomes (Query 1) are always bugs after run completion.
-- Duplicate terminal outcomes (Query 2) should be impossible unless the unique
-  index was bypassed or the DB is corrupted.
-- Missing required fields (Query 3) indicate incorrect recorder call sites.
-- Sink mismatches (Queries 4 and 5) indicate a broken sink path or outcome
-  recording gap.
-
-## What to do with results
-
-1. Group failures by outcome type.
-2. Map each group to the outcome path map (docs/contracts/token-outcomes/01-outcome-path-map.md).
-3. Reproduce with a minimal pipeline test.
-4. Add regression test that fails the audit sweep.
+1. Group failures by `(outcome, path)`.
+2. Use [Outcome Path Map](01-outcome-path-map.md) to find the producer.
+3. Reproduce the gap with the smallest pipeline or repository-level test.
+4. Add a regression that fails the relevant sweep query.
+5. Fix the producer path and re-run the sweep.

@@ -2,6 +2,8 @@
 
 The ChaosLLM MCP server provides Claude-optimized analysis tools for investigating test results. Tools pre-compute insights and return concise summaries designed for LLM consumption.
 
+This CLI is provided by the `errorworks` package and was checked against the installed `chaosllm-mcp` command on 2026-05-20.
+
 ## Starting the Server
 
 ```bash

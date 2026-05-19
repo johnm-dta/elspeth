@@ -87,7 +87,8 @@ telemetry:
 telemetry:
   # If true, crash the run when all exporters fail repeatedly
   # If false, log CRITICAL and continue without telemetry
-  fail_on_total_exporter_failure: false  # Default
+  fail_on_total_exporter_failure: true  # Default
+  max_consecutive_failures: 10           # Default
 ```
 
 Telemetry uses aggregate logging to avoid "Warning Fatigue" - it logs every 100 dropped events, not every single one.
@@ -360,7 +361,8 @@ telemetry:
 
 **Symptoms:**
 - Log message: "ALL telemetry exporters failing - events dropped"
-- Log message (after 10 failures): "Telemetry disabled after repeated total failures"
+- With `fail_on_total_exporter_failure: true` (default), the run fails after `max_consecutive_failures`
+- With `fail_on_total_exporter_failure: false`, telemetry disables itself after repeated total failures
 
 **Solutions:**
 1. Check network connectivity to all exporter endpoints

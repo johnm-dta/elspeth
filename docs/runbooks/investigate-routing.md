@@ -1,221 +1,197 @@
 # Runbook: Investigate Routing
 
-Explain why a specific row was routed to a particular destination.
+Explain why a row, token, or pipeline branch reached a specific destination.
+
+Current as of 2026-05-20. This runbook uses the ADR-019 two-axis terminal
+model: `token_outcomes.completed`, `token_outcomes.outcome`, and
+`token_outcomes.path`.
 
 ---
 
-## Symptoms
+## When To Use
 
-- Auditor asks "why was transaction X flagged?"
-- Row appeared in unexpected sink
-- Need to verify routing logic is working correctly
+- An auditor asks why a row was flagged, discarded, routed, or written.
+- A row appears in an unexpected sink.
+- A composed or hand-authored pipeline needs routing proof before rerun.
+- You need to distinguish success, failure, and transient terminal paths.
 
----
+## Inputs
 
-## Prerequisites
+- Landscape database path, usually from `settings.yaml` or the run environment.
+- Run ID.
+- Row ID or token ID.
+- The settings file used for the run, when available.
 
-- Run ID where the row was processed
-- Row identifier (row_id or content from the row)
-- Access to the audit database
+## Preferred Procedure
 
----
-
-## Procedure
-
-### Step 1: Find the Row
-
-If you have the row content but not the row_id:
+### Step 1: Identify The Run
 
 ```bash
-# Search by row index
 sqlite3 runs/audit.db "
-  SELECT row_id, source_data_hash
-  FROM rows
-  WHERE run_id = '<RUN_ID>'
-  ORDER BY row_index
+  SELECT run_id, status, started_at, completed_at, config_hash
+  FROM runs
+  ORDER BY started_at DESC
   LIMIT 10;
 "
 ```
 
-To find a specific row, you'll need to check the source data. If you know the row index:
+If you are working from the Web UI, use the run ID shown in the run evidence or
+diagnostics surface.
+
+### Step 2: Find The Row Or Token
+
+Find recent rows for a run:
 
 ```bash
-# Find by row index
 sqlite3 runs/audit.db "
   SELECT row_id, row_index, source_data_hash
   FROM rows
   WHERE run_id = '<RUN_ID>'
-    AND row_index = 42;
+  ORDER BY row_index
+  LIMIT 20;
 "
 ```
 
-### Step 2: Use the Explain Command
-
-Launch the lineage explorer TUI:
+Find tokens for a row:
 
 ```bash
-elspeth explain --run <RUN_ID> --row <ROW_ID> --database <path/to/audit.db>
-```
-
-The TUI shows:
-- Source row and its content hash
-- Each processing step (transforms, gates)
-- Gate evaluation results and routing decisions
-- Final destination and artifact hash
-
-### Step 3: Manual Lineage Query (Alternative)
-
-If you need raw data instead of the TUI:
-
-```bash
-# Get all processing states for a row
 sqlite3 runs/audit.db "
-  SELECT
-    ns.state_id,
-    ns.node_id,
-    n.plugin_name,
-    ns.status,
-    ns.input_hash,
-    ns.output_hash,
-    ns.started_at
-  FROM node_states ns
-  JOIN tokens t ON ns.token_id = t.token_id
-  JOIN nodes n ON ns.node_id = n.node_id
-  WHERE t.row_id = '<ROW_ID>'
-  ORDER BY ns.step_index;
+  SELECT token_id, row_id, branch_name, created_at
+  FROM tokens
+  WHERE run_id = '<RUN_ID>'
+    AND row_id = '<ROW_ID>'
+  ORDER BY created_at, token_id;
 "
 ```
 
-### Step 4: Check Gate Evaluations
+### Step 3: Use `elspeth explain`
 
-Find the gate decision that caused the routing:
+Use the CLI lineage read path before writing ad hoc SQL.
 
 ```bash
-sqlite3 runs/audit.db "
+elspeth explain --run <RUN_ID> --row <ROW_ID> --database runs/audit.db
+```
+
+For non-interactive output:
+
+```bash
+elspeth explain --run <RUN_ID> --row <ROW_ID> --database runs/audit.db --no-tui
+elspeth explain --run <RUN_ID> --token <TOKEN_ID> --database runs/audit.db --json
+```
+
+The explain output is the preferred evidence because it uses the maintained
+Landscape query repositories and formatter.
+
+### Step 4: Inspect Terminal Outcomes
+
+Use direct SQL only when you need raw records for an incident note or audit
+packet.
+
+```bash
+sqlite3 -header -column runs/audit.db "
   SELECT
+    t.row_id,
+    t.token_id,
+    t.branch_name,
+    o.completed,
+    o.outcome,
+    o.path,
+    o.sink_name,
+    o.batch_id,
+    o.recorded_at
+  FROM tokens t
+  LEFT JOIN token_outcomes o
+    ON o.run_id = t.run_id
+   AND o.token_id = t.token_id
+  WHERE t.run_id = '<RUN_ID>'
+    AND t.row_id = '<ROW_ID>'
+  ORDER BY t.created_at, o.recorded_at;
+"
+```
+
+Interpretation:
+
+- `completed = 1` means the token has a terminal outcome.
+- `outcome = success` means the producer reported successful terminal handling.
+- `outcome = failure` means the producer reported failed terminal handling.
+- `outcome = transient` means the path is non-terminal or consumed by another
+  producer, such as batch/coalesce handling.
+- `path` explains the producer-declared terminal path.
+
+### Step 5: Inspect Routing Events
+
+```bash
+sqlite3 -header -column runs/audit.db "
+  SELECT
+    ns.step_index,
     ns.node_id,
     n.plugin_name,
+    e.label AS edge_label,
     re.mode,
-    e.label as route_taken
+    re.ordinal,
+    re.reason_hash
   FROM routing_events re
-  JOIN node_states ns ON re.state_id = ns.state_id
-  JOIN edges e ON re.edge_id = e.edge_id
-  JOIN nodes n ON ns.node_id = n.node_id
-  JOIN tokens t ON ns.token_id = t.token_id
-  WHERE t.row_id = '<ROW_ID>';
+  JOIN node_states ns
+    ON ns.state_id = re.state_id
+  JOIN nodes n
+    ON n.run_id = ns.run_id
+   AND n.node_id = ns.node_id
+  JOIN edges e
+    ON e.run_id = ns.run_id
+   AND e.edge_id = re.edge_id
+  JOIN tokens t
+    ON t.run_id = ns.run_id
+   AND t.token_id = ns.token_id
+  WHERE ns.run_id = '<RUN_ID>'
+    AND t.row_id = '<ROW_ID>'
+  ORDER BY ns.step_index, re.ordinal, re.event_id;
 "
 ```
 
-The `label` shows which route was taken (`true`, `false`, or a named sink).
+Do not evaluate stored or configured expressions with Python `eval`. If a
+condition needs source-level inspection, review the pipeline settings and the
+production expression parser path instead.
 
-### Step 5: Verify the Condition
+### Step 6: Inspect Validation Or Transform Errors
 
-Check the gate configuration that was used:
-
-```bash
-sqlite3 runs/audit.db "
-  SELECT config
-  FROM runs
-  WHERE run_id = '<RUN_ID>';
-"
-```
-
-Parse the JSON config to find the gate condition, then manually evaluate:
-
-```python
-# Example: verify the condition
-row = {"amount": 1500}  # From the payload
-condition = "row['amount'] > 1000"  # From the config
-print(eval(condition))  # True
-```
-
----
-
-## Docker Usage
+Source validation errors:
 
 ```bash
-docker run --rm \
-  -v $(pwd)/state:/app/state:ro \
-  ghcr.io/johnm-dta/elspeth:latest \
-  explain --run <RUN_ID> --row <ROW_ID> --database <path/to/audit.db>
-```
-
----
-
-## Common Scenarios
-
-### Row Went to Wrong Sink
-
-1. Find the gate that made the decision
-2. Check the condition in the config
-3. Verify the row's field values at that point
-4. Check if any transforms modified the field before the gate
-
-### Row Was Quarantined
-
-```bash
-# Find validation errors (source quarantine)
-sqlite3 runs/audit.db "
-  SELECT error, schema_mode, destination
+sqlite3 -header -column runs/audit.db "
+  SELECT node_id, row_id, destination, schema_mode, error, created_at
   FROM validation_errors
-  WHERE run_id = '<RUN_ID>';
+  WHERE run_id = '<RUN_ID>'
+    AND (row_id = '<ROW_ID>' OR '<ROW_ID>' = '');
 "
+```
 
-# Find transform errors
-sqlite3 runs/audit.db "
-  SELECT te.transform_id, te.error_details_json, te.destination
+Transform errors for the row:
+
+```bash
+sqlite3 -header -column runs/audit.db "
+  SELECT te.transform_id, te.token_id, te.destination, te.error_hash, te.created_at
   FROM transform_errors te
-  JOIN tokens t ON te.token_id = t.token_id
-  WHERE t.row_id = '<ROW_ID>';
+  JOIN tokens t
+    ON t.run_id = te.run_id
+   AND t.token_id = te.token_id
+  WHERE te.run_id = '<RUN_ID>'
+    AND t.row_id = '<ROW_ID>';
 "
 ```
 
-Common reasons:
-- Schema validation failure
-- Transform error
-- Missing required field
+## Common Findings
 
-### Row Disappeared
-
-Check if it was consumed by an aggregation:
-
-```bash
-sqlite3 runs/audit.db "
-  SELECT to.outcome, to.sink_name, to.batch_id
-  FROM token_outcomes to
-  JOIN tokens t ON to.token_id = t.token_id
-  WHERE t.row_id = '<ROW_ID>';
-"
-```
-
-Look for outcome `consumed_in_batch` - this means the row was aggregated into a batch.
-
----
-
-## Generating Audit Reports
-
-For compliance reporting, export the complete lineage:
-
-```bash
-# Export complete lineage for a specific row
-sqlite3 -header -csv runs/audit.db "
-  SELECT
-    r.row_id, r.row_index, r.source_data_hash,
-    t.token_id, t.branch_name,
-    ns.node_id, ns.step_index, ns.status, ns.input_hash, ns.output_hash,
-    to.outcome, to.sink_name
-  FROM rows r
-  JOIN tokens t ON r.row_id = t.row_id
-  LEFT JOIN node_states ns ON t.token_id = ns.token_id
-  LEFT JOIN token_outcomes to ON t.token_id = to.token_id
-  WHERE r.row_id = '<ROW_ID>'
-  ORDER BY ns.step_index;
-" > lineage_report.csv
-```
-
----
+| Symptom | Check |
+|---------|-------|
+| All rows took the same branch | Compare routing events across several rows and inspect the configured condition. |
+| Row was discarded | Check validation and transform errors, then inspect `token_outcomes.path`. |
+| Row entered a batch | Check `token_outcomes.batch_id` and batch records for the same run. |
+| `explain` cannot find a row | Confirm the row belongs to the supplied run ID; row/run ownership is enforced. |
+| Terminal count looks wrong | Use `completed`, not the retired `is_terminal` column. |
 
 ## See Also
 
-- [Configuration Reference](../reference/configuration.md#gate-settings) - Gate configuration
-- [Incident Response](incident-response.md) - For broader investigations
+- [Configuration Reference](../reference/configuration.md)
+- [Incident Response](incident-response.md)
+- [Database Maintenance](database-maintenance.md)
+- [Architecture Overview](../../ARCHITECTURE.md)

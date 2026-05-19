@@ -1,301 +1,144 @@
-# Runbook: Backup and Recovery
+# Runbook: Backup And Recovery
 
-Backup audit trail and recover from data loss.
+Current as of 2026-05-20.
 
----
+Back up ELSPETH's audit evidence, payloads, configuration, session state, and
+outputs before maintenance or deployment. Landscape audit data is the legal
+record; losing it is not equivalent to losing cache.
 
-## What to Backup
+## What To Back Up
 
-| Component | Location | Priority |
-|-----------|----------|----------|
-| Audit database | `runs/audit.db` or PostgreSQL | **Critical** |
-| Payload store | `.elspeth/payloads/` | High |
-| Configuration | `pipeline.yaml` | High |
-| Output files | `output/` | Medium (can regenerate) |
+| Component | Typical location | Priority |
+|-----------|------------------|----------|
+| Landscape audit database | `runs/audit.db`, `data/runs/audit.db`, or configured PostgreSQL URL | Critical |
+| Payload store | `.elspeth/payloads/`, `data/payloads/`, or `payload_store.base_path` | High |
+| Web session database | `data/sessions.db` or `ELSPETH_WEB__SESSION_DB_URL` | High for Web UI deployments |
+| Settings/configuration | The settings file used for each run; deployment env files | High |
+| Outputs/artifacts | Example or deployment output directories; object stores | Medium to critical, depending on retention policy |
 
----
+For staging-specific service layout, see
+[staging session database recreation](staging-session-db-recreation.md).
 
-## Backup Procedures
+## Locate The Databases
 
-### SQLite Backup
-
-**Online backup (while pipeline may be running):**
+CLI runs usually take their Landscape URL from the `landscape.url` setting:
 
 ```bash
-sqlite3 runs/audit.db ".backup 'runs/audit.db.backup'"
+python - <<'PY'
+from pathlib import Path
+from elspeth.core.config import load_settings
+settings = load_settings(Path("settings.yaml"))
+print(settings.landscape.url)
+print(settings.payload_store.base_path)
+PY
 ```
 
-**Scheduled backup script:**
+Web deployments default to `data/runs/audit.db`, `data/payloads/`, and
+`data/sessions.db` under `ELSPETH_WEB__DATA_DIR` unless explicit URLs/paths are
+configured.
+
+## SQLite Backup
+
+Use SQLite's online backup command for a running database:
 
 ```bash
-#!/bin/bash
-# backup-elspeth.sh
-
-BACKUP_DIR="/backups/elspeth"
-DATE=$(date +%Y%m%d_%H%M%S)
-
-# Create backup directory
-mkdir -p "$BACKUP_DIR"
-
-# Backup audit database
-sqlite3 runs/audit.db ".backup '$BACKUP_DIR/audit_$DATE.db'"
-
-# Backup payload store
-tar -czf "$BACKUP_DIR/payloads_$DATE.tar.gz" .elspeth/payloads/
-
-# Backup configuration
-cp pipeline.yaml "$BACKUP_DIR/pipeline_$DATE.yaml"
-
-# Keep only last 30 days
-find "$BACKUP_DIR" -type f -mtime +30 -delete
-
-echo "Backup completed: $DATE"
+mkdir -p /backups/elspeth
+sqlite3 runs/audit.db ".backup '/backups/elspeth/audit-$(date +%Y%m%dT%H%M%S).db'"
 ```
 
-**Cron schedule (daily at 2 AM):**
+For Web UI deployments, also back up the session database:
 
 ```bash
-0 2 * * * /opt/elspeth/backup-elspeth.sh >> /var/log/elspeth-backup.log 2>&1
+sqlite3 data/sessions.db ".backup '/backups/elspeth/sessions-$(date +%Y%m%dT%H%M%S).db'"
 ```
 
-### PostgreSQL Backup
-
-**Logical backup (pg_dump):**
+Back up payloads and settings:
 
 ```bash
-pg_dump -Fc -d elspeth -f /backups/elspeth_$(date +%Y%m%d).dump
+tar -czf "/backups/elspeth/payloads-$(date +%Y%m%dT%H%M%S).tar.gz" data/payloads
+cp settings.yaml "/backups/elspeth/settings-$(date +%Y%m%dT%H%M%S).yaml"
 ```
 
-**Point-in-time recovery setup:**
+Do not print or archive secret values into broad-access locations. Deployment
+environment files may contain secrets; store those backups in a restricted
+secret-management location.
+
+## PostgreSQL Backup
+
+Use logical dumps for routine recovery:
 
 ```bash
-# Enable WAL archiving in postgresql.conf
-archive_mode = on
-archive_command = 'cp %p /backups/wal/%f'
-
-# Base backup
-pg_basebackup -D /backups/base -Fp -Xs -P
+pg_dump -Fc -d "$ELSPETH_DATABASE_URL" -f "/backups/elspeth/landscape-$(date +%Y%m%dT%H%M%S).dump"
 ```
 
-### Docker Backup
+Use your PostgreSQL platform's WAL/PITR process for point-in-time recovery. Do
+not rely on a generic `recovery.conf` snippet; PostgreSQL recovery configuration
+varies by version and hosting platform.
 
-When running in Docker, backup the mounted volumes:
+## Restore SQLite
 
-```bash
-# Stop container for consistent backup
-docker compose stop elspeth
-
-# Backup volumes
-tar -czf elspeth_backup_$(date +%Y%m%d).tar.gz \
-  ./config \
-  ./state \
-  ./output
-
-# Restart container
-docker compose start elspeth
-```
-
----
-
-## Recovery Procedures
-
-### SQLite Recovery
-
-**Restore from backup:**
+1. Stop the application or pipeline writers.
+2. Archive the current possibly-bad database before overwriting it.
+3. Restore the selected backup.
+4. Verify integrity.
+5. Restart the application or resume the affected run only after verification.
 
 ```bash
-# Stop any running pipelines
-pkill -f elspeth
-
-# Restore database
-cp /backups/elspeth/audit_20240115.db runs/audit.db
-
-# Verify integrity
+cp runs/audit.db "runs/audit.db.before-restore-$(date +%Y%m%dT%H%M%S)"
+cp /backups/elspeth/audit-20260520T020000.db runs/audit.db
 sqlite3 runs/audit.db "PRAGMA integrity_check;"
-
-# Restore payloads
-tar -xzf /backups/elspeth/payloads_20240115.tar.gz
 ```
 
-**Recover from corruption:**
+Restore payloads:
 
 ```bash
-# Attempt recovery
-sqlite3 runs/audit.db ".recover" | sqlite3 runs/audit_recovered.db
-
-# Verify recovered database
-sqlite3 runs/audit_recovered.db "SELECT COUNT(*) FROM runs;"
-
-# Replace if valid
-mv runs/audit_recovered.db runs/audit.db
+tar -xzf /backups/elspeth/payloads-20260520T020000.tar.gz -C /
 ```
 
-### PostgreSQL Recovery
-
-**Restore from pg_dump:**
+If the restore is for an interrupted CLI run, dry-run resume first:
 
 ```bash
-# Create fresh database
-dropdb elspeth
-createdb elspeth
-
-# Restore
-pg_restore -d elspeth /backups/elspeth_20240115.dump
+elspeth resume <RUN_ID> --database runs/audit.db
+elspeth resume <RUN_ID> --database runs/audit.db --execute
 ```
 
-**Point-in-time recovery:**
+## Verify A Backup
 
 ```bash
-# Stop PostgreSQL
-pg_ctl stop -D /var/lib/postgresql/data
+BACKUP=/backups/elspeth/audit-latest.db
 
-# Restore base backup
-rm -rf /var/lib/postgresql/data/*
-tar -xf /backups/base.tar -C /var/lib/postgresql/data/
-
-# Create recovery.conf
-cat > /var/lib/postgresql/data/recovery.conf << EOF
-restore_command = 'cp /backups/wal/%f %p'
-recovery_target_time = '2024-01-15 14:30:00'
-EOF
-
-# Start PostgreSQL
-pg_ctl start -D /var/lib/postgresql/data
+test -f "$BACKUP"
+sqlite3 "$BACKUP" "PRAGMA integrity_check;"
+sqlite3 "$BACKUP" "SELECT COUNT(*) FROM runs;"
+sqlite3 "$BACKUP" "SELECT COUNT(*) FROM tokens;"
+sqlite3 "$BACKUP" "SELECT COUNT(*) FROM token_outcomes;"
 ```
 
-### Docker Recovery
+For a recent run, verify explain still works:
 
 ```bash
-# Stop container
-docker compose stop elspeth
-
-# Restore volumes
-tar -xzf elspeth_backup_20240115.tar.gz
-
-# Restart
-docker compose start elspeth
-
-# Verify
-docker compose run --rm elspeth health --verbose
+elspeth explain --run latest --database "$BACKUP" --json
 ```
 
----
+## Partial Data Loss
 
-## Disaster Recovery
+Missing payload files do not invalidate stored hashes, but they do limit what
+operators can rehydrate from the audit trail. Record the limitation in incident
+notes and rerun affected source data if payload content is required for review.
 
-### Complete Environment Loss
-
-1. **Provision new infrastructure**
-2. **Restore configuration:**
-   ```bash
-   cp /backups/pipeline_latest.yaml pipeline.yaml
-   ```
-3. **Restore audit database:**
-   ```bash
-   cp /backups/audit_latest.db runs/audit.db
-   ```
-4. **Restore payload store:**
-   ```bash
-   tar -xzf /backups/payloads_latest.tar.gz
-   ```
-5. **Verify system:**
-   ```bash
-   elspeth health --verbose
-   elspeth validate --settings pipeline.yaml
-   ```
-6. **Resume any incomplete runs:**
-   ```bash
-   sqlite3 runs/audit.db "SELECT run_id FROM runs WHERE status = 'running';"
-   elspeth resume <RUN_ID>
-   ```
-
-### Partial Data Loss
-
-**Missing payloads:**
-- Audit hashes remain valid (hashes survive payload deletion)
-- Re-run affected data if payload content needed
-
-**Corrupted rows:**
-- Export valid rows
-- Create new database
-- Import valid data
-- Re-run affected source data
-
----
-
-## Backup Verification
-
-### Weekly Verification Checklist
-
-```bash
-#!/bin/bash
-# verify-backup.sh
-
-BACKUP="/backups/elspeth/audit_latest.db"
-
-# Check file exists
-if [ ! -f "$BACKUP" ]; then
-  echo "FAIL: Backup file not found"
-  exit 1
-fi
-
-# Check integrity
-INTEGRITY=$(sqlite3 "$BACKUP" "PRAGMA integrity_check;" 2>&1)
-if [ "$INTEGRITY" != "ok" ]; then
-  echo "FAIL: Integrity check failed: $INTEGRITY"
-  exit 1
-fi
-
-# Check recent data
-RECENT=$(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM runs WHERE started_at > datetime('now', '-7 days');")
-if [ "$RECENT" -eq 0 ]; then
-  echo "WARN: No runs in last 7 days"
-fi
-
-# Check table counts
-echo "Runs: $(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM runs;")"
-echo "Tokens: $(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM tokens;")"
-echo "States: $(sqlite3 "$BACKUP" "SELECT COUNT(*) FROM node_states;")"
-
-echo "OK: Backup verification passed"
-```
-
-### Monthly Recovery Test
-
-1. Restore backup to test environment
-2. Run `elspeth health --verbose`
-3. Run `elspeth explain --run <recent_run> --row 1 --database <path/to/audit.db>`
-4. Verify data integrity
-5. Document results
-
----
+If audit rows are corrupt, prefer restoring the whole database from a known-good
+backup. Do not manually coerce or patch Tier-1 audit rows to make read paths
+green.
 
 ## Retention Policy
 
-| Data Type | Retention | Rationale |
-|-----------|-----------|-----------|
-| Audit database | 7 years | Compliance requirement |
-| Payload store | 90 days | Storage cost |
-| Daily backups | 30 days | Operational recovery |
-| Weekly backups | 90 days | Extended recovery |
-| Monthly backups | 7 years | Compliance archives |
-
----
-
-## Monitoring Alerts
-
-Configure alerts for:
-
-- [ ] Backup job failure
-- [ ] Backup size anomaly (sudden growth/shrink)
-- [ ] Backup age > 24 hours
-- [ ] Backup integrity check failure
-- [ ] Disk space < 20% on backup storage
-
----
+Set retention by deployment policy, legal requirements, and storage cost. The
+default payload retention setting is 90 days, but audit database retention is a
+compliance decision rather than a framework constant.
 
 ## See Also
 
 - [Database Maintenance](database-maintenance.md)
 - [Incident Response](incident-response.md)
+- [Resume Failed Run](resume-failed-run.md)
 - [Configuration Reference](../reference/configuration.md)

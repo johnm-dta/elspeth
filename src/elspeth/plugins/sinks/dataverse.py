@@ -218,7 +218,7 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7c4a3db0ccb11e7a"
+    source_file_hash: str | None = "sha256:16df438775374c43"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)

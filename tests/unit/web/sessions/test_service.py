@@ -1249,15 +1249,33 @@ class TestArchiveSessionWithActiveRun:
     """Tests for archive_session when a run is active."""
 
     @pytest.mark.asyncio
-    async def test_archive_cascades_through_active_run(self, service) -> None:
-        """Archiving a session with an active run deletes everything including the run."""
+    async def test_archive_soft_hides_session_with_active_run(self, service) -> None:
+        """A session with a durable run is soft-archived, not deleted.
+
+        Commit 4c3e81182 ("Polish RC5 composer UX and archive behavior")
+        defined the contract: ``archive_session`` physically deletes
+        sessions with no durable history (no runs, no composer
+        completion events) and soft-hides sessions that have either.
+        An active run counts as durable history — the row remains, an
+        ``archived_at`` timestamp is set, and the session is hidden
+        from the default list but visible when ``include_archived``
+        is requested. Preserving the row keeps the run's audit
+        lineage queryable.
+        """
         session = await service.create_session("alice", "Pipeline", "local")
         state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
         await service.create_run(session.id, state.id)
-        # Archive should succeed — cascade deletes the run
+
         await service.archive_session(session.id)
-        with pytest.raises(ValueError, match="Session not found"):
-            await service.get_session(session.id)
+
+        archived = await service.get_session(session.id)
+        assert archived.archived_at is not None, "Soft-archive should populate archived_at, not delete the row"
+
+        default_listing = await service.list_sessions("alice", "local")
+        assert session.id not in [s.id for s in default_listing], "Soft-archived session must be hidden from default listing"
+
+        with_archived = await service.list_sessions("alice", "local", include_archived=True)
+        assert session.id in [s.id for s in with_archived], "Soft-archived session must be retrievable via include_archived"
 
 
 class TestGetMessagesNonexistentSession:

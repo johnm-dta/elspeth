@@ -343,7 +343,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4b5cf12339422ebe"
+    source_file_hash: str | None = "sha256:fdf63d8bbfccc3b9"
     config_model = WebScrapeConfig
     passes_through_input = True
 

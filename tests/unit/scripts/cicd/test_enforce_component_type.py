@@ -10,6 +10,9 @@ Follows the pattern established by test_enforce_freeze_guards.py.
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
+import sys
 import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +27,30 @@ from scripts.cicd.enforce_component_type import (
     run_check,
     scan_and_resolve,
 )
+
+
+def test_component_type_json_mode_succeeds_on_current_codebase() -> None:
+    """Legacy component-type scanner emits JSON for shadow-mode parity."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/enforce_component_type.py",
+            "check",
+            "--root",
+            "src/elspeth",
+            "--allowlist",
+            "config/cicd/enforce_component_type",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[4],
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
+
 
 # =============================================================================
 # Helpers

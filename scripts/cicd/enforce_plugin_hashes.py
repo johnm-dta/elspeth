@@ -12,7 +12,10 @@ check --fix: Auto-update stale hashes in-place (developer mode).
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.cicd.plugin_hash import (
@@ -48,6 +51,36 @@ _EXCLUDED_FILES = frozenset(
 
 EXPECTED_PLUGIN_COUNT = 37
 
+RULES: dict[str, dict[str, str]] = {
+    "PH1": {
+        "name": "missing-plugin-version",
+        "remediation": "Declare a non-placeholder plugin_version on every plugin class.",
+    },
+    "PH2": {
+        "name": "missing-source-file-hash",
+        "remediation": "Declare source_file_hash on every plugin class and keep it synchronized with the source file.",
+    },
+    "PH3": {
+        "name": "stale-source-file-hash",
+        "remediation": "Run the plugin hash fixer to refresh the stale source_file_hash declaration.",
+    },
+}
+
+
+@dataclass(frozen=True)
+class Finding:
+    """A plugin hash declaration violation."""
+
+    rule_id: str
+    file_path: str
+    class_name: str
+    message: str
+
+    @property
+    def fingerprint(self) -> str:
+        payload = f"{self.rule_id}|{self.file_path}|{self.class_name}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
 
 def _discover_plugin_files(root: Path) -> list[Path]:
     """Find all plugin entry-point files under root.
@@ -69,7 +102,7 @@ def _discover_plugin_files(root: Path) -> list[Path]:
     return files
 
 
-def run_check(root: Path, *, fix: bool = False, min_plugins: int = EXPECTED_PLUGIN_COUNT) -> int:
+def run_check(root: Path, *, fix: bool = False, min_plugins: int = EXPECTED_PLUGIN_COUNT, output_format: str = "text") -> int:
     """Run the enforcement check. Returns 0 on success, 1 on failure."""
     files = _discover_plugin_files(root)
 
@@ -80,7 +113,7 @@ def run_check(root: Path, *, fix: bool = False, min_plugins: int = EXPECTED_PLUG
         print(f"DISCOVERY ERROR: found {plugin_count} plugins, expected at least {min_plugins}. Check --root path and PLUGIN_DIRS.")
         return 1
 
-    violations: list[str] = []
+    violations: list[Finding] = []
     fixed: list[str] = []
 
     for file_path in files:
@@ -94,11 +127,25 @@ def run_check(root: Path, *, fix: bool = False, min_plugins: int = EXPECTED_PLUG
         for attrs in attrs_list:
             # Check plugin_version
             if attrs.plugin_version is None or attrs.plugin_version == "0.0.0":
-                violations.append(f"{rel} ({attrs.class_name}): no version declaration (plugin_version is {attrs.plugin_version!r})")
+                violations.append(
+                    Finding(
+                        rule_id="PH1",
+                        file_path=rel.as_posix(),
+                        class_name=attrs.class_name,
+                        message=f"{rel} ({attrs.class_name}): no version declaration (plugin_version is {attrs.plugin_version!r})",
+                    )
+                )
 
             # Check source_file_hash
             if attrs.source_file_hash is None:
-                violations.append(f"{rel} ({attrs.class_name}): no source_file_hash declaration")
+                violations.append(
+                    Finding(
+                        rule_id="PH2",
+                        file_path=rel.as_posix(),
+                        class_name=attrs.class_name,
+                        message=f"{rel} ({attrs.class_name}): no source_file_hash declaration",
+                    )
+                )
             elif attrs.source_file_hash != computed:
                 if fix:
                     fix_source_file_hash(file_path, attrs.class_name, computed)
@@ -107,7 +154,16 @@ def run_check(root: Path, *, fix: bool = False, min_plugins: int = EXPECTED_PLUG
                     computed = compute_source_file_hash(file_path)
                 else:
                     violations.append(
-                        f"{rel} ({attrs.class_name}): stale source_file_hash\n  declared: {attrs.source_file_hash}\n  expected: {computed}"
+                        Finding(
+                            rule_id="PH3",
+                            file_path=rel.as_posix(),
+                            class_name=attrs.class_name,
+                            message=(
+                                f"{rel} ({attrs.class_name}): stale source_file_hash\n"
+                                f"  declared: {attrs.source_file_hash}\n"
+                                f"  expected: {computed}"
+                            ),
+                        )
                     )
 
     if fixed:
@@ -116,13 +172,17 @@ def run_check(root: Path, *, fix: bool = False, min_plugins: int = EXPECTED_PLUG
             print(f"  {msg}")
         print()
 
+    if output_format == "json":
+        sys.stdout.write(json_findings(violations))
+        return 1 if violations else 0
+
     if violations:
         print(f"{'=' * 60}")
         print(f"VIOLATIONS FOUND: {len(violations)}")
         print(f"{'=' * 60}")
         print()
-        for v in violations:
-            print(v)
+        for finding in violations:
+            print(finding.message)
             print()
         print(f"{'=' * 60}")
         print("CHECK FAILED")
@@ -132,6 +192,24 @@ def run_check(root: Path, *, fix: bool = False, min_plugins: int = EXPECTED_PLUG
     if not fixed:
         print("All plugin hashes verified. Check passed.")
     return 0
+
+
+def json_findings(findings: list[Finding]) -> str:
+    """Render findings in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": finding.rule_id,
+            "file_path": finding.file_path,
+            "line": 1,
+            "column": 0,
+            "message": finding.message,
+            "fingerprint": finding.fingerprint,
+            "severity": "error",
+            "suggestion": RULES[finding.rule_id]["remediation"],
+        }
+        for finding in findings
+    ]
+    return json.dumps(payload, sort_keys=True) + "\n"
 
 
 def main() -> None:
@@ -150,13 +228,14 @@ def main() -> None:
         default=EXPECTED_PLUGIN_COUNT,
         help=(f"Minimum expected plugin count (default: {EXPECTED_PLUGIN_COUNT}). Fail if fewer are discovered."),
     )
+    check_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format")
 
     args = parser.parse_args()
     if args.command != "check":
         parser.print_help()
         sys.exit(1)
 
-    sys.exit(run_check(args.root, fix=args.fix, min_plugins=args.min_plugins))
+    sys.exit(run_check(args.root, fix=args.fix, min_plugins=args.min_plugins, output_format=args.format))
 
 
 if __name__ == "__main__":

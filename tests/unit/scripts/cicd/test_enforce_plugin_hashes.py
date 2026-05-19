@@ -8,6 +8,7 @@ production count guard (which expects 28 plugins).
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import textwrap
@@ -64,6 +65,26 @@ def _run_check(root: Path, *extra_args: str) -> subprocess.CompletedProcess[str]
 
 
 class TestEnforcePluginHashes:
+    def test_json_mode_succeeds_on_current_codebase(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.cicd.enforce_plugin_hashes",
+                "check",
+                "--root",
+                "src/elspeth",
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[4]),
+        )
+
+        assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        assert json.loads(result.stdout) == []
+
     def test_passes_on_correct_hashes(self, plugin_tree: Path) -> None:
         result = _run_check(plugin_tree)
         assert result.returncode == 0, result.stderr + result.stdout

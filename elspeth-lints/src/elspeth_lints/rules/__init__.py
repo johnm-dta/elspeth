@@ -10,11 +10,13 @@ from elspeth_lints.rules.audit_evidence import (
 )
 from elspeth_lints.rules.immutability import FREEZE_GUARDS_RULE, FROZEN_ANNOTATIONS_RULE
 from elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer import RULE as META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE
-from elspeth_lints.rules.plugin_contract.options_metadata import RULE as OPTIONS_METADATA_RULE
+from elspeth_lints.rules.plugin_contract import COMPONENT_TYPE_RULE, OPTIONS_METADATA_RULE, PLUGIN_HASHES_RULE
 
 BUILTIN_RULES = (
     META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE,
     OPTIONS_METADATA_RULE,
+    COMPONENT_TYPE_RULE,
+    PLUGIN_HASHES_RULE,
     FREEZE_GUARDS_RULE,
     FROZEN_ANNOTATIONS_RULE,
     AUDIT_EVIDENCE_NOMINAL_RULE,
@@ -26,11 +28,13 @@ BUILTIN_RULES = (
 __all__ = [
     "AUDIT_EVIDENCE_NOMINAL_RULE",
     "BUILTIN_RULES",
+    "COMPONENT_TYPE_RULE",
     "FREEZE_GUARDS_RULE",
     "FROZEN_ANNOTATIONS_RULE",
     "GUARD_SYMMETRY_RULE",
     "GVE_ATTRIBUTION_RULE",
     "META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE",
     "OPTIONS_METADATA_RULE",
+    "PLUGIN_HASHES_RULE",
     "TIER_1_DECORATION_RULE",
 ]

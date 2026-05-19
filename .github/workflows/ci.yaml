@@ -75,6 +75,12 @@ jobs:
             --rules plugin_contract.options_metadata \
             --root .
 
+      - name: Shadow plugin-contract elspeth-lints rules
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules plugin_contract.component_type,plugin_contract.plugin_hashes \
+            --root src/elspeth
+
       - name: Shadow immutability elspeth-lints rules
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -119,6 +125,19 @@ jobs:
             exit "$status"
           fi
 
+      - name: Emit elspeth-lints plugin-contract SARIF artifact
+        if: always()
+        run: |
+          set +e
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules plugin_contract.component_type,plugin_contract.plugin_hashes \
+            --root src/elspeth \
+            --format sarif > elspeth-lints-plugin-contract.sarif
+          status=$?
+          if [[ "$status" -gt 1 ]]; then
+            exit "$status"
+          fi
+
       - name: Emit elspeth-lints audit-evidence SARIF artifact
         if: always()
         run: |
@@ -140,6 +159,7 @@ jobs:
           path: |
             elspeth-lints.sarif
             elspeth-lints-immutability.sarif
+            elspeth-lints-plugin-contract.sarif
             elspeth-lints-audit-evidence.sarif
           retention-days: 7
 

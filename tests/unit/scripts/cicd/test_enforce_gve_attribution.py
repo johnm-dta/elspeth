@@ -3,7 +3,7 @@
 Tests the GA1 rule: raise GraphValidationError(...) without component_id=.
 Uses tmp_path fixtures with real files.
 
-Follows the pattern established by test_enforce_component_type.py.
+Follows the tmp-path scanner fixture pattern used by the legacy CI scanners.
 """
 
 from __future__ import annotations

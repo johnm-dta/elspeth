@@ -43,29 +43,8 @@ rules:
       - json
   - old_script: scripts/cicd/enforce_component_type.py
     new_rule: plugin_contract.component_type
-    status: shadow
+    status: deleted
     migration_issue: elspeth-90576d9826
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_component_type"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_composer_catch_order.py
     new_rule: composer.catch_order
     status: deleted
@@ -150,28 +129,8 @@ rules:
     migration_issue: elspeth-8e8b49d58e
   - old_script: scripts/cicd/enforce_plugin_hashes.py
     new_rule: plugin_contract.plugin_hashes
-    status: shadow
+    status: deleted
     migration_issue: elspeth-90576d9826
-    old_command:
-      - "{python}"
-      - -m
-      - scripts.cicd.enforce_plugin_hashes
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_tier_1_decoration.py
     new_rule: audit_evidence.tier_1_decoration
     status: shadow

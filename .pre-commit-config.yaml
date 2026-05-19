@@ -81,8 +81,8 @@ repos:
         files: ^(src/elspeth/plugins/|config/cicd/enforce_options_metadata/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/options_metadata/)
         pass_filenames: false
 
-      - id: elspeth-lints-plugin-contract-shadow
-        name: elspeth-lints plugin contract shadow
+      - id: elspeth-lints-plugin-contract
+        name: elspeth-lints plugin contract
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules plugin_contract.component_type,plugin_contract.plugin_hashes --root src/elspeth
         language: system
         files: ^(src/elspeth/plugins/|config/cicd/enforce_component_type/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/(component_type|plugin_hashes)/)
@@ -133,13 +133,6 @@ repos:
       - id: check-contracts
         name: Check Contracts
         entry: .venv/bin/python -m scripts.check_contracts
-        language: system
-        types: [python]
-        pass_filenames: false
-
-      - id: enforce-plugin-hashes
-        name: Enforce Plugin Hashes
-        entry: .venv/bin/python -m scripts.cicd.enforce_plugin_hashes check --root src/elspeth
         language: system
         types: [python]
         pass_filenames: false

@@ -1,14 +1,22 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/client";
 import { resetStore } from "@/test/store-helpers";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { ChatMessage, CompositionState, Session } from "@/types/index";
-import { buildTutorialDraft } from "./TutorialTurn2Describe";
+import type {
+  ChatMessage,
+  ComposerProgressSnapshot,
+  CompositionState,
+  Session,
+} from "@/types/index";
+import { buildTutorialDraft, TutorialTurn2Describe } from "./TutorialTurn2Describe";
 
 vi.mock("@/api/client", () => ({
   acceptCompositionProposal: vi.fn(),
   createSession: vi.fn(),
+  fetchComposerProgress: vi.fn(),
   fetchComposerPreferences: vi.fn(),
   fetchCompositionProposals: vi.fn(),
   fetchCompositionState: vi.fn(),
@@ -59,6 +67,17 @@ const compositionState: CompositionState = {
   metadata: { name: null, description: null },
 };
 
+const composerProgress: ComposerProgressSnapshot = {
+  session_id: tutorialSession.id,
+  request_id: "message-1",
+  phase: "using_tools",
+  headline: "The model is choosing pipeline components.",
+  evidence: ["Checking source, transform, and output schemas."],
+  likely_next: "ELSPETH will draft the pipeline and validate the result.",
+  reason: null,
+  updated_at: "2026-05-19T12:00:03Z",
+};
+
 function primeHappyPath(): void {
   vi.mocked(api.createSession).mockResolvedValue(tutorialSession);
   vi.mocked(api.renameSession).mockResolvedValue({
@@ -85,6 +104,27 @@ function primeHappyPath(): void {
     density_default: "medium",
     updated_at: "2026-05-19T12:00:00Z",
   });
+  vi.mocked(api.fetchComposerProgress).mockResolvedValue({
+    ...composerProgress,
+    phase: "idle",
+    headline: "",
+    evidence: [],
+    likely_next: null,
+  });
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("buildTutorialDraft — surface backend errors, never silent-fallback", () => {
@@ -173,5 +213,60 @@ describe("buildTutorialDraft — surface backend errors, never silent-fallback",
     await expect(buildTutorialDraft("rate cool gov pages")).rejects.toThrow(
       /502|bad gateway/,
     );
+  });
+});
+
+describe("TutorialTurn2Describe pending progress", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useInterpretationEventsStore);
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("renders the tutorial shimmer while the LLM draft is still pending", async () => {
+    primeHappyPath();
+    vi.mocked(api.sendMessage).mockReturnValue(
+      deferred<Awaited<ReturnType<typeof api.sendMessage>>>().promise,
+    );
+
+    render(
+      <TutorialTurn2Describe
+        initialPrompt="rate cool gov pages"
+        onBuilt={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Build it" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Asking the composer to draft the pipeline.",
+    );
+    expect(document.querySelector(".tutorial-progress-bar")).toBeInTheDocument();
+  });
+
+  it("polls tutorial composer progress and renders provider-safe backend activity", async () => {
+    primeHappyPath();
+    const send = deferred<Awaited<ReturnType<typeof api.sendMessage>>>();
+    vi.mocked(api.sendMessage).mockReturnValue(send.promise);
+    vi.mocked(api.fetchComposerProgress).mockResolvedValue(composerProgress);
+
+    render(
+      <TutorialTurn2Describe
+        initialPrompt="rate cool gov pages"
+        onBuilt={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Build it" }));
+    await waitFor(() =>
+      expect(api.fetchComposerProgress).toHaveBeenCalledWith(tutorialSession.id),
+    );
+
+    expect(await screen.findByText(composerProgress.headline)).toBeInTheDocument();
+    expect(screen.getByText(composerProgress.evidence[0])).toBeInTheDocument();
+    expect(screen.getByText(composerProgress.likely_next ?? "")).toBeInTheDocument();
   });
 });

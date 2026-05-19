@@ -2026,6 +2026,35 @@ summary:focus-visible {
   margin-top: var(--space-lg);
 }
 
+.tutorial-draft-progress {
+  align-items: flex-start;
+  max-width: 720px;
+}
+
+.tutorial-draft-progress-copy {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.tutorial-draft-progress-headline {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.tutorial-draft-progress-evidence {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.tutorial-draft-progress-next {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
 .tutorial-progress-bar {
   /* Indeterminate progress affordance. The prior implementation was a
      static 60% gradient that reads as "stuck at 60%". A sliding shimmer

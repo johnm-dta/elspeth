@@ -5,6 +5,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import type {
   ChatMessage,
   ComposerPreferences,
+  ComposerProgressSnapshot,
   CompositionProposal,
   CompositionState,
   Session,
@@ -20,10 +21,16 @@ import {
   type TutorialBuildResult,
 } from "./tutorialMachine";
 
+const TUTORIAL_DRAFT_PROGRESS_POLL_INTERVAL_MS = 1_500;
+
 interface TutorialTurn2DescribeProps {
   initialPrompt: string;
   onBuilt: (result: TutorialBuildResult) => void;
   onBack: () => void;
+}
+
+interface BuildTutorialDraftOptions {
+  onSessionReady?: (sessionId: string) => void;
 }
 
 export function TutorialTurn2Describe({
@@ -33,6 +40,9 @@ export function TutorialTurn2Describe({
 }: TutorialTurn2DescribeProps): JSX.Element {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [pending, setPending] = useState(false);
+  const [draftSessionId, setDraftSessionId] = useState<string | null>(null);
+  const [composerProgress, setComposerProgress] =
+    useState<ComposerProgressSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
 
@@ -43,16 +53,51 @@ export function TutorialTurn2Describe({
     headingRef.current?.focus();
   }, []);
 
+  useEffect(() => {
+    if (!pending || draftSessionId === null) {
+      return;
+    }
+
+    let active = true;
+    const pollProgress = async (): Promise<void> => {
+      try {
+        const progress = await api.fetchComposerProgress(draftSessionId);
+        if (!active) return;
+        setComposerProgress(progress.phase === "idle" ? null : progress);
+      } catch {
+        // Advisory only: keep the visible local fallback while the draft call
+        // continues. The final build request still owns user-facing failures.
+      }
+    };
+
+    void pollProgress();
+    const timer = window.setInterval(
+      () => void pollProgress(),
+      TUTORIAL_DRAFT_PROGRESS_POLL_INTERVAL_MS,
+    );
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [draftSessionId, pending]);
+
   const onSubmit = useCallback(async () => {
     setPending(true);
+    setDraftSessionId(null);
+    setComposerProgress(null);
     setError(null);
     try {
-      const result = await buildTutorialDraft(prompt);
+      const result = await buildTutorialDraft(prompt, {
+        onSessionReady: setDraftSessionId,
+      });
       onBuilt(result);
     } catch (err) {
       setError(formatError(err));
     } finally {
       setPending(false);
+      setDraftSessionId(null);
+      setComposerProgress(null);
     }
   }, [onBuilt, prompt]);
 
@@ -103,9 +148,7 @@ export function TutorialTurn2Describe({
           Back
         </button>
       </div>
-      <p role="status" className="sr-only">
-        {pending ? "Building draft pipeline" : ""}
-      </p>
+      {pending && <TutorialDraftProgress progress={composerProgress} />}
       {error !== null && (
         <p role="alert" className="tutorial-error">
           {error}
@@ -117,6 +160,7 @@ export function TutorialTurn2Describe({
 
 export async function buildTutorialDraft(
   prompt: string,
+  options: BuildTutorialDraftOptions = {},
 ): Promise<TutorialBuildResult> {
   const effectivePrompt = prompt.trim() || CANONICAL_TUTORIAL_PROMPT;
   const session = await api.createSession();
@@ -126,6 +170,7 @@ export async function buildTutorialDraft(
   // final rename. Without this, a tab close at any point in buildTutorialDraft
   // would leave a "New session" titled session that cleanup never matches.
   await api.renameSession(session.id, HELLO_WORLD_PENDING_SESSION_TITLE);
+  options.onSessionReady?.(session.id);
   await api.optOutOfInterpretations(session.id);
   const response = await api.sendMessage(session.id, effectivePrompt);
   const pendingProposals = (response.proposals ?? []).filter(
@@ -236,4 +281,39 @@ function formatError(err: unknown): string {
     return err.message;
   }
   return "The tutorial could not build the draft pipeline.";
+}
+
+function TutorialDraftProgress({
+  progress,
+}: {
+  progress: ComposerProgressSnapshot | null;
+}): JSX.Element {
+  const headline =
+    progress?.headline || "Asking the composer to draft the pipeline.";
+  const evidence =
+    progress !== null && progress.evidence.length > 0
+      ? progress.evidence
+      : ["Waiting for the composer to report its current step."];
+  const likelyNext =
+    progress?.likely_next ??
+    "ELSPETH will draft the pipeline, accept safe proposals, and prepare it for review.";
+
+  return (
+    <div
+      role="status"
+      aria-busy="true"
+      className="tutorial-running tutorial-draft-progress"
+    >
+      <span className="tutorial-progress-bar" aria-hidden="true" />
+      <div className="tutorial-draft-progress-copy">
+        <span className="tutorial-draft-progress-headline">{headline}</span>
+        <ul className="tutorial-draft-progress-evidence">
+          {evidence.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ul>
+        <span className="tutorial-draft-progress-next">{likelyNext}</span>
+      </div>
+    </div>
+  );
 }

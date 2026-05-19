@@ -64,17 +64,17 @@ for sha in "${COMMITS[@]}"; do
 
     check_cohort() {
         local cohort="$1"
-        local phase_token="$2"
-        if ! echo "$body" | grep -qE "^telemetry-backfill: phase-${phase_token}\$"; then
+        local trailer_token="$2"
+        if ! echo "$body" | grep -qE "^telemetry-backfill: ${trailer_token}\$"; then
             echo ""
-            echo "✗ Commit ${sha:0:12} '${subject}' touches cohort ${cohort} (phase-${phase_token}) but lacks the required trailer."
+            echo "✗ Commit ${sha:0:12} '${subject}' touches cohort ${cohort} but lacks the required trailer: telemetry-backfill: ${trailer_token}"
             fail=$(( fail + 1 ))
         fi
     }
 
-    (( cohort_a_hit ))  && check_cohort "(a)  shareable_reviews" "6"
-    (( cohort_b1_hit )) && check_cohort "(b1) sessions opt-out"  "5b"
-    (( cohort_b2_hit )) && check_cohort "(b2) audit_readiness"   "2c"
+    (( cohort_a_hit ))  && check_cohort "(a)  shareable_reviews" "shareable-reviews"
+    (( cohort_b1_hit )) && check_cohort "(b1) sessions opt-out"  "interpretation-opt-out"
+    (( cohort_b2_hit )) && check_cohort "(b2) audit_readiness"   "audit-readiness"
 done
 
 if (( fail > 0 )); then
@@ -82,10 +82,14 @@ if (( fail > 0 )); then
 
 CI ENFORCEMENT FAILURE — ${fail} commit-trailer violation(s) detected.
 
-Every commit touching a Phase 8 cohort directory MUST include a
-telemetry-backfill: phase-X trailer on its own line in the body, where
-X identifies the originating phase (6, 5b, or 2c).  This makes
-\`git blame\` + \`git log -1\` reveal the cross-phase attribution.
+Every commit touching a telemetry-backfill cohort directory MUST include a
+stable telemetry-backfill trailer on its own line in the body:
+
+  telemetry-backfill: shareable-reviews
+  telemetry-backfill: interpretation-opt-out
+  telemetry-backfill: audit-readiness
+
+This makes \`git blame\` + \`git log -1\` reveal the cohort attribution.
 
 See:
   docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md

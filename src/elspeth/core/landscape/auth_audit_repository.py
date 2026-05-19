@@ -16,7 +16,9 @@ AuthAuditEventType = Literal["login", "token_issued", "auth_failure"]
 AuthAuditOutcome = Literal["success", "failure"]
 
 AUTH_AUDIT_EVENT_TYPES: tuple[AuthAuditEventType, ...] = ("login", "token_issued", "auth_failure")
-AUTH_AUDIT_OUTCOMES: tuple[AuthAuditOutcome, ...] = ("success", "failure")
+AUTH_AUDIT_SUCCESS: AuthAuditOutcome = "success"
+AUTH_AUDIT_FAILURE: AuthAuditOutcome = "failure"
+AUTH_AUDIT_OUTCOMES: tuple[AuthAuditOutcome, ...] = (AUTH_AUDIT_SUCCESS, AUTH_AUDIT_FAILURE)
 
 
 class AuthAuditRepository:
@@ -44,9 +46,9 @@ class AuthAuditRepository:
             raise AuditIntegrityError(f"Unsupported auth audit event_type: {event_type!r}")
         if outcome not in AUTH_AUDIT_OUTCOMES:
             raise AuditIntegrityError(f"Unsupported auth audit outcome: {outcome!r}")
-        if outcome == "success" and failure_category is not None:
+        if outcome == AUTH_AUDIT_SUCCESS and failure_category is not None:
             raise AuditIntegrityError("Successful auth audit events must not carry failure_category")
-        if outcome == "failure" and failure_category is None:
+        if outcome == AUTH_AUDIT_FAILURE and failure_category is None:
             raise AuditIntegrityError("Failed auth audit events must carry failure_category")
 
         event_id = generate_id()
@@ -110,7 +112,7 @@ class AuthAuditRepository:
         """Record access-token issuance without storing the bearer token."""
         return self.record_auth_event(
             event_type="token_issued",
-            outcome="success",
+            outcome=AUTH_AUDIT_SUCCESS,
             provider=provider,
             user_id=user_id,
             username=username,
@@ -136,7 +138,7 @@ class AuthAuditRepository:
         """Record an authentication or profile-lookup failure classification."""
         return self.record_auth_event(
             event_type="auth_failure",
-            outcome="failure",
+            outcome=AUTH_AUDIT_FAILURE,
             provider=provider,
             user_id=user_id,
             username=username,

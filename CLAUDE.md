@@ -155,6 +155,9 @@ Pipelines compile to DAGs. Linear pipelines are degenerate DAGs (single `continu
 
 **Package management:** Use `uv` for ALL package management. Never use `pip` directly.
 
+For ELSPETH-specific CI analyzer rationale, rule taxonomy, and lifecycle policy,
+see [docs/elspeth-lints/rationale.md](docs/elspeth-lints/rationale.md).
+
 ```bash
 # Environment setup
 uv venv && source .venv/bin/activate
@@ -176,10 +179,10 @@ uv pip install -e ".[all]"      # Everything
 .venv/bin/python -m scripts.check_contracts
 
 # Tier model enforcement (defensive pattern detection + layer-import enforcement)
-.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
 
 # Layer-import architecture observation (deterministic graph; always exits 0)
-.venv/bin/python scripts/cicd/enforce_tier_model.py dump-edges --root src/elspeth --format json --output /tmp/l3-import-graph.json --no-timestamp
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli dump-edges --root src/elspeth --format json --output /tmp/l3-import-graph.json --no-timestamp
 # Also supports --format mermaid (inline diagrams) and --format dot (Graphviz).
 # Full reference: engine-patterns-reference skill, "Layer Architecture & Dependency Analysis" section.
 
@@ -252,11 +255,11 @@ L3  plugins/       Can import L0, L1, L2. Sources, transforms, sinks, clients.
     mcp/ tui/ cli* telemetry/ testing/   — also L3 (application layer)
 ```
 
-**Enforced by CI:** `scripts/cicd/enforce_tier_model.py` detects upward imports and fails the build. The allowlist mechanism (`config/cicd/enforce_tier_model/`) supports per-file and per-finding exemptions for legitimate exceptions.
+**Enforced by CI:** the `trust_tier.tier_model` elspeth-lints rule detects upward imports and fails the build. The allowlist mechanism (`config/cicd/enforce_tier_model/`) supports per-file and per-finding exemptions for legitimate exceptions.
 
 **TYPE_CHECKING imports** are reported as warnings, not failures. They're architecturally impure (the dependency still exists for type checkers) but don't create runtime coupling.
 
-**Architecture observation (separate from enforcement).** The same script also exposes a `dump-edges` subcommand that emits the deterministic intra-layer import graph as JSON, Mermaid, or Graphviz DOT. It always exits 0 (observational, not a gate) and supports SCC detection via `networkx`. Use it for architecture analysis, refactor planning, or dependency-graph diffing across branches. **Cite the JSON output by path** rather than paraphrasing — the `--no-timestamp` flag produces byte-identical output across runs so cited values stay stable. Full reference (subcommands, JSON schema, edge metadata semantics, SCC interpretation, citation discipline) lives in the `engine-patterns-reference` skill under "Layer Architecture & Dependency Analysis".
+**Architecture observation (separate from enforcement).** `elspeth-lints dump-edges` emits the deterministic intra-layer import graph as JSON, Mermaid, or Graphviz DOT. It always exits 0 (observational, not a gate) and supports SCC detection via `networkx`. Use it for architecture analysis, refactor planning, or dependency-graph diffing across branches. **Cite the JSON output by path** rather than paraphrasing — the `--no-timestamp` flag produces byte-identical output across runs so cited values stay stable. Full reference (subcommands, JSON schema, edge metadata semantics, SCC interpretation, citation discipline) lives in the `engine-patterns-reference` skill under "Layer Architecture & Dependency Analysis".
 
 ### When a New Cross-Layer Need Arises
 

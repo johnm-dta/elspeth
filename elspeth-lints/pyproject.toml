@@ -1,0 +1,33 @@
+[project]
+name = "elspeth-lints"
+version = "0.1.0"
+description = "Workspace-only static analyzer for ELSPETH-specific CI invariants"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["pyyaml>=6.0,<7"]
+
+[project.scripts]
+elspeth-lints = "elspeth_lints.core.cli:main"
+
+[project.entry-points."elspeth_lints.rules"]
+meta-no-new-bespoke-cicd-enforcer = "elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer:RULE"
+plugin-contract-options-metadata = "elspeth_lints.rules.plugin_contract.options_metadata:RULE"
+plugin-contract-component-type = "elspeth_lints.rules.plugin_contract.component_type:RULE"
+plugin-contract-plugin-hashes = "elspeth_lints.rules.plugin_contract.plugin_hashes:RULE"
+composer-catch-order = "elspeth_lints.rules.composer.catch_order:RULE"
+composer-exception-channel = "elspeth_lints.rules.composer.exception_channel:RULE"
+immutability-freeze-guards = "elspeth_lints.rules.immutability.freeze_guards:RULE"
+immutability-frozen-annotations = "elspeth_lints.rules.immutability.frozen_annotations:RULE"
+audit-evidence-nominal-base = "elspeth_lints.rules.audit_evidence.audit_evidence_nominal:RULE"
+audit-evidence-tier-1-decoration = "elspeth_lints.rules.audit_evidence.tier_1_decoration:RULE"
+audit-evidence-guard-symmetry = "elspeth_lints.rules.audit_evidence.guard_symmetry:RULE"
+audit-evidence-gve-attribution = "elspeth_lints.rules.audit_evidence.gve_attribution:RULE"
+trust-tier-model = "elspeth_lints.rules.trust_tier.tier_model:RULE"
+# Rule entry points are added by migration tasks.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/elspeth_lints"]

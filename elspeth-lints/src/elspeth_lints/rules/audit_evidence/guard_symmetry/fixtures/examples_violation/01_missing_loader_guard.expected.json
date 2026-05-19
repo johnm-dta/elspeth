@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "core/model_loaders.py",
+    "fingerprint": "23423a97c3b0cef2",
+    "line": 4,
+    "message": "Widget has __post_init__ validation (at contracts/audit.py:5) but WidgetLoader.load() has no AuditIntegrityError guards",
+    "rule_id": "GS1",
+    "severity": "error",
+    "suggestion": "Add AuditIntegrityError validation to the loader's load() method for Tier 1 read-side integrity"
+  }
+]

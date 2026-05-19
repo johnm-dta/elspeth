@@ -1,0 +1,3 @@
+entries:
+  - id: source/metadata_gap:missing_title
+    reason: Fixture proves legacy identifier suppression.

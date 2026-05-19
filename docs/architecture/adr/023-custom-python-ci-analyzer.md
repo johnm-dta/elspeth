@@ -24,6 +24,15 @@ This ADR records the prior, more fundamental question: **should ELSPETH be writi
 
 The four candidates considered were CodeQL (already in the toolchain via `.github/workflows/codeql.yaml`), Semgrep, ast-grep, and continuing with custom Python in the consolidated `elspeth-lints` package. External reviewers landing in `scripts/cicd/` should be able to find the answer to "why didn't you use CodeQL?" without having to ask. The absence of this ADR was itself a structural gap, identified in the consolidation epic.
 
+## Considered Options
+
+| Option | Fit for ELSPETH-specific invariants | Main benefit | Main cost |
+|---|---|---|---|
+| **CodeQL custom queries** | Partial. Strong for inter-procedural taint and generic security queries; weak for project-specific dataclass, Pydantic, manifest, and allowlist semantics. | Already integrated with GitHub Code Scanning and the Security tab. | High authoring/debugging friction, database-build workflow, team has no QL fluency, and manifest-class rules still need custom Python. |
+| **Semgrep** | Partial. Good for many AST pattern rules; weak for computed-manifest parity and ELSPETH-specific Python object semantics. | Faster rule iteration than CodeQL and broad ecosystem familiarity. | Would still require custom Python for manifest rules, creating a two-toolchain maintenance surface. |
+| **ast-grep** | Partial. Useful for syntax-pattern matching; weak for semantic rules involving project helpers, manifests, fingerprints, and allowlist lifecycle. | Lightweight and fast for local AST shape checks. | Same split-toolchain problem as Semgrep, with less direct fit for Python-specific semantic helpers. |
+| **Custom Python via `elspeth-lints`** | Full fit for the current rule set. Can reuse Python `ast`, project-specific helpers, YAML manifests, fingerprints, and existing tests. | Preserves existing investment, supports incremental pre-commit naturally, and can model ELSPETH-specific invariants directly. | ELSPETH owns analyzer maintenance, false-positive economics, SARIF integration, and lifecycle discipline. |
+
 ## Decisions
 
 ### D1. Custom Python (`elspeth-lints`) is the chosen tooling for ELSPETH-specific CI invariants
@@ -75,6 +84,16 @@ The four candidates considered were CodeQL (already in the toolchain via `.githu
 ### D6. CodeQL findings and elspeth-lints findings coexist via SARIF `category`
 
 **Decision:** Both analyzers upload to GitHub Code Scanning. To prevent collision in the Security tab, `elspeth-lints` uploads with `category: elspeth-lints` (the upload mechanism is tracked in filigree `elspeth-b79958739e`). CodeQL uses the default category. Findings are visually distinguishable in the Security tab, the Code Scanning API, and any downstream dashboard.
+
+## Revisit Triggers
+
+Re-open this ADR if one of these conditions becomes true:
+
+* A new ELSPETH invariant requires inter-procedural taint/data-flow analysis that cannot be expressed cleanly with the `elspeth-lints` rule framework.
+* CodeQL's Python pack gains first-class dataclass/Pydantic semantics that substantially reduce the custom code required for ELSPETH's trust-tier or plugin-contract rules.
+* Semgrep or ast-grep gains a manifest-comparison and allowlist-lifecycle surface strong enough to replace both the AST-pattern rules and the manifest-class rules.
+* `elspeth-lints` false-positive maintenance cost grows faster than rule-quality fixes can reduce it for two consecutive audit cycles.
+* ELSPETH decides to publish the analyzer outside the monorepo, which would introduce external compatibility and versioning obligations not covered by this ADR.
 
 ## Consequences
 

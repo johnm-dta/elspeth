@@ -1,0 +1,6 @@
+version: 1
+rules:
+  - old_script: scripts/cicd/enforce_existing.py
+    new_rule: null
+    status: pending
+    migration_issue: null

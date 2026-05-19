@@ -70,7 +70,7 @@ ctx = make_context(recorder=recorder, run_id=run_id)
 
 ```bash
 # Tier model enforcement (layer dependency detection)
-.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
 ```
 
 ## Commit Guidelines

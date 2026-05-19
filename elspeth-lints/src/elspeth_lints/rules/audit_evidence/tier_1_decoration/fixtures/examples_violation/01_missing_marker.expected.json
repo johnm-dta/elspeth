@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "bad.py",
+    "fingerprint": "bad.py:TDE1:WidgetError",
+    "line": 1,
+    "message": "WidgetError has no @tier_1_error(reason=...) decorator and no # TIER-2: justification comment",
+    "rule_id": "TDE1",
+    "severity": "error",
+    "suggestion": "Add @tier_1_error(reason=...) or a non-empty # TIER-2: justification comment"
+  }
+]

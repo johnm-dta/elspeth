@@ -22,7 +22,7 @@ mutable container fields, so no freeze guard is required (per CLAUDE.md
 "Scalar-Only Fields Need No Guard").
 
 This module is L0 (contracts layer): no upward imports from core, engine,
-or plugins. It is enforced as a leaf by ``scripts/cicd/enforce_tier_model.py``.
+or plugins. It is enforced as a leaf by the ``trust_tier.tier_model`` rule.
 """
 
 from __future__ import annotations

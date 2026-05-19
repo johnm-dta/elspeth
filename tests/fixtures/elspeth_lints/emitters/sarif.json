@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "results": [
+        {
+          "fingerprints": {
+            "elspeth-lints/v1": "demo-fingerprint"
+          },
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/example.py"
+                },
+                "region": {
+                  "startColumn": 3,
+                  "startLine": 7
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Demo finding"
+          },
+          "partialFingerprints": {
+            "primaryLocationLineHash": "demo-fingerprint"
+          },
+          "properties": {
+            "suggestion": "Fix the demo"
+          },
+          "ruleId": "demo.rule"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/johnm-dta/elspeth/tree/main/elspeth-lints",
+          "name": "elspeth-lints",
+          "rules": [
+            {
+              "fullDescription": {
+                "text": "Demonstrates emitter output."
+              },
+              "help": {
+                "text": "Demonstrates emitter output."
+              },
+              "id": "demo.rule",
+              "name": "Demo rule",
+              "properties": {
+                "category": "manifest",
+                "precision": "high",
+                "severity": "error",
+                "tags": []
+              },
+              "shortDescription": {
+                "text": "Demonstrates emitter output."
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

@@ -3067,12 +3067,12 @@ class TestQuerySuccessPostFreezeMutationGuards:
     """Exercise the ``freeze_fields`` post-init guard on
     ``MultiQueryStrategy._QuerySuccess``.
 
-    ``enforce_freeze_guards.py`` is a static scanner — a typo that omits
-    a field name (``freeze_fields(self, "fields")`` without
-    ``"audit_metadata"``) still parses as a valid call expression and
-    would silently leave ``audit_metadata`` mutable.  These tests pin the
-    runtime contract by mutating each container field after construction
-    and asserting TypeError surfaces.
+    The ``immutability.freeze_guards`` lint rule is a static scanner — a
+    typo that omits a field name (``freeze_fields(self, "fields")`` without
+    ``"audit_metadata"``) still parses as a valid call expression and would
+    silently leave ``audit_metadata`` mutable.  These tests pin the runtime
+    contract by mutating each container field after construction and asserting
+    TypeError surfaces.
     """
 
     def test_query_success_fields_is_immutable_after_construction(self) -> None:

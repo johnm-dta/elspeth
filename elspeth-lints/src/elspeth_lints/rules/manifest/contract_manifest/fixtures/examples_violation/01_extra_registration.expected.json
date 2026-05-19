@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "contracts/ghost.py",
+    "fingerprint": "contracts/ghost.py:MC1:ghost_not_in_manifest",
+    "line": 16,
+    "message": "contract 'ghost_not_in_manifest' is registered but not listed in EXPECTED_CONTRACT_SITES manifest.",
+    "rule_id": "MC1",
+    "severity": "error",
+    "suggestion": "Keep EXPECTED_CONTRACT_SITES, register_declaration_contract(...) calls, and @implements_dispatch_site markers in sync."
+  }
+]

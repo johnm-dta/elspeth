@@ -1,0 +1,12 @@
+[
+  {
+    "column": 11,
+    "file_path": "bad.py",
+    "fingerprint": "126cd9f9c70032ff",
+    "line": 2,
+    "message": "Potential dict.get() usage: return data.get(\"key\")",
+    "rule_id": "R1",
+    "severity": "error",
+    "suggestion": "Access dict keys directly (dict[key]) and fix the schema/contract if KeyError occurs"
+  }
+]

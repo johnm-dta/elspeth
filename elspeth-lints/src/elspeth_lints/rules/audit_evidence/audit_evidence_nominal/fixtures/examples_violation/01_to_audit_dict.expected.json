@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "bad.py",
+    "fingerprint": "bad.py:AEN1:Mimic",
+    "line": 1,
+    "message": "Mimic defines to_audit_dict without inheriting AuditEvidenceBase",
+    "rule_id": "AEN1",
+    "severity": "error",
+    "suggestion": "Inherit AuditEvidenceBase explicitly, or remove the accidental to_audit_dict method"
+  }
+]

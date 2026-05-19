@@ -1,17 +1,16 @@
 # enforce_telemetry_backfill_trailer — allowlist
 
-Per-cohort allowlist for the B4-r3 commit-msg hook
+Per-cohort allowlist for the telemetry-backfill commit-msg hook
 (`.githooks/commit-msg-telemetry-backfill`) and its CI backstop
 (`.github/workflows/enforce-telemetry-backfill-trailer.yaml`).
 
 ## Why this directory exists
 
-Phase 8's telemetry harvest landed counter emits that semantically belong
-to Phases 6, 5b, and 2C. A future maintainer doing `git blame` on those
-files sees a Phase 8 commit editing code that "belongs" to a different
-phase. The commit-msg hook makes the cross-phase attribution mechanically
-discoverable by requiring a `telemetry-backfill: phase-X` trailer on the
-authoring commit.
+A telemetry harvest landed counter emits that semantically belong to earlier
+feature cohorts. A future maintainer doing `git blame` on those files sees a
+telemetry commit editing code that "belongs" to a different cohort. The
+commit-msg hook makes the attribution mechanically discoverable by requiring a
+stable `telemetry-backfill: <cohort-token>` trailer on the authoring commit.
 
 At 8a landing, this directory is empty. The allowlist mechanism is
 seeded so that:
@@ -57,7 +56,7 @@ Re-enforcement happens automatically.
 
 ## Removing the hook entirely
 
-Phase 9-or-later decision. Any PR removing the hook MUST cite
+Later removal is a governance decision. Any PR removing the hook MUST cite
 [20-phase-8-polish-and-telemetry.md](../../../docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md)
 §"Cohort attribution via commit trailers (A4 — load-bearing)" in the
 removal commit's body and explain how cross-phase attribution will be

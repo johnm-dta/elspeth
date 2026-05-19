@@ -148,12 +148,12 @@ class TestVerificationResult:
 class TestVerificationResultPostFreezeMutationGuards:
     """Exercise the ``freeze_fields`` post-init guard on ``VerificationResult``.
 
-    ``enforce_freeze_guards.py`` is a static scanner — a typo that drops
-    a field name from the ``freeze_fields(self, ...)`` call still parses
-    as valid Python and silently defeats the scan.  These tests pin the
-    runtime contract by mutating each container field after construction
-    and asserting the post-freeze TypeError surfaces.  If a refactor
-    drops a field, the mutation succeeds and this test fails loudly.
+    The ``immutability.freeze_guards`` lint rule is a static scanner — a
+    typo that drops a field name from the ``freeze_fields(self, ...)`` call
+    still parses as valid Python and silently defeats the scan.  These tests
+    pin the runtime contract by mutating each container field after
+    construction and asserting the post-freeze TypeError surfaces.  If a
+    refactor drops a field, the mutation succeeds and this test fails loudly.
     """
 
     def test_live_response_is_immutable_after_construction(self) -> None:

@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "plugins/sources/missing_version.py",
+    "fingerprint": "6ea094705f9d424b",
+    "line": 1,
+    "message": "plugins/sources/missing_version.py (MissingVersionSource): no version declaration (plugin_version is None)",
+    "rule_id": "PH1",
+    "severity": "error",
+    "suggestion": "Declare a non-placeholder plugin_version on every plugin class."
+  }
+]

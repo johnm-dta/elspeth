@@ -969,11 +969,11 @@ different phase, with no inline explanation of why. To make the
 absorption discoverable:
 
 - Every commit that lands a cohort-(a) emit (Sub-task 7d) MUST
-  include the trailer `telemetry-backfill: phase-6`.
+  include the trailer `telemetry-backfill: shareable-reviews`.
 - Every commit that lands the cohort-(b1) emit (Sub-task 7e) MUST
-  include the trailer `telemetry-backfill: phase-5b`.
+  include the trailer `telemetry-backfill: interpretation-opt-out`.
 - Every commit that lands the cohort-(b2) emit (Sub-task 7f) MUST
-  include the trailer `telemetry-backfill: phase-2c`.
+  include the trailer `telemetry-backfill: audit-readiness`.
 
 The trailer is the read-time seam: a future maintainer doing `git
 blame` and then `git log -1` on the offending commit immediately
@@ -999,9 +999,9 @@ that mechanically rejects commits violating the rule:
     `src/elspeth/web/composer/` or `src/elspeth/web/sessions/`;
     cite the actual file in the hook source)
   - cohort (b2): `src/elspeth/web/audit_readiness/`
-- **Rule:** if the commit message body does **not** contain a
-  trailer line matching `^telemetry-backfill: phase-(6|5b|2c)$`,
-  exit 1 with a message naming the cohort directory that
+- **Rule:** if the commit message body does **not** contain the
+  stable trailer token required by the touched cohort, exit 1 with a
+  message naming the cohort directory that
   triggered the check, the missing trailer, and the
   §"Cohort attribution via commit trailers" section to read.
 - **Installation:** 8a's first task (alongside MeterProvider

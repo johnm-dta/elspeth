@@ -2,7 +2,7 @@
 
 Lives outside ``routes.py`` for the same reason as
 :mod:`elspeth.web.sessions._guided_solve_chain`:
-``scripts/cicd/enforce_tier_model.py`` fingerprints findings by AST sibling
+the ``trust_tier.tier_model`` analyzer fingerprints findings by AST sibling
 index from the module root. Adding a new top-level function to ``routes.py``
 would shift the indices of every allowlisted ``isinstance`` check in that
 file and force unrelated allowlist churn. Extracting the helper into its own

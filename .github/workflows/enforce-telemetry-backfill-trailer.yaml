@@ -1,11 +1,11 @@
-# Phase 8 B4-r3 — CI backstop for telemetry-backfill cohort attribution.
+# CI backstop for telemetry-backfill cohort attribution.
 #
 # Local enforcement is via .githooks/commit-msg-telemetry-backfill installed
 # by scripts/git-hooks/install-commit-msg-dispatcher.sh, but contributors
 # may forget the install step.  This workflow runs the same predicate
 # against every commit in the PR diff and fails the build if any commit
 # touched a cohort directory without the required trailer.  Belt-and-
-# braces, same pattern as enforce_tier_model.
+# braces, same pattern as the elspeth-lints policy gates.
 #
 # Spec: docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md
 #       §"Cohort attribution via commit trailers (A4 — load-bearing)"

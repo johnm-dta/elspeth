@@ -1,6 +1,6 @@
 """Transient-LLM-failure wrapper for ``solve_chain`` (I2 — PR-review finding).
 
-Lives outside ``routes.py`` deliberately. ``scripts/cicd/enforce_tier_model.py``
+Lives outside ``routes.py`` deliberately. The ``trust_tier.tier_model`` analyzer
 fingerprints findings by AST path from the module root, so adding a new
 top-level function to ``routes.py`` between ``_dispatch_guided_respond`` and
 ``create_session_router`` would shift the AST sibling index of every existing

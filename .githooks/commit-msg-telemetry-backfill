@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# Phase 8 B4-r3 — commit-msg hook: telemetry-backfill cohort attribution
+# Commit-msg hook: telemetry-backfill cohort attribution
 #
-# Phase 8's telemetry harvest landed counter emits whose natural home is
-# Phases 6, 5b, and 2C.  Without an explicit trailer, a future maintainer
-# doing `git blame` on those files sees a Phase 8 commit editing code that
-# "belongs" to a different phase with no inline rationale.  This hook
-# rejects commits that touch a cohort directory without the corresponding
-# `telemetry-backfill: phase-X` trailer, making the cross-phase attribution
+# A telemetry harvest landed counter emits whose natural home is outside the
+# commit that added them. Without an explicit trailer, a future maintainer doing
+# `git blame` on those files sees a telemetry commit editing code that "belongs"
+# to a different cohort with no inline rationale. This hook rejects commits that
+# touch a cohort directory without the corresponding stable
+# `telemetry-backfill: <cohort-token>` trailer, making the attribution
 # mechanically discoverable.
 #
 # Cohorts (per docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md
 # §"Cohort attribution via commit trailers (A4 — load-bearing)"):
-#   (a)  src/elspeth/web/shareable_reviews/   →  telemetry-backfill: phase-6
-#   (b1) Phase 5b interpretation-opt-out path →  telemetry-backfill: phase-5b
+#   (a)  src/elspeth/web/shareable_reviews/   →  telemetry-backfill: shareable-reviews
+#   (b1) interpretation-opt-out path          →  telemetry-backfill: interpretation-opt-out
 #        (matched as: sessions/routes.py OR sessions/service.py with an
 #         added line referencing the opt-out telemetry counter or the
 #         auto_interpreted_opt_out audit-row commit site)
-#   (b2) src/elspeth/web/audit_readiness/    →  telemetry-backfill: phase-2c
+#   (b2) src/elspeth/web/audit_readiness/    →  telemetry-backfill: audit-readiness
 #
 # Trailer format (must appear on its own line in the commit-message body):
-#     telemetry-backfill: phase-6
-#     telemetry-backfill: phase-5b
-#     telemetry-backfill: phase-2c
+#     telemetry-backfill: shareable-reviews
+#     telemetry-backfill: interpretation-opt-out
+#     telemetry-backfill: audit-readiness
 #
 # A single commit may touch multiple cohorts; in that case ALL applicable
 # trailers must be present (one trailer line per cohort).
 #
-# Removing this hook is a Phase 9-or-later decision and MUST cite the
+# Removing this hook is a governance decision and MUST cite the
 # §"Cohort attribution via commit trailers" section in the removing commit.
 
 set -euo pipefail
@@ -104,10 +104,10 @@ fi
 
 require_trailer() {
     local cohort="$1"
-    local phase_token="$2"   # 6 | 5b | 2c
+    local trailer_token="$2"
     local reason="$3"
 
-    if grep -qE "^telemetry-backfill: phase-${phase_token}\$" "$COMMIT_MSG_FILE"; then
+    if grep -qE "^telemetry-backfill: ${trailer_token}\$" "$COMMIT_MSG_FILE"; then
         return 0
     fi
 
@@ -119,17 +119,17 @@ COMMIT REJECTED — telemetry-backfill cohort attribution missing.
   Trigger:  ${reason}
   Required: a trailer line of exactly:
 
-      telemetry-backfill: phase-${phase_token}
+      telemetry-backfill: ${trailer_token}
 
   Place the trailer on its own line in the commit message body (after the
   subject + blank line + body), per the git-interpret-trailers convention.
   Multiple trailers are allowed if the commit touches multiple cohorts.
 
 Why this matters
-  The cohort emit code "belongs" semantically to a different phase from
-  Phase 8.  Without the trailer, \`git blame\` + \`git log -1\` does not
-  reveal the cross-phase attribution and the coupling becomes invisible
-  debt.  See:
+  The cohort emit code "belongs" semantically to a different delivery
+  cohort from the commit that added it. Without the trailer, \`git blame\`
+  + \`git log -1\` does not reveal the attribution and the coupling becomes
+  invisible debt. See:
 
       ${SPEC_REF}
 
@@ -137,8 +137,8 @@ EOM
     exit 1
 }
 
-(( cohort_a_hit ))  && require_trailer "(a)  — Phase 6 shareable_reviews" "6"  "commit touches src/elspeth/web/shareable_reviews/"
-(( cohort_b1_hit )) && require_trailer "(b1) — Phase 5b interpretation opt-out" "5b" "commit adds opt-out telemetry / audit-content in sessions/{routes,service}.py"
-(( cohort_b2_hit )) && require_trailer "(b2) — Phase 2C audit_readiness"  "2c" "commit touches src/elspeth/web/audit_readiness/"
+(( cohort_a_hit ))  && require_trailer "(a)  — shareable_reviews" "shareable-reviews" "commit touches src/elspeth/web/shareable_reviews/"
+(( cohort_b1_hit )) && require_trailer "(b1) — interpretation opt-out" "interpretation-opt-out" "commit adds opt-out telemetry / audit-content in sessions/{routes,service}.py"
+(( cohort_b2_hit )) && require_trailer "(b2) — audit_readiness" "audit-readiness" "commit touches src/elspeth/web/audit_readiness/"
 
 exit 0

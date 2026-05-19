@@ -1,0 +1,78 @@
+version: 1
+# Active legacy scripts are explicitly tracked so the meta gate can reject any
+# new bespoke scripts/cicd/enforce_*.py file during the elspeth-lints migration.
+# Status lifecycle:
+#   pending -> shadow -> cutover -> deleted
+#
+# Shadow entries must include:
+#   new_rule: <elspeth-lints rule id>
+#   old_command: [<argv tokens emitting JSON findings>]
+#   new_command: [<argv tokens emitting JSON findings>]
+#
+# Supported command placeholders:
+#   {python}, {root}, {old_script}, {new_rule}
+rules:
+  - old_script: scripts/cicd/enforce_adapter_budget.py
+    new_rule: null
+    status: pending
+    migration_issue: null
+  - old_script: scripts/cicd/enforce_audit_evidence_nominal.py
+    new_rule: audit_evidence.nominal_base
+    status: deleted
+    migration_issue: elspeth-64d67da0de
+  - old_script: scripts/cicd/enforce_component_type.py
+    new_rule: plugin_contract.component_type
+    status: deleted
+    migration_issue: elspeth-90576d9826
+  - old_script: scripts/cicd/enforce_composer_catch_order.py
+    new_rule: composer.catch_order
+    status: deleted
+    migration_issue: elspeth-48db98bd88
+  - old_script: scripts/cicd/enforce_composer_exception_channel.py
+    new_rule: composer.exception_channel
+    status: deleted
+    migration_issue: elspeth-48db98bd88
+  - old_script: scripts/cicd/enforce_contract_manifest.py
+    new_rule: manifest.contract_manifest
+    status: deleted
+    migration_issue: elspeth-48db98bd88
+  - old_script: scripts/cicd/adr019_symbol_inventory.py
+    new_rule: manifest.symbol_inventory
+    status: deleted
+    migration_issue: elspeth-48db98bd88
+  - old_script: scripts/cicd/adr019_test_inventory.py
+    new_rule: manifest.test_to_source_mapping
+    status: deleted
+    migration_issue: elspeth-48db98bd88
+  - old_script: scripts/cicd/enforce_freeze_guards.py
+    new_rule: immutability.freeze_guards
+    status: deleted
+    migration_issue: elspeth-a3f6004c83
+  - old_script: scripts/cicd/enforce_frozen_annotations.py
+    new_rule: immutability.frozen_annotations
+    status: deleted
+    migration_issue: elspeth-a3f6004c83
+  - old_script: scripts/cicd/enforce_guard_symmetry.py
+    new_rule: audit_evidence.guard_symmetry
+    status: deleted
+    migration_issue: elspeth-64d67da0de
+  - old_script: scripts/cicd/enforce_gve_attribution.py
+    new_rule: audit_evidence.gve_attribution
+    status: deleted
+    migration_issue: elspeth-64d67da0de
+  - old_script: scripts/cicd/enforce_options_metadata.py
+    new_rule: plugin_contract.options_metadata
+    status: deleted
+    migration_issue: elspeth-8e8b49d58e
+  - old_script: scripts/cicd/enforce_plugin_hashes.py
+    new_rule: plugin_contract.plugin_hashes
+    status: deleted
+    migration_issue: elspeth-90576d9826
+  - old_script: scripts/cicd/enforce_tier_1_decoration.py
+    new_rule: audit_evidence.tier_1_decoration
+    status: deleted
+    migration_issue: elspeth-64d67da0de
+  - old_script: scripts/cicd/enforce_tier_model.py
+    new_rule: trust_tier.tier_model
+    status: deleted
+    migration_issue: elspeth-73990ea9f8

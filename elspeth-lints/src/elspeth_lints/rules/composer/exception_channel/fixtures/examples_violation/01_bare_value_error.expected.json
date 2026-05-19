@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "web/composer/tools.py",
+    "fingerprint": "f7ff4fda2232b1ab",
+    "line": 2,
+    "message": "raise ValueError(...) at web/composer/tools.py:2 — use ToolArgumentError",
+    "rule_id": "CEC1",
+    "severity": "error",
+    "suggestion": "raise ToolArgumentError(argument=..., expected=..., actual_type=...) from exc, or catch locally and return _failure_result"
+  }
+]

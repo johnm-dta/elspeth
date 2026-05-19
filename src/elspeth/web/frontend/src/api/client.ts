@@ -341,14 +341,20 @@ export async function renameSession(
   return parseResponse<Session>(response);
 }
 
-/** Run the tutorial pipeline for an already-built tutorial session. */
+/** Run the tutorial pipeline for an already-built tutorial session.
+ *
+ * Accepts an optional `AbortSignal` so the Turn 4 cancel button can abort
+ * an in-flight LLM call. Matches the signal convention used elsewhere in
+ * this module (see `fetchMessages`, `sendMessage`, etc.). */
 export async function runTutorialPipeline(
   body: TutorialRunRequest,
+  signal?: AbortSignal,
 ): Promise<TutorialRunResponse> {
   const response = await fetch("/api/tutorial/run", {
     method: "POST",
     headers: authHeaders("application/json"),
     body: JSON.stringify(body),
+    signal,
   });
   return parseResponse<TutorialRunResponse>(response);
 }

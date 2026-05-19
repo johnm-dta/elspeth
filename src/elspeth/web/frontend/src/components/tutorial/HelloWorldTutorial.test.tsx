@@ -280,15 +280,22 @@ describe("HelloWorldTutorial", () => {
           sessionId="strict-session"
           prompt="strict prompt"
           onCompleted={() => undefined}
+          onCancelled={() => undefined}
+          onBack={() => undefined}
         />
       </StrictMode>,
     );
 
     expect(await screen.findByText("bold")).toBeInTheDocument();
     expect(api.runTutorialPipeline).toHaveBeenCalledTimes(1);
-    expect(api.runTutorialPipeline).toHaveBeenCalledWith({
+    // Body shape unchanged; the second argument is the AbortSignal owned
+    // by the per-(session, prompt) cache entry and is asserted by type
+    // rather than by identity (a fresh signal is created per cache miss).
+    const [body, signal] = vi.mocked(api.runTutorialPipeline).mock.calls[0];
+    expect(body).toEqual({
       session_id: "strict-session",
       prompt: "strict prompt",
     });
+    expect(signal).toBeInstanceOf(AbortSignal);
   });
 });

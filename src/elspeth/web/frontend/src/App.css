@@ -62,6 +62,7 @@
   --color-error:             #e85653;
   --color-warning:           #e38444;
   --color-info:              #61daff;
+  --color-state-positive:    #14b0ae;
 
   /* ── Semantic backgrounds — for inline alert/banner components ────────────── */
   --color-success-bg:        rgba(20, 176, 174, 0.12);
@@ -1740,7 +1741,9 @@ summary:focus-visible {
 
 .tutorial-turn h3 {
   margin: 0 0 var(--space-sm);
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .tutorial-turn p {
@@ -1777,14 +1780,19 @@ summary:focus-visible {
 
 .tutorial-layer-grid,
 .tutorial-summary-grid {
+  /* Rendered as <ol> so assistive tech reports the layer/stage sequence
+     with explicit ordering. Reset list defaults to keep the existing
+     grid layout. */
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-md);
   margin-top: var(--space-lg);
+  padding: 0;
+  list-style: none;
 }
 
 .tutorial-layer,
-.tutorial-summary-grid > div {
+.tutorial-summary-grid > li {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--space-lg);
@@ -1792,14 +1800,25 @@ summary:focus-visible {
 }
 
 .tutorial-layer strong {
+  /* Neutral emphasis (uppercase + body text colour). The prior
+     --color-success green read as "completed" semantics on a welcome
+     screen where nothing has happened yet. */
   display: block;
-  color: var(--color-success);
+  color: var(--color-text);
   margin-bottom: var(--space-xs);
   text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .tutorial-muted {
   color: var(--color-text-muted);
+}
+
+.tutorial-preamble {
+  /* Small subdued line under the welcome cards and above the Turn 4 run
+     indicator. Signals "here is what happens next" before the LLM call. */
+  margin-top: var(--space-md);
+  font-size: var(--font-size-sm);
 }
 
 .tutorial-textarea-label {
@@ -1834,10 +1853,34 @@ summary:focus-visible {
 }
 
 .tutorial-graph {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  /* Rendered as <ol> with <li> stages and aria-hidden chevrons between
+     them. Flexbox so the chevron items can be narrow auto-width siblings
+     of the flex:1 stage items. Under 760px the layout switches to
+     column-direction (see media query below) and chevrons rotate. */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
   gap: var(--space-md);
   margin: var(--space-xl) 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tutorial-graph > li {
+  flex: 1 1 130px;
+  min-width: 130px;
+  display: flex;
+  flex-direction: column;
+}
+
+.tutorial-graph-chevron {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  font-size: 24px;
+  line-height: 1;
 }
 
 .tutorial-graph-stage {
@@ -1875,17 +1918,63 @@ summary:focus-visible {
 }
 
 .tutorial-progress-bar {
+  /* Indeterminate progress affordance. The prior implementation was a
+     static 60% gradient that reads as "stuck at 60%". A sliding shimmer
+     gives the user a continuous "still working" signal without claiming
+     a specific completion percentage. Under prefers-reduced-motion the
+     animation is suppressed and the bar falls back to a flat,
+     non-misleading "Working…" chip rendered alongside (handled by the
+     consumer; see Turn 4's status text region). */
   width: 160px;
   height: 10px;
   border-radius: 999px;
-  background:
-    linear-gradient(90deg, var(--color-success) 0 60%, transparent 60%),
-    var(--color-surface-elevated);
+  background: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
+  overflow: hidden;
+  position: relative;
+}
+
+.tutorial-progress-bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-state-positive) 50%,
+    transparent
+  );
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tutorial-progress-bar::after {
+    animation: tutorial-progress-slide 1.4s ease-in-out infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tutorial-progress-bar::after {
+    /* Static centred chunk so the affordance still says "something is
+       happening" without motion. */
+    left: 30%;
+    background: var(--color-state-positive);
+  }
+}
+
+@keyframes tutorial-progress-slide {
+  from {
+    left: -40%;
+  }
+  to {
+    left: 100%;
+  }
 }
 
 .tutorial-run-summary {
-  color: var(--color-success);
+  color: var(--color-state-positive);
   font-weight: 600;
 }
 
@@ -1939,6 +2028,57 @@ summary:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.tutorial-hash {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.tutorial-hash-value {
+  flex: 1 1 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  overflow-wrap: anywhere;
+}
+
+.tutorial-hash-copy {
+  /* Compact button — does not require .btn's 44px hit area because it sits
+     in a dense audit panel; instead inherit min-height from the row's
+     wrap height. Still focusable via :focus-visible. */
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: var(--space-xs) var(--space-sm);
+}
+
+.tutorial-hash-copy:hover {
+  background: var(--color-surface-hover);
+}
+
+.tutorial-cancelled-note {
+  /* Rendered on Turn 6 when the user arrived via cancelRun. role="status"
+     so AT users hear the acknowledgement when the turn mounts. Visually
+     subdued (uses the warning-bg tint, not warning-fg) so it reads as an
+     informational note, not an error. */
+  margin: 0 0 var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  color: var(--color-text);
+}
+
 .tutorial-mode-fieldset {
   display: grid;
   gap: var(--space-md);
@@ -1984,7 +2124,7 @@ summary:focus-visible {
 }
 
 .tutorial-progress-dot--active {
-  background: var(--color-success);
+  background: var(--color-state-positive);
 }
 
 @media (max-width: 760px) {
@@ -1998,9 +2138,18 @@ summary:focus-visible {
 
   .tutorial-layer-grid,
   .tutorial-summary-grid,
-  .tutorial-graph,
   .tutorial-audit-list {
     grid-template-columns: 1fr;
+  }
+
+  .tutorial-graph {
+    /* Stack stages vertically; chevrons rotate 90deg so the down-arrow
+       direction still reads as flow. */
+    flex-direction: column;
+  }
+
+  .tutorial-graph-chevron {
+    transform: rotate(90deg);
   }
 }
 
@@ -2050,10 +2199,16 @@ summary:focus-visible {
   --color-info-border:       rgba(40, 150, 190, 0.30);
 
   /* ── Semantic colours — slightly darkened for light backgrounds ───────── */
+  /* --color-info and --color-link were deepened from #2890b8 to #176d8a so
+     they meet WCAG AA (4.5:1) as text on --color-bg (#f4f8f9). Verified by
+     colorContrast.test.ts. The semantic-colour-on-tinted-bg pairings (e.g.
+     --color-info on --color-info-bg) become slightly higher-contrast, which
+     is the desired direction. */
   --color-success:           #0d8a88;
   --color-error:             #c93b38;
   --color-warning:           #b86830;
-  --color-info:              #2890b8;
+  --color-info:              #176d8a;
+  --color-state-positive:    #056e6c;
 
   /* ── Component type badges — WCAG AA 4.5:1 on 12% badge backgrounds ──── */
   --color-badge-source:      #257963;
@@ -2092,7 +2247,7 @@ summary:focus-visible {
   --color-btn-primary-bg-hover: #156048;
   --color-btn-danger-bg:     #b23835;
   --color-btn-danger-bg-hover: #912f2d;
-  --color-link:              #2890b8;
+  --color-link:              #176d8a;
   --color-highlight:         rgba(21, 96, 72, 0.12);
   --color-selected-ring:     rgba(21, 96, 72, 0.45);
 
@@ -2228,6 +2383,35 @@ summary:focus-visible {
 
   .yaml-toolbar-btn[data-copied="true"] {
     border: 2px solid Highlight;
+  }
+
+  /* First-run tutorial — high-contrast fallbacks. Without these the
+     graph nodes render borderless, the active progress dot is
+     indistinguishable from inactive dots, and the indeterminate
+     progress bar disappears into the surface. */
+  .tutorial-graph-node {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .tutorial-graph-chevron {
+    color: CanvasText;
+  }
+
+  .tutorial-progress-dot {
+    border: 1px solid CanvasText;
+  }
+
+  .tutorial-progress-dot--active {
+    background: Highlight;
+  }
+
+  .tutorial-progress-bar {
+    border: 1px solid CanvasText;
+  }
+
+  .tutorial-progress-bar::after {
+    background: Highlight;
   }
 }
 

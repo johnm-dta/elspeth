@@ -130,3 +130,68 @@ showed diminishing returns at exactly this point. The four pass-3
 blockers were operator-decision shaped, not mechanical-fix shaped;
 pass-4 would have produced a different four blockers from the same
 convergent dynamic. Phase 8 ships on the pass-3 resolutions.
+
+## 2026-05-19 — cross-plan contract amendment (Phase 4 ↔ Phase 8 P1)
+
+Phase 4 pass-1 review found a Systems S1 contract rupture between
+Phase 4 and Phase 8 Task 6 over the `tutorial_completed_at` field
+shape and PATCH semantics. Phase 8 Task 6 originally tested
+`PATCH {"tutorial_completed": false}` against a boolean
+`tutorial_completed` field that Phase 4 was not in fact going to
+ship; Phase 4 ships `tutorial_completed_at: datetime | None` with
+the original draft disallowing nullification via PATCH — the very
+operation Phase 8 needed.
+
+Synthesizer-adopted resolution: Option (a) — single column, single
+contract; Phase 4 permits explicit `null` in the PATCH body to
+clear the column; Phase 8 retake PATCHes
+`{"tutorial_completed_at": null}`. The Pydantic three-state
+discrimination (absent / datetime / null) is implemented via
+`model_fields_set`. The boolean frontend accessor
+(`tutorialCompleted = (tutorialCompletedAt !== null)`) is unchanged.
+
+Edits applied in the Phase 8 plan:
+
+- §Pre-flight check probe table: probe target updated from
+  `'tutorial_completed'` to `'tutorial_completed_at'`.
+- §Sibling plans: Phase 4 line updated to link the shipped plan
+  and the cross-plan contract section.
+- §Scope boundaries: Task 6 bullet rewritten to name the new PATCH
+  body and cite the cross-plan contract.
+- §Decision 2 prose: PATCH body string updated.
+- §Trust tier check: Tier-1 entry renamed from
+  `composer.tutorial_completed` (bool) to
+  `user_preferences_table.tutorial_completed_at` (datetime | None)
+  with the Phase 4 Tier-1 read-side guard cited. Tier-3 entry
+  reshaped from "Pydantic `Literal[False]` / `bool`" to "Pydantic
+  `datetime | None` accepts null, rejects other types with 422".
+- §B2 service-signature reshape: transition predicate updated from
+  `prior.tutorial_completed and not current.tutorial_completed` to
+  `prior.tutorial_completed_at is not None and current.tutorial_completed_at is None`.
+- §Cohort (c) Phase 9 follow-up text: `True → False` transition
+  rewritten as `not-None → None` (retake); the Q6 transition-edge
+  test names updated from `true_to_false`/`false_to_true` to
+  `set_to_null`/`null_to_set`.
+- Task 6 Step 1 (probe): grep target updated; case-A/B language
+  shifted from "flag" to "column".
+- Task 6 Step 2 (wire shape): rewritten to cite Phase 4's
+  cross-plan contract directly; PATCH body updated.
+- Task 6 Step 3 (Q5 Pydantic boundary tests): the three original
+  bool-rejection tests (`string_false`, `integer_zero`, `null`)
+  removed (those rejections now live in Phase 4); replaced with
+  two retake-specific tests (`with_explicit_null_clears`,
+  `distinguishes_absent_from_null`).
+- Task 6 Step 5 (store action): API call corrected to
+  `api.updateComposerPreferences({ tutorial_completed_at: null })`;
+  TypeScript request type contract pinned to allow `null`; a
+  prohibition added on inventing a separate
+  `clearTutorialCompleted` store action (single shared API
+  surface).
+- Task 6 deferred-Step-7 block: surrounding prose updated; new
+  paragraph added naming the audit-emit boundary question for
+  Phase 9 (where the audit event lives, prior-timestamp capture,
+  Landscape-row-versus-counter choice).
+
+No change to the Decision 2 Option C outcome itself
+(`composer.tutorial.replayed_total` remains deferred to Phase 9);
+only the field-name, type, and PATCH-body shape were corrected.

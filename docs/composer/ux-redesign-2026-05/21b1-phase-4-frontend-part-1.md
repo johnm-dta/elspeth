@@ -343,8 +343,11 @@ export interface ComposerPreferences {
 export interface UpdateComposerPreferencesRequest {
   default_mode?: 'guided' | 'freeform';
   banner_dismissed_at?: string;
-  // Phase 4: caller sends an ISO timestamp string to mark tutorial complete.
-  tutorial_completed_at?: string;
+  // Phase 4: caller sends an ISO timestamp string to mark tutorial complete,
+  // or explicit `null` to clear it (Phase 8 retake path). Optional `?` =
+  // absent (no-op); explicit `null` = write NULL to the column.
+  // Three-state contract — see 21a §"Cross-plan contract — `tutorial_completed_at` PATCH semantics".
+  tutorial_completed_at?: string | null;
 }
 ```
 

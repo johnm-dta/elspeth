@@ -75,8 +75,11 @@ Design spec: [04-first-run-tutorial.md](04-first-run-tutorial.md).
 
 **Out of scope (handled elsewhere or post-launch):**
 
-- Re-take tutorial from settings (Open Question C3 — post-launch; Phase 8
-  handles if telemetry shows demand).
+- Re-take tutorial from settings (Open Question C3 — Phase 8 Task 6 ships
+  this affordance). The Phase 4 PATCH contract permits nullification via
+  `{"tutorial_completed_at": null}` so Phase 8 can clear the column with no
+  additional Phase 4 changes; see §"Cross-plan contract" in
+  [21a-phase-4-backend.md](21a-phase-4-backend.md).
 - A "rename" transform alternative to the LLM-rate transform for the canonical
   seed (Open Question C1; recommended call is `(a) LLM with aggressive cache`,
   which is what this plan implements).
@@ -157,7 +160,7 @@ introduced in the user's first **real** session, not the tutorial.
 |---|---|---|---|
 | C1 | Tutorial transform: rename, LLM, or both? | **(a) LLM with aggressive cache** | The canonical seed produces a pipeline with the existing `web_scrape` + `llm_rate` transforms. No rename-transform alternative is shipped. The cache is the cost-control mechanism. |
 | C2 | Tutorial-skip affordance | **(b) subtle skip link in turn 1 → fast-forwards to turn 6 only** | Turn 1 component includes a small "I've used ELSPETH before, skip this" link. Clicking it sets `tutorial_completed_at` to now AND advances directly to turn 6's mode-choice — without build/run. The vocabulary teaching is lost (acceptable for returning users per design doc 04 §Risks). |
-| C3 | Re-take tutorial from settings | **Post-launch (Phase 8)** | Not implemented here. The settings menu has no "retake" entry yet; Phase 8 wires this if telemetry shows demand. |
+| C3 | Re-take tutorial from settings | **Phase 8 Task 6** | Not implemented in Phase 4. The settings menu has no "retake" entry until Phase 8 ships it. Phase 4 ships the PATCH contract that permits nullification (`tutorial_completed_at: null` clears the column) so Phase 8's button needs no Phase 4 schema or service changes — see §"Cross-plan contract — `tutorial_completed_at` PATCH semantics" in 21a. |
 
 ## "Shifting the Burden" risk explicitly acknowledged
 
@@ -246,9 +249,16 @@ the Alembic project, which is a much larger commitment.
 
 - `src/elspeth/web/frontend/src/stores/preferencesStore.ts` — add
   `tutorialCompleted: boolean` (derived from `tutorialCompletedAt` non-null)
-  and `markTutorialCompleted(defaultMode)` action.
+  and `markTutorialCompleted(defaultMode)` action. Phase 8 Task 6's retake
+  path reuses the same PATCH API client function (with body
+  `{tutorial_completed_at: null}`) — Phase 4 does **not** add a separate
+  `clearTutorialCompleted` action; Phase 8 calls
+  `api.updateComposerPreferences({ tutorial_completed_at: null })` and then
+  re-bootstraps the store.
 - `src/elspeth/web/frontend/src/api/client.ts` — extend the
-  preferences-API typing to include `tutorial_completed_at`.
+  preferences-API typing to include `tutorial_completed_at`. The TypeScript
+  request type must allow `null` (not just `undefined`) so the Phase 8
+  retake call type-checks.
 - `src/elspeth/web/frontend/src/App.tsx` — bootstrap-time check; route to
   `HelloWorldTutorial` if `preferencesStore.tutorialCompleted === false` AND
   the user has no active sessions (defensive belt-and-braces — but the
@@ -347,7 +357,7 @@ fresh LLM run — is the cost we're trying to avoid).
 | **User refreshes the page mid-tutorial.** | The tutorial state machine is in-memory (Zustand-free; lives in `HelloWorldTutorial.tsx` `useReducer` state). On refresh, the user lands back at turn 1 — unless the tutorial reached the point where the pipeline was created (turn 2b onwards). At turn 2b, the session exists in the backend; the tutorial detection logic considers a user with `tutorial_completed_at IS NULL` AND `>=1 session` as "tutorial interrupted." The recovery path is to re-show turn 1 with a small "You started the tutorial earlier — pick it up from where you left off?" note. **However**, recovering mid-tutorial state cleanly is genuinely hard (turn 2b depends on the LLM's interpretation event from Phase 5b being still-pending, turn 4's run output may or may not exist, etc.). **Accepted simplification:** on refresh, restart at turn 1. The unsaved-on-the-way work is fine to lose; the canonical seed produces a fresh pipeline each time, and the cache makes that fast. |
 | **Cache corruption.** | The cache is Tier-1 data; corruption is a fault. The tutorial cache reader uses Pydantic to parse the JSON file. If the parse fails, crash with the file path and the parse error chained via `from`. The operator's recovery is to delete the cache directory. **Do not** silently fall back to a live LLM call: that would mask the corruption and ship demonstrably wrong audit snippets to the user. |
 | **Concurrent first-session for the same user (two browser tabs).** | Two tabs may both decide "tutorial not yet done" and both render the tutorial container. The user finishes in tab A; PATCH writes `tutorial_completed_at`. Tab B continues rendering its tutorial container until its next preference read. Outcome: tab B may produce a second pipeline/session named "hello-world (cool government pages)". This is acceptable — the user has two pipelines they can run/edit/delete independently. No locking is added (the Phase 1A "Concurrent PATCH race window" mitigation applies: SQLite `ON CONFLICT DO UPDATE` resolves to the last write). |
-| **User explicitly clicks "skip" but immediately wants to come back.** | The skip affordance writes `tutorial_completed_at = now()`. To take the tutorial again, the user must clear it from settings (post-launch, Open Question C3). For now, an operator can clear the row manually. This is acceptable for the launch window; if telemetry shows skip-then-regret is common, Phase 8 wires the settings entry. |
+| **User explicitly clicks "skip" but immediately wants to come back.** | The skip affordance writes `tutorial_completed_at = now()`. Phase 8 Task 6 ships a "Replay hello-world tutorial" button in settings that PATCHes `{"tutorial_completed_at": null}` to re-enter tutorial mode (the Phase 4 PATCH contract supports this directly — see §"Cross-plan contract" in 21a). Between Phase 4 ship and Phase 8 ship, an operator can clear the row via SQL. |
 | **User edits the LLM's interpretation in turn 2b but then changes their mind.** | The Phase 5b interpretation-events table records every resolution; if the user wants to revisit, the standard composer flow surfaces pending interpretation events. The tutorial's turn 2b is just a styled wrapper around the existing `InterpretationReviewTurn` from Phase 5b. The user cannot "undo" an interpretation acceptance from inside the tutorial; the design doc 04 implicit choice is that this is acceptable for a 3-minute hello-world. |
 | **Cache fills with one entry per model rotation, growing forever.** | One entry per `(canonical_prompt, model)` is small (model count is small; canonical prompts is one). Filesystem footprint is bounded. No eviction policy needed. |
 | **Phase 5b's `interpretation_events_table` doesn't yet record the prompt-template string.** | This is a Phase 5b dependency. The Phase 4 preflight (plan 21a Task 0) verifies it. If 5b's table doesn't yet record the prompt template, the tutorial cannot deliver on the design doc 04 promise "Your accepted definition of 'cool' — recorded as a prompt template" — in which case Phase 4 implementation halts and the operator is informed. Per CLAUDE.md "no defensive programming": the tutorial does **not** fall back to canned text. |
@@ -379,7 +389,27 @@ promise mapped to its Phase 4 implementation:
 
 ## Review history
 
-(Empty at draft time. Reviewers append findings below.)
+### 2026-05-19 — cross-plan contract amendment (Phase 4 ↔ Phase 8)
+
+Pass-1 review (Systems S1) found that Phase 4's draft forbade nullification
+of `tutorial_completed_at` via PATCH while Phase 8 Task 6 expected to clear
+the column via the same PATCH endpoint. Resolution: Option (a) — Phase 4
+permits explicit-null nullification; Phase 8 retake uses
+`PATCH {"tutorial_completed_at": null}`. The same field and same column
+remain a single shared contract. See 21a §"Cross-plan contract —
+`tutorial_completed_at` PATCH semantics" for the canonical statement.
+
+Edits applied in this overview:
+
+- §Out of scope — C3 bullet updated to reference Phase 8 Task 6 and the
+  shared contract (formerly "post-launch if telemetry shows demand").
+- §Open-question decisions — C3 row updated to name Phase 8 Task 6 and link
+  to the shared contract.
+- §Risks — the "skip but wants to come back" row updated to name the
+  Phase 8 retake button.
+- §File inventory — `preferencesStore.ts` and `client.ts` rows note that
+  Phase 8 retake reuses the existing API surface (no new
+  `clearTutorialCompleted` action).
 
 ---
 

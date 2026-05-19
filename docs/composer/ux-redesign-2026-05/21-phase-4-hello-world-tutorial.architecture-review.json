@@ -1,0 +1,202 @@
+{
+  "review_type": "architecture",
+  "reviewer": "architecture-review-agent",
+  "date": "2026-05-19",
+  "plan_files": [
+    "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+    "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+    "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+    "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md"
+  ],
+  "verdict": "CHANGES_REQUESTED",
+  "confidence": "high",
+  "blast_radius": {
+    "files_touched_raw": 30,
+    "weighted_score": 27,
+    "risk_level": "VERY_HIGH",
+    "weighting_notes": [
+      "src/elspeth/web/sessions/models.py — schema file (3x): DB schema + SQLAlchemy table definitions. Column addition + epoch bump lands here.",
+      "src/elspeth/web/preferences/service.py — core business logic (2x): service layer with Panel C2 guard, telemetry counter, CorruptPreferencesError pattern.",
+      "src/elspeth/web/preferences/models.py — core business logic (2x): Pydantic models with Panel U1 nullable updated_at contract.",
+      "src/elspeth/web/sessions/tutorial_cache.py (new) — core business logic (2x): new module; Tier-1 cache semantics, SHA-256 key, crash-on-corrupt pattern.",
+      "src/elspeth/web/routes/preferences.py — core business logic (2x): route layer for preferences endpoints.",
+      "src/elspeth/web/routes/tutorial.py (new) — core business logic (2x): two new endpoints (POST /tutorial/seed, POST /tutorial/complete).",
+      "Configuration, test, and frontend component files counted at standard or 0.5x weight."
+    ],
+    "recommendation": "Strongly recommend splitting into two independently-landable PRs: 21a backend (Tasks 0-7) and 21b frontend (Tasks 1-15). The tasks already follow this split implicitly."
+  },
+  "one_way_doors": [
+    {
+      "id": "OWD-1",
+      "change": "ADD COLUMN tutorial_completed_at to user_preferences_table",
+      "risk": "MEDIUM",
+      "rationale": "Per project DB migration policy (project_db_migration_policy.md + project_phase9_sqlite_only.md): migration = delete the old DB. Column add is low structural risk. However, the column enables the skip-retake flow described in A7 — once users write tutorial_completed_at, removing retake requires another DB delete or a new column to track 'wants retake'. One-way in the sense that the skip state is sticky with no undo path until Phase 8.",
+      "mitigation_in_plan": "PARTIAL — plan acknowledges retake is deferred to Phase 8 (21-phase-4-hello-world-tutorial.md, Risks section) but does not flag this as a one-way door or establish a recovery path if Phase 8 slips."
+    },
+    {
+      "id": "OWD-2",
+      "change": "Cache schema: SHA-256(canonical_prompt + ':' + model_id) keyed flat-file JSON store classified Tier 1",
+      "risk": "HIGH",
+      "rationale": "Cache classified as Tier 1 ('our data, crash on corruption'). This establishes a precedent for treating serialized LLM output as Tier-1 data. If the cache format needs to change — e.g., adding a field, changing the prompt, rotating the model_id — the crash-on-corruption rule triggers. Rolling key rotation or prompt iteration would require a cache purge script (not described) or a silent invalidation path (not Tier-1 compatible). The flat-file format is also not versioned.",
+      "mitigation_in_plan": "NONE — cache is described with Tier-1 semantics (crash on corrupt, miss on absence) but no version field, no purge mechanism, and no discussion of cache invalidation when the prompt or model changes. 21a-phase-4-backend.md Task 6 classifies the cache as Tier 1 without acknowledging the upgrade/invalidation contradiction."
+    },
+    {
+      "id": "OWD-3",
+      "change": "Two new public REST endpoints: POST /api/tutorial/seed and POST /api/tutorial/complete",
+      "risk": "MEDIUM",
+      "rationale": "New API surface. Once used by the frontend, removing or renaming these endpoints is a breaking change. Plan has no versioning strategy.",
+      "mitigation_in_plan": "Acceptable for an internal-only API where frontend and backend are co-deployed. ELSPETH has no external API consumers at this stage. No action required."
+    }
+  ],
+  "findings": [
+    {
+      "id": "A1",
+      "severity": "BLOCKING",
+      "category": "pattern-alignment",
+      "title": "SESSION_SCHEMA_EPOCH not bumped — startup validator will fire late or not at all",
+      "detail": "The plan adds a column (tutorial_completed_at) to user_preferences_table, which is part of the schema governed by SESSION_SCHEMA_EPOCH. The startup validator _assert_schema_version crashes immediately if the epoch in code doesn't match the epoch baked into the existing DB — this is the clean 'delete your DB' signal. The plan never references SESSION_SCHEMA_EPOCH. Executor following the plan will land a schema change without advancing the epoch, causing one of: (a) silent mismatch between old and new DB layouts on upgrade, (b) delayed runtime crash at the column-read site rather than startup, or (c) confusing errors for staging operators who don't know to delete the DB.",
+      "evidence": "grep -r 'SCHEMA_EPOCH' in all four plan files: zero matches. sessions/models.py line confirms current epoch = 4 with comment history showing every prior column addition bumped this.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 0, Task 1 — no epoch bump step)",
+        "src/elspeth/web/sessions/models.py (live: SESSION_SCHEMA_EPOCH = 4)"
+      ],
+      "recommendation": "Add an explicit step in 21a Task 1 (or Task 0 preflight): bump SESSION_SCHEMA_EPOCH to 5 and add a comment line to the epoch history. The epoch bump is the correct single source of truth for 'schema changed, delete your DB'."
+    },
+    {
+      "id": "A2",
+      "severity": "BLOCKING",
+      "category": "attributability",
+      "title": "Cache-hit run attribution violates CLAUDE.md attributability test",
+      "detail": "On cache hit, plan Task 7 returns the run_id that was cached from the original tutorial execution. Frontend Turn 5 then calls GET /api/sessions/{session_id}/runs/{run_id}/audit-story, where session_id is the current user's session but run_id belongs to a different (earlier) session — possibly a different user's session entirely. This produces one of: (a) a 404 because run_id is not associated with the current session_id, (b) an audit-story for the wrong session context, or (c) (worst case) cross-user lineage exposure if the cache is populated from a different user's prior run. No Landscape entry is created for the current user's tutorial run on cache hit. CLAUDE.md: 'For any output, explain(recorder, run_id, token_id) must prove complete lineage back to source.' On cache hit, this is impossible — the current user's session has no lineage entry.",
+      "evidence": "21a-phase-4-backend.md Task 6 (cache module) returns run_id from cached payload. Task 7 Step 5 calls run-path integration passing cached_run_id. 21b2 Task 10 TutorialTurn5 fetches audit-story for session_id + run_id. No plan task creates a Landscape record or session-run association for cache-hit execution.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 6 — cache module, Task 7 — run-path integration)",
+        "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md (Task 10 — TutorialTurn5)"
+      ],
+      "recommendation": "Cache hit should not return a run_id from another session. Options in priority order: (1) Cache only the pipeline YAML + source config (i.e., the 'what to run'); always execute fresh for each new session (cache the LLM-generation cost, not the run). (2) If caching the run result is required for cost: create a lightweight Landscape read receipt or session-run association for the current session on cache hit, so the audit trail is connected. Option (1) is architecturally cleaner and removes the cross-session attribution problem entirely."
+    },
+    {
+      "id": "A3",
+      "severity": "MAJOR",
+      "category": "pattern-regression-risk",
+      "title": "Plan service snippet diverges from established service pattern — Panel C2 guard and telemetry counter at risk",
+      "detail": "The plan's 21a Task 3 Step 3 provides a complete rewrite snippet for update_composer_preferences. The live service contains two load-bearing patterns not reflected in the plan snippet: (a) the payload_is_empty Panel C2 guard (empty PATCH on no-row user is a documented no-op, no row inserted) at lines 186 and 226-231 of preferences/service.py, and (b) the _PREFERENCES_PATCH_COUNTER telemetry counter at lines 84-88 and 293-300 with attributes mode_changed, banner_dismissed, wrote_row. An executor following the plan snippet literally will silently drop both. The plan does not flag these as 'patterns to preserve'; it frames the task as 'extend the service.'",
+      "evidence": "preferences/service.py lines 84-88 (_PREFERENCES_PATCH_COUNTER definition), 186 (payload_is_empty call), 226-231 (no-insert guard with comment 'Panel C2 guard'), 293-300 (counter emission). 21a-phase-4-backend.md Task 3 snippet contains neither reference.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 3, Step 3)",
+        "src/elspeth/web/preferences/service.py (live pattern at lines 84-88, 186, 226-231, 293-300)"
+      ],
+      "recommendation": "Revise Task 3 Step 3 to provide an additive diff rather than a full-function rewrite. Explicitly call out 'preserve Panel C2 guard at line 186' and 'preserve telemetry counter at lines 293-300' as non-negotiable. Or restructure the task as 'add tutorial_completed_at handling following the existing banner_dismissed_at pattern' rather than 'rewrite the function.'"
+    },
+    {
+      "id": "A4",
+      "severity": "MAJOR",
+      "category": "pattern-alignment",
+      "title": "CorruptPreferencesError pattern not applied to tutorial_completed_at read guard",
+      "detail": "The live service uses CorruptPreferencesError(user_id, bad_value) as the named exception for Tier-1 read guard failures — see preferences/service.py lines 47-69 (class definition) and 151, 259 (raise sites). The service comment at line 257-259 explicitly requires parity between get and update read paths. The plan's proposed guard for tutorial_completed_at uses bare raise RuntimeError(...) rather than CorruptPreferencesError. This breaks the named exception pattern that downstream error handlers, tests, and the CLAUDE.md offensive programming mandate all depend on.",
+      "evidence": "preferences/service.py lines 47-69: CorruptPreferencesError definition with user_id and bad_value attributes. Lines 151, 259: raise sites. 21a-phase-4-backend.md Task 3 snippet uses raise RuntimeError(f'corrupt tutorial_completed_at ...') without referencing CorruptPreferencesError.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 3, Step 3)",
+        "src/elspeth/web/preferences/service.py (live pattern at lines 47-69, 151, 259)"
+      ],
+      "recommendation": "Replace the bare RuntimeError in the plan snippet with CorruptPreferencesError(user_id=user_id, bad_value=raw_val). Update Task 3 test cases to assert CorruptPreferencesError, not RuntimeError."
+    },
+    {
+      "id": "A5",
+      "severity": "MAJOR",
+      "category": "pattern-alignment",
+      "title": "Plan snippet shows ComposerPreferences.updated_at as non-nullable — contradicts live Panel U1 contract",
+      "detail": "The live preferences/models.py has updated_at: datetime | None (Panel U1: nullable for no-row case). The plan's 21a Task 2 snippet shows updated_at: datetime (non-nullable). This is not a trivial type annotation gap: Panel U1 governs the no-row GET response and the empty-PATCH-on-no-row path. Changing nullable to non-nullable silently breaks both paths and would cause a Pydantic validation error when the service returns updated_at=None for a user with no preferences row.",
+      "evidence": "preferences/models.py line 59: updated_at: datetime | None. Plan 21a Task 2 snippet: updated_at: datetime (no | None). Panel U1 documented in models.py docstring and service.py line 132.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 2, model snippet)",
+        "src/elspeth/web/preferences/models.py (live: line 59)"
+      ],
+      "recommendation": "Fix the Task 2 snippet to show updated_at: datetime | None. Add an explicit note: 'preserve Panel U1 — updated_at is nullable; do not change this.' Add a test case in Task 5 that asserts updated_at=None for the no-row GET path."
+    },
+    {
+      "id": "A6",
+      "severity": "MAJOR",
+      "category": "complexity",
+      "title": "Run-path integration point unresolved at plan-writing time — most architecturally sensitive task deferred to in-flight recon",
+      "detail": "21a Task 7 is the most architecturally delicate task: it integrates the tutorial seed into the live run path. Step 1 of Task 7 explicitly punts identification of the entry point to the executor: 'Step 1: Identify the run-path entry point (grep for execute_pipeline or equivalent; this varies by session type).' The run path is L2/L3 engine code. Touching it without prior analysis risks introducing a dependency inversion (L2 calling into L3 tutorial-cache code), a layer violation (web/routes calling engine internals), or a race condition in the session lifecycle. This should be resolved before the plan ships, not during implementation.",
+      "evidence": "21a-phase-4-backend.md Task 7 Step 1: 'Identify the run-path entry point (grep for execute_pipeline or equivalent; this varies by session type).' No prior task establishes this. The tutorial_cache module (Task 6) is at the web layer (L3 app); the run path may be at L2 engine — a potential upward-import violation per CLAUDE.md layer rules.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 7, Step 1)"
+      ],
+      "recommendation": "Before the plan is implemented, do the Task 7 Step 1 recon and add the result to the plan. The plan should specify: (a) the exact function/file where cache lookup will be inserted, (b) which layer that code lives in, and (c) how tutorial_cache will be imported from that layer without a layer violation. If the entry point is at L2 or below, the cache module must live at L2 or be accessed via an L1/L0 protocol — not imported from the web layer."
+    },
+    {
+      "id": "A7",
+      "severity": "MAJOR",
+      "category": "one-way-door",
+      "title": "Skip writes irreversible state with no retake path until Phase 8 — Phase 8 timeline is undefined",
+      "detail": "When a user skips the tutorial, tutorial_completed_at is written. There is no un-skip affordance. The plan delegates retake capability to Phase 8 (acknowledged in the Risks section of 21-phase-4-hello-world-tutorial.md). Project memory feedback_no_calendar_shipping_commitments.md: 'ELSPETH ships work-until-done.' Phase 8 may slip indefinitely. Any user who skips is permanently locked out of the tutorial until Phase 8 ships. Given that the tutorial is designed as the primary onboarding surface for new users (project memory project_composer_first_run_tutorial.md), this is not a minor UX issue — it's an onboarding dead-end.",
+      "evidence": "21-phase-4-hello-world-tutorial.md Risks section: 'retake path deferred to Phase 8.' No filigree dependency link between Phase 4 and Phase 8 retake issue. project memory: feedback_no_calendar_shipping_commitments.md.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md (Risks section)"
+      ],
+      "recommendation": "Either: (a) Add a simple retake path within Phase 4 — a settings preference toggle 'reset tutorial' that clears tutorial_completed_at (low effort, same column). Or (b) Add a filigree dependency so Phase 4 is blocked until Phase 8 retake is scoped and queued. Option (a) is cheaper and removes the one-way door."
+    },
+    {
+      "id": "A8",
+      "severity": "MAJOR",
+      "category": "blast-radius",
+      "title": "Blast radius VERY HIGH — no phasing plan despite natural 21a/21b split",
+      "detail": "The plan touches approximately 30 files with a weighted score of ~27 (schema files at 3x, service files at 2x). This is Very High risk by the review protocol. The plan does not propose splitting into two PRs even though its own structure cleanly supports this: 21a (backend, Tasks 0-7) and 21b (frontend, Tasks 1-15) are independently testable and deployable. Shipping both as a single PR increases rollback complexity, review surface, and the risk of frontend task blocking backend landing.",
+      "evidence": "File inventories in 21-phase-4-hello-world-tutorial.md, 21a-phase-4-backend.md, 21b1/21b2 plan files. Natural split: backend has its own test suite (pytest); frontend has its own (vitest + Playwright). The plan itself segments into 21a and 21b.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md (file inventory)"
+      ],
+      "recommendation": "Split into two PRs: PR-21a (backend) and PR-21b (frontend, depends on PR-21a merged). This matches the plan's existing document structure. No restructuring of the plan itself is required — just explicit PR boundaries and a dependency between them."
+    },
+    {
+      "id": "A9",
+      "severity": "MINOR",
+      "category": "pattern-alignment",
+      "title": "Defensive ?? [] on inline_blob URLs violates CLAUDE.md no-defensive-programming rule",
+      "detail": "21b1 Tasks 6 and 7 contain the snippet: ((pipelineSnapshot.source as { urls?: string[] }).urls) ?? []. The ?? [] is defensive fallback programming: if urls is absent from an inline_blob source, this silently produces an empty array rather than surfacing the structural bug. CLAUDE.md: 'Do not use .get(), getattr(), isinstance(), or silent exception handling to suppress errors from nonexistent attributes.' The TypeScript equivalent is the ?? fallback operator in this context.",
+      "evidence": "21b1-phase-4-frontend-part-1.md Tasks 6 and 7 component snippets.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md (Tasks 6, 7)"
+      ],
+      "recommendation": "Replace with an assertion: if (!pipelineSnapshot.source || !('urls' in pipelineSnapshot.source)) throw new Error('TutorialTurn6: expected inline_blob source with urls; got ' + JSON.stringify(pipelineSnapshot.source)). This makes structural bugs visible rather than silent."
+    },
+    {
+      "id": "A10",
+      "severity": "MINOR",
+      "category": "trust-tier",
+      "title": "Cache Tier-1 classification establishes a precedent for treating LLM output as Tier-1 data",
+      "detail": "The tutorial cache stores serialized LLM output (pipeline YAML + run results) and classifies it as Tier 1: 'our data, crash on corruption, miss on absence.' The crash-on-corruption behavior is correct for integrity purposes. However, LLM output is not 'our data' in the same sense as the audit DB — it is derived output from an external model call. Classifying it as Tier 1 creates a precedent that could be extended to other LLM caches (e.g., future pipeline-suggestion caches) in ways that blur the trust-tier boundary. The behavioral rules happen to be correct; the classification framing is imprecise.",
+      "evidence": "21a-phase-4-backend.md Task 6: cache described with Tier-1 semantics (crash on corrupt, miss on absence). CLAUDE.md Tier 1: 'Our Data (Audit Database / Landscape) — FULL TRUST. We wrote it, we own it, we trust it completely.'",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 6 — cache module design)"
+      ],
+      "recommendation": "Reclassify the cache as 'server-generated cache — crash on corrupt, miss on absence (same operational rules as Tier 1 but derived from external model call).' This preserves the correct crash/miss behavior while not stretching the Tier-1 label to cover LLM-derived data. A comment in the cache module itself should state this distinction."
+    }
+  ],
+  "summary": {
+    "architectural_concerns": 10,
+    "blocking_issues": 2,
+    "major_issues": 6,
+    "minor_issues": 2,
+    "one_way_doors_without_mitigation": 1,
+    "pattern_violations": 4,
+    "blocking_summary": [
+      "A1: SESSION_SCHEMA_EPOCH not bumped — startup validator will not fire at schema mismatch boundary",
+      "A2: Cache-hit run attribution violates CLAUDE.md attributability test — cross-session run_id returned to frontend"
+    ],
+    "must_fix_before_implementation": [
+      "A1: Add epoch bump to 21a Task 0/1",
+      "A2: Resolve cache-hit attribution — cache pipeline config only (not run_id), or create session-run association on hit",
+      "A6: Resolve run-path entry point before Task 7 begins — identify file, layer, import chain"
+    ],
+    "should_fix_before_implementation": [
+      "A3: Revise Task 3 to additive diff, not full rewrite, preserving Panel C2 and telemetry counter",
+      "A4: Replace RuntimeError with CorruptPreferencesError in Task 3 snippet",
+      "A5: Fix updated_at nullable annotation in Task 2 snippet",
+      "A7: Add retake path within Phase 4 or add filigree dependency on Phase 8 retake",
+      "A8: Split into PR-21a and PR-21b"
+    ]
+  }
+}

@@ -1,0 +1,167 @@
+{
+  "reviewer": "plan-review-quality",
+  "plan": "21-phase-4-hello-world-tutorial",
+  "files_reviewed": [
+    "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+    "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+    "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+    "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+    "src/elspeth/web/preferences/service.py",
+    "src/elspeth/web/preferences/models.py",
+    "src/elspeth/web/config.py"
+  ],
+  "verdict": "BLOCKING",
+  "confidence": "high",
+  "findings": [
+    {
+      "id": "Q1",
+      "severity": "BLOCKING",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Section 'New endpoints' vs Tasks 1-41",
+      "evidence": "The plan's 'New endpoints' section specifies two routes: POST /api/tutorial/run and GET /api/sessions/{id}/runs/{run_id}/audit-story. Task 7 only wires a cache hook onto the existing POST /api/sessions/{id}/runs endpoint — it does not implement either of the two new routes. Frontend Tasks 8 and 9 (21b2) call runTutorialPipeline and getRunAuditSummary respectively, which target these non-existent endpoints. No backend task in 21a implements either route. There are no tests for either endpoint because there is no implementation to test.",
+      "recommendation": "Add explicit backend tasks to implement POST /api/tutorial/run and GET /api/sessions/{id}/runs/{run_id}/audit-story with corresponding tests. Alternatively, if the intent is to reuse existing session-run infrastructure unchanged, remove the dedicated endpoint declarations from the 'New endpoints' section and rewrite frontend Tasks 8 and 9 to target the existing endpoints. The plan must be internally consistent before implementation begins."
+    },
+    {
+      "id": "Q2",
+      "severity": "BLOCKING",
+      "category": "audit-integrity",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 3 — update_composer_preferences example",
+      "evidence": "The Task 3 code example shows a new update_composer_preferences implementation. Comparing against the live service.py, the example silently drops all four Phase 1A correctness guards shipped in service.py: (1) Panel C2 — empty-PATCH on no-row is a no-op, no insert created; (2) Panel U1 — updated_at=None when no row exists, never fabricated; (3) Panel S1 — OpenTelemetry counter composer.preferences.patch_total with wrote_row label; (4) CorruptPreferencesError in the write path when the DB returns an unexpected value. An implementer following the Task 3 example exactly would regress all four of these on the live codebase.",
+      "recommendation": "Rewrite the Task 3 code example to extend the shipped service, not replace it. Show only the delta — the new tutorial_completed_at column handling — preserving all existing Panel guards. Add an explicit test asserting that empty-PATCH on a no-row state with the tutorial field absent does not insert a row (C2 parity)."
+    },
+    {
+      "id": "Q3",
+      "severity": "BLOCKING",
+      "category": "other",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 3 — _row_to_prefs Tier-1 guard for tutorial_completed_at",
+      "evidence": "The plan's _row_to_prefs guard for an unexpected tutorial_completed_at value uses bare raise RuntimeError(f'...{row.tutorial_completed_at!r}'). The shipped service uses CorruptPreferencesError(user_id=user_id, bad_value=row.default_composer_mode) — a named exception class with typed attributes for user_id and bad_value. Using RuntimeError breaks the established named-exception pattern and would prevent callers from catching CorruptPreferencesError specifically (Phase 1A consumer contract).",
+      "recommendation": "Replace raise RuntimeError(...) with raise CorruptPreferencesError(user_id=user_id, bad_value=row.tutorial_completed_at). Add a test test_corrupt_tutorial_completed_at_raises_CorruptPreferencesError (not just test_corrupt_tutorial_completed_at_crashes_loudly) that asserts the exception type and that exc.user_id and exc.bad_value are correctly populated."
+    },
+    {
+      "id": "Q4",
+      "severity": "BLOCKING",
+      "category": "other",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 2 — ComposerPreferences model example",
+      "evidence": "The Task 2 code example shows ComposerPreferences with ConfigDict(frozen=True) and updated_at: datetime (non-nullable). The live models.py uses ConfigDict(strict=True, extra='forbid') and updated_at: datetime | None — the nullable Panel U1 contract is load-bearing: no-row GET returns updated_at=None and the docstring explains fabricating a timestamp would be evidence tampering. frozen=True is not a substitute for strict=True + extra='forbid' and would silently permit extra fields in responses.",
+      "recommendation": "Correct the Task 2 model example to preserve ConfigDict(strict=True, extra='forbid') and updated_at: datetime | None. The new tutorial_completed_at field should also be datetime | None for the same reason. Add a Pydantic unit test asserting that constructing ComposerPreferences with an unexpected extra field raises ValidationError."
+    },
+    {
+      "id": "Q5",
+      "severity": "MAJOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+      "task_or_section": "Risk table row 'Refresh during tutorial' vs 21b1 Navigation Resilience section",
+      "evidence": "Plan 21 risk table states: 'refresh → restart at turn 1 (accepted simplification)'. Plan 21b1 Navigation Resilience section states: 'resume from persisted turn (handles refresh / browser-back)'. These are directly contradictory behaviours. Task 12 (21b2) implements sessionStorage-based resume via initialStep/onStepChange props, which implies resume semantics. No test in either Vitest or Playwright covers the refresh path for either behaviour. If resume is the actual intent, the risk table is wrong; if restart is the intent, Task 12's sessionStorage scaffolding is dead code.",
+      "recommendation": "Resolve the contradiction explicitly in writing before implementation. Whichever behaviour is chosen, add a test: either a Playwright test that refreshes mid-tutorial and asserts restart at step 1, or a Vitest test that populates sessionStorage and asserts the machine initialises at the persisted step. Remove or correct the risk table entry to match."
+    },
+    {
+      "id": "Q6",
+      "severity": "MAJOR",
+      "category": "audit-integrity",
+      "file": "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+      "task_or_section": "Task 9 (Turn 5) — getRunAuditSummary / GET /api/sessions/{id}/runs/{run_id}/audit-story",
+      "evidence": "Turn 5 calls getRunAuditSummary targeting GET /api/sessions/{id}/runs/{run_id}/audit-story. This endpoint does not exist in the backend plan. If it is implemented as a tutorial-special-cased synthesizer that returns curated text rather than raw audit events, it violates CLAUDE.md's attributability standard: 'For any output, explain(recorder, run_id, token_id) must prove complete lineage back to source' — a synthesized summary that does not directly correspond to Landscape records cannot satisfy this test. There is no implementation task, no backend test, and no specification of what the endpoint returns.",
+      "recommendation": "Either (a) specify the endpoint precisely — what Landscape tables it queries, what it returns, under what trust tier — and add a backend implementation task with tests asserting the response is derived entirely from real audit rows; or (b) replace getRunAuditSummary with a direct query against the existing audit API surface and present unmodified Landscape data in the UI. Do not synthesize tutorial-special-cased audit text."
+    },
+    {
+      "id": "Q7",
+      "severity": "MAJOR",
+      "category": "missing-observability",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "All backend tasks — telemetry coverage",
+      "evidence": "The plan defers all telemetry instrumentation to Phase 8. The tutorial introduces three user-decision events that are launch-critical for evaluating whether the tutorial succeeds: (1) tutorial skipped (skip button clicked at any turn), (2) tutorial abandoned (session closed mid-tutorial), (3) tutorial completed (reach Turn 6 and mark_tutorial_completed called). Without these counters at launch, the team has no signal on whether the tutorial is working or driving users away. CLAUDE.md primacy order is audit → telemetry → logging; these events belong in audit (mark_tutorial_completed is a write event with a timestamp) and in operational telemetry (skip/abandon are ephemeral signals). Neither is covered.",
+      "recommendation": "Add OpenTelemetry counters for tutorial.skip_total, tutorial.abandon_total (on session close while tutorial in progress), and tutorial.complete_total alongside the existing composer.preferences.patch_total pattern in Panel S1. The mark_tutorial_completed write event is already audit-recorded via tutorial_completed_at timestamp — confirm the service emits a telemetry event on that write, mirroring the patch_total counter pattern. Do not defer to Phase 8."
+    },
+    {
+      "id": "Q8",
+      "severity": "MAJOR",
+      "category": "defensive-programming",
+      "file": "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+      "task_or_section": "Tasks 5 and 6 — Turn 2b and Turn 3 code examples",
+      "evidence": "Multiple defensive patterns appear in plan code examples against Tier-2 pipeline snapshot data: (1) snapshot?.nodes ?? [] — the optional chain on snapshot and nullish coalesce on nodes treats a missing or incomplete snapshot as a recoverable condition rather than a bug; (2) node?.type — optional chain on node.type treats a missing type as recoverable; (3) hard-coded fallback strings like node?.label ?? node?.id ?? 'node' when the pipeline snapshot is a Tier-2 datum that passed source validation and should have well-typed fields. CLAUDE.md: 'Do not use .get(), getattr(), isinstance(), or silent exception handling to suppress errors from nonexistent attributes.' The frontend equivalent is optional chaining on non-optional fields.",
+      "recommendation": "Remove all optional chains and nullish coalesces on Tier-2 pipeline snapshot fields. Access node.type, node.label, and snapshot.nodes directly. If snapshot itself can be null (i.e., the store has not yet populated it), that is a valid null guard on a nullable field — but the inner fields should then be accessed without defensiveness. Add TypeScript assertions or zod schemas at the API boundary so the snapshot is guaranteed well-typed by the time it reaches Turn 2b/3 rendering."
+    },
+    {
+      "id": "Q9",
+      "severity": "MAJOR",
+      "category": "defensive-programming",
+      "file": "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+      "task_or_section": "tutorialMachine.ts — tutorialReducer default/default case",
+      "evidence": "The plan's tutorialReducer handles unrecognised action types with a console.warn and returns state unchanged (silent no-op). CLAUDE.md: 'Proactively detect invalid states and throw meaningful exceptions... Never wrap plugin calls in try/except to recover — let them crash.' The frontend equivalent for a typed discriminated union reducer is throwing on unrecognised actions, not logging and continuing. A silent no-op means invalid state transitions are invisible during development and testing.",
+      "recommendation": "Replace the default case silent no-op with throw new Error(`tutorialReducer: unrecognised action type '${(action as {type: string}).type}'`). Add a Vitest test asserting that dispatching an unknown action type throws rather than silently returning state."
+    },
+    {
+      "id": "Q10",
+      "severity": "MAJOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 6 — TutorialCacheService startup write-permission check",
+      "evidence": "Task 6 specifies that the TutorialCacheService constructor raises RuntimeError if tutorial_cache_dir cannot be created or written to. There is no test for this code path. This is a startup-time failure mode that will manifest in production when ELSPETH_DATA_DIR is read-only or misconfigured. The plan's test list for Task 6 covers cache miss, cache hit, atomicity, and corruption — but not the constructor's permission check.",
+      "recommendation": "Add test_tutorial_cache_raises_on_unwritable_dir using tmp_path with chmod 0o444 on the parent directory, asserting RuntimeError is raised at construction time. Also verify the error message includes the directory path so operators can diagnose misconfiguration without reading source code."
+    },
+    {
+      "id": "Q11",
+      "severity": "MAJOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 7 / POST /api/tutorial/run",
+      "evidence": "The plan specifies that tutorial cache behaviour is conditional on the user being in tutorial mode (default_mode='guided', tutorial_completed_at=None). There is no test asserting that a user who has already completed the tutorial (tutorial_completed_at is set) or who is in freeform mode receives a 400 or is simply routed to the non-cached path without the tutorial hook firing. Without this test, a regression that serves cached tutorial output to non-tutorial users is undetectable.",
+      "recommendation": "Add test_tutorial_cache_not_used_for_freeform_user and test_tutorial_cache_not_used_after_completion. Both should confirm that the run proceeds via normal (non-cached) path and that no cache lookup or store is attempted."
+    },
+    {
+      "id": "Q12",
+      "severity": "MINOR",
+      "category": "operator-action",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 1 — Alembic migration / DB schema change",
+      "evidence": "Task 1 adds tutorial_completed_at to user_preferences_table. Per project_db_migration_policy.md and feedback_operator_gate_destructive_actions, schema changes require the operator to delete and recreate the sessions DB. The Task 1 commit message as written ('feat(preferences): add tutorial_completed_at column') does not surface this required destructive operator action. Per feedback_operator_gate_destructive_actions: 'Surface BEFORE the destructive step; don't take precursor actions that leave staging broken if the destructive step gets denied.'",
+      "recommendation": "Add an OPERATOR ACTION note to Task 1 specifying: 'After merging this task, the operator must delete and recreate the sessions database (rm sessions.db && restart elspeth-web.service) before any downstream task can be verified on staging.' The commit message or PR description should include this warning."
+    },
+    {
+      "id": "Q13",
+      "severity": "MINOR",
+      "category": "other",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 5 — TutorialCache default path",
+      "evidence": "The Task 5 TutorialCache default path uses ${ELSPETH_DATA_DIR:-/var/lib/elspeth}/tutorial_cache/. The live config.py sets WebSettings.data_dir = Field(default=Path('data'), validate_default=True) — a relative path intended for local development. The two defaults are inconsistent: ELSPETH_DATA_DIR defaults to /var/lib/elspeth (an absolute production path) while WebSettings.data_dir defaults to data/ (a relative dev path). If Task 6 adds tutorial_cache_dir to WebSettings as specified, it should derive from settings.data_dir / 'tutorial_cache' rather than from a separate env var to avoid two competing sources of truth for the same directory.",
+      "recommendation": "In Task 6, add tutorial_cache_dir: Path = Field(default=None) to WebSettings with a validator that defaults to self.data_dir / 'tutorial_cache' when not explicitly set. Remove the standalone ELSPETH_DATA_DIR lookup in tutorial_cache.py and inject settings.tutorial_cache_dir at construction. This makes the cache dir consistent with all other data paths and testable via settings override."
+    },
+    {
+      "id": "Q14",
+      "severity": "MINOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 5 — test_store_is_atomic",
+      "evidence": "The plan's test_store_is_atomic asserts that after a successful store() call, exactly one .json file exists in the cache directory. This tests the post-success file count, not atomicity. An atomic write requires temp-file-then-rename so that a crash mid-write never leaves a partial file. The test does not verify that the intermediate .tmp file does not persist on success, nor does it simulate a crash-during-write and assert the .json file is absent (which would require mocking os.replace to raise). The test name overstates what is being tested.",
+      "recommendation": "Either rename the test to test_store_leaves_exactly_one_json_file (describing what it actually checks) and add a separate test that patches os.replace to raise OSError mid-write and asserts no .json file exists afterward; or expand the existing test to verify the .tmp file is absent after a successful write. At minimum the name should not claim atomicity when it does not test crash-recovery."
+    },
+    {
+      "id": "Q15",
+      "severity": "MINOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+      "task_or_section": "Task 11 — Turn 6 Vitest, markTutorialCompleted spy",
+      "evidence": "The Turn 6 Vitest test uses vi.spyOn(usePreferencesStore.getState(), 'markTutorialCompleted'). usePreferencesStore.getState() returns a snapshot of the store state at the moment the spy is set up. Zustand store methods are stable references on the store object itself, but spying on a snapshot rather than the store's bound method means the spy may not intercept calls made via the store's live reference. This is a known Vitest/Zustand interaction that produces intermittent failures depending on how the component accesses the store.",
+      "recommendation": "Spy on the store module directly: vi.spyOn(usePreferencesStore, 'getState').mockReturnValue({...usePreferencesStore.getState(), markTutorialCompleted: vi.fn()}). Alternatively, use a Zustand test utility that replaces the store state before the test and captures calls through the store's own dispatch path. Verify the spy intercepts the call by asserting toHaveBeenCalledOnce() and checking the call argument."
+    }
+  ],
+  "tested_correctly": [
+    "Tier-1 read guard for tutorial_completed_at column — plan specifies test_corrupt_tutorial_completed_at_crashes_loudly covering the _row_to_prefs guard path",
+    "Cache corruption crash path — test_corrupt_file_crashes_lookup and test_corrupt_cache_file_crashes_run_path both specified and consistent with Tier-1 semantics (crash, no fallback)",
+    "Cache miss falls through to live run then populates — test_cache_miss_runs_live_then_populates_cache covers the primary happy path",
+    "Non-tutorial user bypasses cache — test_non_tutorial_user_skips_cache correctly gates on user state",
+    "Edited prompt bypasses cache — test_edited_prompt_skips_cache correctly gates on canonical key mismatch",
+    "State machine transition coverage — all named transitions including skip fast-forward are listed in the Vitest plan",
+    "Turn 2 error surface — plan specifies a test for the restore-canonical-seed affordance on pipeline validation failure",
+    "Turn 5 surfaces real Landscape error — plan specifies test asserting the error displayed comes from the API response, not canned text",
+    "Full 6-turn Vitest integration test — Task 10 specifies an end-to-end machine walkthrough through all six turns",
+    "Playwright E2E three scenarios — complete flow, second-login (tutorial skipped), skip button — all specified in Task 13",
+    "Service partial-update field preservation — plan specifies tests asserting existing fields are unchanged when only tutorial_completed_at is written",
+    "Route round-trip for new field — plan specifies GET after PATCH asserting tutorial_completed_at survives serialization"
+  ],
+  "summary_for_synthesizer": "The Phase 4 quality review found 4 BLOCKING issues, 7 MAJOR issues, and 4 MINOR issues. The plan cannot be implemented as written. The two most critical problems are structural: (1) the backend plan specifies two new API endpoints (POST /api/tutorial/run and GET /api/sessions/{id}/runs/{run_id}/audit-story) that have no implementation tasks — the frontend turns 4 and 5 call these endpoints directly, so the frontend cannot function; (2) the Task 3 service code example would silently regress all four Phase 1A correctness guards (Panel C2 empty-PATCH no-op, Panel U1 fabrication-free updated_at, Panel S1 telemetry counter, CorruptPreferencesError write-path check) if an implementer followed it. Additionally, the plan contains a direct contradiction between the refresh-restart and refresh-resume behaviours with no test for either, all telemetry is deferred despite tutorial skip/abandon/complete being launch-critical evaluation signals, and multiple code examples use defensive optional-chaining on Tier-2 data in violation of CLAUDE.md. The test coverage for the cache layer and state machine is genuinely good — those sections need only targeted fixes, not rewrites. The plan requires author revision before implementation assignment."
+}

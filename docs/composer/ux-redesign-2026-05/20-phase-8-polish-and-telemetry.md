@@ -35,7 +35,7 @@ testing-library + axe-core (frontend), TypeScript.
 - [13-phase-1b-frontend.md](13-phase-1b-frontend.md) — `ComposerPreferencesPanel.tsx`; Task 6 mounts replay button here.
 - [14a/b/c — Phase 2](14a-phase-2a-backend.md) — audit-readiness panel; Task 2 reads its aggregated state.
 - [15a1/a2/b1/b2 — Phase 3](15a1-phase-3a-removals-part-1.md) — IA cleanup. Phase 3B introduces `HeaderSessionSwitcher`; Task 4 is conditional on it.
-- **Phase 4** — Hello-world tutorial (plan not yet written); Task 6 conditional on `tutorial_completed` flag.
+- **Phase 4** — Hello-world tutorial ([21-phase-4-hello-world-tutorial.md](21-phase-4-hello-world-tutorial.md)); Task 6 conditional on Phase 4's `tutorial_completed_at` column having shipped (see Phase 4 §"Cross-plan contract" for the PATCH-body shape Task 6 relies on).
 - **Phase 5a** ([17-phase-5a-dynamic-source-from-chat.md](17-phase-5a-dynamic-source-from-chat.md)) / **Phase 5b** — Task 1 wires Phase 5a marker if present.
 - **Phase 6** — Completion gestures (plan not yet written); Task 1 wires YAML-export marker if present.
 - [16a/b/c — Phase 7](16a-phase-7a-backend.md) — catalog reshape; Task 3 follows its vocabulary and tone.
@@ -63,7 +63,7 @@ runs them again at execution time):
 | `grep -rn 'auto_interpreted_opt_out' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7e (B3 cohort b1) |
 | `grep -rn 'audit_readiness\|composer/audit/readiness' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7f (B3 cohort b2) |
 | `ls src/elspeth/web/frontend/src/components/sessions/HeaderSessionSwitcher.tsx` | file exists | Task 4 (session-sidebar migration) |
-| `grep -rn 'tutorial_completed' src/elspeth/web/` | ≥1 | Task 6 (tutorial-replay button) |
+| `grep -rn 'tutorial_completed_at' src/elspeth/web/` | ≥1 | Task 6 (tutorial-replay button) |
 
 **Probe classification (S5 — load-bearing).** Pass-2 review caught
 that the previous "≥75% / 50-74% / <50% auto-stop" rule treated all
@@ -207,8 +207,10 @@ currently treated as a non-decision-read superset exception per
 §B2.b reasoning: no audit row, telemetry-only signal. But
 tutorial-replay is a **user-write-intent** — the user clicked
 "Replay hello-world tutorial" deliberately, the PATCH body says
-`{"tutorial_completed": false}`, the audit-relevant fact is the
-user's explicit intent to re-onboard.
+`{"tutorial_completed_at": null}` (clearing Phase 4's
+`tutorial_completed_at` column — see §"Cross-plan contract" in
+[21a-phase-4-backend.md](21a-phase-4-backend.md)), and the
+audit-relevant fact is the user's explicit intent to re-onboard.
 
 CLAUDE.md's superset exception is named for non-decision **reads**
 (read-path operational health: counter fires on a fetch failure
@@ -273,8 +275,12 @@ see commit history for the cohort.
 - Audit and reorganise keyboard shortcuts (App.tsx + ShortcutsHelp.tsx);
   group them by category (Task 5).
 - Add a "Replay hello-world tutorial" button in the settings pane that
-  clears `composer.tutorial_completed` (Task 6). **Conditional** on
-  Phase 4 having shipped the flag.
+  nulls `user_preferences_table.tutorial_completed_at` via
+  `PATCH /api/composer-preferences` with body
+  `{"tutorial_completed_at": null}` (Task 6). **Conditional** on Phase 4
+  having shipped the column. The PATCH contract is co-owned with Phase 4 —
+  see §"Cross-plan contract — `tutorial_completed_at` PATCH semantics" in
+  [21a-phase-4-backend.md](21a-phase-4-backend.md).
 - Run axe-core against every new component from Phases 1-7; fix
   high-severity findings; file medium-severity findings as follow-ups
   (Task 7).
@@ -338,13 +344,19 @@ tier its inputs and outputs live in. Summary up front:
 
 **Tier 1 — Our data (audit / config / preferences DB):**
 
-- `composer.tutorial_completed` flag (Task 6): crash-on-anomaly per
-  [12-phase-1a-backend.md](12-phase-1a-backend.md). Corrupt (non-boolean) value → 500.
+- `user_preferences_table.tutorial_completed_at` column (Task 6, read on
+  bootstrap; cleared on retake): crash-on-anomaly per Phase 4's Tier-1
+  read-side guard (`_row_to_prefs`). A non-NULL value that is not a
+  `datetime` → `RuntimeError`. Defined and tested in
+  [21a-phase-4-backend.md](21a-phase-4-backend.md) Task 3.
 
 **Tier 3 — External data (source input):**
 
-- **Tutorial-replay PATCH body**: Pydantic `Literal[False]` / `bool`
-  rejects non-boolean at the boundary (422). `"false"` (str) ≠ `False` (bool).
+- **Tutorial-replay PATCH body**: Pydantic accepts `null` for the
+  `tutorial_completed_at: datetime | None = None` field (Phase 4 contract);
+  any non-`datetime`, non-`null` value is rejected at the boundary (422).
+  `"yesterday"` (str), `false` (bool), `0` (int) all → 422. See Phase 4
+  Task 4 for the route-level coverage.
 - **README "Example Use Cases" content** (Task 3): build-time only —
   hand-curated into `TemplateCards.tsx`; no runtime Tier 3 boundary.
 
@@ -688,7 +700,7 @@ have the same defect.
 Without the prior value in scope, the route handlers cannot compute
 the transition predicates that Task 2 Step 3
 (`if prior.trust_mode != current.trust_mode`) and Task 6 Step 7
-(`if prior.tutorial_completed and not current.tutorial_completed`)
+(`if prior.tutorial_completed_at is not None and current.tutorial_completed_at is None`)
 depend on, and cannot compile the `from_mode=prior.trust_mode`
 argument that Task 2 Step 3 passes to `record_session_switched`.
 Sub-task 7a does not consume `prior.*` after B2.b (see
@@ -712,8 +724,9 @@ formerly have been the third dependent) was deferred to Phase 9
 by the Decision 2 resolution (Option C — see §"Decision 2"
 above), so the B2 reshape no longer carries it as a dependent
 inside Phase 8. The reshape is still required for Task 6's UI
-(`bootstrap()` reads `tutorial_completed` and the button PATCHes
-it via the existing endpoint), but the *route-handler* consumer
+(`bootstrap()` reads `tutorial_completed_at` and the button PATCHes
+`{"tutorial_completed_at": null}` via the existing endpoint), but
+the *route-handler* consumer
 of `prior` is reduced to the two cases above. Either both emits
 land after the reshape, or each emit co-lands with the reshape of
 its own service function in the same commit. The reshape must
@@ -1322,7 +1335,7 @@ whether it returned a hit or a miss:
 | Task 1 Sub-task 7e (B3 cohort b1) | `grep -rn 'auto_interpreted_opt_out' src/elspeth/web/` | ≥1 match (Phase 5b opt-out fact) |
 | Task 1 Sub-task 7f (B3 cohort b2) | `grep -rn 'audit_readiness\|composer/audit/readiness' src/elspeth/web/` | ≥1 match (Phase 2C audit-readiness endpoint) |
 | Task 4 | `ls ...HeaderSessionSwitcher.tsx` | file exists |
-| Task 6 | `grep -rn 'tutorial_completed'` in web/ | ≥1 match |
+| Task 6 | `grep -rn 'tutorial_completed_at'` in web/ | ≥1 match |
 
 - [ ] **Step 2: For each missed probe, emit the probe-failure counter**
 
@@ -1377,23 +1390,28 @@ three now so the deferrals are durable and discoverable:
     (shipped); proposed emit site: interpretation resolve path.
     Rationale: same as above.
   - `composer.tutorial.replayed_total` + **boundary question** —
-    owner Phase 9; proposed emit site: the same `True → False`
-    transition gate in `update_composer_preferences` that Phase 8
-    Task 6 Step 7 would have implemented. **Open question Phase 9
-    MUST answer first:** is a deliberate tutorial-replay click
-    (a user-write-intent) a "non-decision" under the CLAUDE.md
-    superset exception, or does it merit a Landscape audit row?
-    Phase 8 reviewed this and ruled the superset exception applies
-    to read-path operational health only; broadening it would be
-    a project-wide policy change. Phase 9 may either (a) accept
-    that ruling and ship the counter as telemetry-only with a
-    matching audit row for the transition, (b) propose an
+    owner Phase 9; proposed emit site: the `prior.tutorial_completed_at
+    is not None and current.tutorial_completed_at is None` transition
+    gate in `update_composer_preferences` that Phase 8 Task 6 Step 7
+    would have implemented (the retake PATCH body is
+    `{"tutorial_completed_at": null}` per the Phase 4 cross-plan
+    contract). **Open question Phase 9 MUST answer first:** is a
+    deliberate tutorial-replay click (a user-write-intent) a
+    "non-decision" under the CLAUDE.md superset exception, or does
+    it merit a Landscape audit row? Phase 8 reviewed this and ruled
+    the superset exception applies to read-path operational health
+    only; broadening it would be a project-wide policy change.
+    Phase 9 may either (a) accept that ruling and ship the counter
+    as telemetry-only with a matching audit row for the transition
+    (capturing the destroyed prior timestamp), (b) propose an
     audit-vocabulary amendment that broadens the superset exception
     project-wide and ship the counter telemetry-only, or (c) drop
     the counter entirely if downstream consumers turn out not to
     need it. The three Q6 transition-edge tests
-    (`true_to_false`, `false_to_true`, `no_op`) that Phase 8
-    spec'd are re-usable verbatim when Phase 9 resumes the work.
+    (`set_to_null` [retake], `null_to_set` [completion], `no_op`)
+    that Phase 8 spec'd are re-usable when Phase 9 resumes the work
+    — note that they originally targeted a `bool` field; the
+    transition predicates change to `datetime|None` shape.
 
 This is a documentation-only step; no code changes.
 
@@ -2984,22 +3002,23 @@ deleted, not patched.
 - Modify: `src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.tsx`
 - Create: `src/elspeth/web/frontend/src/components/settings/TutorialReplayButton.tsx`
 - Create: `src/elspeth/web/frontend/src/components/settings/TutorialReplayButton.test.tsx`
-- Modify: `src/elspeth/web/frontend/src/api/client.ts` (add `clearTutorialCompleted()`; the preferences API surface lives in `client.ts`, not a separate `api/preferences.ts` — that file does not exist).
+- Modify: `src/elspeth/web/frontend/src/api/client.ts` (extend `updateComposerPreferences`'s request type to allow `tutorial_completed_at: string | null`; no new function added — see Step 5).
 - Modify: `src/elspeth/web/frontend/src/stores/preferencesStore.ts` (expose `replayTutorial()`).
-- Modify: `src/elspeth/web/composer/telemetry_phase8.py` (add the replay helper).
+- Modify: `tests/integration/web/test_preferences_routes.py` (two retake-specific boundary tests — see Step 3 Q5 block: `test_retake_patch_with_explicit_null_clears_tutorial`, `test_retake_patch_distinguishes_absent_from_null`).
+- Modify: `src/elspeth/web/composer/telemetry_phase8.py` — Phase 9 follow-up; Decision 2 Option C defers counter emission, so this entry remains only as the structural placeholder for the deferred replay-counter helper (see Step 7).
 
 ### Probe step
 
-- [ ] **Step 1: Probe — does the tutorial flag exist?**
+- [ ] **Step 1: Probe — does the tutorial column exist?**
 
 ```bash
-grep -rn 'tutorial_completed\|tutorialCompleted\|composer.tutorial' \
+grep -rn 'tutorial_completed_at\|tutorialCompletedAt\|tutorialCompleted' \
   /home/john/elspeth/src/elspeth/web/ --include='*.py' --include='*.ts' --include='*.tsx'
 ```
 
-**Case A — flag exists (Phase 4 shipped):** continue with Steps 2-8.
+**Case A — column exists (Phase 4 shipped):** continue with Steps 2-8.
 
-**Case B — flag does not exist:** Phase 4 has not shipped the
+**Case B — column does not exist:** Phase 4 has not shipped the
 hello-world tutorial yet. The replay button has nothing to clear.
 
 - **B-1:** Add a placeholder UI that says "Tutorial replay
@@ -3015,18 +3034,24 @@ If you reach Case B, **stop and surface to operator**.
 
 - [ ] **Step 2: Confirm the wire shape**
 
-Phase 4 should have added `tutorial_completed: bool` to the
-`user_preferences` row and made it readable / writeable on the
-PATCH /GET endpoint. Confirm:
+Phase 4 ships `tutorial_completed_at: datetime | None` on the
+`user_preferences` row and exposes it on GET/PATCH
+`/api/composer-preferences`. See
+[21a-phase-4-backend.md](21a-phase-4-backend.md) §"Cross-plan
+contract — `tutorial_completed_at` PATCH semantics" for the
+canonical statement of the contract Task 6 relies on. Confirm:
 
 ```bash
-grep -n 'tutorial_completed' /home/john/elspeth/src/elspeth/web/sessions/routes.py \
-  /home/john/elspeth/src/elspeth/web/sessions/service.py
+grep -n 'tutorial_completed_at' \
+  /home/john/elspeth/src/elspeth/web/preferences/models.py \
+  /home/john/elspeth/src/elspeth/web/preferences/service.py \
+  /home/john/elspeth/src/elspeth/web/sessions/models.py
 ```
 
-If the field is there, the replay action is `PATCH
-/api/composer-preferences` with body `{"tutorial_completed":
-false}`. No new endpoint needed.
+The replay action is `PATCH /api/composer-preferences` with body
+`{"tutorial_completed_at": null}` — explicit `null` clears the
+column per Phase 4's three-state PATCH semantics (absent =
+preserve; datetime = write; null = clear). No new endpoint needed.
 
 - [ ] **Step 3: Write the failing test —
   TutorialReplayButton.test.tsx**
@@ -3045,39 +3070,33 @@ fixture pattern):
   resolved promise, click, await visibility of the
   `Tutorial will replay on next sign-in` confirmation string.
 
-**(Q5 — Pydantic boundary tests for `tutorial_completed`):** add
-three backend Python tests under
-`src/elspeth/web/preferences/routes_test.py` (or wherever the
-account-level `update_preferences` PATCH handler is tested — verify
-at implementation time; the file may be
-`preferences/service_test.py` if the route is thin). All three are
-Tier-3 boundary checks called out in §"Trust tier check": the PATCH
-body crosses an external trust boundary and the Pydantic request
-model must reject any non-`bool` value rather than coerce. Without
-these tests the Tier-3 claim for `tutorial_completed` is prose-only.
+**(Q5 — Pydantic boundary tests for `tutorial_completed_at`):** the
+Tier-3 boundary tests for the field live in Phase 4 (see
+[21a-phase-4-backend.md](21a-phase-4-backend.md) Task 2 and Task 4):
+`tutorial_completed_at` is `datetime | None`; the model rejects
+non-datetime, non-null values at the boundary with 422. Phase 8
+Task 6 adds **two** retake-specific boundary tests on top of
+Phase 4's coverage, focused on the explicit-null retake path:
 
-- `test_replay_rejects_string_false_for_tutorial_completed` — PATCH
+- `test_retake_patch_with_explicit_null_clears_tutorial` — PATCH
   `/api/composer-preferences` with body
-  `{"tutorial_completed": "false"}` (string, not bool). Assert
-  `response.status_code == 422`; assert the validation error
-  payload names `tutorial_completed` as the failing field.
-- `test_replay_rejects_integer_zero_for_tutorial_completed` — PATCH
-  with body `{"tutorial_completed": 0}` (integer). Assert
-  `response.status_code == 422`. Pydantic v2 by default coerces
-  `0` to `False` for `bool` fields unless `strict=True`; this test
-  pins the strict-mode requirement and forces a config change if it
-  ever regresses. If Pydantic is not in strict mode for this field,
-  the test failure is the signal to enable it on the
-  `ComposerPreferencesPatchBody` model rather than to relax the
-  test.
-- `test_replay_rejects_null_for_tutorial_completed` — PATCH with
-  body `{"tutorial_completed": null}`. Assert
-  `response.status_code == 422`. The field is `bool`, not
-  `Optional[bool]`; `null` is not a valid replay-intent signal and
-  silently treating it as "no change" would mask a malformed client
-  request.
+  `{"tutorial_completed_at": null}` after a prior PATCH set the
+  field. Assert `response.status_code == 200`; assert
+  `response.json()["tutorial_completed_at"] is None`. This is the
+  Phase 8 retake happy-path.
+- `test_retake_patch_distinguishes_absent_from_null` — two
+  back-to-back PATCHes from a starting state where the field is
+  set: (a) PATCH with body `{"default_mode": "freeform"}` (field
+  absent from payload) → assert `tutorial_completed_at` is
+  preserved; (b) PATCH with body `{"tutorial_completed_at": null}`
+  (field present and null) → assert the column is cleared. This
+  pins the three-state contract co-owned with Phase 4.
 
-Run: expected fail.
+Phase 4 already covers boundary rejection for non-datetime,
+non-null values (`"yesterday"` etc.). No need to duplicate that
+coverage here; Phase 8 only owns the retake-specific paths.
+
+Run: expected fail (Task 6 is not yet implemented).
 
 - [ ] **Step 4: Implement `TutorialReplayButton.tsx`**
 
@@ -3100,13 +3119,26 @@ Component shape (functional component):
 - [ ] **Step 5: Add `replayTutorial` to `preferencesStore`**
 
 In the Zustand store, add a `replayTutorial` action that calls
-`api.updateComposerPreferences({ tutorial_completed: false })` then
-re-invokes `get().bootstrap()` so the cached row reflects the
-freshly-cleared flag without a race.
+`api.updateComposerPreferences({ tutorial_completed_at: null })`
+then re-invokes `get().bootstrap()` so the cached row reflects the
+freshly-cleared column without a race. Phase 4's PATCH contract
+treats explicit `null` as "write NULL to the column" (the retake
+state); see §"Cross-plan contract" in
+[21a-phase-4-backend.md](21a-phase-4-backend.md).
 
-In `api/client.ts` (where `updateComposerPreferences` actually lives — no separate `api/preferences.ts` module exists), verify `updateComposerPreferences`'s body
-type already includes `tutorial_completed` (Phase 4 should have
-extended it; if not, extend it here).
+In `api/client.ts` (where `updateComposerPreferences` actually lives — no separate `api/preferences.ts` module exists), verify
+`updateComposerPreferences`'s body type still includes
+`tutorial_completed_at: string | null` as Phase 4 ships it (see
+[21a-phase-4-backend.md](21a-phase-4-backend.md) §"Cross-plan
+contract — `tutorial_completed_at` PATCH semantics"). If the type
+union has regressed, fix Phase 4 — do not patch around it in Phase
+8. Ownership stays with Phase 4; Phase 8 verifies.
+
+Do **not** add a separate `clearTutorialCompleted` store action.
+The same `updateComposerPreferences` PATCH client function is the
+correct surface for both finalisation (writes a timestamp) and
+retake (writes null); a parallel action would split a single
+shared contract into two and is forbidden.
 
 - [ ] **Step 6: Mount the button in `ComposerPreferencesPanel`**
 
@@ -3128,18 +3160,39 @@ What this means concretely for Task 6:
 
 - The PATCH-handler `prior → current` transition detection logic
   does **not** ship in 8c. Task 6 stops at Step 6 (button mounted +
-  PATCH call wired); the backend handler accepts the PATCH and
-  clears the flag, exactly as Phase 4 already permits.
+  PATCH call wired); the backend handler accepts the PATCH (body
+  `{"tutorial_completed_at": null}`) and writes NULL to the column,
+  exactly as Phase 4's three-state PATCH contract already permits.
 - The §B2 service-signature reshape is **still required** for
-  Task 6's UI to function (the button reads `tutorial_completed`
-  via `bootstrap()` and PATCHes it via the existing endpoint),
-  but the *route-handler* consumer of the `prior` record is
-  reduced to the two opt-out / opt-in cases — the tutorial-replay
-  dependent on §"Service signature precondition (B2 — load-
-  bearing)" is removed.
+  Task 6's UI to function (the button reads `tutorial_completed_at`
+  via `bootstrap()` and PATCHes `{"tutorial_completed_at": null}`
+  via the existing endpoint), but the *route-handler* consumer of
+  the `prior` record is reduced to the two opt-out / opt-in cases
+  — the tutorial-replay dependent on §"Service signature
+  precondition (B2 — load-bearing)" is removed.
 - The three Q6 tests for `tutorial_replayed_total` are deleted.
   Task 6 retains only its UI-render, store-action, and PATCH-
-  call tests (Steps 3-6).
+  call tests (Steps 3-6) plus the two retake-specific Pydantic
+  boundary tests (Step 3, see Q5 block above).
+
+**Audit-emit boundary (Phase 9 design input).** The retake PATCH
+clears `tutorial_completed_at` and thereby destroys the prior
+completion timestamp. That destruction is itself audit-worthy:
+"user X had completed the tutorial at time T1 and then retook at
+time T2" is the kind of fact an auditor would expect the Landscape
+to recover. Phase 8 does not yet emit this audit event (per the
+Decision 2 deferral), but Phase 9's design pass should consider:
+(a) where the audit event lives — `preferences/service.py` versus
+the route handler in `preferences/routes.py`; (b) whether the
+prior timestamp is captured inside the same transaction as the
+clear (mandatory, to avoid TOCTOU); (c) whether the audit event
+is a new event type or piggybacks on the existing
+`composer.preferences.patch_total` emission point. The §B2
+service-signature reshape is a precondition (it makes `prior` and
+`current` available at the emit site); the Phase 9 work is to
+decide between Landscape-row and telemetry-counter and, if
+Landscape-row, the schema. Recorded as a Phase 9 follow-up in
+`21-phase-9-followups.md`.
 
 - [ ] **Step 7 (was Step 8): Run tests + commit**
 

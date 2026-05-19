@@ -311,8 +311,20 @@ text:
 - The `interpretationEventId` from the state (cited as "your accepted
   definition of cool — recorded in interpretation events row evt-1").
 - The `runId` (cited in the "Explore the full audit trail" link href).
+  This is **always the current session's run_id** — never a foreign
+  run_id from a cache-seeding session. On a cache hit the backend
+  synthesises a new Landscape entry under the current session and
+  returns its run_id; the audit-story call below targets that same
+  current-session-owned run.
 - The LLM-call row count (read from the run's Landscape entry via the
   existing audit-readiness API — see Phase 2 audit-readiness work).
+- The `seeded_from_cache` provenance flag and `cache_key`. When the
+  audit story reports `seeded_from_cache: true`, the run was a
+  cache-replay: this turn briefly acknowledges that ("Your run reused
+  cached LLM responses from a prior canonical run; the audit trail
+  records the cache key so the original generation can be traced"). The
+  narration neither hides the replay nor pretends the LLM was called for
+  this run.
 
 - [ ] **Step 1: Recon Phase 2's audit-readiness API.**
 
@@ -352,6 +364,8 @@ describe('TutorialTurn5AuditStory', () => {
       output_file_hash: 'cafebabe',
       run_started_at: '2026-05-15T12:00:00Z',
       plugin_versions: { web_scrape: '1.0.0', llm_rate: '1.0.0' },
+      seeded_from_cache: false,
+      cache_key: null,
     });
   });
 
@@ -387,7 +401,50 @@ describe('TutorialTurn5AuditStory', () => {
     render(<TutorialTurn5AuditStory {...props} />);
     await waitFor(() => screen.getByText(TURN_5_EXPLORE_BUTTON));
     const link = screen.getByText(TURN_5_EXPLORE_BUTTON);
+    // The href targets the CURRENT session's run — same-ownership.
+    expect(link.getAttribute('href') ?? '').toContain('sess-1');
     expect(link.getAttribute('href') ?? '').toContain('run-1');
+  });
+
+  it('calls audit-story under the current session id', async () => {
+    // Architectural invariant: the audit-story endpoint is always a
+    // same-ownership query against the props.sessionId + props.runId pair
+    // returned by POST /api/tutorial/run. There is no path that emits a
+    // foreign run_id.
+    const spy = vi.spyOn(api, 'getRunAuditSummary');
+    render(<TutorialTurn5AuditStory {...props} />);
+    await waitFor(() => expect(spy).toHaveBeenCalledWith('sess-1', 'run-1'));
+  });
+
+  it('on cache hit: narrates the seeded_from_cache provenance', async () => {
+    vi.spyOn(api, 'getRunAuditSummary').mockResolvedValue({
+      llm_call_count: 0,
+      output_file_hash: 'cafebabe',
+      run_started_at: '2026-05-15T12:00:00Z',
+      plugin_versions: { web_scrape: '1.0.0', llm_rate: '1.0.0' },
+      seeded_from_cache: true,
+      cache_key: 'a'.repeat(64),
+    });
+    render(<TutorialTurn5AuditStory {...props} />);
+    await waitFor(() =>
+      expect(
+        screen.getByText(/reused cached LLM responses/i),
+      ).toBeInTheDocument(),
+    );
+    // The cache key is rendered (short prefix) so the auditor narrative
+    // is concrete, not vague.
+    expect(screen.getByText(/aaaaaa/)).toBeInTheDocument();
+    // llm_call_count is 0 on the replay (the cache served the responses).
+    expect(screen.getByText(/0 calls/)).toBeInTheDocument();
+  });
+
+  it('on cache miss: does NOT narrate seeded_from_cache', async () => {
+    // Default beforeEach mock has seeded_from_cache: false.
+    render(<TutorialTurn5AuditStory {...props} />);
+    await waitFor(() => screen.getByText(/5/));
+    expect(
+      screen.queryByText(/reused cached LLM responses/i),
+    ).not.toBeInTheDocument();
   });
 
   it('fires onContinue on continue click', async () => {

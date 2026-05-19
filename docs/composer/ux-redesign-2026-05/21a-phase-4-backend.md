@@ -40,11 +40,13 @@ test, smoke deploy.
 - Extend `PreferencesService`:
   - `_row_to_prefs` reads and Tier-1-guards the new field.
   - `get_composer_preferences` continues to return the full payload.
-  - `update_composer_preferences` partial-update supports the new field;
-    explicit `null` (i.e., "clear the tutorial-complete state") is **not**
-    accepted via this PATCH — the Pydantic field default is `None` (meaning
-    "leave alone"), and there is no client need to clear the flag (Phase 8
-    handles "retake tutorial").
+  - `update_composer_preferences` partial-update supports the new field with
+    **three semantic states**: (a) field absent from the PATCH body → no-op
+    for the column; (b) field present with a `datetime` value → write the
+    timestamp; (c) field present with explicit `null` → write `NULL` (the
+    Phase 8 retake path). Absent-vs-`null` is distinguished via Pydantic v2's
+    `model_fields_set` so the service does not collapse the two cases. See
+    §"Cross-plan contract — `tutorial_completed_at` PATCH semantics" below.
 - Tutorial cache module:
   - `src/elspeth/web/preferences/tutorial_cache.py`.
   - SHA-256 keying on `(canonical_prompt, model_id)`.
@@ -75,13 +77,40 @@ This is the **second** of three schema additions before Phase 9: (1) Phase 1A, (
 
 **Sequencing note:** If Phase 4A and Phase 5b deploy in the same operator-action window, batch both schema additions into one commit and perform a single DB-delete.
 
+## Cross-plan contract — `tutorial_completed_at` PATCH semantics
+
+Phase 4 ships `tutorial_completed_at: datetime | None` to
+`user_preferences_table`. The field is nullable in the schema AND on the
+PATCH request body. The three semantic states are:
+
+| Field state in PATCH body | Service behaviour | Used by |
+|---|---|---|
+| Absent (key not in payload) | No-op for this column | Most Phase 4 PATCH flows (e.g., mode toggle, banner-dismiss) |
+| Present with `datetime` value | Write timestamp to column | Phase 4 turn 6 finalisation; Phase 4 turn 1 skip |
+| Present with `null` | Write `NULL` to column | Phase 8 retake (`20-phase-8-polish-and-telemetry.md` Task 6) |
+
+This contract is **co-owned** by Phase 4 (which ships the schema, the
+Pydantic models, the service, and the Tier-1 read-side guard) and Phase 8
+(which adds the retake mechanism by PATCHing `tutorial_completed_at: null`).
+Either side changing the nullification semantics requires a paired edit in
+both plan files.
+
+Audit primacy: a successful PATCH that nulls the column (the retake event)
+is a user-write-intent that belongs in the Landscape — see Phase 8 Task 6
+for the audit-emit boundary question and the prior-timestamp capture
+requirement. Phase 4's service emits the existing
+`composer.preferences.patch_total` counter unchanged; the new
+audit-event-on-retake responsibility lives with Phase 8.
+
+The frontend exposes a derived boolean `tutorialCompleted = (tutorialCompletedAt !== null)` on the Zustand `preferencesStore`. The retake path does **not** add a new store action or a new API client function — it reuses `api.updateComposerPreferences({ tutorial_completed_at: null })`.
+
 ## New endpoints (Phase 4A additions)
 
 Consumed by Phase 4B Part 2. Defined here so 21b2 can reference them.
 
-**`POST /api/tutorial/run`** — body: `{"session_id": "<uuid>"}`. Response: `{"run_id": "<uuid>", "source_data_hash": "<hex>", "rows": [{"url":..., "score":..., "rationale":...}]}`. Cache-hit: milliseconds. Cache-miss: live run (~30s), populates cache on success. Non-tutorial-mode user → 400.
+**`POST /api/tutorial/run`** — body: `{"session_id": "<uuid>"}`. Response: `{"run_id": "<uuid>", "source_data_hash": "<hex>", "rows": [{"url":..., "score":..., "rationale":...}]}`. Cache-hit: the backend **synthesises a real Landscape entry under the current user's session**, populated from the cached content (rows, source_data_hash, llm_call_count=0, pipeline_yaml) plus a `seeded_from_cache: true` marker carrying the cache key. The returned `run_id` is **owned by the current session** — there is no foreign-run reference in the response. Cache-miss: live run (~30s), populates cache on success. Non-tutorial-mode user → 400.
 
-**`GET /api/sessions/{session_id}/runs/{run_id}/audit-story`** — response: `{"llm_call_count": N, "output_file_hash": "<hex>", "run_started_at": "<iso8601>", "plugin_versions": {...}}`. Reads from the Landscape (Tier 1). Not-found → 404. Landscape failure propagates — no fallback (design doc 04: "Otherwise the demonstration is theatre.").
+**`GET /api/sessions/{session_id}/runs/{run_id}/audit-story`** — response: `{"llm_call_count": N, "output_file_hash": "<hex>", "run_started_at": "<iso8601>", "plugin_versions": {...}, "seeded_from_cache": <bool>, "cache_key": "<hex>" | null}`. Reads from the Landscape — server-generated content (operational Tier-1 behaviour: corruption crashes, absence is 404). When the run was a cache hit, `seeded_from_cache` is `true`, `llm_call_count` is `0`, and `cache_key` is the SHA-256 that points at the original cache-seeding run for cross-run lineage joins. Not-found → 404. Landscape failure propagates — no fallback (design doc 04: "Otherwise the demonstration is theatre.").
 
 ## Trust tier check (per CLAUDE.md)
 
@@ -89,10 +118,10 @@ Consumed by Phase 4B Part 2. Defined here so 21b2 can reference them.
 |---|---|---|
 | Inbound `tutorial_completed_at` (PATCH body) | Tier 3 | Pydantic rejects non-datetime with 422. |
 | Outbound `tutorial_completed_at` (DB read) | Tier 1 | `_row_to_prefs` guards: must be `None` or `datetime`; non-datetime → crash. |
-| Tutorial cache file contents | Tier 1 | Parse failure = corruption → crash. |
+| Tutorial cache file contents | server-generated cache content | Parse failure = corruption → crash. (Final tier classification deferred to P23; the operational behaviour — crash-on-corrupt, miss-on-absence — is the binding contract.) |
 | Tutorial cache file presence | n/a | Absent = miss, not fault. |
-| Canonical seed prompt | Tier 1 | Python constant shared with frontend; drift → cache miss (intended). |
-| LLM results in cache | Tier 1 once written | Cache write happens after Landscape record. Corruption → crash on parse. |
+| Canonical seed prompt | constant | Python constant shared with frontend; drift → cache miss (intended). |
+| LLM results in cache | server-generated cache content | Cache write happens after the canonical-seed run is recorded in the Landscape and only when every row succeeded (gating is added by P18; see Task 7 Step 4's `# TODO: P18` hook). Corruption → crash on parse. |
 
 ## File structure
 
@@ -279,6 +308,12 @@ user_preferences_table = Table(
     # via the turn-1 skip affordance). The value is the timestamp at
     # finalisation; the timestamp itself is not load-bearing — only the
     # NULL / non-NULL distinction is read by the frontend.
+    #
+    # `nullable=True` is load-bearing for the Phase 8 retake mechanism: the
+    # Phase 8 retake button PATCHes `{tutorial_completed_at: null}` to clear
+    # the column and re-enter tutorial mode (see §"Cross-plan contract —
+    # `tutorial_completed_at` PATCH semantics"). Do NOT add a non-null
+    # constraint or a server_default here.
     Column("tutorial_completed_at", DateTime(timezone=True), nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
@@ -376,11 +411,13 @@ class UpdateComposerPreferencesRequest(BaseModel):
     default_mode: ComposerMode | None = None
     banner_dismissed_at: datetime | None = None
     # Phase 4: the tutorial finalisation flow sets this to the completion
-    # timestamp; no other client need exists. The PATCH semantics for None
-    # are "leave alone" (the standard partial-update pattern). There is no
-    # path to clear this to NULL via PATCH; operators who want to grant
-    # a "retake" must SQL-UPDATE the row directly until Phase 8 ships the
-    # settings affordance.
+    # timestamp; the Phase 8 retake flow sends explicit `null` to clear it.
+    # Three semantic states are distinguished via `model_fields_set` in the
+    # service (see Task 3): (a) key absent → no-op; (b) datetime → write
+    # timestamp; (c) explicit `null` → write NULL. The Pydantic annotation
+    # `datetime | None = None` allows the inbound payload to be either omitted
+    # or sent as `null`; the service does NOT collapse the two cases. See
+    # §"Cross-plan contract — `tutorial_completed_at` PATCH semantics".
     tutorial_completed_at: datetime | None = None
 ```
 
@@ -404,6 +441,22 @@ git commit -m "feat(web): extend ComposerPreferences with tutorial_completed_at 
 **Files:**
 - Modify: `src/elspeth/web/preferences/service.py`.
 - Modify: `tests/unit/web/preferences/test_service.py`.
+
+> **Implementer note — stale docstring at
+> `src/elspeth/web/preferences/models.py:78-86`.** The existing
+> docstring on `UpdateComposerPreferencesRequest` claims Pydantic v2
+> cannot distinguish JSON-missing from JSON-null without a sentinel.
+> That claim is stale: Pydantic v2's `model_fields_set` discriminates
+> the two cases correctly under
+> `ConfigDict(strict=True, extra='forbid')` (verified empirically).
+> When you add `tutorial_completed_at: datetime | None = None` to
+> the model in Task 2, also update the docstring to reflect that
+> `banner_dismissed_at`'s "absent collapses to no-op" behaviour is a
+> *deliberate spec choice* (one-way dismissal — see Phase 1B), not a
+> Pydantic limitation. The new `tutorial_completed_at` field is the
+> first to *use* the three-state distinction in production (absent =
+> preserve, datetime = set, explicit null = clear). The Task 3
+> service implementation below is the consumer of that distinction.
 
 - [ ] **Step 1: Write the failing test extensions.**
 
@@ -464,6 +517,69 @@ def test_partial_update_preserves_tutorial_completed_at(service):
     follow_up = asyncio.run(service.get_composer_preferences("alice-tutorial-preserve"))
     assert follow_up.tutorial_completed_at == stamp
     assert follow_up.default_mode == "freeform"
+
+
+def test_explicit_null_clears_tutorial_completed_at(service):
+    """Phase 8 retake contract: PATCH with explicit null nulls the column.
+
+    Cross-plan contract — see §"Cross-plan contract — `tutorial_completed_at`
+    PATCH semantics". Phase 8 Task 6's retake button PATCHes
+    `{"tutorial_completed_at": null}`; the service must distinguish that
+    from "field absent" (preserve) and write NULL.
+    """
+    stamp = datetime(2026, 5, 15, 11, 15, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-retake",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+    # Retake: explicit null in the PATCH body.
+    result = asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-retake",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=None),
+        )
+    )
+    assert result.tutorial_completed_at is None
+    follow_up = asyncio.run(service.get_composer_preferences("alice-tutorial-retake"))
+    assert follow_up.tutorial_completed_at is None
+
+
+def test_absent_field_and_explicit_null_are_distinguished(service):
+    """The service distinguishes absent-from-payload from explicit-null.
+
+    Pydantic v2 `model_fields_set` is the discriminator. This pins the
+    boundary contract that Phase 8 Task 6 depends on.
+    """
+    stamp = datetime(2026, 5, 15, 11, 20, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-discriminate",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+    # (a) Field ABSENT from payload → preserve.
+    absent_payload = UpdateComposerPreferencesRequest(default_mode="freeform")
+    assert "tutorial_completed_at" not in absent_payload.model_fields_set
+    asyncio.run(
+        service.update_composer_preferences("alice-tutorial-discriminate", absent_payload)
+    )
+    after_absent = asyncio.run(
+        service.get_composer_preferences("alice-tutorial-discriminate")
+    )
+    assert after_absent.tutorial_completed_at == stamp  # preserved
+
+    # (c) Field PRESENT with explicit null → write NULL.
+    null_payload = UpdateComposerPreferencesRequest(tutorial_completed_at=None)
+    assert "tutorial_completed_at" in null_payload.model_fields_set
+    asyncio.run(
+        service.update_composer_preferences("alice-tutorial-discriminate", null_payload)
+    )
+    after_null = asyncio.run(
+        service.get_composer_preferences("alice-tutorial-discriminate")
+    )
+    assert after_null.tutorial_completed_at is None
 
 
 def test_corrupt_tutorial_completed_at_crashes_loudly(service, engine):
@@ -581,8 +697,17 @@ async def update_composer_preferences(
                 ).scalar_one_or_none()
 
             # Resolve tutorial_completed_at (new — Phase 4).
-            if payload.tutorial_completed_at is not None:
-                resolved_tutorial = payload.tutorial_completed_at
+            # Three semantic states (see Cross-plan contract):
+            #   (a) field absent from payload         → preserve existing value
+            #   (b) field present, datetime value     → write the timestamp
+            #   (c) field present, value is None      → write NULL (Phase 8 retake)
+            # Pydantic v2 exposes `model_fields_set` containing only the keys
+            # that were explicitly provided by the caller; this is how we
+            # distinguish (a) "key absent" from (c) "key present but null"
+            # without inventing a sentinel.
+            tutorial_was_provided = "tutorial_completed_at" in payload.model_fields_set
+            if tutorial_was_provided:
+                resolved_tutorial = payload.tutorial_completed_at  # may be a datetime or None
             else:
                 resolved_tutorial = conn.execute(
                     select(user_preferences_table.c.tutorial_completed_at).where(
@@ -594,16 +719,27 @@ async def update_composer_preferences(
                 "user_id": user_id,
                 "default_composer_mode": insert_mode,
                 "banner_dismissed_at": payload.banner_dismissed_at,
-                "tutorial_completed_at": payload.tutorial_completed_at,
+                # Insert-side: use the resolved value so a fresh-row upsert
+                # without `tutorial_completed_at` in the payload writes NULL
+                # (the default for new users) rather than a stale-read value
+                # from an earlier transaction.
+                "tutorial_completed_at": resolved_tutorial,
                 "updated_at": now,
             }
             stmt = sqlite_insert(user_preferences_table).values(**values)
             update_clause: dict[str, object] = {"updated_at": now}
+            # Note: default_mode and banner_dismissed_at retain the Phase 1A
+            # "None = preserve" convention (there is no client need to NULL
+            # either field via PATCH; the banner-dismissed timestamp is
+            # write-once-and-leave-alone). Only `tutorial_completed_at` uses
+            # the three-state `model_fields_set` discrimination because
+            # Phase 8 Task 6's retake requires the explicit-null write path.
             if payload.default_mode is not None:
                 update_clause["default_composer_mode"] = payload.default_mode
             if payload.banner_dismissed_at is not None:
                 update_clause["banner_dismissed_at"] = payload.banner_dismissed_at
-            if payload.tutorial_completed_at is not None:
+            if tutorial_was_provided:
+                # Writes either a datetime (set) or NULL (Phase 8 retake).
                 update_clause["tutorial_completed_at"] = payload.tutorial_completed_at
             stmt = stmt.on_conflict_do_update(
                 index_elements=["user_id"], set_=update_clause
@@ -630,7 +766,7 @@ Phase 1A's version).
 .venv/bin/python -m pytest tests/unit/web/preferences/test_service.py -v
 ```
 
-Expected: PASS — all service tests green (existing + 5 new).
+Expected: PASS — all service tests green (existing + 7 new — 5 originally specified plus 2 added for the cross-plan retake contract).
 
 - [ ] **Step 5: Commit.**
 
@@ -688,6 +824,30 @@ def test_patch_rejects_non_datetime_tutorial(client_as_alice: TestClient) -> Non
         json={"tutorial_completed_at": "yesterday"},
     )
     assert response.status_code == 422
+
+
+def test_patch_with_explicit_null_clears_tutorial(client_as_alice: TestClient) -> None:
+    """Phase 8 retake contract at the HTTP boundary.
+
+    See §"Cross-plan contract — `tutorial_completed_at` PATCH semantics".
+    Phase 8 Task 6 PATCHes `{"tutorial_completed_at": null}` to retrigger
+    the tutorial; the route must accept the body and return a payload with
+    `tutorial_completed_at = null`.
+    """
+    # First set the field via a normal finalisation PATCH.
+    set_response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": "2026-05-15T12:40:00Z"},
+    )
+    assert set_response.status_code == 200
+    assert set_response.json()["tutorial_completed_at"] == "2026-05-15T12:40:00Z"
+    # Phase 8 retake: explicit null clears the column.
+    clear_response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": None},
+    )
+    assert clear_response.status_code == 200
+    assert clear_response.json()["tutorial_completed_at"] is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails.**
@@ -715,11 +875,36 @@ git commit -m "test(web): cover tutorial_completed_at in preferences routes (Pha
 - Create: `src/elspeth/web/preferences/tutorial_cache.py`.
 - Create: `tests/unit/web/preferences/test_tutorial_cache.py`.
 
-The cache stores the **full run output** for a `(canonical_prompt, model)`
-key. "Full run output" is whatever the run-path returns to the frontend on a
-successful execution — pipeline state, run id, audit-trail snippet bundle,
-result rows. We delegate the shape to the run path; the cache module sees an
-opaque dict and serialises it.
+The cache stores the **deterministic output content** of a canonical-seed
+run, keyed on `(canonical_prompt, model)`. **The cache never stores identity
+references** (no `run_id`, no `session_id`, no `interpretation_event_id`)
+from the cache-seeding run — those are owned by the user/session that
+seeded the cache and have no meaning to a different user replaying the
+same content. On a cache hit the run-path synthesises a fresh Landscape
+entry under the **current** session, populated from the cached content
+plus a `seeded_from_cache: true` provenance marker (Task 7). The cache key
+is recorded on the marker so an auditor can join across runs that share
+the same cache-seeded content.
+
+The cached fields are:
+
+- `rows` — the row-level LLM rating output (list of dicts shaped per the
+  canonical pipeline's terminal node).
+- `source_data_hash` — SHA-256 of the source URL set, computed by the
+  source plugin at run time. Reproducible across runs of the same input,
+  so the cache-replayed run's Landscape entry carries the same hash as
+  the original seeding run did — genuine determinism evidence, not a
+  copied identity field.
+- `llm_call_count` — integer count of LLM calls the cache-seeding run
+  made. Persisted so the replay's Landscape entry can record an
+  authentic count (the replay itself records `llm_call_count = 0`; the
+  seeding-run count is exposed separately for cost-attribution copy in
+  turn 5).
+- `pipeline_yaml` — the canonical pipeline YAML the cache-seeding run
+  executed. Persisted so replay records the same pipeline definition
+  the seeded content was generated against; otherwise a hit could
+  replay against a drifted pipeline and produce inconsistent audit
+  evidence.
 
 **Cache directory:** `~/.elspeth_web/tutorial_cache/`. Operators can override
 via a constructor argument (used by tests).
@@ -730,8 +915,12 @@ are also stored inside the JSON for diagnostic visibility (an operator
 inspecting a file should be able to confirm what it caches without
 recomputing the hash).
 
-**Tier-1 guarantees:**
-- A file present → must parse via Pydantic. Parse failure → crash.
+**Operational guarantees** (corruption discipline; tier classification is
+deferred to P23 which decides whether "server-generated cache content"
+warrants Tier-1 framing):
+
+- A file present → must parse via Pydantic. Parse failure → crash. No
+  fallback to a live run: that would mask corruption.
 - A file absent → cache miss (legitimate).
 - A file's recorded `(canonical_prompt, model_id)` must match what we expected
   for the given key — if not, the file is in the wrong location and we crash.
@@ -751,6 +940,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from elspeth.web.preferences.tutorial_cache import (
     CANONICAL_SEED_PROMPT,
@@ -783,14 +973,28 @@ def test_lookup_returns_none_on_miss(cache: TutorialCache) -> None:
     assert cache.lookup(CANONICAL_SEED_PROMPT, "claude-opus-4-7") is None
 
 
+_CANONICAL_PIPELINE_YAML = """\
+source:
+  type: inline_blob
+  rows:
+    - url: ato.gov.au
+transforms:
+  - type: web_scrape
+  - type: llm_rate
+sink:
+  type: tutorial_summary
+"""
+
+
 def test_lookup_returns_entry_on_hit(cache: TutorialCache) -> None:
     entry = TutorialCacheEntry(
         canonical_prompt=CANONICAL_SEED_PROMPT,
         model_id="claude-opus-4-7",
         cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={"run_id": "abc-123", "rows": [{"url": "ato.gov.au"}]},
+        rows=[{"url": "ato.gov.au", "score": 5, "rationale": "clear nav"}],
         source_data_hash="a7f3e2deadbeef",
-        interpretation_event_id="evt-1",
+        llm_call_count=5,
+        pipeline_yaml=_CANONICAL_PIPELINE_YAML,
     )
     cache.store(entry)
     got = cache.lookup(CANONICAL_SEED_PROMPT, "claude-opus-4-7")
@@ -798,7 +1002,25 @@ def test_lookup_returns_entry_on_hit(cache: TutorialCache) -> None:
     assert got.canonical_prompt == CANONICAL_SEED_PROMPT
     assert got.model_id == "claude-opus-4-7"
     assert got.source_data_hash == "a7f3e2deadbeef"
-    assert got.run_output["run_id"] == "abc-123"
+    assert got.llm_call_count == 5
+    assert got.rows[0]["url"] == "ato.gov.au"
+    assert got.pipeline_yaml == _CANONICAL_PIPELINE_YAML
+
+
+def test_entry_rejects_identity_fields() -> None:
+    """Architectural invariant: the cache schema MUST NOT accept run_id or
+    interpretation_event_id. Foreign identity must not enter the cache."""
+    with pytest.raises(ValidationError):
+        TutorialCacheEntry.model_validate({
+            "canonical_prompt": CANONICAL_SEED_PROMPT,
+            "model_id": "claude-opus-4-7",
+            "cached_at": "2026-05-15T00:00:00+00:00",
+            "rows": [],
+            "source_data_hash": "hash",
+            "llm_call_count": 0,
+            "pipeline_yaml": _CANONICAL_PIPELINE_YAML,
+            "run_id": "abc-123",  # extra field — must be rejected
+        })
 
 
 def test_lookup_misses_on_different_model(cache: TutorialCache) -> None:
@@ -806,9 +1028,10 @@ def test_lookup_misses_on_different_model(cache: TutorialCache) -> None:
         canonical_prompt=CANONICAL_SEED_PROMPT,
         model_id="claude-opus-4-7",
         cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={},
+        rows=[],
         source_data_hash="hash",
-        interpretation_event_id=None,
+        llm_call_count=0,
+        pipeline_yaml=_CANONICAL_PIPELINE_YAML,
     )
     cache.store(entry)
     assert cache.lookup(CANONICAL_SEED_PROMPT, "claude-opus-4-8") is None
@@ -819,9 +1042,10 @@ def test_lookup_misses_on_different_prompt(cache: TutorialCache) -> None:
         canonical_prompt=CANONICAL_SEED_PROMPT,
         model_id="claude-opus-4-7",
         cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={},
+        rows=[],
         source_data_hash="hash",
-        interpretation_event_id=None,
+        llm_call_count=0,
+        pipeline_yaml=_CANONICAL_PIPELINE_YAML,
     )
     cache.store(entry)
     edited = CANONICAL_SEED_PROMPT + " and also rate accessibility"
@@ -833,9 +1057,10 @@ def test_store_and_lookup_round_trip(cache: TutorialCache, cache_dir: Path) -> N
         canonical_prompt=CANONICAL_SEED_PROMPT,
         model_id="claude-opus-4-7",
         cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={"k": "v"},
+        rows=[{"url": "example.gov.au", "score": 3}],
         source_data_hash="hash",
-        interpretation_event_id="evt-1",
+        llm_call_count=5,
+        pipeline_yaml=_CANONICAL_PIPELINE_YAML,
     )
     cache.store(entry)
     files = list(cache_dir.iterdir())
@@ -846,6 +1071,9 @@ def test_store_and_lookup_round_trip(cache: TutorialCache, cache_dir: Path) -> N
     raw = json.loads(files[0].read_text())
     assert raw["canonical_prompt"] == CANONICAL_SEED_PROMPT
     assert raw["model_id"] == "claude-opus-4-7"
+    # No identity fields written to disk.
+    assert "run_id" not in raw
+    assert "interpretation_event_id" not in raw
 
 
 def test_corrupt_file_crashes_lookup(cache: TutorialCache, cache_dir: Path) -> None:
@@ -871,9 +1099,10 @@ def test_file_with_mismatched_prompt_crashes_lookup(
         "canonical_prompt": "a different prompt",
         "model_id": "claude-opus-4-7",
         "cached_at": "2026-05-15T00:00:00+00:00",
-        "run_output": {},
+        "rows": [],
         "source_data_hash": "hash",
-        "interpretation_event_id": None,
+        "llm_call_count": 0,
+        "pipeline_yaml": _CANONICAL_PIPELINE_YAML,
     }
     (cache_dir / f"{key}.json").write_text(json.dumps(bad_entry))
     with pytest.raises(RuntimeError, match="prompt mismatch"):
@@ -886,9 +1115,10 @@ def test_store_is_atomic(cache: TutorialCache, cache_dir: Path) -> None:
         canonical_prompt=CANONICAL_SEED_PROMPT,
         model_id="claude-opus-4-7",
         cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={"k": "v"},
+        rows=[{"url": "example.gov.au"}],
         source_data_hash="hash",
-        interpretation_event_id=None,
+        llm_call_count=0,
+        pipeline_yaml=_CANONICAL_PIPELINE_YAML,
     )
     cache.store(entry)
     # The directory should contain exactly one .json file and no tempfiles.
@@ -945,16 +1175,43 @@ def _compute_key(canonical_prompt: str, model_id: str) -> str:
 
 
 class TutorialCacheEntry(BaseModel):
-    """Cached canonical-seed run output. `run_output` is opaque (frontend knows shape)."""
+    """Cached deterministic output of a canonical-seed run.
 
-    model_config = ConfigDict(frozen=True)
+    Content-not-identity invariant: this model stores the output content of a
+    canonical-seed-prompt run, never identity references (no run_id,
+    session_id, user_id, or interpretation_event_id) from the cache-seeding
+    run. On a cache hit the run-path synthesises a fresh Landscape entry
+    under the **current** session populated from these fields plus a
+    `seeded_from_cache: true` marker; the original seeding-run identity is
+    referenced only indirectly, via the cache key, so an auditor can join
+    across runs that share the same cache-seeded content.
+
+    Field semantics:
+
+    - ``rows``: row-level LLM rating output, shape = canonical pipeline's
+      terminal-node output.
+    - ``source_data_hash``: SHA-256 (hex) of the source URL set, computed
+      by the source plugin. Reproducible across runs over the same input,
+      so the replayed Landscape entry can carry this value as genuine
+      determinism evidence rather than a copied identity field.
+    - ``llm_call_count``: number of LLM calls the cache-seeding run made.
+      Persisted so turn 5's cost-attribution copy can cite a real number;
+      the replay's own Landscape entry records ``llm_call_count = 0``
+      (the cache served the responses).
+    - ``pipeline_yaml``: canonical pipeline YAML the cache-seeding run
+      executed. Persisted so a hit replays against the same pipeline
+      definition the content was generated against.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     canonical_prompt: str
     model_id: str
     cached_at: datetime
-    run_output: dict[str, Any]
-    source_data_hash: str  # design doc 04 turn 5
-    interpretation_event_id: str | None  # Phase 5b row; None if not recorded
+    rows: list[dict[str, Any]]
+    source_data_hash: str
+    llm_call_count: int
+    pipeline_yaml: str
 
 
 class TutorialCache:
@@ -1108,16 +1365,43 @@ branch that:
    that order; the sink is the standard tutorial-sink shape — confirmed
    during recon).
 3. Calls `app.state.tutorial_cache.lookup(CANONICAL_SEED_PROMPT, model_id)`.
-4. On hit: returns the cached output (synthesised into the run-response
-   shape the frontend expects).
+4. **On hit: replays the cached content against the current session** by
+   synthesising a real Landscape entry under the current user's `session_id`
+   with a freshly-minted `run_id` owned by the current session. The
+   synthesised entry records:
+   - `pipeline_yaml` from the cache entry (so the replay's audit trail
+     references the same pipeline definition the cached content was
+     generated against);
+   - `rows` exactly as cached (no re-execution; this is the optimisation);
+   - `source_data_hash` from the cache entry (reproducible across runs
+     over the same input — this is determinism evidence, not a copied
+     identity);
+   - `llm_call_count = 0` on the new run (the cache served the LLM
+     responses);
+   - `seeded_from_cache: true` provenance marker carrying the cache key
+     (`SHA-256(canonical_prompt + ":" + model_id)`) so an auditor can
+     join across runs that share the same cache-seeded content; this
+     surfaces the cache-replay in the audit trail rather than hiding it.
+
+   Returns `run_id` (the new, current-session-owned identifier) to the
+   frontend. The frontend's turn 5 audit-story call then targets the
+   **current** session's run — a same-ownership query, with the
+   `seeded_from_cache` marker visible in the response so turn 5 can
+   acknowledge the cache-replay in user-facing copy.
 5. On miss: proceeds with the normal run path. **After** the run completes
-   successfully, calls `app.state.tutorial_cache.store(...)` to populate the
-   cache for the next user.
+   successfully, calls `app.state.tutorial_cache.store(...)` to populate
+   the cache for the next user. (P18 will gate this write on the
+   all-rows-succeeded condition; see the `# TODO: P18` hook in Step 4.)
 
 **Edge: a user edits the seed.** The canonical-seed-match check fails; the
 cache is bypassed entirely; the user pays for a live LLM run. This is the
 intended behaviour — caching edited prompts would require a much larger key
 space and create per-edit cache churn.
+
+**Cross-ownership query is impossible by construction.** The cache stores
+no foreign identity, so the run-path cannot return a foreign `run_id`. The
+frontend therefore cannot accidentally query another session's audit
+endpoint. This is the architectural fix that the P2 review surfaced.
 
 - [ ] **Step 1: Reconnaissance — identify the run path.**
 
@@ -1206,43 +1490,126 @@ def app_with_cache(cache_dir: Path) -> FastAPI:
     return app
 
 
-def test_cache_hit_returns_cached_output_without_calling_llm(
+_CANONICAL_PIPELINE_YAML = """\
+source:
+  type: inline_blob
+  rows:
+    - url: ato.gov.au
+transforms:
+  - type: web_scrape
+  - type: llm_rate
+sink:
+  type: tutorial_summary
+"""
+
+
+def _seed_canonical_cache_entry(app: FastAPI) -> None:
+    """Helper: pre-populate the cache with a recognisable canonical entry."""
+    app.state.tutorial_cache.store(
+        TutorialCacheEntry(
+            canonical_prompt=CANONICAL_SEED_PROMPT,
+            model_id="claude-opus-4-7",
+            cached_at=datetime(2026, 5, 15, tzinfo=UTC),
+            rows=[{"url": "ato.gov.au", "score": 5, "rationale": "clear nav"}],
+            source_data_hash="a7f3e2cached",
+            llm_call_count=5,
+            pipeline_yaml=_CANONICAL_PIPELINE_YAML,
+        )
+    )
+
+
+def test_cache_hit_returns_cached_content_without_calling_llm(
     app_with_cache: FastAPI, cache_dir: Path
 ) -> None:
     """User in tutorial mode + canonical seed + cache hit → no LLM call."""
-    # Pre-populate the cache.
-    entry = TutorialCacheEntry(
-        canonical_prompt=CANONICAL_SEED_PROMPT,
-        model_id="claude-opus-4-7",
-        cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={"rows": [{"url": "ato.gov.au", "score": 5}]},
-        source_data_hash="a7f3e2cached",
-        interpretation_event_id="evt-cached",
-    )
-    app_with_cache.state.tutorial_cache.store(entry)
+    _seed_canonical_cache_entry(app_with_cache)
 
     # The user is in tutorial mode (no PATCH yet → tutorial_completed_at is None).
     client = TestClient(app_with_cache)
 
     # Patch the LLM-call path so we can assert it was NOT called.
     with patch("<llm-call-path>") as mock_llm:
-        # Build the canonical-seed pipeline through the standard composer
-        # API (the test isn't unit-testing the cache module — it's verifying
-        # the integration). Specifics depend on the run-path shape, filled
-        # in during implementation.
         response = client.post(
             "/api/sessions/<session_id>/runs",
             json={"<canonical-seed-pipeline-shape>": "..."},
         )
         assert response.status_code == 200
         body = response.json()
-        # The cached run_output is returned verbatim.
+        # The cached rows are returned verbatim.
         assert body["rows"][0]["url"] == "ato.gov.au"
-        # The cached source_data_hash propagates to the run response so
-        # turn 5 can render it without a separate Landscape read.
+        # The cached source_data_hash propagates to the run response.
         assert body["source_data_hash"] == "a7f3e2cached"
         # The LLM was never called.
         mock_llm.assert_not_called()
+
+
+def test_cache_hit_creates_landscape_entry_under_current_session(
+    app_with_cache: FastAPI, cache_dir: Path
+) -> None:
+    """Architectural invariant: a cache hit produces a NEW run_id owned by
+    the current user's session — not a foreign run_id from the cache-seeding
+    session.
+
+    This is the P2-review fix: cross-ownership audit-story queries are
+    impossible because the cache never stores foreign identity.
+    """
+    _seed_canonical_cache_entry(app_with_cache)
+
+    client = TestClient(app_with_cache)
+    response = client.post(
+        "/api/sessions/<session_id>/runs",
+        json={"<canonical-seed-pipeline-shape>": "..."},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    returned_run_id = body["run_id"]
+
+    # The audit-story endpoint resolves under the CURRENT session — no
+    # cross-ownership query is possible.
+    story = client.get(
+        f"/api/sessions/<session_id>/runs/{returned_run_id}/audit-story"
+    )
+    assert story.status_code == 200
+    story_body = story.json()
+    # The seeded_from_cache marker surfaces the cache-replay provenance.
+    assert story_body["seeded_from_cache"] is True
+    # The cache key is recorded so an auditor can join to the seeding run.
+    assert isinstance(story_body["cache_key"], str)
+    assert len(story_body["cache_key"]) == 64  # SHA-256 hex
+    # The replayed Landscape entry records llm_call_count = 0 (no live LLM).
+    assert story_body["llm_call_count"] == 0
+
+
+def test_cache_hits_for_different_users_produce_distinct_run_ids(
+    app_with_cache: FastAPI, cache_dir: Path
+) -> None:
+    """Two users hitting the same cached content get two distinct run_ids,
+    each owned by the issuing user's session.
+
+    This is the second leg of the content-not-identity invariant: cached
+    content is shared, but the audit identity of each replay is unique.
+    """
+    _seed_canonical_cache_entry(app_with_cache)
+
+    client_alice = TestClient(app_with_cache)
+    response_alice = client_alice.post(
+        "/api/sessions/<alice_session_id>/runs",
+        json={"<canonical-seed-pipeline-shape>": "..."},
+    )
+    assert response_alice.status_code == 200
+    run_id_alice = response_alice.json()["run_id"]
+
+    # Switch to Bob (test-fixture detail filled in during recon; the
+    # dependency-override for get_current_user is reassigned).
+    client_bob = TestClient(app_with_cache)
+    response_bob = client_bob.post(
+        "/api/sessions/<bob_session_id>/runs",
+        json={"<canonical-seed-pipeline-shape>": "..."},
+    )
+    assert response_bob.status_code == 200
+    run_id_bob = response_bob.json()["run_id"]
+
+    assert run_id_alice != run_id_bob
 
 
 def test_cache_miss_runs_live_then_populates_cache(
@@ -1256,9 +1623,18 @@ def test_cache_miss_runs_live_then_populates_cache(
         json={"<canonical-seed-pipeline-shape>": "..."},
     )
     assert response.status_code == 200
-    # After the run, the cache should contain one entry.
+    # After the run, the cache should contain one entry — and that entry
+    # carries content, not identity.
     files = list(cache_dir.iterdir())
     assert len(files) == 1
+    import json as _json
+    raw = _json.loads(files[0].read_text())
+    assert "rows" in raw
+    assert "source_data_hash" in raw
+    assert "llm_call_count" in raw
+    assert "pipeline_yaml" in raw
+    assert "run_id" not in raw  # invariant
+    assert "interpretation_event_id" not in raw  # invariant
 
 
 def test_non_tutorial_user_skips_cache(
@@ -1272,15 +1648,17 @@ def test_non_tutorial_user_skips_cache(
         json={"tutorial_completed_at": "2026-05-14T00:00:00Z"},
     )
     # Pre-populate the cache with a recognisable entry.
-    entry = TutorialCacheEntry(
-        canonical_prompt=CANONICAL_SEED_PROMPT,
-        model_id="claude-opus-4-7",
-        cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={"rows": [{"url": "cached-url", "score": 99}]},
-        source_data_hash="should-not-appear",
-        interpretation_event_id=None,
+    app_with_cache.state.tutorial_cache.store(
+        TutorialCacheEntry(
+            canonical_prompt=CANONICAL_SEED_PROMPT,
+            model_id="claude-opus-4-7",
+            cached_at=datetime(2026, 5, 15, tzinfo=UTC),
+            rows=[{"url": "cached-url", "score": 99}],
+            source_data_hash="should-not-appear",
+            llm_call_count=5,
+            pipeline_yaml=_CANONICAL_PIPELINE_YAML,
+        )
     )
-    app_with_cache.state.tutorial_cache.store(entry)
 
     response = client.post(
         "/api/sessions/<session_id>/runs",
@@ -1298,15 +1676,17 @@ def test_edited_prompt_skips_cache(
 ) -> None:
     """Tutorial mode + edited prompt → cache is bypassed; live run."""
     # Pre-populate the cache for the canonical seed.
-    entry = TutorialCacheEntry(
-        canonical_prompt=CANONICAL_SEED_PROMPT,
-        model_id="claude-opus-4-7",
-        cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-        run_output={"rows": []},
-        source_data_hash="cached-hash",
-        interpretation_event_id=None,
+    app_with_cache.state.tutorial_cache.store(
+        TutorialCacheEntry(
+            canonical_prompt=CANONICAL_SEED_PROMPT,
+            model_id="claude-opus-4-7",
+            cached_at=datetime(2026, 5, 15, tzinfo=UTC),
+            rows=[],
+            source_data_hash="cached-hash",
+            llm_call_count=0,
+            pipeline_yaml=_CANONICAL_PIPELINE_YAML,
+        )
     )
-    app_with_cache.state.tutorial_cache.store(entry)
 
     client = TestClient(app_with_cache)
     # Build a pipeline from an edited prompt (canonical + extra clause).
@@ -1357,7 +1737,7 @@ In the run-path file identified during recon, add a guard at the very top of
 the execution entry point:
 
 ```python
-from elspeth.web.preferences.tutorial_cache import CANONICAL_SEED_PROMPT
+from elspeth.web.preferences.tutorial_cache import CANONICAL_SEED_PROMPT, _compute_key
 
 async def execute_pipeline_run(
     request: Request,
@@ -1368,8 +1748,10 @@ async def execute_pipeline_run(
     """Execute a pipeline run for the user.
 
     Phase 4: tutorial-mode users running the canonical seed pipeline consult
-    the cache first. On hit, return the cached output (synthesised into the
-    run-response shape). On miss, run live; on success, populate the cache.
+    the cache first. On hit, replay the cached **content** against a new
+    Landscape entry owned by the current session (no foreign identity is
+    returned). On miss, run live; on success, populate the cache with the
+    deterministic content of the just-completed run.
     """
     # Tutorial-mode + canonical-seed cache check.
     prefs = await request.app.state.preferences_service.get_composer_preferences(
@@ -1383,13 +1765,27 @@ async def execute_pipeline_run(
                 CANONICAL_SEED_PROMPT, model_id
             )
             if cache_entry is not None:
-                # Cache hit — return the cached output in the run-response shape.
-                return _cached_entry_to_run_response(cache_entry)
+                # Cache hit — REPLAY the cached content under the current
+                # user's session. A fresh Landscape entry is created with a
+                # new run_id owned by `session_id`; the cache key is
+                # recorded on the seeded_from_cache marker so the audit
+                # trail surfaces the cache-replay rather than hiding it.
+                return await _replay_cached_content_to_landscape(
+                    request=request,
+                    user=user,
+                    session_id=session_id,
+                    cache_entry=cache_entry,
+                    cache_key=_compute_key(CANONICAL_SEED_PROMPT, model_id),
+                )
 
     # Normal path: run live.
     result = await _execute_pipeline_live(request, user, session_id, pipeline_state)
 
     # Tutorial-mode + canonical-seed cache populate (on success only).
+    # TODO: P18 — replace `_is_successful_run` with an all-rows-succeeded
+    # gate so a partial-success run (some rows quarantined) does not poison
+    # the cache for the next user. The hook is intentionally narrow: the
+    # write site is here, the gate condition is the only change.
     if (
         prefs.tutorial_completed_at is None
         and _is_canonical_seed_pipeline(pipeline_state)
@@ -1401,25 +1797,79 @@ async def execute_pipeline_run(
                 canonical_prompt=CANONICAL_SEED_PROMPT,
                 model_id=model_id,
                 cached_at=datetime.now(UTC),
-                run_output=result["run_output"],
+                rows=result["rows"],
                 source_data_hash=result["source_data_hash"],
-                interpretation_event_id=result.get("interpretation_event_id"),
+                llm_call_count=result["llm_call_count"],
+                pipeline_yaml=result["pipeline_yaml"],
             )
         )
 
     return result
+
+
+async def _replay_cached_content_to_landscape(
+    *,
+    request: Request,
+    user: UserIdentity,
+    session_id: str,
+    cache_entry: TutorialCacheEntry,
+    cache_key: str,
+) -> dict:
+    """Synthesise a Landscape entry under ``session_id`` from cached content.
+
+    Creates a new ``run_id`` owned by the current session and records:
+
+    - ``pipeline_yaml`` from the cache entry (replay uses the same pipeline
+      definition the seeded content was generated against);
+    - ``rows`` and ``source_data_hash`` exactly as cached (the optimisation);
+    - ``llm_call_count = 0`` (no live LLM calls were made by this replay);
+    - ``seeded_from_cache = True`` plus ``cache_key`` as metadata, so an
+      auditor querying ``explain(recorder, run_id, token_id)`` sees the
+      cache-replay provenance and can join to the original seeding run via
+      ``cache_key``.
+
+    No foreign identity (no ``run_id``, ``session_id``, ``user_id`` from
+    the cache-seeding session) is returned or recorded.
+    """
+    # The exact Landscape write API depends on recon; the implementation
+    # uses the same record-a-completed-run path that `_execute_pipeline_live`
+    # would have used, but feeds it cached content instead of live results.
+    new_run_id = await request.app.state.landscape.record_synthesised_run(
+        session_id=session_id,
+        user_id=user.user_id,
+        pipeline_yaml=cache_entry.pipeline_yaml,
+        rows=cache_entry.rows,
+        source_data_hash=cache_entry.source_data_hash,
+        llm_call_count=0,
+        metadata={
+            "seeded_from_cache": True,
+            "cache_key": cache_key,
+            "cache_seeding_llm_call_count": cache_entry.llm_call_count,
+        },
+    )
+    return {
+        "run_id": new_run_id,
+        "source_data_hash": cache_entry.source_data_hash,
+        "rows": cache_entry.rows,
+    }
 ```
 
 The `_is_canonical_seed_pipeline`, `_model_id_for_pipeline`,
-`_cached_entry_to_run_response`, `_is_successful_run`, and
-`_execute_pipeline_live` helpers are defined in the same file. Their shape
-depends on recon; the executor fills them in based on the actual run-path
-internals.
+`_is_successful_run`, and `_execute_pipeline_live` helpers are defined in
+the same file. Their shape depends on recon; the executor fills them in
+based on the actual run-path internals. `_replay_cached_content_to_landscape`
+replaces the old `_cached_entry_to_run_response` — the substantive change
+is that it writes a real Landscape entry under the current session rather
+than synthesising a response dict containing a foreign `run_id`.
 
-**Tier discipline:** cache `lookup`/`store` are Tier-1 (failures crash);
-`_is_canonical_seed_pipeline` reads Tier-2 `pipeline_state` (no-match is
-normal, corrupt structure crashes); `model_id` extraction crashes on
-absence (it's required by every live run too).
+**Operational discipline:** cache `lookup`/`store` crash on corruption
+(see Task 5 "Operational guarantees"); `_is_canonical_seed_pipeline` reads
+Tier-2 `pipeline_state` (no-match is normal, corrupt structure crashes);
+`model_id` extraction crashes on absence (it's required by every live run
+too). The synthesised Landscape entry is written before the response is
+returned; if the write fails, the request fails — there is no
+silent-cache-hit fallback. Per CLAUDE.md "no defensive programming": no
+try/except wrapping of the replay path.
 
 - [ ] **Step 5: Run test to verify it passes.**
 
@@ -1461,6 +1911,17 @@ Key risks: run-path entry point not where assumed (Task 7 Step 1 recon resolves)
 
 Phase 8 schema additions wipe `tutorial_completed_at` via DB-delete policy — every user retakes the tutorial. Structural fix (Alembic) owned by the roadmap.
 
+**Phase 8 retake mechanism (co-owned contract).** Phase 8 Task 6 ships a
+"Replay hello-world tutorial" button that nulls `tutorial_completed_at` via
+`PATCH /api/composer-preferences` with body `{"tutorial_completed_at": null}`.
+The schema (`nullable=True`), the Pydantic model (`datetime | None`), the
+service (absent-vs-null discrimination via `model_fields_set`), and the route
+(no structural change) shipped by Phase 4 are all the preconditions for that
+mechanism. See §"Cross-plan contract — `tutorial_completed_at` PATCH
+semantics" near the top of this document. The audit emit for the retake
+event itself lives in Phase 8; this plan does not change
+`composer.preferences.patch_total` or its emit site.
+
 ## Memory references
 
 - `project_composer_first_run_tutorial`
@@ -1485,3 +1946,42 @@ Phase 8 schema additions wipe `tutorial_completed_at` via DB-delete policy — e
 | 4A-F5 | IMPORTANT (Quality) | Applied | Preflight Task 0 Step 4 column check made precise |
 | 4A-F6 (from 4B2-F1) | IMPORTANT (Architecture) | Applied | `POST /api/tutorial/run` route specified in §New endpoints |
 | 4A-F7 (from 4B2-F3) | IMPORTANT (Quality) | Applied | `GET /api/sessions/{id}/runs/{run_id}/audit-story` specified in §New endpoints |
+
+### 2026-05-19 — cross-plan contract amendment (Phase 4 ↔ Phase 8)
+
+Pass-1 review of Phase 4 surfaced a Systems S1 contract rupture against
+Phase 8 Task 6's retake mechanism: Phase 4 originally disallowed
+nullification of `tutorial_completed_at` via PATCH (the Pydantic field
+default was treated as "leave alone" and operators were told to SQL-UPDATE
+directly), while Phase 8 expected to clear the column via the same PATCH
+endpoint. Synthesizer-adopted resolution: Option (a) — allow nullification
+via explicit `null` in the PATCH body; distinguish absent-from-payload from
+explicit-null via Pydantic v2's `model_fields_set`. Same field, same column,
+single shared contract co-owned by Phases 4 and 8.
+
+Edits applied:
+
+- §Scope boundaries `update_composer_preferences` bullet rewritten to name
+  the three semantic states (absent / datetime / null).
+- New §"Cross-plan contract — `tutorial_completed_at` PATCH semantics"
+  section inserted between §"DB-delete cadence" and §"New endpoints".
+- Task 1 column-add prose: explicit "do not add NOT NULL or server_default"
+  note attached to the `nullable=True` line.
+- Task 2 model comment rewritten to document the three-state contract and
+  the `model_fields_set` discrimination pattern.
+- Task 3 service code: absent-vs-null distinguished via `model_fields_set`
+  for `tutorial_completed_at` only. `default_mode` and `banner_dismissed_at`
+  retain the Phase 1A "None = preserve" convention (no client need to NULL
+  either field).
+- Task 3 tests: two new tests (`test_explicit_null_clears_tutorial_completed_at`,
+  `test_absent_field_and_explicit_null_are_distinguished`).
+- Task 4 tests: one new test (`test_patch_with_explicit_null_clears_tutorial`).
+- §Forward compatibility: new paragraph naming the Phase 8 retake mechanism
+  and citing the shared contract block.
+
+Co-edits applied in `21-phase-4-hello-world-tutorial.md` (Open Question C3
+resolution updated, vocabulary block extended, file inventory pointer) and
+`20-phase-8-polish-and-telemetry.md` (Task 6 PATCH body changed from
+`{"tutorial_completed": false}` to `{"tutorial_completed_at": null}`,
+Trust-tier check updated, telemetry-primacy footnote updated, retake
+audit-emit boundary surfaced for Phase 8 reviewers).

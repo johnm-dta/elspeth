@@ -102,25 +102,25 @@ repos:
         files: ^(src/elspeth/|config/cicd/enforce_audit_evidence_nominal/|config/cicd/enforce_tier_1_decoration/|config/cicd/enforce_guard_symmetry/|config/cicd/enforce_gve_attribution/|elspeth-lints/src/elspeth_lints/rules/audit_evidence/)
         pass_filenames: false
 
-      - id: elspeth-lints-composer-shadow
-        name: elspeth-lints composer shadow
+      - id: elspeth-lints-composer
+        name: elspeth-lints composer
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules 'composer/*' --root src/elspeth
         language: system
         files: ^(src/elspeth/web/|config/cicd/enforce_composer_(catch_order|exception_channel)/|elspeth-lints/src/elspeth_lints/rules/composer/)
         pass_filenames: false
 
-      - id: elspeth-lints-contract-manifest-shadow
-        name: elspeth-lints contract manifest shadow
+      - id: elspeth-lints-contract-manifest
+        name: elspeth-lints contract manifest
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.contract_manifest --root src/elspeth
         language: system
-        files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/|elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/)
+        files: ^(src/elspeth/|config/cicd/enforce_contract_manifest/|elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/)
         pass_filenames: false
 
-      - id: elspeth-lints-adr019-inventory-shadow
-        name: elspeth-lints ADR-019 inventory shadow
+      - id: elspeth-lints-adr019-inventory
+        name: elspeth-lints ADR-019 inventory
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.symbol_inventory,manifest.test_to_source_mapping --root .
         language: system
-        files: ^(src/elspeth/|tests/|scripts/cicd/adr019_(symbol|test)_inventory\.py|config/cicd/adr019_(symbol|test)_inventory/|elspeth-lints/src/elspeth_lints/rules/manifest/(symbol_inventory|test_to_source_mapping)/)
+        files: ^(src/elspeth/|tests/|config/cicd/adr019_(symbol|test)_inventory/|elspeth-lints/src/elspeth_lints/rules/manifest/(symbol_inventory|test_to_source_mapping)/)
         pass_filenames: false
 
       - id: enforce-tier-model
@@ -150,30 +150,6 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
-
-      - id: enforce-composer-exception-channel
-        name: Composer exception-channel discipline
-        entry: .venv/bin/python scripts/cicd/enforce_composer_exception_channel.py check --root src/elspeth --allowlist config/cicd/enforce_composer_exception_channel
-        language: system
-        types: [python]
-        pass_filenames: false
-        files: ^src/elspeth/web/composer/tools\.py$
-
-      - id: enforce-composer-catch-order
-        name: Composer catch-order discipline
-        entry: .venv/bin/python scripts/cicd/enforce_composer_catch_order.py check --root src/elspeth --allowlist config/cicd/enforce_composer_catch_order
-        language: system
-        types: [python]
-        pass_filenames: false
-        files: ^src/elspeth/web/.*\.py$
-
-      - id: enforce-contract-manifest
-        name: Enforce Declaration Contract Manifest
-        entry: .venv/bin/python scripts/cicd/enforce_contract_manifest.py check --allowlist config/cicd/enforce_contract_manifest
-        language: system
-        types: [python]
-        pass_filenames: false
-        files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/)
 
       - id: check-slot-type-cross-language
         name: SlotType / guided.ts mirror consistency check

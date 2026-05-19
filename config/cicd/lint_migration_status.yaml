@@ -68,131 +68,24 @@ rules:
       - json
   - old_script: scripts/cicd/enforce_composer_catch_order.py
     new_rule: composer.catch_order
-    status: shadow
+    status: deleted
     migration_issue: elspeth-48db98bd88
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_composer_catch_order"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_composer_exception_channel.py
     new_rule: composer.exception_channel
-    status: shadow
+    status: deleted
     migration_issue: elspeth-48db98bd88
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_composer_exception_channel"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_contract_manifest.py
     new_rule: manifest.contract_manifest
-    status: shadow
+    status: deleted
     migration_issue: elspeth-48db98bd88
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --source-root
-      - "{root}/src/elspeth"
-      - --manifest-file
-      - "{root}/src/elspeth/contracts/declaration_contracts.py"
-      - --allowlist
-      - "{root}/config/cicd/enforce_contract_manifest"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/adr019_symbol_inventory.py
     new_rule: manifest.symbol_inventory
-    status: shadow
+    status: deleted
     migration_issue: elspeth-48db98bd88
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/adr019_symbol_inventory"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/adr019_test_inventory.py
     new_rule: manifest.test_to_source_mapping
-    status: shadow
+    status: deleted
     migration_issue: elspeth-48db98bd88
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/tests"
-      - --allowlist
-      - "{root}/config/cicd/adr019_test_inventory"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/tests"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_freeze_guards.py
     new_rule: immutability.freeze_guards
     status: shadow

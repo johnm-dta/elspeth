@@ -236,6 +236,12 @@ Filed:
 
 - `elspeth-ff85897f8f`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-ff85897f8f` resolved. Source-node audit tests now
+  filter for `node_id == "source-0"`, assert exactly one source state, and
+  destructure that singleton before checking terminal status.
+
 ### UENG-7 — GateExecutor audit-state tests allow extra node-state completions
 
 Evidence:

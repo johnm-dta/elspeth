@@ -573,11 +573,16 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
 
-        # At minimum, the source node_state should exist
-        assert len(states) >= 1
-        source_state = states[0]
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
         assert source_state.status == NodeStateStatus.COMPLETED
 
     def test_source_boundary_violation_records_failed_outcome_and_failed_source_state(self) -> None:
@@ -623,11 +628,18 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == "test-run")).fetchall()
 
-        assert len(states) >= 1
-        assert states[0].status == NodeStateStatus.FAILED
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
+        assert source_state.status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
         _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
@@ -843,11 +855,18 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == "test-run")).fetchall()
 
-        assert len(states) >= 1
-        assert states[0].status == NodeStateStatus.FAILED
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
+        assert source_state.status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
         _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
@@ -880,11 +899,18 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == "test-run")).fetchall()
 
-        assert len(states) >= 1
-        assert states[0].status == NodeStateStatus.FAILED
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
+        assert source_state.status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
         _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 

@@ -508,8 +508,10 @@ class TelemetryManager:
         # Re-raise stored exception from background thread (fail_on_total=True)
         if self._stored_exception is not None:
             exc = self._stored_exception
-            self._stored_exception = None  # Clear to allow recovery
-            raise exc
+            try:
+                raise exc
+            finally:
+                self._stored_exception = None  # Clear to allow recovery
 
         for exporter in self._exporters:
             try:

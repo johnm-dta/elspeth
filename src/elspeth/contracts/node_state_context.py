@@ -15,13 +15,9 @@ Trust-tier notes
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from elspeth.contracts.freeze import require_int
-
-if TYPE_CHECKING:
-    from elspeth.contracts.engine import BufferEntry
-    from elspeth.contracts.results import TransformResult
 
 
 class NodeStateContext(Protocol):
@@ -33,6 +29,14 @@ class NodeStateContext(Protocol):
     """
 
     def to_dict(self) -> dict[str, Any]: ...
+
+
+class QueryOrderEntryInput(Protocol):
+    """Structural view of reorder-buffer entries needed for audit ordering."""
+
+    submit_index: int
+    complete_index: int
+    buffer_wait_ms: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +128,7 @@ class PoolExecutionContext:
     def from_executor_stats(
         cls,
         stats: dict[str, Any],
-        entries: list[BufferEntry[TransformResult]],
+        entries: list[QueryOrderEntryInput],
     ) -> PoolExecutionContext:
         """Build from PooledExecutor.get_stats() and reorder buffer entries.
 

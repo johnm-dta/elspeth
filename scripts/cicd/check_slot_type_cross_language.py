@@ -69,14 +69,11 @@ def _extract_python_members() -> set[str]:
 # Pattern targets the slot_type field in RecipeSlotInput:
 #   slot_type: "blob_id" | "str" | "float" | "int" | "str_list";
 #
-# The interface may span multiple lines; the regex allows for whitespace and
-# newlines between tokens.  It looks for ``slot_type:`` followed by a string-
-# literal union ending at a semicolon.  Groups of ``"value"`` tokens separated
-# by ``|`` are captured greedily.
-_TS_FIELD_RE = re.compile(
-    r"slot_type\s*:\s*((?:\"[^\"]+\"\s*\|?\s*)+?)\s*;",
-    re.MULTILINE | re.DOTALL,
-)
+# The interface may span multiple lines.  Keep this deliberately linear:
+# capture everything up to the field terminator, then extract string literal
+# members from that slice.  A nested union-token regex here can backtrack
+# exponentially on malformed input before the semicolon.
+_TS_FIELD_RE = re.compile(r"slot_type\s*:\s*([^;]+);", re.MULTILINE)
 
 _TS_MEMBER_RE = re.compile(r'"([^"]+)"')
 

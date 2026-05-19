@@ -208,6 +208,29 @@ class TestOpenRouterConfig:
         )
         assert config.base_url == "https://custom.proxy.com/api/v1"
 
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "http://custom.proxy.com/api/v1",
+            "https://user:pass@custom.proxy.com/api/v1",
+            "custom.proxy.com/api/v1",
+            "https:///missing-host",
+        ],
+    )
+    def test_config_rejects_credential_unsafe_base_url(self, base_url: str) -> None:
+        """OpenRouter bearer-token base_url must be HTTPS with host and no userinfo."""
+        with pytest.raises(PluginConfigError, match="base_url"):
+            OpenRouterConfig.from_dict(
+                {
+                    "api_key": "sk-test-key",
+                    "model": "openai/gpt-4",
+                    "prompt_template": "{{ row.text }}",
+                    "schema": DYNAMIC_SCHEMA,
+                    "required_input_fields": [],
+                    "base_url": base_url,
+                }
+            )
+
     def test_config_custom_timeout(self) -> None:
         """Config accepts custom timeout."""
         config = OpenRouterConfig.from_dict(

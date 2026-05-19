@@ -13,10 +13,11 @@ variables, not hardcoded in configuration files.
 
 from __future__ import annotations
 
-import urllib.parse
 from typing import TYPE_CHECKING, Self, cast
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 
 if TYPE_CHECKING:
     from azure.storage.blob import BlobServiceClient
@@ -77,12 +78,7 @@ class AzureAuthConfig(BaseModel):
         both would be transmitted in cleartext over HTTP.
         """
         if v is not None and v.strip():
-            parsed = urllib.parse.urlparse(v)
-            if parsed.scheme and parsed.scheme.lower() != "https":
-                raise ValueError(
-                    f"account_url must use HTTPS scheme to protect credentials in transit, "
-                    f"got {parsed.scheme!r}. Example: https://mystorageaccount.blob.core.windows.net"
-                )
+            return validate_credential_safe_https_url(v, field_name="account_url")
         return v
 
     @model_validator(mode="after")

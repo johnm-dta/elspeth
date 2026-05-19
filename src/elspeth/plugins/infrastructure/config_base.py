@@ -288,7 +288,7 @@ class DataPluginConfig(PluginConfig):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if "_component_type_exempt" in cls.__dict__:
+        if cls.__dict__.get("_component_type_exempt") is True:
             return
         if cls._plugin_component_type is None:
             raise TypeError(

@@ -17,11 +17,12 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import structlog
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.value_source import DerivedFromSiblingValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.llm import AuditedLLMClient, ContentPolicyError, LLMClientError
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.provider import FinishReason, LLMQueryResult, parse_finish_reason
 from elspeth.plugins.transforms.llm.tracing import AzureAITracingConfig, TracingConfig
@@ -67,6 +68,11 @@ class AzureOpenAIConfig(LLMConfig):
         default=None,
         description="Tier 2 tracing configuration (azure_ai, langfuse, or none)",
     )
+
+    @field_validator("endpoint")
+    @classmethod
+    def _validate_endpoint_url(cls, value: str) -> str:
+        return validate_credential_safe_https_url(value, field_name="endpoint")
 
     @model_validator(mode="before")
     @classmethod

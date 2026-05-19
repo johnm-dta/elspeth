@@ -188,6 +188,30 @@ class TestAzureOpenAIConfig:
         assert config.system_prompt is None
         assert config.response_field == "llm_response"
 
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://my-resource.openai.azure.com",
+            "https://user:pass@my-resource.openai.azure.com",
+            "my-resource.openai.azure.com",
+            "https:///missing-host",
+        ],
+    )
+    def test_endpoint_rejects_credential_unsafe_urls(self, endpoint: str) -> None:
+        """Azure OpenAI API-key endpoints must be HTTPS URLs with host and no userinfo."""
+        with pytest.raises(PluginConfigError, match="endpoint"):
+            AzureOpenAIConfig.from_dict(
+                {
+                    "deployment_name": "my-gpt4o-deployment",
+                    "endpoint": endpoint,
+                    "api_key": "azure-api-key",
+                    "model": "gpt-4",
+                    "prompt_template": "{{ row.text }}",
+                    "schema": DYNAMIC_SCHEMA,
+                    "required_input_fields": [],
+                }
+            )
+
 
 class TestLLMTransformAzureInit:
     """Tests for LLMTransform initialization with Azure provider."""

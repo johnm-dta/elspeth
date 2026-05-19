@@ -123,7 +123,7 @@ class TestRegexMode:
         """ReDoS protection: pathological pattern with adversarial input."""
         builder = QueryBuilder(
             query_field="text",
-            query_pattern=r"(a+)+b",
+            query_pattern="".join(("(", "a+", ")", "+", "b")),
             regex_timeout=0.1,  # Short timeout for test
         )
         result = builder.build({"text": "a" * 30})

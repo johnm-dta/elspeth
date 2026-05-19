@@ -146,8 +146,7 @@ class TestCsvInspection:
             filename="x.csv",
             mime_type="text/csv",
         )
-        assert "https://example.com" in f.url_candidates
-        assert "https://example.org" in f.url_candidates
+        assert f.url_candidates == ("https://example.com", "https://example.org")
 
     def test_url_candidates_redact_query_values(self) -> None:
         f = inspect_blob_content(
@@ -306,7 +305,7 @@ class TestTextInspection:
             filename="x.txt",
             mime_type="text/plain",
         )
-        assert "https://a.example" in f.url_candidates
+        assert f.url_candidates == ("https://a.example",)
         assert any("URL(s)" in w for w in f.warnings)
 
     def test_plain_text_no_url_no_warning(self) -> None:

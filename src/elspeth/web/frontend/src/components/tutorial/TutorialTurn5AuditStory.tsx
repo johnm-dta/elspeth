@@ -1,13 +1,16 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getRunAuditSummary } from "@/api/client";
 import type { RunAuditStoryResponse } from "@/types/api";
 import { TURN_5_PRIMARY_BUTTON } from "./copy";
+
+const COPY_FEEDBACK_DURATION_MS = 2_000;
 
 interface TutorialTurn5AuditStoryProps {
   sessionId: string;
   runId: string;
   sourceDataHash: string;
   onContinue: () => void;
+  onBack: () => void;
 }
 
 export function TutorialTurn5AuditStory({
@@ -15,9 +18,16 @@ export function TutorialTurn5AuditStory({
   runId,
   sourceDataHash,
   onContinue,
+  onBack,
 }: TutorialTurn5AuditStoryProps): JSX.Element {
   const [summary, setSummary] = useState<RunAuditStoryResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+
+  // Focus the turn's heading on mount (Group D: focus management).
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,7 +46,9 @@ export function TutorialTurn5AuditStory({
   return (
     <section className="tutorial-turn" aria-labelledby="tutorial-audit-title">
       <p className="tutorial-kicker">Audit</p>
-      <h2 id="tutorial-audit-title">This is the audit story.</h2>
+      <h2 id="tutorial-audit-title" ref={headingRef} tabIndex={-1}>
+        This is the audit story.
+      </h2>
       <p>
         The LLM made a judgment call on each page. ELSPETH keeps the evidence
         needed to explain that judgment later.
@@ -56,11 +68,21 @@ export function TutorialTurn5AuditStory({
           <dl className="tutorial-audit-list">
             <div>
               <dt>Source data hash</dt>
-              <dd>{shortHash(sourceDataHash)}</dd>
+              <dd>
+                <HashWithCopy
+                  hash={sourceDataHash}
+                  label="source data hash"
+                />
+              </dd>
             </div>
             <div>
               <dt>Output file hash</dt>
-              <dd>{shortHash(summary.output_file_hash)}</dd>
+              <dd>
+                <HashWithCopy
+                  hash={summary.output_file_hash}
+                  label="output file hash"
+                />
+              </dd>
             </div>
             <div>
               <dt>LLM calls</dt>
@@ -88,6 +110,14 @@ export function TutorialTurn5AuditStory({
             <button type="button" className="btn btn-primary" onClick={onContinue}>
               {TURN_5_PRIMARY_BUTTON}
             </button>
+            <button
+              type="button"
+              className="tutorial-link-button"
+              onClick={onBack}
+              aria-label="Back: edit prompt and start over"
+            >
+              Back
+            </button>
           </div>
         </>
       )}
@@ -95,8 +125,86 @@ export function TutorialTurn5AuditStory({
   );
 }
 
-function shortHash(hash: string): string {
-  return hash.length > 12 ? `${hash.slice(0, 12)}...` : hash;
+/**
+ * Renders a full hash in <code> with a Copy button next to it. The full
+ * hash is shown (not truncated) because the audit-story turn is the
+ * screen that has to prove auditability — an auditor cannot verify a
+ * 12-character prefix. `overflow-wrap: anywhere` on `.tutorial-audit-list
+ * dd` lets the long string wrap inside the existing card.
+ */
+function HashWithCopy({
+  hash,
+  label,
+}: {
+  hash: string;
+  label: string;
+}): JSX.Element {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  // Clear any pending feedback timer on unmount so we don't update state
+  // after the user has navigated away.
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const onCopy = useCallback(async () => {
+    // navigator.clipboard requires a secure context. Fall back to the
+    // textarea/execCommand pattern when unavailable (older browsers or
+    // http:// dev contexts) so the affordance still works.
+    try {
+      if (navigator.clipboard !== undefined) {
+        await navigator.clipboard.writeText(hash);
+      } else {
+        legacyClipboardCopy(hash);
+      }
+      setCopied(true);
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+      timerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        timerRef.current = null;
+      }, COPY_FEEDBACK_DURATION_MS);
+    } catch {
+      // Surface the failure without crashing the audit-story render.
+      // The hash itself remains visible in the <code> beside the button.
+      setCopied(false);
+    }
+  }, [hash]);
+
+  return (
+    <div className="tutorial-hash">
+      <code className="tutorial-hash-value">{hash}</code>
+      <button
+        type="button"
+        className="tutorial-hash-copy"
+        onClick={() => void onCopy()}
+        aria-label={`Copy full ${label}`}
+      >
+        {copied ? "Copied" : "Copy"}
+      </button>
+      <span role="status" className="sr-only">
+        {copied ? `Full ${label} copied to clipboard.` : ""}
+      </span>
+    </div>
+  );
+}
+
+function legacyClipboardCopy(text: string): void {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "absolute";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
 }
 
 function formatPluginVersions(versions: Record<string, string>): string {

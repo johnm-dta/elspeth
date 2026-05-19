@@ -382,6 +382,30 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
   });
 }
 
+async function installTutorialRoutesWithSlowRun(
+  page: Page,
+  state: RouteState,
+): Promise<void> {
+  // Same routes as installTutorialRoutes but holds the /api/tutorial/run
+  // response open for ~7s so the 5s cancel-button timer can fire and the
+  // user can click cancel before the run resolves.
+  await installTutorialRoutes(page, state);
+  await page.route("**/api/tutorial/run", async (route) => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 7_000));
+    await route.fulfill({
+      json: {
+        run_id: "run-slow",
+        output: {
+          source_data_hash: "neverreachedhash",
+          rows: [],
+        },
+        seeded_from_cache: false,
+        cache_key: null,
+      },
+    });
+  });
+}
+
 test.describe("first-run tutorial", () => {
   test("walks the tutorial flow through final preference selection", async ({
     page,
@@ -420,5 +444,127 @@ test.describe("first-run tutorial", () => {
     await expect.poll(() => state.completionPatchSeen).toBe(true);
     expect(state.renamedSession).toBe(true);
     expect(state.sessionPostCount).toBe(2);
+  });
+
+  test("Edit prompt button on Turn 2b returns to Describe with prompt preserved", async ({
+    page,
+  }) => {
+    const state: RouteState = {
+      sessionPostCount: 0,
+      completionPatchSeen: false,
+      renamedSession: false,
+    };
+    await installTutorialRoutes(page, state);
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Let's go" }).click();
+
+    // Edit the prompt before building so we can confirm it survives the
+    // back trip.
+    const promptInput = page.getByLabel("Pipeline description");
+    await promptInput.fill("a custom prompt the user typed");
+
+    await page.getByRole("button", { name: "Build it" }).click();
+    await expect(page.getByText(/Here is what the composer drafted/i)).toBeVisible();
+
+    // The Edit-prompt button is the back-to-describe affordance on Turn 2b.
+    await page.getByRole("button", { name: "Edit prompt" }).click();
+
+    // We're back on Describe with the user's prompt intact.
+    await expect(
+      page.getByRole("heading", { name: /Describe your pipeline/i }),
+    ).toBeVisible();
+    await expect(promptInput).toHaveValue("a custom prompt the user typed");
+  });
+
+  test("Turn 5 hash copy button copies the full hash, not a truncation", async ({
+    page,
+  }) => {
+    const state: RouteState = {
+      sessionPostCount: 0,
+      completionPatchSeen: false,
+      renamedSession: false,
+    };
+    await installTutorialRoutes(page, state);
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Let's go" }).click();
+    await page.getByRole("button", { name: "Build it" }).click();
+    await page.getByRole("button", { name: "Show me the graph" }).click();
+    await page.getByRole("button", { name: "Looks good, run it" }).click();
+    await expect(page.getByText("bold")).toBeVisible();
+    await page.getByRole("button", { name: "Continue" }).click();
+
+    // Audit story turn — full hash visible (not truncated to 12 chars + "...")
+    await expect(page.getByText("a7f3e2fullhash")).toBeVisible();
+
+    // Click the copy button for the source-data hash and verify clipboard
+    // contents match the full hash, not a "..."-truncated prefix.
+    await page
+      .getByRole("button", { name: /Copy full source data hash/i })
+      .click();
+    const clipboardText = await page.evaluate(() =>
+      navigator.clipboard.readText(),
+    );
+    expect(clipboardText).toBe("a7f3e2fullhash");
+
+    // Button feedback flips to "Copied".
+    await expect(
+      page.getByRole("button", { name: /Copy full source data hash/i }),
+    ).toHaveText("Copied");
+  });
+
+  test("Turn 4 cancel skips the audit story and acknowledges on Turn 6", async ({
+    page,
+  }) => {
+    const state: RouteState = {
+      sessionPostCount: 0,
+      completionPatchSeen: false,
+      renamedSession: false,
+    };
+    await installTutorialRoutesWithSlowRun(page, state);
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Let's go" }).click();
+    await page.getByRole("button", { name: "Build it" }).click();
+    await page.getByRole("button", { name: "Show me the graph" }).click();
+    await page.getByRole("button", { name: "Looks good, run it" }).click();
+
+    // The cancel button appears 5 seconds after the run starts (per the
+    // SHOW_CANCEL_DELAY_MS constant in TutorialTurn4Run).
+    const cancelButton = page.getByRole("button", { name: "Cancel run" });
+    await expect(cancelButton).toBeVisible({ timeout: 10_000 });
+    await cancelButton.click();
+
+    // Should land directly on Turn 6 (skipping Turn 5 audit) with the
+    // cancelled-run acknowledgement.
+    await expect(
+      page.getByRole("heading", { name: /Choose your default composer mode/i }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/Your run was cancelled/i),
+    ).toBeVisible();
+  });
+
+  test("Turn 1 surfaces the privacy preamble before the run starts", async ({
+    page,
+  }) => {
+    const state: RouteState = {
+      sessionPostCount: 0,
+      completionPatchSeen: false,
+      renamedSession: false,
+    };
+    await installTutorialRoutes(page, state);
+
+    await page.goto("/");
+
+    // Preamble appears on Turn 1 (welcome) and again on Turn 4 (run).
+    // Verifying Turn 1 here; Turn 4 is exercised in the happy-path spec.
+    await expect(
+      page.getByText(
+        /This is calling the configured LLM and fetching the URLs/i,
+      ),
+    ).toBeVisible();
   });
 });

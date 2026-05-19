@@ -44,6 +44,14 @@ export interface TutorialState {
   rows: RunResultRow[];
   builtSummary: TutorialBuiltSummary | null;
   skipped: boolean;
+  /**
+   * Set when the user explicitly cancelled the Turn 4 run via the cancel
+   * button. Consumed by Turn 6 to render an acknowledgement note in place
+   * of the audit-story summary the user skipped. Cleared by `reset` and
+   * by any back navigation that returns to `describe` (i.e. the user is
+   * starting over).
+   */
+  cancelled: boolean;
 }
 
 export type TutorialAction =
@@ -54,6 +62,8 @@ export type TutorialAction =
   | { type: "runCompleted"; result: TutorialRunResult }
   | { type: "continueToMode" }
   | { type: "skipToMode" }
+  | { type: "cancelRun" }
+  | { type: "back" }
   | { type: "reset" };
 
 export const initialTutorialState: TutorialState = {
@@ -65,7 +75,39 @@ export const initialTutorialState: TutorialState = {
   rows: [],
   builtSummary: null,
   skipped: false,
+  cancelled: false,
 };
+
+/**
+ * Explicit back-navigation parent map. Defined as a function (not a static
+ * object) because the previous step depends on how the user reached the
+ * current one — Turn 6 has three arrival paths (continueToMode, skipToMode,
+ * cancelRun) and each goes back to a different turn.
+ *
+ * For run/audit, back lands on `describe` rather than the mechanically
+ * previous step. The user's actual intent at that point is "I want to edit
+ * the prompt and start over", not "show me the graph card again".
+ */
+export function previousStep(state: TutorialState): TutorialStep | null {
+  switch (state.step) {
+    case "welcome":
+      return null;
+    case "describe":
+      return "welcome";
+    case "showBuilt":
+      return "describe";
+    case "graph":
+      return "showBuilt";
+    case "run":
+      return "describe";
+    case "audit":
+      return "describe";
+    case "mode":
+      if (state.skipped) return "welcome";
+      if (state.cancelled) return "describe";
+      return "audit";
+  }
+}
 
 export function tutorialReducer(
   state: TutorialState,
@@ -109,6 +151,31 @@ export function tutorialReducer(
         step: "mode",
         skipped: true,
       };
+    case "cancelRun":
+      // The user cancelled mid-run. Skip Turn 5 (no audit story is
+      // available — the run was aborted) and land on Turn 6 with the
+      // `cancelled` flag set so the mode-choice turn renders an
+      // acknowledgement note instead of silently swallowing the cancel.
+      // Session metadata (sessionId, prompt, builtSummary) is preserved
+      // so the user can rerun the same prompt later from the chat panel.
+      return { ...state, step: "mode", cancelled: true };
+    case "back": {
+      const previous = previousStep(state);
+      if (previous === null) {
+        return state;
+      }
+      // Going back to `describe` is "I want to edit the prompt and start
+      // over": clear the session-derived state so the next build starts
+      // fresh. Preserve the prompt itself so the user keeps their edits.
+      if (previous === "describe" && state.step !== "welcome") {
+        return {
+          ...initialTutorialState,
+          step: "describe",
+          prompt: state.prompt,
+        };
+      }
+      return { ...state, step: previous };
+    }
     case "reset":
       return initialTutorialState;
     default: {

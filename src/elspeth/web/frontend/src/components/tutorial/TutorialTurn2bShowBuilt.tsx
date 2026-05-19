@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { InterpretationReviewTurn } from "@/components/chat/guided/InterpretationReviewTurn";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -9,16 +9,23 @@ interface TutorialTurn2bShowBuiltProps {
   sessionId: string;
   summary: TutorialBuiltSummary;
   onContinue: () => void;
+  onBack: () => void;
 }
 
 export function TutorialTurn2bShowBuilt({
   sessionId,
   summary,
   onContinue,
+  onBack,
 }: TutorialTurn2bShowBuiltProps): JSX.Element {
   const pendingBySession = useInterpretationEventsStore(
     (state) => state.pendingBySession,
   );
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
   const pendingInterpretation = useMemo(() => {
     const events = Object.values(pendingBySession[sessionId] ?? {});
     return events.find(
@@ -31,9 +38,11 @@ export function TutorialTurn2bShowBuilt({
   return (
     <section className="tutorial-turn" aria-labelledby="tutorial-built-title">
       <p className="tutorial-kicker">Draft</p>
-      <h2 id="tutorial-built-title">Here is what the composer drafted.</h2>
-      <div className="tutorial-summary-grid">
-        <div>
+      <h2 id="tutorial-built-title" ref={headingRef} tabIndex={-1}>
+        Here is what the composer drafted.
+      </h2>
+      <ol className="tutorial-summary-grid" aria-label="Pipeline layers">
+        <li>
           <h3>Source</h3>
           <p>{summary.sourceLabel}</p>
           {summary.urls.length > 0 ? (
@@ -47,8 +56,8 @@ export function TutorialTurn2bShowBuilt({
               The generated source is attached to the session state.
             </p>
           )}
-        </div>
-        <div>
+        </li>
+        <li>
           <h3>Transform</h3>
           {summary.transforms.length > 0 ? (
             <ul>
@@ -59,12 +68,12 @@ export function TutorialTurn2bShowBuilt({
           ) : (
             <p className="tutorial-muted">No transform nodes were returned.</p>
           )}
-        </div>
-        <div>
+        </li>
+        <li>
           <h3>Sink</h3>
           <p>{summary.sinkLabel}</p>
-        </div>
-      </div>
+        </li>
+      </ol>
 
       {pendingInterpretation ? (
         <div className="tutorial-interpretation">
@@ -88,6 +97,13 @@ export function TutorialTurn2bShowBuilt({
       <div className="tutorial-actions">
         <button type="button" className="btn btn-primary" onClick={onContinue}>
           {TURN_2B_PRIMARY_BUTTON}
+        </button>
+        <button
+          type="button"
+          className="tutorial-link-button"
+          onClick={onBack}
+        >
+          Edit prompt
         </button>
       </div>
     </section>

@@ -1,26 +1,103 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { runTutorialPipeline } from "@/api/client";
 import type { TutorialRunResponse } from "@/types/api";
-import { TURN_4_PRIMARY_BUTTON } from "./copy";
+import { TUTORIAL_RUN_PREAMBLE, TURN_4_PRIMARY_BUTTON } from "./copy";
 import type { RunResultRow, TutorialRunResult } from "./tutorialMachine";
 
 interface TutorialTurn4RunProps {
   sessionId: string;
   prompt: string;
   onCompleted: (result: TutorialRunResult) => void;
+  onCancelled: () => void;
+  onBack: () => void;
+}
+
+/**
+ * Three-phase narration timing for the run status text. Tied to fixed
+ * timers (not streamed progress events — the backend run is an opaque
+ * POST). Tuned so AT users hear progress at a rate that matches the
+ * typical 8–12s tutorial run on a warm cache.
+ */
+const PHASE_MODEL_DELAY_MS = 2_000;
+const PHASE_WRITE_DELAY_MS = 6_000;
+const SHOW_CANCEL_DELAY_MS = 5_000;
+
+type RunPhase = "fetch" | "model" | "write";
+
+interface CachedRun {
+  promise: Promise<TutorialRunResponse>;
+  controller: AbortController;
+}
+
+/**
+ * Cached by `[sessionId, prompt]` so React StrictMode's double-invoke of
+ * the run effect coalesces to a single backend call. The cache entry
+ * stores both the promise and the AbortController owning the fetch's
+ * signal — the user-cancel path aborts via the cached controller and
+ * removes the entry so a subsequent re-mount triggers a fresh run.
+ */
+const tutorialRunCache = new Map<string, CachedRun>();
+
+function getTutorialRun(sessionId: string, prompt: string): CachedRun {
+  const key = JSON.stringify([sessionId, prompt]);
+  const existing = tutorialRunCache.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const controller = new AbortController();
+  const promise = runTutorialPipeline(
+    { session_id: sessionId, prompt },
+    controller.signal,
+  ).catch((err: unknown) => {
+    // Drop the cache entry on failure so the user can retry without
+    // hitting a stale rejected promise.
+    tutorialRunCache.delete(key);
+    throw err;
+  });
+  const entry: CachedRun = { promise, controller };
+  tutorialRunCache.set(key, entry);
+  return entry;
+}
+
+function clearTutorialRunCache(sessionId: string, prompt: string): void {
+  const key = JSON.stringify([sessionId, prompt]);
+  tutorialRunCache.delete(key);
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
 }
 
 export function TutorialTurn4Run({
   sessionId,
   prompt,
   onCompleted,
+  onCancelled,
+  onBack,
 }: TutorialTurn4RunProps): JSX.Element {
   const [result, setResult] = useState<TutorialRunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<RunPhase>("fetch");
+  const [showCancel, setShowCancel] = useState(false);
+  const [retryNonce, setRetryNonce] = useState(0);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+
+  // Move focus to the turn's heading on mount so screen-reader users
+  // hear the new step. `tabIndex={-1}` on the h2 makes it
+  // programmatically focusable without entering the tab order.
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     let active = true;
-    getTutorialRunPromise(sessionId, prompt)
+    setResult(null);
+    setError(null);
+    setPhase("fetch");
+    setShowCancel(false);
+
+    const cached = getTutorialRun(sessionId, prompt);
+    cached.promise
       .then((response) => {
         if (!active) return;
         setResult({
@@ -33,27 +110,105 @@ export function TutorialTurn4Run({
       })
       .catch((err: unknown) => {
         if (!active) return;
+        // AbortError on the cached promise means another consumer (the
+        // user-cancel path below) aborted the run. The cancel handler
+        // already dispatched onCancelled; nothing more to render here.
+        if (isAbortError(err)) return;
         setError(formatError(err));
       });
+
+    const phaseModelTimer = window.setTimeout(() => {
+      if (active) setPhase("model");
+    }, PHASE_MODEL_DELAY_MS);
+    const phaseWriteTimer = window.setTimeout(() => {
+      if (active) setPhase("write");
+    }, PHASE_WRITE_DELAY_MS);
+    const cancelTimer = window.setTimeout(() => {
+      if (active) setShowCancel(true);
+    }, SHOW_CANCEL_DELAY_MS);
+
     return () => {
       active = false;
+      window.clearTimeout(phaseModelTimer);
+      window.clearTimeout(phaseWriteTimer);
+      window.clearTimeout(cancelTimer);
+      // Do NOT abort the cached controller on effect cleanup — that path
+      // fires under React StrictMode's developer double-invoke as well as
+      // on real unmount. The cached promise should survive the
+      // double-invoke (that's the whole point of the cache); the
+      // user-cancel button is the only legitimate abort trigger.
     };
-  }, [prompt, sessionId]);
+  }, [prompt, sessionId, retryNonce]);
+
+  const onCancelClick = (): void => {
+    const key = JSON.stringify([sessionId, prompt]);
+    const cached = tutorialRunCache.get(key);
+    if (cached !== undefined) {
+      cached.controller.abort();
+      tutorialRunCache.delete(key);
+    }
+    onCancelled();
+  };
+
+  const onRetryClick = (): void => {
+    clearTutorialRunCache(sessionId, prompt);
+    setRetryNonce((n) => n + 1);
+  };
+
+  const phaseText = describePhase(phase);
 
   return (
     <section className="tutorial-turn" aria-labelledby="tutorial-run-title">
       <p className="tutorial-kicker">Run</p>
-      <h2 id="tutorial-run-title">Running your pipeline.</h2>
+      <h2 id="tutorial-run-title" ref={headingRef} tabIndex={-1}>
+        Running your pipeline.
+      </h2>
+      <p className="tutorial-muted">{TUTORIAL_RUN_PREAMBLE}</p>
       {result === null && error === null && (
-        <div role="status" className="tutorial-running">
-          <span className="tutorial-progress-bar" />
-          <span>Fetching pages, rating them, and writing the output...</span>
-        </div>
+        <>
+          <div
+            role="status"
+            aria-busy="true"
+            className="tutorial-running"
+          >
+            <span className="tutorial-progress-bar" aria-hidden="true" />
+            <span>{phaseText}</span>
+          </div>
+          {showCancel && (
+            <div className="tutorial-actions">
+              <button
+                type="button"
+                className="btn"
+                onClick={onCancelClick}
+              >
+                Cancel run
+              </button>
+            </div>
+          )}
+        </>
       )}
       {error !== null && (
-        <p role="alert" className="tutorial-error">
-          {error}
-        </p>
+        <>
+          <p role="alert" className="tutorial-error">
+            {error}
+          </p>
+          <div className="tutorial-actions">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onRetryClick}
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              className="tutorial-link-button"
+              onClick={onBack}
+            >
+              Back
+            </button>
+          </div>
+        </>
       )}
       {result !== null && (
         <>
@@ -70,6 +225,14 @@ export function TutorialTurn4Run({
             >
               {TURN_4_PRIMARY_BUTTON}
             </button>
+            <button
+              type="button"
+              className="tutorial-link-button"
+              onClick={onBack}
+              aria-label="Back: edit prompt and start over"
+            >
+              Back
+            </button>
           </div>
         </>
       )}
@@ -77,25 +240,15 @@ export function TutorialTurn4Run({
   );
 }
 
-const tutorialRunPromises = new Map<string, Promise<TutorialRunResponse>>();
-
-function getTutorialRunPromise(
-  sessionId: string,
-  prompt: string,
-): Promise<TutorialRunResponse> {
-  const key = JSON.stringify([sessionId, prompt]);
-  const existing = tutorialRunPromises.get(key);
-  if (existing !== undefined) {
-    return existing;
+function describePhase(phase: RunPhase): string {
+  switch (phase) {
+    case "fetch":
+      return "Fetching pages…";
+    case "model":
+      return "Calling the model…";
+    case "write":
+      return "Writing the output…";
   }
-  const promise = runTutorialPipeline({ session_id: sessionId, prompt }).catch(
-    (err: unknown) => {
-      tutorialRunPromises.delete(key);
-      throw err;
-    },
-  );
-  tutorialRunPromises.set(key, promise);
-  return promise;
 }
 
 function TutorialResultTable({ rows }: { rows: RunResultRow[] }): JSX.Element {
@@ -103,6 +256,7 @@ function TutorialResultTable({ rows }: { rows: RunResultRow[] }): JSX.Element {
   return (
     <div className="tutorial-result-table-wrap">
       <table className="tutorial-result-table">
+        <caption className="sr-only">Pipeline run results</caption>
         <thead>
           <tr>
             {columns.map((column) => (

@@ -125,6 +125,43 @@ describe("light theme colour contrast", () => {
     expect(contrastRatio(darkText, darkBg)).toBeGreaterThanOrEqual(4.5);
     expect(contrastRatio(lightText, lightBg)).toBeGreaterThanOrEqual(4.5);
   });
+
+  it("keeps info-coloured text at WCAG AA contrast in both themes", () => {
+    // --color-info is used on the .tutorial-kicker (bold uppercase ~14px) and
+    // on other "info" labels. The light-theme value was deepened from #2890b8
+    // to #176d8a explicitly to pass this assertion; do not regress.
+    const darkInfo = extractRootToken("--color-info");
+    const darkBg = extractRootToken("--color-bg");
+    const lightInfo = extractLightThemeToken("--color-info");
+    const lightBg = extractLightThemeToken("--color-bg");
+
+    expect(contrastRatio(darkInfo, darkBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightInfo, lightBg)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps link text at WCAG AA contrast in both themes", () => {
+    // --color-link governs the tutorial skip-button and every inline link in
+    // the app. Deepened in light theme to #176d8a so AA holds.
+    const darkLink = extractRootToken("--color-link");
+    const darkBg = extractRootToken("--color-bg");
+    const lightLink = extractLightThemeToken("--color-link");
+    const lightBg = extractLightThemeToken("--color-bg");
+
+    expect(contrastRatio(darkLink, darkBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightLink, lightBg)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps state-positive text at WCAG AA contrast in both themes", () => {
+    // --color-state-positive replaces the prior overloaded --color-success
+    // usage on .tutorial-run-summary. Light value (#056e6c) chosen for AA.
+    const darkPositive = extractRootToken("--color-state-positive");
+    const darkBg = extractRootToken("--color-bg");
+    const lightPositive = extractLightThemeToken("--color-state-positive");
+    const lightBg = extractLightThemeToken("--color-bg");
+
+    expect(contrastRatio(darkPositive, darkBg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightPositive, lightBg)).toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 describe("base interaction tokens", () => {
@@ -168,5 +205,10 @@ describe("forced-colors accessibility fallbacks", () => {
     expect(forcedColorsBlock).toContain(".type-badge-coalesce");
     expect(forcedColorsBlock).toContain(".react-flow__edge-path");
     expect(forcedColorsBlock).toContain(".yaml-toolbar-btn[data-copied=\"true\"]");
+    // First-run tutorial high-contrast fallbacks
+    expect(forcedColorsBlock).toContain(".tutorial-graph-node");
+    expect(forcedColorsBlock).toContain(".tutorial-progress-dot");
+    expect(forcedColorsBlock).toContain(".tutorial-progress-dot--active");
+    expect(forcedColorsBlock).toContain(".tutorial-progress-bar");
   });
 });

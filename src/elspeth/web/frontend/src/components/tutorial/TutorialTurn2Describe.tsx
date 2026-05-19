@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "@/api/client";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -23,15 +23,25 @@ import {
 interface TutorialTurn2DescribeProps {
   initialPrompt: string;
   onBuilt: (result: TutorialBuildResult) => void;
+  onBack: () => void;
 }
 
 export function TutorialTurn2Describe({
   initialPrompt,
   onBuilt,
+  onBack,
 }: TutorialTurn2DescribeProps): JSX.Element {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+
+  // Move focus to this turn's heading on mount so screen-reader users
+  // hear the transition. tabIndex={-1} on the h2 keeps it out of the
+  // tab order while still programmatically focusable.
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
 
   const onSubmit = useCallback(async () => {
     setPending(true);
@@ -49,7 +59,9 @@ export function TutorialTurn2Describe({
   return (
     <section className="tutorial-turn" aria-labelledby="tutorial-describe-title">
       <p className="tutorial-kicker">Describe</p>
-      <h2 id="tutorial-describe-title">Describe your pipeline in one sentence.</h2>
+      <h2 id="tutorial-describe-title" ref={headingRef} tabIndex={-1}>
+        Describe your pipeline in one sentence.
+      </h2>
       <p>
         You do not have to build the layers one at a time. Start with this
         prompt, or edit it before we ask the composer to draft the pipeline.
@@ -82,7 +94,18 @@ export function TutorialTurn2Describe({
         >
           {TURN_2_RESTORE_BUTTON}
         </button>
+        <button
+          type="button"
+          className="tutorial-link-button"
+          disabled={pending}
+          onClick={onBack}
+        >
+          Back
+        </button>
       </div>
+      <p role="status" className="sr-only">
+        {pending ? "Building draft pipeline" : ""}
+      </p>
       {error !== null && (
         <p role="alert" className="tutorial-error">
           {error}

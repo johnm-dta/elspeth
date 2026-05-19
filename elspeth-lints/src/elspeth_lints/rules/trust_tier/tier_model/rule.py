@@ -28,13 +28,18 @@ import json
 import sys
 from calendar import monthrange
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
-import yaml
-
+from elspeth_lints.core.allowlist import Allowlist as Allowlist
+from elspeth_lints.core.allowlist import (
+    AllowlistBudgetViolation as AllowlistBudgetViolation,
+)
+from elspeth_lints.core.allowlist import AllowlistEntry as AllowlistEntry
+from elspeth_lints.core.allowlist import FindingKey, load_allowlist
+from elspeth_lints.core.allowlist import PerFileRule as PerFileRule
 from elspeth_lints.core.protocols import (
     Finding as LintFinding,
 )
@@ -86,51 +91,6 @@ class Finding:
         }
 
 
-@dataclass
-class AllowlistEntry:
-    """A single allowlist entry permitting a specific finding."""
-
-    key: str
-    owner: str
-    reason: str
-    safety: str
-    expires: date | None
-    pattern: str | None = None
-    matched: bool = field(default=False, compare=False)
-    source_file: str = field(default="", compare=False)
-
-
-@dataclass
-class PerFileRule:
-    """A per-file rule that whitelists all patterns of specified rules for a file/directory."""
-
-    pattern: str  # Glob pattern like "plugins/llm/*" or exact path like "mcp/server.py"
-    rules: list[str]  # List of rule IDs like ["R1", "R4", "R6"]
-    reason: str
-    expires: date | None
-    max_hits: int | None = None  # Cap on allowed matches; None = unlimited
-    matched_count: int = field(default=0, compare=False)
-    source_file: str = field(default="", compare=False)
-
-    def matches(self, file_path: str, rule_id: str) -> bool:
-        """Check if this per-file rule matches a finding."""
-        import fnmatch
-
-        if rule_id not in self.rules:
-            return False
-        # Match against file path (supports glob patterns)
-        return fnmatch.fnmatch(file_path, self.pattern)
-
-
-@dataclass(frozen=True)
-class AllowlistBudgetViolation:
-    """A loaded allowlist count exceeded a configured ratchet ceiling."""
-
-    category: str
-    current: int
-    max_allowed: int
-
-
 @dataclass(frozen=True)
 class CheckResult:
     """Structured result for check-mode analysis."""
@@ -157,82 +117,6 @@ class CheckResult:
             or self.exceeded_file_rules
             or self.budget_violations
         )
-
-
-@dataclass
-class Allowlist:
-    """Parsed allowlist configuration."""
-
-    entries: list[AllowlistEntry]
-    per_file_rules: list[PerFileRule] = field(default_factory=list)
-    fail_on_stale: bool = True
-    fail_on_expired: bool = True
-    max_allow_hits: int | None = None
-    max_per_file_rules: int | None = None
-    max_total_entries: int | None = None
-    max_permanent_allow_hits: int | None = None
-    max_permanent_per_file_rules: int | None = None
-    max_permanent_total_entries: int | None = None
-
-    def match(self, finding: Finding) -> AllowlistEntry | PerFileRule | None:
-        """Check if a finding is covered by an allowlist entry or per-file rule.
-
-        Per-file rules are checked first (more general), then specific entries.
-        """
-        # Check per-file rules first
-        for rule in self.per_file_rules:
-            if rule.matches(finding.file_path, finding.rule_id):
-                rule.matched_count += 1
-                return rule
-
-        # Check specific entries
-        for entry in self.entries:
-            if entry.key == finding.canonical_key:
-                entry.matched = True
-                return entry
-        return None
-
-    def get_stale_entries(self) -> list[AllowlistEntry]:
-        """Return entries that didn't match any finding."""
-        return [e for e in self.entries if not e.matched]
-
-    def get_expired_entries(self) -> list[AllowlistEntry]:
-        """Return entries that have expired."""
-        today = datetime.now(UTC).date()
-        return [e for e in self.entries if e.expires and e.expires < today]
-
-    def get_expired_file_rules(self) -> list[PerFileRule]:
-        """Return per-file rules that have expired."""
-        today = datetime.now(UTC).date()
-        return [r for r in self.per_file_rules if r.expires and r.expires < today]
-
-    def get_unused_file_rules(self) -> list[PerFileRule]:
-        """Return per-file rules that didn't match any finding."""
-        return [r for r in self.per_file_rules if r.matched_count == 0]
-
-    def get_exceeded_file_rules(self) -> list[PerFileRule]:
-        """Return per-file rules where matched_count exceeds max_hits."""
-        return [r for r in self.per_file_rules if r.max_hits is not None and r.matched_count > r.max_hits]
-
-    def get_budget_violations(self) -> list[AllowlistBudgetViolation]:
-        """Return configured allowlist-count budget overruns."""
-        total_entries = len(self.entries) + len(self.per_file_rules)
-        permanent_allow_hits = sum(1 for entry in self.entries if entry.expires is None)
-        permanent_per_file_rules = sum(1 for rule in self.per_file_rules if rule.expires is None)
-        permanent_total_entries = permanent_allow_hits + permanent_per_file_rules
-        checks = (
-            ("allow_hits", len(self.entries), self.max_allow_hits),
-            ("per_file_rules", len(self.per_file_rules), self.max_per_file_rules),
-            ("total_entries", total_entries, self.max_total_entries),
-            ("permanent_allow_hits", permanent_allow_hits, self.max_permanent_allow_hits),
-            ("permanent_per_file_rules", permanent_per_file_rules, self.max_permanent_per_file_rules),
-            ("permanent_total_entries", permanent_total_entries, self.max_permanent_total_entries),
-        )
-        return [
-            AllowlistBudgetViolation(category=category, current=current, max_allowed=max_allowed)
-            for category, current, max_allowed in checks
-            if max_allowed is not None and current > max_allowed
-        ]
 
 
 # =============================================================================
@@ -1695,259 +1579,99 @@ _ALLOWLIST_PATTERN_TAGS = frozenset(
 _ALWAYS_EXCLUDED_DIRS = ("node_modules",)
 
 
-def _parse_allow_hits(data: dict[str, Any], source_file: str = "") -> list[AllowlistEntry]:
-    """Parse allow_hits entries from a YAML data dict."""
-    entries: list[AllowlistEntry] = []
-    for item in data.get("allow_hits", []):
-        key = item.get("key", "")
-        source_ctx = f" in {source_file}" if source_file else ""
-        parts = key.split(":")
+def _validate_allowlist_governance(allowlist: Allowlist) -> None:
+    """Apply tier_model's domain-specific governance to a loaded ``Allowlist``.
+
+    The core loader (``elspeth_lints.core.allowlist.load_allowlist``) is generic.
+    tier_model adds three checks the generic loader does not:
+
+    1. **Banned-rule discipline**: ``RULES`` entries marked ``banned: True``
+       cannot be allowlisted via ``allow_hits[].key`` (the ``rule_id`` is the
+       second ``:``-separated segment) or via ``per_file_rules[].rules``.
+    2. **Registry coherence on allow_hits keys**: core only validates
+       ``per_file_rules[].rules`` against ``valid_rule_ids``; the rule-id
+       embedded in an ``allow_hits[].key`` is opaque to core and is checked
+       here.
+    3. **Pattern-tag governance**: an ``allow_hits[].pattern`` value must be
+       drawn from the closed ``_ALLOWLIST_PATTERN_TAGS`` vocabulary, and
+       ``owner: bugfix`` entries require either an expiry or a pattern tag
+       (a "permanent bugfix" needs an architectural category, not silent debt).
+
+    Raises ``ValueError`` on any violation. The CLI converts that to exit-2.
+    Replaces the previous ``sys.exit(1)`` / ``print(..., file=sys.stderr)``
+    pattern, which violated the CLAUDE.md audit-primacy order (audit/exception
+    before stderr logging).
+    """
+    for entry in allowlist.entries:
+        source_ctx = f" in {entry.source_file}" if entry.source_file else ""
+        parts = entry.key.split(":")
         if len(parts) < 2:
-            print(
-                f"Error: allow_hits entry has malformed key (expected 'file:rule_id:...' format){source_ctx}: {key!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            raise ValueError(f"allow_hits entry has malformed key (expected 'file:rule_id:...' format){source_ctx}: {entry.key!r}")
         rule_id = parts[1]
         if rule_id in _BANNED_RULES:
-            print(
-                f"Error: allow_hits entry uses banned rule {rule_id} (cannot be allowlisted){source_ctx}: {key}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            raise ValueError(f"allow_hits entry uses banned rule {rule_id} (cannot be allowlisted){source_ctx}: {entry.key}")
         if rule_id not in _ALL_RULE_IDS:
-            print(
-                f"Error: allow_hits entry has unknown rule ID '{rule_id}'{source_ctx}: {key}",
-                file=sys.stderr,
+            raise ValueError(f"allow_hits entry has unknown rule ID '{rule_id}'{source_ctx}: {entry.key}")
+        if entry.pattern is not None and entry.pattern not in _ALLOWLIST_PATTERN_TAGS:
+            raise ValueError(f"allow_hits entry has unknown pattern tag{source_ctx}: {entry.pattern!r}")
+        if entry.owner == "bugfix" and entry.expires is None and entry.pattern is None:
+            raise ValueError(f"owner=bugfix allow_hits entry must define expires or pattern{source_ctx}: {entry.key}")
+
+    for rule in allowlist.per_file_rules:
+        source_ctx = f" in {rule.source_file}" if rule.source_file else ""
+        rule_ids = set(rule.rules)
+        banned = rule_ids & _BANNED_RULES
+        if banned:
+            raise ValueError(
+                f"per_file_rules entry for '{rule.pattern}'{source_ctx} uses banned rule(s) {sorted(banned)} (cannot be allowlisted)"
             )
-            sys.exit(1)
-        expires_str = item.get("expires")
-        expires_date = None
-        if expires_str:
-            try:
-                expires_date = datetime.strptime(expires_str, "%Y-%m-%d").replace(tzinfo=UTC).date()
-            except ValueError:
-                print(
-                    f"Warning: Invalid date format for expires: {expires_str}",
-                    file=sys.stderr,
-                )
-        pattern = item.get("pattern")
-        if pattern is not None:
-            if not isinstance(pattern, str) or not pattern:
-                print(
-                    f"Error: allow_hits entry has invalid pattern tag{source_ctx}: {pattern!r}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            if pattern not in _ALLOWLIST_PATTERN_TAGS:
-                print(
-                    f"Error: allow_hits entry has unknown pattern tag{source_ctx}: {pattern!r}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-        owner = item.get("owner", "unknown")
-        if owner == "bugfix" and expires_date is None and pattern is None:
-            print(
-                f"Error: owner=bugfix allow_hits entry must define expires or pattern{source_ctx}: {key}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        entries.append(
-            AllowlistEntry(
-                key=item["key"],
-                owner=owner,
-                reason=item.get("reason", ""),
-                safety=item.get("safety", ""),
-                expires=expires_date,
-                pattern=pattern,
-                source_file=source_file,
-            )
-        )
-    return entries
+        # Note: unknown-rule-id check is enforced by the core loader when
+        # ``valid_rule_ids=_ALL_RULE_IDS`` is passed to ``load_allowlist``.
 
 
-def _parse_per_file_rules(data: dict[str, Any], source_file: str = "") -> list[PerFileRule]:
-    """Parse per_file_rules entries from a YAML data dict."""
-    per_file_rules: list[PerFileRule] = []
-    for item in data.get("per_file_rules", []):
-        rule_ids = set(item.get("rules", []))
-        banned_in_entry = rule_ids & _BANNED_RULES
-        if banned_in_entry:
-            print(
-                f"Error: per_file_rules entry for '{item.get('pattern', '?')}' uses banned rule(s) "
-                f"{banned_in_entry} (cannot be allowlisted)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        unknown_in_entry = rule_ids - _ALL_RULE_IDS
-        if unknown_in_entry:
-            source_ctx = f" in {source_file}" if source_file else ""
-            print(
-                f"Error: per_file_rules entry for '{item.get('pattern', '?')}'{source_ctx} uses unknown rule ID(s) {unknown_in_entry}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        expires_str = item.get("expires")
-        expires_date = None
-        if expires_str:
-            try:
-                expires_date = datetime.strptime(expires_str, "%Y-%m-%d").replace(tzinfo=UTC).date()
-            except ValueError:
-                print(
-                    f"Warning: Invalid date format for per_file_rules expires: {expires_str}",
-                    file=sys.stderr,
-                )
+def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | PerFileRule | None:
+    """Match a tier_model ``Finding`` against ``allowlist``.
 
-        raw_max_hits = item.get("max_hits")
-        max_hits: int | None = None
-        if raw_max_hits is not None:
-            try:
-                max_hits = int(raw_max_hits)
-            except ValueError:
-                pattern = item.get("pattern", "?")
-                source_ctx = f" in {source_file}" if source_file else ""
-                print(
-                    f"Error: per_file_rules entry for '{pattern}'{source_ctx} has non-numeric max_hits: {raw_max_hits!r}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-        per_file_rules.append(
-            PerFileRule(
-                pattern=item["pattern"],
-                rules=item.get("rules", []),
-                reason=item.get("reason", ""),
-                expires=expires_date,
-                max_hits=max_hits,
-                source_file=source_file,
-            )
-        )
-    return per_file_rules
-
-
-def _parse_allowlist_budget(defaults: dict[str, Any], source_file: str = "") -> dict[str, int | None]:
-    """Parse optional allowlist-count ratchet ceilings from defaults."""
-    raw_budget = defaults.get("allowlist_budget", {})
-    source_ctx = f" in {source_file}" if source_file else ""
-    if raw_budget is None:
-        raw_budget = {}
-    if not isinstance(raw_budget, dict):
-        print(
-            f"Error: allowlist_budget must be a mapping{source_ctx}: {raw_budget!r}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    parsed: dict[str, int | None] = {
-        "max_allow_hits": None,
-        "max_per_file_rules": None,
-        "max_total_entries": None,
-        "max_permanent_allow_hits": None,
-        "max_permanent_per_file_rules": None,
-        "max_permanent_total_entries": None,
-    }
-    for key in parsed:
-        raw_value = raw_budget.get(key)
-        if raw_value is None:
-            continue
-        try:
-            value = int(raw_value)
-        except (TypeError, ValueError):
-            print(
-                f"Error: allowlist_budget.{key} must be a non-negative integer{source_ctx}: {raw_value!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if value < 0:
-            print(
-                f"Error: allowlist_budget.{key} must be non-negative{source_ctx}: {raw_value!r}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        parsed[key] = value
-    return parsed
-
-
-def _load_yaml_file(path: Path) -> dict[str, Any]:
-    """Load and return a YAML file as a dict, exiting on parse error."""
-    try:
-        with path.open() as f:
-            return yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        print(f"Error: Invalid YAML in allowlist {path}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def load_allowlist_from_directory(directory: Path) -> Allowlist:
-    """Load allowlist from a directory of per-module YAML files.
-
-    Expected structure:
-        directory/
-            _defaults.yaml   — version and defaults section
-            core.yaml         — per_file_rules + allow_hits for core/*
-            plugins.yaml      — per_file_rules + allow_hits for plugins/*
-            ...
+    Preserves tier_model's historical match order: per-file rules are checked
+    **before** specific entries. Core's ``Allowlist.match`` checks entries
+    first; that order would silently shift ``matched`` / ``matched_count``
+    accounting (and thus ``get_unused_entries`` / ``get_unused_rules``
+    diagnostics) for findings covered by both an exact entry and a per-file
+    rule. We keep the historical order to preserve the production
+    ``contracts.yaml`` semantics across this consolidation.
     """
-    # Load defaults
-    defaults_path = directory / "_defaults.yaml"
-    if defaults_path.exists():
-        defaults_data = _load_yaml_file(defaults_path)
-        defaults = defaults_data.get("defaults", {})
-    else:
-        defaults = {}
-    budget = _parse_allowlist_budget(defaults, source_file="_defaults.yaml")
-
-    # Glob all YAML files except _defaults.yaml, sorted by filename
-    yaml_files = sorted(f for f in directory.glob("*.yaml") if f.name != "_defaults.yaml")
-
-    all_entries: list[AllowlistEntry] = []
-    all_per_file_rules: list[PerFileRule] = []
-
-    for yaml_file in yaml_files:
-        data = _load_yaml_file(yaml_file)
-        all_entries.extend(_parse_allow_hits(data, source_file=yaml_file.name))
-        all_per_file_rules.extend(_parse_per_file_rules(data, source_file=yaml_file.name))
-
-    return Allowlist(
-        entries=all_entries,
-        per_file_rules=all_per_file_rules,
-        fail_on_stale=defaults.get("fail_on_stale", True),
-        fail_on_expired=defaults.get("fail_on_expired", True),
-        max_allow_hits=budget["max_allow_hits"],
-        max_per_file_rules=budget["max_per_file_rules"],
-        max_total_entries=budget["max_total_entries"],
-        max_permanent_allow_hits=budget["max_permanent_allow_hits"],
-        max_permanent_per_file_rules=budget["max_permanent_per_file_rules"],
-        max_permanent_total_entries=budget["max_permanent_total_entries"],
+    finding_key = FindingKey(
+        file_path=finding.file_path,
+        rule_id=finding.rule_id,
+        symbol_context=finding.symbol_context,
+        fingerprint=finding.fingerprint,
     )
+    for rule in allowlist.per_file_rules:
+        if rule.matches(finding_key):
+            rule.matched_count += 1
+            return rule
+    for entry in allowlist.entries:
+        if entry.matches(finding_key):
+            entry.matched = True
+            return entry
+    return None
 
 
-def load_allowlist(path: Path) -> Allowlist:
-    """Load and parse the allowlist from a YAML file or directory of YAML files."""
-    if path.is_dir():
-        return load_allowlist_from_directory(path)
+def _load_tier_model_allowlist(path: Path) -> Allowlist:
+    """Load the tier-model allowlist via core's loader, then apply local governance.
 
+    Core's ``load_allowlist`` treats a missing file path as an empty mapping
+    (returning an empty ``Allowlist``); we additionally short-circuit for paths
+    that resolve to neither a file nor a directory so we don't attempt to read
+    a ghost path. Governance (banned rules, pattern-tag vocabulary,
+    bugfix-owner discipline, registry coherence on ``allow_hits[].key``) is
+    applied after the generic load.
+    """
     if not path.exists():
         return Allowlist(entries=[])
-
-    data = _load_yaml_file(path)
-    defaults = data.get("defaults", {})
-    budget = _parse_allowlist_budget(defaults, source_file=path.name)
-
-    return Allowlist(
-        entries=_parse_allow_hits(data),
-        per_file_rules=_parse_per_file_rules(data),
-        fail_on_stale=defaults.get("fail_on_stale", True),
-        fail_on_expired=defaults.get("fail_on_expired", True),
-        max_allow_hits=budget["max_allow_hits"],
-        max_per_file_rules=budget["max_per_file_rules"],
-        max_total_entries=budget["max_total_entries"],
-        max_permanent_allow_hits=budget["max_permanent_allow_hits"],
-        max_permanent_per_file_rules=budget["max_permanent_per_file_rules"],
-        max_permanent_total_entries=budget["max_permanent_total_entries"],
-    )
+    allowlist = load_allowlist(path, valid_rule_ids=_ALL_RULE_IDS)
+    _validate_allowlist_governance(allowlist)
+    return allowlist
 
 
 # =============================================================================
@@ -2076,7 +1800,7 @@ def collect_check_result(
         raise ValueError(f"{resolved_root} is not a directory")
 
     resolved_allowlist_path = allowlist_path if allowlist_path is not None else _default_allowlist_path(resolved_root)
-    allowlist = load_allowlist(resolved_allowlist_path)
+    allowlist = _load_tier_model_allowlist(resolved_allowlist_path)
     exclude_patterns = exclude_patterns or []
     files = files or []
 
@@ -2101,12 +1825,12 @@ def collect_check_result(
 
     violations: list[Finding] = []
     for finding in all_findings:
-        if finding.rule_id in _BANNED_RULES or allowlist.match(finding) is None:
+        if finding.rule_id in _BANNED_RULES or _match_finding(allowlist, finding) is None:
             violations.append(finding)
 
     layer_warnings: list[Finding] = []
     for tc_finding in all_tc_findings:
-        if allowlist.match(tc_finding) is None:
+        if _match_finding(allowlist, tc_finding) is None:
             layer_warnings.append(tc_finding)
 
     if files:
@@ -2116,11 +1840,11 @@ def collect_check_result(
         unused_file_rules: list[PerFileRule] = []
         exceeded_file_rules: list[PerFileRule] = []
     else:
-        stale_entries = allowlist.get_stale_entries() if allowlist.fail_on_stale else []
+        stale_entries = allowlist.get_unused_entries() if allowlist.fail_on_stale else []
         expired_entries = allowlist.get_expired_entries() if allowlist.fail_on_expired else []
-        expired_file_rules = allowlist.get_expired_file_rules() if allowlist.fail_on_expired else []
-        unused_file_rules = allowlist.get_unused_file_rules() if allowlist.fail_on_stale else []
-        exceeded_file_rules = allowlist.get_exceeded_file_rules()
+        expired_file_rules = allowlist.get_expired_rules() if allowlist.fail_on_expired else []
+        unused_file_rules = allowlist.get_unused_rules() if allowlist.fail_on_stale else []
+        exceeded_file_rules = allowlist.get_exceeded_rules()
 
     return CheckResult(
         allowlist_path=resolved_allowlist_path,

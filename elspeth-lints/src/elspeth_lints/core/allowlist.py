@@ -39,6 +39,7 @@ class AllowlistEntry:
     expires: date | None
     file_fingerprint: str | None = None
     ast_path: str | None = None
+    pattern: str | None = None
     source_file: str = ""
     matched: bool = field(default=False, compare=False)
 
@@ -269,6 +270,7 @@ def _parse_allow_hits(data: dict[str, Any], *, source_file: str) -> list[Allowli
                 expires=_optional_date_alias(entry, "expires", "expires_at", context=f"allow_hits[{index}]"),
                 file_fingerprint=_optional_string(entry, "file_fingerprint", context=f"allow_hits[{index}]"),
                 ast_path=_optional_string(entry, "ast_path", context=f"allow_hits[{index}]"),
+                pattern=_optional_string(entry, "pattern", context=f"allow_hits[{index}]"),
                 source_file=source_file,
             )
         )

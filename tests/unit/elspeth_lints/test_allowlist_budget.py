@@ -135,3 +135,56 @@ def test_missing_budget_block_is_permissive(tmp_path: Path) -> None:
     p.write_text(yaml)
     al = load_allowlist(p, valid_rule_ids=set())
     assert al.get_budget_violations() == []
+
+
+def test_allow_hit_pattern_field_round_trips(tmp_path: Path) -> None:
+    """The optional ``pattern`` field on allow_hits parses verbatim into AllowlistEntry.
+
+    Plan A Task 7: tier_model encodes a typed pattern-tag on allow_hits entries
+    (e.g. ``display-fallback``). Core stores the field as raw text — pattern-tag
+    governance lives in tier_model's local validator, not in the core loader.
+    """
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "src/x.py:R1:func:fp=abc"
+            owner: bugfix
+            reason: r
+            safety: s
+            pattern: display-fallback
+    """).strip()
+    p = tmp_path / "al.yaml"
+    p.write_text(yaml)
+    al = load_allowlist(p, valid_rule_ids={"R1"})
+    assert len(al.entries) == 1
+    assert al.entries[0].pattern == "display-fallback"
+
+
+def test_allow_hit_pattern_field_defaults_to_none(tmp_path: Path) -> None:
+    """Omitting ``pattern`` produces ``pattern=None`` (default)."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "src/x.py:R1:func:fp=abc"
+            owner: x
+            reason: r
+            safety: s
+    """).strip()
+    p = tmp_path / "al.yaml"
+    p.write_text(yaml)
+    al = load_allowlist(p, valid_rule_ids={"R1"})
+    assert al.entries[0].pattern is None
+
+
+def test_allow_hit_pattern_empty_string_rejected(tmp_path: Path) -> None:
+    """Empty-string ``pattern`` is rejected by core's optional-string parser."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "src/x.py:R1:func:fp=abc"
+            owner: x
+            reason: r
+            safety: s
+            pattern: ""
+    """).strip()
+    p = tmp_path / "al.yaml"
+    p.write_text(yaml)
+    with pytest.raises(ValueError, match="pattern"):
+        load_allowlist(p, valid_rule_ids={"R1"})

@@ -19,12 +19,16 @@ allow_hits:
 - key: mcp/server.py:R6:_find_audit_databases:fp=d1b9da6750fcbc5b
   owner: architecture
   reason: Silent recovery with explicit error handling path
+  safety: Filesystem discovery helper; OSError/PermissionError on individual entries are expected and skipped without affecting the audit trail
 - key: mcp/server.py:R6:_prompt_for_database:fp=4bf1b74c95450844
   owner: architecture
   reason: Silent recovery with explicit error handling path
+  safety: Interactive prompt helper; KeyboardInterrupt / EOFError handled to allow clean cancellation without poisoning subsequent operations
 - key: mcp/server.py:R6:_prompt_for_database:fp=db88995ea304163f
   owner: architecture
   reason: Silent recovery with explicit error handling path
+  safety: Interactive prompt helper; KeyboardInterrupt / EOFError handled to allow clean cancellation without poisoning subsequent operations
 - key: mcp/server.py:R6:_prompt_for_database:fp=ca7cd80408f8d4f3
   owner: architecture
   reason: Silent recovery with explicit error handling path
+  safety: Interactive prompt helper; KeyboardInterrupt / EOFError handled to allow clean cancellation without poisoning subsequent operations

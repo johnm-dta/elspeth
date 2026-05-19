@@ -183,7 +183,7 @@ def scan_root(root: Path) -> list[LintFinding]:
     """Scan tests and apply the ADR-019 test inventory allowlist."""
     tests_root, project_root = tests_scan_roots(root)
     findings = scan_tree(tests_root, project_root)
-    active = filter_findings(findings, allowlist_path_for_root(root, "adr019_test_inventory"))
+    active = filter_findings(findings, allowlist_path_for_root(root, "test_to_source_mapping"))
     return [to_lint_finding(finding) for finding in active]
 
 

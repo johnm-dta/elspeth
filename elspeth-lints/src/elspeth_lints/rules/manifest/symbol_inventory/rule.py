@@ -202,7 +202,7 @@ def scan_root(root: Path) -> list[LintFinding]:
     """Scan source files and apply the ADR-019 symbol allowlist."""
     source_root, project_root = source_scan_roots(root)
     findings = scan_tree(source_root, project_root)
-    active = filter_findings(findings, allowlist_path_for_root(root, "adr019_symbol_inventory"))
+    active = filter_findings(findings, allowlist_path_for_root(root, "symbol_inventory"))
     return [to_lint_finding(finding) for finding in active]
 
 

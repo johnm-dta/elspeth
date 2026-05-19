@@ -294,8 +294,8 @@ smarter" discovery becomes a separate rule-quality issue.
 
 **Order inside the task:**
 
-1. Reconfirm the old script's current behavior with the gate command:
-   `.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model`
+1. Reconfirm the current rule behavior with the gate command:
+   `env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth`
 2. Port current behavior into `rules/trust_tier/` with submodules for the
    individual defensive-pattern/layer rules.
 3. Preserve allowlist path compatibility:
@@ -494,7 +494,7 @@ Adapt exact test paths to the files touched in the tranche.
 .venv/bin/python -m pytest tests/path/to/targeted_tests.py -v
 .venv/bin/python -m mypy src/ elspeth-lints/src/
 .venv/bin/python -m ruff check src/ tests/ elspeth-lints/ scripts/cicd/
-.venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
 .venv/bin/pre-commit run --all-files
 git diff --check
 ```

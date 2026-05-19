@@ -1,4 +1,4 @@
-# Temporary ADR-019 Stage 2/3 symbol-inventory allowlist.
+# Temporary source-symbol inventory allowlist.
 #
 # Keep this narrow: the inventory is meant to catch downstream consumers of
 # `is_terminal` and brittle outcome/path string checks that the RowOutcome lint

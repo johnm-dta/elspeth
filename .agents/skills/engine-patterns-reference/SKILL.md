@@ -269,14 +269,14 @@ src/elspeth/
 +-- cli_formatters.py   # Event formatting for CLI output
 ```
 
-## Layer Architecture & Dependency Analysis (`enforce_tier_model.py`)
+## Layer Architecture & Dependency Analysis (`trust_tier.tier_model`)
 
 ELSPETH's layer model (L0 contracts → L1 core → L2 engine → L3
 plugins/web/mcp/tui/cli/telemetry/testing) is enforced by
-`scripts/cicd/enforce_tier_model.py`. This script does **dual duty** (per
-ADR-006 Phase 5) — it is both the defensive-pattern scanner *and* the
-layer-import enforcer. Treat the two roles as separate even though they
-share a process.
+the `trust_tier.tier_model` elspeth-lints rule. This rule does **dual
+duty** (per ADR-006 Phase 5) — it is both the defensive-pattern scanner
+*and* the layer-import enforcer. Treat the two roles as separate even
+though they share a process.
 
 The script exposes **two subcommands** with different exit-code semantics:
 
@@ -292,9 +292,9 @@ would be tool-level, not architectural).
 ### `check` — conformance gate
 
 ```bash
-.venv/bin/python scripts/cicd/enforce_tier_model.py check \
-  --root src/elspeth \
-  --allowlist config/cicd/enforce_tier_model
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check \
+  --rules trust_tier.tier_model \
+  --root src/elspeth
 ```
 
 Detects:
@@ -315,7 +315,7 @@ exemptions, not for hiding bugs.
 ### `dump-edges` — architecture observation
 
 ```bash
-.venv/bin/python scripts/cicd/enforce_tier_model.py dump-edges \
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli dump-edges \
   --root src/elspeth \
   --format json \
   --output /tmp/l3-import-graph.json \
@@ -449,11 +449,12 @@ claim by querying the JSON. Paraphrasing produces second-hand claims
 that drift from the artefact silently. The `--no-timestamp` flag exists
 specifically so the cited values stay stable.
 
-### Extending the script
+### Extending the rule
 
-The script's path→layer table lives at the top of the file (search for
-`LAYER_TABLE` or the equivalent constant). Adding a new layer or
-re-classifying a path requires:
+The rule's path→layer table lives in
+`elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py`
+(search for `LAYER_TABLE` or the equivalent constant). Adding a new layer
+or re-classifying a path requires:
 
 1. Updating the table.
 2. Verifying `check` still passes (regression test against the live
@@ -461,7 +462,7 @@ re-classifying a path requires:
 3. Re-running `dump-edges` and committing the updated artefact if the
    workspace stores one.
 
-Tests live in `tests/unit/scripts/cicd/test_enforce_tier_model_dump_edges.py`
+Tests live in `tests/unit/elspeth_lints/test_trust_tier_dump_edges.py`
 and cover smoke, layer filtering, TYPE_CHECKING/conditional/reexport
 tagging, collapse-to-subsystem, SCC detection, determinism, CLI
 validation, and empty-input handling. Adding new metadata fields or

@@ -1,4 +1,4 @@
-"""Metadata for the ADR-019 tests-to-source inventory rule."""
+"""Metadata for the test-to-source mapping inventory rule."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ RULE_ID = "manifest.test_to_source_mapping"
 
 RULE_METADATA = RuleMetadata(
     id=RULE_ID,
-    name="ADR-019 tests-to-source mapping inventory",
-    description="Inventories tests that still assert pre-ADR-019 RowOutcome or token_outcomes outcome-only behavior.",
+    name="Test-to-source mapping inventory",
+    description="Inventories tests that still assert obsolete RowOutcome or token_outcomes outcome-only behavior.",
     severity=Severity.ERROR,
     category=Category.MANIFEST,
     cwe=("CWE-710",),

@@ -14,7 +14,7 @@ from elspeth_lints.rules.manifest.test_to_source_mapping import RULE as TEST_TO_
 from elspeth_lints.rules.manifest.test_to_source_mapping.rule import FindingKind as MappingFindingKind
 from elspeth_lints.rules.manifest.test_to_source_mapping.rule import scan_file as scan_test_file
 
-SYMBOL_FIXTURE_DIR = Path("tests/fixtures/cicd/adr019_symbol_inventory")
+SYMBOL_FIXTURE_DIR = Path("tests/fixtures/cicd/symbol_inventory")
 
 
 def test_symbol_inventory_reports_every_finding_kind() -> None:
@@ -62,7 +62,7 @@ def test_symbol_inventory_uses_directory_allowlist(tmp_path: Path) -> None:
     source = "def f(record):\n    return record.is_terminal\n"
     (allowed / "enums.py").write_text(source, encoding="utf-8")
     (denied / "types.py").write_text(source, encoding="utf-8")
-    allowlist = tmp_path / "config" / "cicd" / "adr019_symbol_inventory"
+    allowlist = tmp_path / "config" / "cicd" / "symbol_inventory"
     allowlist.mkdir(parents=True)
     (allowlist / "migration_files.yaml").write_text(
         "allowed:\n  - file: src/elspeth/contracts/enums.py\n    justification: compatibility mapping fixture\n",
@@ -180,7 +180,7 @@ def test_test_to_source_mapping_uses_directory_allowlist(tmp_path: Path) -> None
             assert result.outcome == LEGACY.COMPLETED
         """.replace("LEGACY", legacy_name),
     )
-    allowlist = tmp_path / "config" / "cicd" / "adr019_test_inventory"
+    allowlist = tmp_path / "config" / "cicd" / "test_to_source_mapping"
     _write(
         allowlist / "migration_files.yaml",
         """

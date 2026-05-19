@@ -1,4 +1,4 @@
-# Temporary ADR-019 Phase 5 tests-tree inventory allowlist.
+# Temporary test-to-source mapping inventory allowlist.
 #
 # Keep this narrow: real engine-output tests must migrate to two-axis
 # (TerminalOutcome, TerminalPath) assertions in this PR. This allowlist is only
@@ -7,7 +7,7 @@
 allowed:
   - file: tests/unit/contracts/test_enums.py
     justification: ADR-019 compatibility and mapping-table tests intentionally exercise RowOutcome until Stage 5 deletes the enum.
-  - file: tests/fixtures/cicd/adr019_symbol_inventory/positive.py
+  - file: tests/fixtures/cicd/symbol_inventory/positive.py
     justification: ADR-019 source-inventory positive fixture intentionally keeps stale value comparisons for guard coverage.
   - file: tests/unit/core/landscape/test_database_compatibility_guards.py
     justification: ADR-019 compatibility tests intentionally build stale token_outcomes schemas to verify fail-fast migration errors.

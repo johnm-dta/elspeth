@@ -102,7 +102,7 @@ jobs:
             --rules manifest.contract_manifest \
             --root src/elspeth
 
-      - name: Run ADR-019 inventory elspeth-lints rules
+      - name: Run manifest inventory elspeth-lints rules
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules manifest.symbol_inventory,manifest.test_to_source_mapping \
@@ -192,14 +192,14 @@ jobs:
             exit "$status"
           fi
 
-      - name: Emit elspeth-lints ADR-019 inventory SARIF artifact
+      - name: Emit elspeth-lints manifest-inventory SARIF artifact
         if: always()
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules manifest.symbol_inventory,manifest.test_to_source_mapping \
             --root . \
-            --format sarif > elspeth-lints-adr019-inventory.sarif
+            --format sarif > elspeth-lints-manifest-inventory.sarif
           status=$?
           if [[ "$status" -gt 1 ]]; then
             exit "$status"
@@ -217,7 +217,7 @@ jobs:
             elspeth-lints-audit-evidence.sarif
             elspeth-lints-composer.sarif
             elspeth-lints-contract-manifest.sarif
-            elspeth-lints-adr019-inventory.sarif
+            elspeth-lints-manifest-inventory.sarif
           retention-days: 7
 
   # ===========================================================================

@@ -1,4 +1,4 @@
-"""Metadata for the ADR-019 source-symbol inventory rule."""
+"""Metadata for the source-symbol inventory rule."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ RULE_ID = "manifest.symbol_inventory"
 
 RULE_METADATA = RuleMetadata(
     id=RULE_ID,
-    name="ADR-019 source symbol inventory",
-    description="Inventories stale ADR-019 source symbols and brittle outcome/path string checks.",
+    name="Source symbol inventory",
+    description="Inventories stale source symbols and brittle outcome/path string checks.",
     severity=Severity.ERROR,
     category=Category.MANIFEST,
     cwe=("CWE-710",),

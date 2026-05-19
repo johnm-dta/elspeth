@@ -25,6 +25,8 @@ directory. To map an old active path, prefix it with
 | `docs/audits/2026-05-14-composer-ux-review-actions.md` | Stale checklist form; represented by the RC5-UX remediation epic | `elspeth-de91358c30` and children |
 | `docs/audits/test-infrastructure-audit-2026-03-01.md` | Old test-infrastructure snapshot; too stale to remain active truth | Fresh validation should be filed under Filigree before implementation |
 | `docs/architecture/semi-autonomous/design-review-minutes.md`, `design-review-synthesis.md`, `independent-critique-gemini.md` | Review history around the retained design | `docs/architecture/semi-autonomous/design.md` |
+| `CHANGELOG-RC1.md`, `CHANGELOG-RC2.md` | Reconstructed historical changelogs covering Pre-RC1 through RC2; ongoing `/CHANGELOG.md` is the authoritative line-by-line record from RC3 onward. Retained here so the RC1/RC2 narrative remains discoverable. | `/CHANGELOG.md` for RC3+; this archive for the RC1 build and RC2 hardening narrative |
+| `scripts/generate_test_bugs.py` | One-off test-bug fixture generator; unreferenced anywhere in the active tree. Bug-tracking discipline now lives in Filigree. | Filigree (`filigree session-context`) and the per-suite test fixtures under `tests/` |
 
 ## Not Moved
 

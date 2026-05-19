@@ -71,6 +71,25 @@ function clearComposerProgressPollTimer(): void {
   composerProgressPollSessionId = null;
 }
 
+// Live-message polling — runs while a send is inflight so the chat panel
+// reflects each LLM round-trip's assistant row as the backend persists it,
+// instead of waiting for the POST to return with the final message. The
+// turn-coalescing logic in components/chat/turns.ts groups the freshly-
+// arrived rows under the user message's turn, so visually the tool calls
+// "appear in the same bubble as they come in" rather than as a row of
+// silent waiting then a single completed bubble.
+const INFLIGHT_MESSAGES_POLL_INTERVAL_MS = 1500;
+let inflightMessagesPollTimer: ReturnType<typeof setInterval> | null = null;
+let inflightMessagesPollSessionId: string | null = null;
+
+function clearInflightMessagesPollTimer(): void {
+  if (inflightMessagesPollTimer !== null) {
+    clearInterval(inflightMessagesPollTimer);
+    inflightMessagesPollTimer = null;
+  }
+  inflightMessagesPollSessionId = null;
+}
+
 function formatProviderDiagnostic(apiErr: ApiError): string {
   const lines: string[] = [];
   if (apiErr.provider_detail) {
@@ -189,6 +208,9 @@ interface SessionState {
   loadComposerProgress: (sessionId?: string) => Promise<void>;
   startComposerProgressPolling: (sessionId: string) => void;
   stopComposerProgressPolling: (sessionId?: string) => void;
+  loadInflightMessages: (sessionId: string) => Promise<void>;
+  startInflightMessagesPolling: (sessionId: string) => void;
+  stopInflightMessagesPolling: (sessionId?: string) => void;
   sendValidationFeedback: (result: ValidationResult) => Promise<void>;
   retryMessage: (messageId: string, signal?: AbortSignal) => Promise<void>;
   forkFromMessage: (messageId: string, newContent: string) => Promise<void>;
@@ -492,10 +514,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       messages: [...state.messages, optimisticMessage],
     }));
     get().startComposerProgressPolling(activeSessionId);
+    get().startInflightMessagesPolling(activeSessionId);
 
     try {
       const stateId = get().compositionState?.id;
       const result = await api.sendMessage(activeSessionId, content, stateId, signal);
+      // Sync the chat panel against the durable DB state before applying the
+      // POST's metadata. After this await, get().messages contains every
+      // assistant row the compose loop persisted (and the canonical user row
+      // — the optimistic local-* version is gone). The set() block below
+      // then only needs to update derived state (compositionState, proposals,
+      // isComposing) without re-appending the final assistant message that
+      // the poll has already pulled in.
+      await get().loadInflightMessages(activeSessionId);
       const { message, state } = result;
       const proposals = result.proposals ?? [];
       set((s) => {
@@ -516,12 +547,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           !s.selectedNodeId ||
           newState?.nodes.some((n) => n.id === s.selectedNodeId);
 
+        // After loadInflightMessages the message list reflects the canonical
+        // DB state — the optimistic local-* row has been dropped and every
+        // assistant row the compose loop persisted (including the final
+        // ``message`` the POST returned) is present. We still defensively
+        // backfill in case the poll request failed: clear the optimistic's
+        // pending status and append the final message only when neither is
+        // already represented in s.messages (dedup by id).
+        const seen = new Set(s.messages.map((m) => m.id));
+        const repaired = s.messages.map((existing) =>
+          existing.id === optimisticMessage.id
+            ? { ...existing, local_status: undefined, local_error: undefined }
+            : existing,
+        );
+        const finalMessages = seen.has(message.id)
+          ? repaired
+          : repaired.concat(message);
+
         return {
-          messages: s.messages.map((existing) =>
-            existing.id === optimisticMessage.id
-              ? { ...existing, local_status: undefined, local_error: undefined }
-              : existing,
-          ).concat(message),
+          messages: finalMessages,
           compositionState: newState,
           compositionProposals: mergeCompositionProposals(
             s.compositionProposals,
@@ -588,6 +632,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }));
     } finally {
       get().stopComposerProgressPolling(activeSessionId);
+      get().stopInflightMessagesPolling(activeSessionId);
     }
   },
 
@@ -791,6 +836,63 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
+  async loadInflightMessages(sessionId: string) {
+    // Refresh the chat messages from the server so newly-persisted assistant
+    // rows from the inflight compose loop are visible immediately. The
+    // optimistic local-* user message is preserved when its canonical
+    // counterpart hasn't appeared in the fresh list yet (race between the
+    // first poll and the route's user-message persist); once the canonical
+    // user row arrives, the optimistic one is dropped.
+    try {
+      const fresh = await api.fetchMessages(sessionId);
+      if (get().activeSessionId !== sessionId) return;
+      // If polling has been stopped (or rebound to a different session), drop
+      // this stale response on the floor.
+      if (
+        inflightMessagesPollSessionId !== null &&
+        inflightMessagesPollSessionId !== sessionId
+      ) {
+        return;
+      }
+      set((s) => {
+        if (s.activeSessionId !== sessionId) return s;
+        const localOptimistic = s.messages.filter((m) =>
+          m.id.startsWith("local-"),
+        );
+        const survivors = localOptimistic.filter(
+          (local) =>
+            !fresh.some(
+              (f) => f.role === local.role && f.content === local.content,
+            ),
+        );
+        return { messages: [...fresh, ...survivors] };
+      });
+    } catch {
+      // Inflight polling is advisory — failures keep the existing UI state
+      // until the next poll or the POST completion handler refreshes it.
+    }
+  },
+
+  startInflightMessagesPolling(sessionId: string) {
+    clearInflightMessagesPollTimer();
+    inflightMessagesPollSessionId = sessionId;
+    inflightMessagesPollTimer = setInterval(() => {
+      if (inflightMessagesPollSessionId !== sessionId) return;
+      void useSessionStore.getState().loadInflightMessages(sessionId);
+    }, INFLIGHT_MESSAGES_POLL_INTERVAL_MS);
+  },
+
+  stopInflightMessagesPolling(sessionId?: string) {
+    if (
+      sessionId !== undefined &&
+      inflightMessagesPollSessionId !== null &&
+      inflightMessagesPollSessionId !== sessionId
+    ) {
+      return;
+    }
+    clearInflightMessagesPollTimer();
+  },
+
   async sendValidationFeedback(result: ValidationResult) {
     // Format validation errors into a message the LLM can act on.
     const lines = ["Pipeline validation failed with the following errors:"];
@@ -835,12 +937,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ),
     }));
     get().startComposerProgressPolling(activeSessionId);
+    get().startInflightMessagesPolling(activeSessionId);
 
     try {
       // Use recompose (not sendMessage) — the user message is already
       // persisted from the original send. Calling sendMessage again
       // would insert a duplicate user message.
       const result = await api.recompose(activeSessionId, signal);
+      // Sync the chat panel against the DB state (see sendMessage for
+      // rationale).
+      await get().loadInflightMessages(activeSessionId);
       const { message: assistantMessage, state } = result;
       const proposals = result.proposals ?? [];
       set((s) => {
@@ -859,12 +965,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           !s.selectedNodeId ||
           newState?.nodes.some((n) => n.id === s.selectedNodeId);
 
+        // Polling has loaded the canonical messages list. Defensive backfill
+        // mirrors the sendMessage success branch: clear the retried message's
+        // pending status, and only append the recomposed assistant message
+        // if it isn't already represented (dedup by id).
+        const seen = new Set(s.messages.map((m) => m.id));
+        const repaired = s.messages.map((existing) =>
+          existing.id === messageId
+            ? { ...existing, local_status: undefined, local_error: undefined }
+            : existing,
+        );
+        const finalMessages = seen.has(assistantMessage.id)
+          ? repaired
+          : repaired.concat(assistantMessage);
+
         return {
-          messages: s.messages.map((existing) =>
-            existing.id === messageId
-              ? { ...existing, local_status: undefined, local_error: undefined }
-              : existing,
-          ).concat(assistantMessage),
+          messages: finalMessages,
           compositionState: newState,
           compositionProposals: mergeCompositionProposals(
             s.compositionProposals,
@@ -912,6 +1028,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }));
     } finally {
       get().stopComposerProgressPolling(activeSessionId);
+      get().stopInflightMessagesPolling(activeSessionId);
     }
   },
 

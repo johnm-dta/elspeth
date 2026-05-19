@@ -386,6 +386,168 @@ describe("sessionStore", () => {
         vi.useRealTimers();
       }
     });
+
+    it("polls inflight messages while a send is composing and stops on completion", async () => {
+      vi.useFakeTimers();
+      try {
+        const {
+          sendMessage: mockSendMessage,
+          fetchMessages,
+          fetchComposerProgress,
+        } = await import("@/api/client");
+        const sendDeferred =
+          deferred<{ message: ChatMessage; state: null }>();
+        const canonicalUser: ChatMessage = {
+          id: "msg-canonical-user",
+          session_id: "session-1",
+          role: "user",
+          content: "hello",
+          tool_calls: null,
+          created_at: "2026-04-26T10:00:00Z",
+        };
+        const inflightAssistant: ChatMessage = {
+          id: "msg-inflight-assistant",
+          session_id: "session-1",
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "tc-1",
+              type: "function",
+              function: { name: "list_models", arguments: "{}" },
+            },
+          ],
+          created_at: "2026-04-26T10:00:01Z",
+        };
+        const finalAssistant: ChatMessage = {
+          id: "msg-final-assistant",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Done",
+          tool_calls: null,
+          created_at: "2026-04-26T10:00:02Z",
+        };
+        // First poll sees the canonical user + an in-flight tool-call row.
+        // Subsequent polls would see more rows; the final post-completion
+        // sync sees the full list.
+        (fetchMessages as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce([canonicalUser, inflightAssistant])
+          .mockResolvedValueOnce([canonicalUser, inflightAssistant, finalAssistant]);
+        (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue({
+          session_id: "session-1",
+          request_id: "msg-canonical-user",
+          phase: "idle",
+          headline: "",
+          evidence: [],
+          likely_next: null,
+          reason: null,
+          updated_at: "2026-04-26T10:00:00Z",
+        });
+        (mockSendMessage as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+          sendDeferred.promise,
+        );
+
+        useSessionStore.setState({ activeSessionId: "session-1", messages: [] });
+        const sendPromise = useSessionStore.getState().sendMessage("hello");
+
+        // Drain the optimistic-append microtask.
+        await Promise.resolve();
+        // Polling fires on the interval, not at start, so we advance to the
+        // first tick.
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(fetchMessages).toHaveBeenCalledTimes(1);
+        const afterFirstPoll = useSessionStore.getState().messages;
+        // Canonical user has replaced the local-* optimistic row, and the
+        // in-flight assistant is now visible — exactly the "tool calls
+        // appear in the same bubble as they come in" behaviour.
+        expect(afterFirstPoll.map((m) => m.id)).toEqual([
+          "msg-canonical-user",
+          "msg-inflight-assistant",
+        ]);
+
+        sendDeferred.resolve({ message: finalAssistant, state: null });
+        await sendPromise;
+        // Post-completion sync brings the final assistant row in.
+        expect(useSessionStore.getState().messages.map((m) => m.id)).toEqual([
+          "msg-canonical-user",
+          "msg-inflight-assistant",
+          "msg-final-assistant",
+        ]);
+        // Polling stops once isComposing flips back to false.
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(fetchMessages).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("preserves the optimistic user message when the canonical row has not yet appeared", async () => {
+      vi.useFakeTimers();
+      try {
+        const {
+          sendMessage: mockSendMessage,
+          fetchMessages,
+          fetchComposerProgress,
+        } = await import("@/api/client");
+        const sendDeferred =
+          deferred<{ message: ChatMessage; state: null }>();
+        // First poll returns an empty list (the canonical user hasn't been
+        // persisted yet — should not happen in production, but the merge
+        // logic must not silently drop the optimistic row if it does).
+        (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+        (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue({
+          session_id: "session-1",
+          request_id: "msg-pending",
+          phase: "idle",
+          headline: "",
+          evidence: [],
+          likely_next: null,
+          reason: null,
+          updated_at: "2026-04-26T10:00:00Z",
+        });
+        (mockSendMessage as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+          sendDeferred.promise,
+        );
+
+        useSessionStore.setState({ activeSessionId: "session-1", messages: [] });
+        const sendPromise = useSessionStore.getState().sendMessage("the user's question");
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(1500);
+        const afterEmptyPoll = useSessionStore.getState().messages;
+        // The local-* optimistic row survives because no canonical row in
+        // fresh matched its (role, content) tuple.
+        expect(afterEmptyPoll).toHaveLength(1);
+        expect(afterEmptyPoll[0].id).toMatch(/^local-/);
+        expect(afterEmptyPoll[0].role).toBe("user");
+        expect(afterEmptyPoll[0].content).toBe("the user's question");
+
+        // Wind down cleanly.
+        (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+          {
+            id: "msg-final",
+            session_id: "session-1",
+            role: "assistant",
+            content: "ok",
+            tool_calls: null,
+            created_at: "2026-04-26T10:00:01Z",
+          } as ChatMessage,
+        ]);
+        sendDeferred.resolve({
+          message: {
+            id: "msg-final",
+            session_id: "session-1",
+            role: "assistant",
+            content: "ok",
+            tool_calls: null,
+            created_at: "2026-04-26T10:00:01Z",
+          } as ChatMessage,
+          state: null,
+        });
+        await sendPromise;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("renameSession", () => {

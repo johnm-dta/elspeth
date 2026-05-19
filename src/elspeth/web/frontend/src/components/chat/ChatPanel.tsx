@@ -15,6 +15,7 @@ import {
   toInlineSourceProvenance,
 } from "@/api/client";
 import { MessageBubble } from "./MessageBubble";
+import { groupIntoTurns, turnRepresentativeMessage, type ChatTurn } from "./turns";
 import { ComposingIndicator } from "./ComposingIndicator";
 import { ChatInput } from "./ChatInput";
 import { TemplateCards } from "./TemplateCards";
@@ -319,6 +320,10 @@ export function ChatPanel({
   onOpenComposerPreferences,
 }: ChatPanelProps) {
   const messages = useSessionStore((s) => s.messages);
+  // Project audit-grade message rows onto user-visible turns. One bubble per
+  // turn — see ./turns.ts for the grouping rules. Memoised on the messages
+  // reference because the store updates the array on append, not in place.
+  const chatTurns = useMemo(() => groupIntoTurns(messages), [messages]);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const compositionState = useSessionStore((s) => s.compositionState);
@@ -1236,20 +1241,29 @@ export function ChatPanel({
         {messages.length === 0 ? (
           <TemplateCards onSelectTemplate={handleSelectTemplate} />
         ) : (
-          messages.map((msg) => (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              isComposing={isComposing}
-              onRetry={msg.role === "user" ? retryMessage : undefined}
-              onFork={msg.role === "user" ? handleFork : undefined}
-              proposalsByToolCallId={proposalsByToolCallId}
-              staleProposalIds={staleProposalIds}
-              proposalActionPendingIds={proposalActionPendingIds}
-              onAcceptProposal={acceptProposal}
-              onRejectProposal={rejectProposal}
-            />
-          ))
+          // Render one bubble per *turn*, not one per audit row. The compose
+          // loop persists every LLM round-trip as its own assistant row
+          // (Tier-1 audit doctrine); grouping projects the audit stream onto
+          // user-visible turns so a single user prompt becomes one user
+          // bubble + one agent bubble that aggregates every tool call and the
+          // final answer. See ./turns.ts.
+          chatTurns.map((turn: ChatTurn) => {
+            const repr = turnRepresentativeMessage(turn);
+            return (
+              <MessageBubble
+                key={turn.id}
+                message={repr}
+                isComposing={isComposing}
+                onRetry={turn.kind === "user" ? retryMessage : undefined}
+                onFork={turn.kind === "user" ? handleFork : undefined}
+                proposalsByToolCallId={proposalsByToolCallId}
+                staleProposalIds={staleProposalIds}
+                proposalActionPendingIds={proposalActionPendingIds}
+                onAcceptProposal={acceptProposal}
+                onRejectProposal={rejectProposal}
+              />
+            );
+          })
         )}
         {inlineSourceSummary && (
           <InlineSourceCreatedTurn

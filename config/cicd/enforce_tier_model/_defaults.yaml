@@ -10,7 +10,24 @@ defaults:
     # to avoid leaking tracebacks into the response body). Bounded
     # 90-day expiry (2026-08-19); reviewer must renew or reify after
     # production traffic confirms the handler is unreachable.
-    max_allow_hits: 393
+    #
+    # Bumped from 393 → 411 on 2026-05-20 (net +18) to accommodate the
+    # session-routes resource split (commit 064a026dd "Refactor session
+    # routes by resource"). The refactor decomposed the 7791-line
+    # ``web/sessions/routes.py`` into a package
+    # (``routes/{__init__,_helpers,composer,interpretation,messages,runs,sessions}.py``)
+    # and named extracted helpers (``_dispatch_guided_respond_impl``,
+    # ``_state_data_from_composer_state_impl``, ``_patched_routes_attr``,
+    # ``_composer_persisted_validation``, ``_extract_runtime_model_snapshot``).
+    # Same HTTP/session-route trust boundary; AST shape changes increased
+    # the fingerprinted-entry count from 30 (consolidated under the old
+    # ``create_session_router`` factory) to 47 (distributed across
+    # registrar wrappers and helpers). All 18 net new entries are bounded
+    # 2026-08-20 to force re-evaluation; the 12 R5 isinstance() guards
+    # inside ``_dispatch_guided_respond_impl`` are the highest-value
+    # remediation target — consolidating that validation behind a single
+    # Pydantic validator at the boundary would retire that whole block.
+    max_allow_hits: 411
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -22,7 +39,10 @@ defaults:
     max_per_file_rules: 93
     # Bumped from 485 → 486 on 2026-05-19 for the same Phase 8 PR-review
     # S4 entry as ``max_allow_hits`` above.
-    max_total_entries: 486
+    #
+    # Bumped from 486 → 504 on 2026-05-20 for the same session-routes
+    # resource split bump as ``max_allow_hits`` above (net +18).
+    max_total_entries: 504
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

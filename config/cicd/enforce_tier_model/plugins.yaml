@@ -248,27 +248,27 @@ allow_hits:
   reason: CSV source schema validation handles Tier 3 rows; ValidationError means external row data violates the configured source schema.
   safety: Records schema validation evidence and yields quarantine unless discard; programmer errors still propagate.
   expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R1:DataverseSource:_normalize_row_fields:fp=bda9358e61cd3c2c
+- key: plugins/sources/dataverse.py:R1:DataverseSource:_normalize_row_fields:fp=f3907b46f21d68bc
   owner: source-boundary
   reason: Dataverse rows are Tier 3 and may be sparse; fields absent from the first-row mapping must be normalized individually.
   safety: Unmapped fields are normalized with normalize_field_name(), trigger field-resolution rebuild, and still pass through schema validation.
   expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R1:DataverseSource:load:fp=7555c055e0c45509
+- key: plugins/sources/dataverse.py:R1:DataverseSource:load:fp=8df573ea46394553
   owner: source-boundary
   reason: FetchXML is Tier 3 source configuration; the entity name attribute is optional in parsed XML and must be checked explicitly.
   safety: Missing entity name raises RuntimeError before any Dataverse request is made; no fallback entity is fabricated.
   expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=81aa8f5fbf5f8e29
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=17871a1175fbfa6e
   owner: source-boundary
   reason: Dataverse formatted-value stripping handles Tier 3 API rows; ValueError means external metadata would collide with real fields.
   safety: Records validation evidence and yields quarantine unless discard; the row is not emitted as valid.
   expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=88dfa7954bbaa41a
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=3ae8917b9078d3f9
   owner: source-boundary
   reason: Dataverse field normalization handles Tier 3 API rows; ValueError means an external field name cannot be normalized safely.
   safety: Records field-normalization validation evidence and yields quarantine unless discard.
   expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=0cfffa58cc323ca7
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=50a647937d8741b4
   owner: source-boundary
   reason: Dataverse source schema validation handles Tier 3 API rows; ValidationError means external row data violates the configured schema.
   safety: Records schema validation evidence and yields quarantine unless discard; programmer errors still propagate.
@@ -337,7 +337,7 @@ allow_hits:
     is genuinely optional with empty-string default
   safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
   expires: '2026-07-02'
-- key: plugins/infrastructure/discovery.py:R9:_discover_in_file:fp=0acd1690c04355a2
+- key: plugins/infrastructure/discovery.py:R9:_discover_in_file:fp=12a2a0eef980437f
   owner: architecture
   reason: sys.modules.pop cleanup on import failure — module may not be registered
     yet
@@ -566,7 +566,7 @@ allow_hits:
   safety: Unknown provider raises ValueError at config validation time with list of
     available providers; no silent data loss
   expires: null
-- key: plugins/transforms/rag/config.py:R1:RAGRetrievalConfig:validate_provider_config:fp=bb927661731d8cb8
+- key: plugins/transforms/rag/config.py:R1:RAGRetrievalConfig:validate_provider_config:fp=ab1b18358607f1ff
   owner: feature
   reason: Provider lookup — dict.get() with explicit None check and meaningful ValueError;
     this IS the guard that catches unknown providers at config load time rather than
@@ -674,14 +674,6 @@ allow_hits:
   safety: Non-finite float rows diverted via _divert_row() with per-field detail;
     valid rows written normally; no silent data loss
   expires: null
-- key: plugins/infrastructure/discovery.py:R6:discover_plugins_in_directory:fp=17b3c58c5cf147b9
-  owner: bugfix
-  pattern: external-dependency-optional
-  reason: Optional extras (e.g. chromadb for [rag]) are external dependencies — ImportError
-    is expected when not installed
-  safety: Only catches ImportError/ModuleNotFoundError; logs warning with file name
-    and error; SyntaxError and other bugs still crash
-  expires: null
 - key: plugins/infrastructure/preflight.py:R1:plugin_preflight_mode_enabled:fp=2019727813f38ff9
   owner: web-execution
   reason: ContextVar.get() is not dict.get() — _PLUGIN_PREFLIGHT_MODE is a ContextVar[bool];
@@ -718,3 +710,8 @@ allow_hits:
     skipped and the original Pydantic msg passes through unchanged. No silent coercion
     of error data.
   expires: null
+- key: plugins/infrastructure/config_base.py:R1:DataPluginConfig:__init_subclass__:fp=e9064dddb97b1895
+  owner: plugin-infrastructure
+  reason: cls.__dict__ is a Tier-1 Python-internal mapping with guaranteed shape; the .get() reads an opt-in `_component_type_exempt` marker on subclass definition. The flag is class-internal metadata, not external data.
+  safety: Default False; absent marker behaves as non-exempt, which is the stricter side. The fall-through path enforces _plugin_component_type or raises TypeError.
+  expires: '2026-08-20'

@@ -206,3 +206,8 @@ allow_hits:
   reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance guards against corrupted checkpoint
   safety: Raises AuditIntegrityError if not dict; no silent coercion
   expires: null
+- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=c48ba8486b6c2e03
+  owner: checkpoint
+  reason: Resume-point read may discover the persisted checkpoint is incompatible with the current schema (post-deploy migration scenario); narrow catch falls back to a None resume-point, forcing full recompute from upstream audit records.
+  safety: Catches only IncompatibleCheckpointError; returns None so the orchestrator treats the run as not-resumable and starts from the source. No audit data is lost; lineage is preserved by full recompute.
+  expires: '2026-08-20'

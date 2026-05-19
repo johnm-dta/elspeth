@@ -36,7 +36,7 @@ This is not optional. This is not best-effort. This is the reason ELSPETH exists
 
 ### 1.1 Complete Lineage
 
-**Promise:** For any output token, `explain(run_id, token_id)` returns:
+**Promise:** For any output token, `explain(query, data_flow, run_id, token_id=...)` returns:
 
 | Component | Guarantee |
 |-----------|-----------|
@@ -46,6 +46,8 @@ This is not optional. This is not best-effort. This is the reason ELSPETH exists
 | External calls | Full request/response for LLM/HTTP calls |
 | Routing decisions | Why data went where it went |
 | Terminal state | Final disposition (completed, routed, failed, etc.) |
+
+`query` and `data_flow` are the `QueryRepository` and `DataFlowRepository` exposed by `RecorderFactory` (the construction point for the Landscape repositories adopted in the RC-3.3 repository decomposition). In practice a caller writes `from elspeth.core.landscape import explain` and passes `factory.query` and `factory.data_flow`.
 
 ### 1.2 No Silent Drops
 
@@ -314,9 +316,12 @@ Future versions may:
 The ultimate test of ELSPETH's contract:
 
 ```python
-def test_attributability(run_id: str, token_id: str):
+from elspeth.core.landscape import explain
+from elspeth.core.landscape.factory import RecorderFactory
+
+def test_attributability(factory: RecorderFactory, run_id: str, token_id: str):
     """Given any output, prove complete lineage to source."""
-    lineage = landscape.explain(run_id, token_id=token_id)
+    lineage = explain(factory.query, factory.data_flow, run_id, token_id=token_id)
 
     # Source exists
     assert lineage.source_row is not None

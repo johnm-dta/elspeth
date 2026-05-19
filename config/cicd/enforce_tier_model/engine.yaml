@@ -81,17 +81,11 @@ allow_hits:
   safety: Missing depends_on yields []; malformed present values are still validated immediately by subsequent
     type checks
   expires: null
-- key: engine/coalesce_executor.py:R5:CoalesceExecutor:_execute_merge:fp=0f05412d6f31e065
+- key: engine/coalesce_executor.py:R5:CoalesceExecutor:_execute_merge:fp=4a8461c859544771
   owner: architecture
   reason: "AuditIntegrityError check prevents writing FAILED records to a compromised database \u2014\
     \ leaving node states as pending is more honest than corrupting further"
   safety: Re-raises immediately; no writes to the untrustworthy database
-  expires: null
-- key: engine/coalesce_executor.py:R4:CoalesceExecutor:_execute_merge:fp=5961761ea314e7c4
-  owner: architecture
-  reason: "Best-effort cleanup of OPEN branch node_states after merge failure \u2014 broad catch prevents\
-    \ cleanup failure from masking original merge exception"
-  safety: Logs error with state_id and cleanup exception details; always re-raises the original error
   expires: null
 - key: engine/executors/sink.py:R4:SinkExecutor:_best_effort_cleanup:fp=1b066df6010227f2
   owner: architecture

@@ -38,7 +38,7 @@ ELSPETH is built for **high-stakes accountability**. The audit trail must withst
 - "I don't know what happened" is never an acceptable answer for any output
 - The Landscape audit trail is the source of truth, not logs or metrics
 - No inference - if it's not recorded, it didn't happen
-- **Attributability test**: For any output, `explain(recorder, run_id, token_id)` must prove complete lineage back to source
+- **Attributability test**: For any output, `explain(query, data_flow, run_id, token_id=...)` (where `query` and `data_flow` are the `QueryRepository` and `DataFlowRepository` exposed by `RecorderFactory`) must prove complete lineage back to source
 
 ## Data Manifesto: Three-Tier Trust Model
 

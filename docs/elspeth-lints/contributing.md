@@ -10,3 +10,34 @@ work is an explicit migration-state update for an existing legacy script.
 
 Use `docs/elspeth-lints/rule-author-guide.md` for the rule workflow and
 `docs/elspeth-lints/protocols.md` for the protocol details.
+
+## Fixture Convention
+
+Every rule must ship at least one `examples_violation` fixture and one
+`examples_clean` fixture under its rule package:
+
+```text
+elspeth-lints/src/elspeth_lints/rules/<rule_package>/
+├── rule.py
+├── metadata.py
+└── fixtures/
+    ├── examples_violation/
+    │   ├── 01_basic.py
+    │   └── 01_basic.expected.json
+    └── examples_clean/
+        └── 01_basic.py
+```
+
+Incremental AST rules normally use single `.py` fixtures. Whole-repository rules
+may use a directory fixture with an adjacent `<case>.expected.json` file:
+
+```text
+fixtures/examples_violation/01_repo_shape/
+fixtures/examples_violation/01_repo_shape.expected.json
+```
+
+The shared test `tests/unit/elspeth_lints/test_all_rule_fixtures.py` fails when a
+rule has no fixtures, when a clean fixture emits findings, or when a violation
+fixture does not match its expected JSON. It also checks that
+`RuleMetadata.examples_violation_count` and `RuleMetadata.examples_clean_count`
+match the discovered fixture inventory.

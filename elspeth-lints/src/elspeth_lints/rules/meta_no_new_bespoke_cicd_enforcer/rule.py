@@ -1,4 +1,4 @@
-"""Meta rule preventing new bespoke scripts/cicd/enforce_*.py gates."""
+"""Implementation for the no-new-bespoke-CI-enforcers meta rule."""
 
 from __future__ import annotations
 
@@ -9,25 +9,13 @@ from typing import Any
 
 import yaml
 
-from elspeth_lints.core.protocols import Category, Finding, RuleContext, RuleMetadata, RuleScope, Severity
+from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
+from elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer.metadata import MANIFEST_PATH, RULE_ID, RULE_METADATA
 
-RULE_ID = "meta.no-new-bespoke-cicd-enforcer"
-MANIFEST_PATH = Path("config/cicd/lint_migration_status.yaml")
+MANIFEST_RELATIVE_PATH = Path(MANIFEST_PATH)
 ACTIVE_STATUSES = frozenset({"pending", "shadow", "cutover"})
 DELETED_STATUS = "deleted"
 KNOWN_STATUSES = ACTIVE_STATUSES | frozenset({DELETED_STATUS})
-RULE_METADATA = RuleMetadata(
-    id=RULE_ID,
-    name="No new bespoke CI enforcers",
-    description="New ELSPETH-specific CI checks must be elspeth-lints rules, not new scripts/cicd/enforce_*.py files.",
-    severity=Severity.ERROR,
-    category=Category.MANIFEST,
-    cwe=(),
-    scope=RuleScope.WHOLE_REPO,
-    path_filter=r"^scripts/cicd/enforce_.*\.py$",
-    examples_violation_count=1,
-    examples_clean_count=1,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +40,7 @@ class NoNewBespokeCicdEnforcerRule:
             return [
                 Finding(
                     rule_id=RULE_ID,
-                    file_path=str(MANIFEST_PATH),
+                    file_path=MANIFEST_PATH,
                     line=1,
                     column=0,
                     message=str(exc),
@@ -91,7 +79,7 @@ class NoNewBespokeCicdEnforcerRule:
             findings.append(
                 Finding(
                     rule_id=RULE_ID,
-                    file_path=str(MANIFEST_PATH),
+                    file_path=MANIFEST_PATH,
                     line=1,
                     column=0,
                     message=f"{rel_path} is active in {MANIFEST_PATH} but no matching file exists.",
@@ -116,7 +104,7 @@ def _actual_enforcer_scripts(root: Path) -> tuple[Path, ...]:
 
 
 def _load_manifest(root: Path) -> _MigrationManifest:
-    manifest_file = root / MANIFEST_PATH
+    manifest_file = root / MANIFEST_RELATIVE_PATH
     if not manifest_file.exists():
         return _MigrationManifest(active_paths=frozenset(), deleted_paths=frozenset())
 

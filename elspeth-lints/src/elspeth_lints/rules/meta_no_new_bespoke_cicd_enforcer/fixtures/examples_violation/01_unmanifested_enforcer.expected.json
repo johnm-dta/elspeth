@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "scripts/cicd/enforce_new_thing.py",
+    "fingerprint": "unmanifested:scripts/cicd/enforce_new_thing.py",
+    "line": 1,
+    "message": "scripts/cicd/enforce_new_thing.py is not listed in config/cicd/lint_migration_status.yaml; add an elspeth-lints rule instead of a bespoke script.",
+    "rule_id": "meta.no-new-bespoke-cicd-enforcer",
+    "severity": "error",
+    "suggestion": null
+  }
+]

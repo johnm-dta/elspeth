@@ -97,6 +97,7 @@ from elspeth.web.composer.guided.steps import (
     handle_step_2_sink,
     handle_step_3_chain_accept,
 )
+from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressRegistry,
@@ -1420,6 +1421,7 @@ async def _state_data_from_composer_state(
         runtime,
     )
     state_d = state.to_dict()
+    persisted_composer_meta = merge_implicit_decisions_meta(composer_meta, state)
     return (
         CompositionStateData(
             source=state_d["source"],
@@ -1429,7 +1431,7 @@ async def _state_data_from_composer_state(
             metadata_=state_d["metadata"],
             is_valid=persisted_is_valid,
             validation_errors=persisted_errors,
-            composer_meta=composer_meta,
+            composer_meta=persisted_composer_meta,
         ),
         authoring,
     )

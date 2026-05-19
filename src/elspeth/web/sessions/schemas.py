@@ -237,10 +237,9 @@ class CompositionStateResponse(_StrictResponse):
     derived_from_state_id: str | None = None
     created_at: datetime
     # Operational/audit metadata produced by the composer pipeline.
-    # ``repair_turns_used`` (number of forced repair turns the proof step
-    # injected when finalising this state) is currently the only field;
-    # ``None`` is honest for revert/fork paths and for historical states
-    # written before this surface existed.
+    # Known keys include ``repair_turns_used``, ``guided_session``, and
+    # ``implicit_decisions``. ``None`` is honest for revert/fork paths and
+    # for historical states written before this surface existed.
     composer_meta: CompositionObject | None = None
 
 

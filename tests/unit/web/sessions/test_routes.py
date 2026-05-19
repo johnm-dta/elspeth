@@ -5547,6 +5547,131 @@ def test_state_data_carries_structured_errors_before_save_for_atomicity() -> Non
     assert any(e.startswith("frame=") for e in errors)
 
 
+@pytest.mark.asyncio
+async def test_state_data_persists_structured_implicit_decisions_report() -> None:
+    """elspeth-457c8688ef: successful compose saves must carry a structured
+    implicit-decision report in ``composition_states.composer_meta``.
+
+    The skill prompt already tells the LLM to include a natural-language
+    "Decisions I made on your behalf" section, but auditors need a persisted
+    machine-readable sidecar on reload. The report is generated from the state
+    that is about to be saved, before the DB write, so the new version and its
+    disclosure are atomic.
+    """
+    from elspeth.contracts.freeze import deep_freeze
+    from elspeth.web.composer.state import EdgeSpec, NodeSpec, OutputSpec, SourceSpec
+    from elspeth.web.sessions.routes import _state_data_from_composer_state
+
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            options=deep_freeze(
+                {
+                    "path": "blobs/session-input.csv",
+                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                }
+            ),
+            on_success="url_rows",
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="url_rows",
+                on_success="scraped_content",
+                on_error="discard",
+                options=deep_freeze(
+                    {
+                        "schema": {"mode": "fixed", "fields": ["url: str"]},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                        "format": "markdown",
+                        "http": {
+                            "abuse_contact": "ops@agency.gov.au",
+                            "scraping_reason": "Front-page summarisation of three .gov.au sites",
+                            "allowed_hosts": "public_only",
+                        },
+                    }
+                ),
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="summarise",
+                node_type="transform",
+                plugin="llm",
+                input="scraped_content",
+                on_success="summaries",
+                on_error="discard",
+                options=deep_freeze(
+                    {
+                        "provider": "openrouter",
+                        "model": "anthropic/claude-sonnet-4",
+                        "temperature": 0,
+                        "pool_size": 1,
+                        "prompt_template": "Summarise {{ row.content }} as JSON.",
+                    }
+                ),
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(
+            EdgeSpec(id="e1", from_node="source", to_node="fetch_pages", edge_type="on_success", label=None),
+            EdgeSpec(id="e2", from_node="fetch_pages", to_node="summarise", edge_type="on_success", label=None),
+            EdgeSpec(id="e3", from_node="summarise", to_node="summaries_out", edge_type="on_success", label=None),
+        ),
+        outputs=(
+            OutputSpec(
+                name="summaries_out",
+                plugin="json",
+                options=deep_freeze({"path": "outputs/summaries_out.json", "collision_policy": "auto_increment"}),
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(name="Gov AU summaries"),
+        version=2,
+    )
+
+    state_data, _validation = await _state_data_from_composer_state(
+        state,
+        settings=object(),
+        secret_service=None,
+        user_id="alice",
+        runtime_preflight=ValidationResult(is_valid=True, checks=[], errors=[]),
+        preflight_exception_policy="raise",
+        initial_version=1,
+        telemetry_source="compose",
+        composer_meta={"repair_turns_used": 0},
+    )
+
+    assert state_data.composer_meta is not None
+    report = state_data.composer_meta["implicit_decisions"]
+    assert report["schema_version"] == 1
+    by_path = {entry["path"]: entry for entry in report["entries"]}
+
+    assert by_path["node.fetch_pages.options.http.abuse_contact"]["value"] == "ops@agency.gov.au"
+    assert by_path["node.fetch_pages.options.http.abuse_contact"]["provenance"] == "explicit_source_required"
+    assert list(by_path["node.fetch_pages.options.format"]["candidate_alternatives"]) == ["html", "markdown", "text"]
+    assert by_path["node.summarise.options.model"]["value"] == "anthropic/claude-sonnet-4"
+    assert by_path["node.summarise.options.temperature"]["provenance"] == "picked"
+    assert by_path["output.summaries_out.options.path"]["value"] == "outputs/summaries_out.json"
+    assert by_path["output.summaries_out.options.collision_policy"]["provenance"] == "default"
+    assert by_path["node.fetch_pages.on_error"]["category"] == "error_routing"
+    assert list(report["normalization_events"]) == []
+
+
 def test_runtime_preflight_failure_500_detail_does_not_promise_journal_traceback() -> None:
     """elspeth-2c3d63037c: 500 detail must not claim "see server logs".
 

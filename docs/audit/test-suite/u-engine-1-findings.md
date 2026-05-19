@@ -321,6 +321,14 @@ Filed:
 
 - `elspeth-2744d69903`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-2744d69903` resolved. Boundary-dispatch source/sink
+  role tests now use synthetic plugins with the MRO-visible `load()` or
+  `write()`/`flush()` methods required by production role detection, and
+  counting contract wrappers prove the intended boundary contract runs once
+  while the opposite role is skipped.
+
 ### UENG-9 — Aggregation post-processing failure test allows duplicate terminal writes
 
 Evidence:

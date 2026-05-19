@@ -416,6 +416,9 @@ calls, payload hashes, route decisions, terminal outcomes, and artifact
 provenance. Telemetry and logs are secondary: useful for operations, but not the
 source of truth.
 
+The current product-level guarantees are summarised in the
+[Assurance Contract](docs/contracts/assurance-contract.md).
+
 RC-5 makes several assurance mechanisms product-visible:
 
 - **Declaration-trust:** plugin declarations that the graph builder trusts are

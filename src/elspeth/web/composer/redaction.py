@@ -1259,7 +1259,7 @@ class _PipelineNodeModel(BaseModel):
     and strengthens boundary validation (e.g., ``routes: {"true": 42}`` is
     now rejected at Pydantic validation instead of silently passing through
     to become an audit fact).  See F3 in
-    ``notes/composer-phase-2-followup-prompt-F1-F6.md``.
+    ``docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md``.
     """
 
     id: str

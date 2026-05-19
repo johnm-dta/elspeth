@@ -1,7 +1,7 @@
 # Composer Tier 1.5 — pre-merge test surface expansion (agent tasking)
 
 **Date issued:** 2026-05-06
-**Issuing investigation:** `notes/composer-passivity-rgr-investigation-2026-05-06.md` (esp. §3.5, §4.1, §9.2, §9.3, §11)
+**Issuing investigation:** `docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md` (esp. §3.5, §4.1, §9.2, §9.3, §11)
 **Predecessor work:** Tier 1 epic `elspeth-1d3be32a8a` — landed across commits `51bfe46c`, `1ca34527`, `a3eede98`, `9251ff5f`, `fa1de04f`, `8735cabb`. Final cohort 5/6 (83%) hard-GREEN on URL-download-line-explode scenario at single-turn.
 **Predecessor tasking:** `docs/superpowers/plans/2026-05-06-composer-tier1-reliability-remediation.md` (read for shape; this doc is the same template).
 **Filigree epic:** `elspeth-08fafb9873` (P0, type=epic, parent=`elspeth-1d3be32a8a`, labels: `effort:m`, `source:agent`).
@@ -35,7 +35,7 @@ You ARE being asked to:
 
 Read in order before starting:
 
-1. **`notes/composer-passivity-rgr-investigation-2026-05-06.md`** — full investigation. Especially §3.5 (cumulative results table), §4.1 (the audit-DB tool-sequence diagnostic — load-bearing for Step C), §9.2 (multi-turn coverage gap), §9.3 (scenario coverage gap), §11 (review recommendations including the `decode_tools.py` helper request).
+1. **`docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md`** — full investigation. Especially §3.5 (cumulative results table), §4.1 (the audit-DB tool-sequence diagnostic — load-bearing for Step C), §9.2 (multi-turn coverage gap), §9.3 (scenario coverage gap), §11 (review recommendations including the `decode_tools.py` helper request).
 2. **`docs/superpowers/plans/2026-05-06-composer-tier1-reliability-remediation.md`** — the Tier 1 tasking. You're following the same shape and the same anti-patterns apply.
 3. **`docs/superpowers/plans/2026-05-06-composer-tier1-reliability-implementation.md`** — the per-commit implementation plan from Tier 1 + the four "reality corrections vs the original tasking" up front. Important: Tier 1 moved the harness preflight from `evals/composer-harness/lib/preflight.sh` to **`evals/lib/preflight.sh`** (commit `1ca34527`). The shared `evals/lib/` location is therefore the convention for cross-harness utilities. Step C's `decode_tools.py` helper goes there.
 4. **The existing scenario:** `evals/composer-rgr/scenario.json` and `evals/composer-rgr/run_scenario.sh`. You will be cloning the scenario shape, not the harness, in Step B.

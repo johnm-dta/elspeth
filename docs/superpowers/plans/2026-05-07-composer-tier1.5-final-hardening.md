@@ -2,7 +2,7 @@
 
 **Date issued:** 2026-05-07
 **Working window:** 24 hours from epic claim. Hard cap.
-**Predecessor work:** Tier 1.5 epic `elspeth-08fafb9873` and its cohort report at `notes/composer-tier1.5-cohort-report-2026-05-06.md`. Six commits on `RC5-UX` (`f0139356` … `ea4607bb`) currently unpushed.
+**Predecessor work:** Tier 1.5 epic `elspeth-08fafb9873` and its cohort report at `docs/composer/evidence/composer-tier1.5-cohort-report-2026-05-06.md`. Six commits on `RC5-UX` (`f0139356` … `ea4607bb`) currently unpushed.
 **Filigree epic:** `elspeth-682aa0c91e` (P0, type=epic, parent=`elspeth-08fafb9873`, grandparent=`elspeth-1d3be32a8a`, labels: `effort:l`, `source:agent`, `changelog:fixed`).
 **Recipient:** any agent willing to operate under a hard 24-hour clock with explicit must-have / nice-to-have prioritisation.
 
@@ -14,7 +14,7 @@ Three deliverables, in priority order. The 24-hour clock is real — if you cann
 
 1. **§7.7 anti-anchor: behavioural proof or fix.** The hint-fire count across the prior cohort was 0. Either (a) construct an adversarial scenario that should trigger the anchor predicate and verify the hint actually fires end-to-end, or (b) determine the predicate is wrong, fix it, and re-verify. Outcome: a captured run with `anti_anchor` evidence in the audit trail OR a code change with the verified-firing run.
 2. **Step B scenarios: re-author and re-cohort.** Three scenarios (`fork-and-route`, `aggregation-content-safety`, `rag-text-llm`) currently fail not because the composer is broken but because their prompts reference `/tmp` paths the composer correctly refuses. Re-author each prompt to use a workspace-allowable input shape (see §6 for the contract). Re-run a 6-run cohort per scenario. Outcome: real fan-out signal across pipeline shapes.
-3. **Final cohort report supersedes the Tier 1.5 cohort report.** New file: `notes/composer-tier1.5-final-cohort-report-2026-05-07.md`. Comment posted to **this epic** plus a cross-link comment on `elspeth-08fafb9873`. Outcome: a single artefact the operator can use to make the merge call.
+3. **Final cohort report supersedes the Tier 1.5 cohort report.** New file: `docs/composer/evidence/composer-tier1.5-final-cohort-report-2026-05-07.md`. Comment posted to **this epic** plus a cross-link comment on `elspeth-08fafb9873`. Outcome: a single artefact the operator can use to make the merge call.
 
 You are NOT being asked to:
 - Land any further Tier 2 items beyond §7.7 (already in tree). No §7.5 strict mode, no §7.6 better diagnostics, no §7.8 mutation echo, no §7.9 set_linear_pipeline. If the §7.7 validation surfaces a related bug, file it; do not fix.
@@ -27,11 +27,11 @@ You are NOT being asked to:
 
 Read in order before starting. Limit pre-reading to ≤45 minutes; the clock is running.
 
-1. **`notes/composer-tier1.5-cohort-report-2026-05-06.md`** — the cohort report you're superseding. Pay attention to:
+1. **`docs/composer/evidence/composer-tier1.5-cohort-report-2026-05-06.md`** — the cohort report you're superseding. Pay attention to:
    - The "Tier 2 fix shipped this session" section on §7.7 (what was claimed)
    - The Step B "/tmp scenarios" section (line 105-118, what failed)
    - The "Reproducibility / artefacts" section (where existing artefacts live)
-2. **`notes/composer-tier1.5-step-c-diagnosis-2026-05-06.md`** — the Step C diagnosis from commit `f0139356`. The classification is the basis for §7.7's design. Confirm the predicate matches the diagnosis.
+2. **`docs/composer/evidence/composer-tier1.5-step-c-diagnosis-2026-05-06.md`** — the Step C diagnosis from commit `f0139356`. The classification is the basis for §7.7's design. Confirm the predicate matches the diagnosis.
 3. **`src/elspeth/web/composer/anti_anchor.py`** — the §7.7 implementation, 119 lines. Read it once end-to-end. Note the trigger predicate, the suppression rule from `3abe4d70` (don't clear anchor on discovery-tool successes), and the hint-text payload.
 4. **`tests/unit/web/composer/test_anti_anchor.py`** and **`tests/unit/web/composer/test_compose_loop_anti_anchor.py`** — the existing 506 lines of unit/integration tests. Understand what's already covered before adding more.
 5. **One Tier 1 GREEN run** — pick any of `evals/composer-rgr/runs/final-*/` that scored GREEN, look at the `messages.json` and `state.json`. Specifically: what shape does the source-blob URL take? What did the model put in `source.options`? This tells you the workspace input contract for Step B.
@@ -99,7 +99,7 @@ If the hint never fires under deliberately anchor-seeking conditions: §7.7's pr
 ### 5.2 Concrete artefacts
 
 - New scenario directory: `evals/composer-rgr/scenarios/anti-anchor-stress/` with its own `scenario.json` plus a `README.md` explaining the adversarial design.
-- New evidence file: `notes/composer-77-validation-2026-05-07.md` with the audit-DB extract showing the hint firing.
+- New evidence file: `docs/composer/evidence/composer-77-validation-2026-05-07.md` with the audit-DB extract showing the hint firing.
 - If a fix landed: a single commit `fix(composer): §7.7 predicate <symptom> — <evidence>` with the test that would have caught the original behaviour.
 
 ### 5.3 Anti-patterns
@@ -122,7 +122,7 @@ Before re-authoring any prompt, learn what the composer accepts. This is non-neg
 Two sources of truth:
 
 1. **A working Tier 1 GREEN run.** Look at the `state.json` in any of the `evals/composer-rgr/runs/final-*-GREEN/` directories from the original cohort. Inspect `source.options`. Whatever URL/path/blob shape is in there is one valid input.
-2. **The composer's source-acceptance code.** Search `src/elspeth/web/composer/` for the validator that rejected `/tmp`. Find the actual allowlist or pattern. Document it in `notes/composer-77-validation-2026-05-07.md` (or a separate notes file) under a "Workspace input contract" heading — this saves the next agent a re-derivation.
+2. **The composer's source-acceptance code.** Search `src/elspeth/web/composer/` for the validator that rejected `/tmp`. Find the actual allowlist or pattern. Document it in `docs/composer/evidence/composer-77-validation-2026-05-07.md` (or a separate notes file) under a "Workspace input contract" heading — this saves the next agent a re-derivation.
 
 Likely shapes (verify, don't assume):
 - Session-uploaded blob URIs created via the `create_blob` tool (this is what the URL-download-line-explode scenario uses)
@@ -177,7 +177,7 @@ If it doesn't — i.e., a §7.7 fix you landed in deliverable 1 broke the workin
 
 ## 8. Deliverable 3 — Final cohort report
 
-New file: `notes/composer-tier1.5-final-cohort-report-2026-05-07.md`. Supersedes the prior 2026-05-06 report. Mirror via comment to **this epic** with a cross-link comment on parent `elspeth-08fafb9873`.
+New file: `docs/composer/evidence/composer-tier1.5-final-cohort-report-2026-05-07.md`. Supersedes the prior 2026-05-06 report. Mirror via comment to **this epic** with a cross-link comment on parent `elspeth-08fafb9873`.
 
 ### Required sections
 

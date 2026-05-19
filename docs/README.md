@@ -2,10 +2,11 @@
 
 Index of the documentation shipped in this repository.
 
-**Framework status:** `0.5.1` (RC-5.1 line)
-**Tracking note:** active delivery work lives in Filigree; many docs under `release/`,
-`plans/`, `analysis/`, `audits/`, and `arch-analysis-*` are intentionally
-point-in-time snapshots.
+**Framework status:** RC-5.2 workstream (pre-release)
+**Tracking note:** active delivery work lives in Filigree. Point-in-time
+release, audit, architecture-pack, generated-review, and handover snapshots
+from earlier workstreams were moved to
+[`docs-archive/2026-05-19-docs-cleanout/`](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md).
 
 ---
 
@@ -39,6 +40,7 @@ Current architecture and design references.
 
 Formal protocol definitions and token outcome guarantees.
 
+- [Assurance Contract](contracts/assurance-contract.md)
 - [Plugin Protocol](contracts/plugin-protocol.md)
 - [System Operations](contracts/system-operations.md)
 - [Execution Graph](contracts/execution-graph.md)
@@ -58,6 +60,13 @@ Tutorials and operator/developer how-to material.
 - [Troubleshooting](guides/troubleshooting.md)
 - [Docker](guides/docker.md)
 
+## Composer Evidence
+
+Evaluation reports and investigation notes that still support current composer
+development or product explanation.
+
+- [Composer Evidence Index](composer/evidence/README.md)
+
 ## Reference
 
 Lookup material for configuration, tools, and plugin-specific behavior.
@@ -68,6 +77,14 @@ Lookup material for configuration, tools, and plugin-specific behavior.
 - [ChaosLLM](reference/chaosllm.md)
 - [ChaosLLM MCP Server](reference/chaosllm-mcp.md)
 - [Web Scrape Transform](reference/web-scrape-transform.md)
+
+## Current Audit Work
+
+Active audit syntheses and ticket-filing packets that still drive current work.
+
+- [CI/CD Allowlist Audit](audit/2026-05-19-cicd-allowlist-audit.md) — live gate inventory and burn-down findings for `elspeth-297b8f5c5d`
+- [CI/CD Allowlist Findings](audit/findings/) — SME reports and draft subticket list retained until filing is complete
+- [Test Suite Audit](audit/test-suite/README.md) — incomplete but still actionable test-quality audit waves and filed issue map
 
 ## Operations
 
@@ -86,9 +103,8 @@ Runbooks and production procedures.
 
 Intentional point-in-time documents retained for reference.
 
-- [Release docs](release/) — RC2 through RC4 checklists, notes, guarantees, and briefs
+- [RC-3 Release Notes](release/rc-3-release-notes.md) — retained because it is still directly cited as a release-history snapshot
 - [Plans index](plans/README.md) — curated in-tree design and implementation plans
-- [Audits](audits/) — audit reports and verification sweeps
-- [Analysis](analysis/) — analysis and posture briefs
-- [Architecture analysis workspace](arch-analysis-2026-02-22-0446/) — pre-remediation snapshot cited by later ADRs and plans
-- [Superpowers specs and plans](superpowers/) — internal assistant-driven planning/spec artifacts
+- [Composer UX Redesign](composer/ux-redesign-2026-05/) — current RC5.2 composer planning and implementation phase documents
+- [Superpowers specs and active plans](superpowers/) — internal assistant-driven planning/spec artifacts retained while still load-bearing
+- [Archived docs cleanout manifest](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) — relocation map for archived release docs, audits, frozen architecture packs, generated review sidecars, and completed handovers

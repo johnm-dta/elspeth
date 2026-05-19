@@ -1,7 +1,7 @@
 # Composer Tier 1 reliability remediation — agent tasking
 
 **Date issued:** 2026-05-06
-**Issuing investigation:** `notes/composer-passivity-rgr-investigation-2026-05-06.md` (READ THIS FIRST)
+**Issuing investigation:** `docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md` (READ THIS FIRST)
 **Branch base:** `RC5-UX` (current HEAD `19317366`)
 **Filigree epic:** `elspeth-1d3be32a8a` (P0, type=epic, labels: `effort:m`, `source:agent`, `changelog:fixed`)
 **Recipient:** any agent capable of editing Python + markdown + bash, running the local RGR harness, and restarting `elspeth-web.service` on this host.
@@ -20,7 +20,7 @@ You are NOT being asked to start Tier 2 work in this ticket. If a Tier 2 candida
 
 Read these in order before starting:
 
-1. **`notes/composer-passivity-rgr-investigation-2026-05-06.md`** — full investigation. §1 (problem), §3 (empirical baseline), §4 (root cause), §7.1–§7.4 (the items you're shipping), §8 (anti-patterns — explicitly rejected approaches you must not re-propose), §10 (code anchors).
+1. **`docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md`** — full investigation. §1 (problem), §3 (empirical baseline), §4 (root cause), §7.1–§7.4 (the items you're shipping), §8 (anti-patterns — explicitly rejected approaches you must not re-propose), §10 (code anchors).
 2. **`CLAUDE.md`** — esp. the data-trust tiers, "no-legacy-code" policy, "defensive programming forbidden" rules, and audit primacy.
 3. **The skill file you're editing:** `src/elspeth/web/composer/skills/pipeline_composer.md`. Read it end-to-end once. It is 1031 lines and you must understand the existing structure before moving sections around.
 4. **Memory entries** — surface via auto-memory:

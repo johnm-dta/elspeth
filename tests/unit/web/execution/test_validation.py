@@ -1552,7 +1552,7 @@ class TestValidatePipelineFabricatedCredentials:
     fields hold a wired ``{secret_ref: ...}`` marker, an inventory env-marker,
     or are absent — never a literal placeholder string.
 
-    Source: notes/composer-llm-eval-2026-05-01.md S1A architectural finding #3.
+    Source: docs/composer/evidence/composer-llm-eval-2026-05-01.md S1A architectural finding #3.
     """
 
     _PLACEHOLDER = "WILL_BE_WIRED_FROM_OPENROUTER_API_KEY"

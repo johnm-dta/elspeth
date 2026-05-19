@@ -753,7 +753,7 @@ def validate_pipeline(
     #       a wired secret rather than a literal placeholder string
     #       (issue elspeth-72d1dccd44 — S1A "WILL_BE_WIRED_FROM_..." defect).
     #
-    # The remediation note (notes/composer-remediation-program-2026-05-01.md)
+    # The remediation note (docs/composer/evidence/composer-remediation-program-2026-05-01.md)
     # suggested "the catalog already knows which fields require secrets."  In
     # practice the catalog renders the per-plugin schema but does not mark
     # credential fields; the closed list of credential-bearing field names

@@ -27,7 +27,7 @@ Execute every scenario fixture under
 `/home/john/elspeth/evals/composer-harness/scenarios/hardmode/` (15 scenarios)
 end-to-end using the harness scripts at
 `/home/john/elspeth/evals/composer-harness/hardmode/`, then produce a report
-in `notes/composer-eval-hardmode-<UTC-date>.md` summarising findings.
+in `docs/composer/evidence/composer-eval-hardmode-<UTC-date>.md` summarising findings.
 
 ## Authorization
 
@@ -183,8 +183,8 @@ hardmode/aggregate.sh "$ELSPETH_EVAL_RUNS_DIR"
 cat "$ELSPETH_EVAL_RUNS_DIR/SCORECARD.md"
 ```
 
-Then write a report at `/home/john/elspeth/notes/composer-eval-hardmode-<UTC-date>.md`
-following the structure of `notes/composer-eval-hardmode-2026-05-03.md`. Include:
+Then write a report at `/home/john/elspeth/docs/composer/evidence/composer-eval-hardmode-<UTC-date>.md`
+following the structure of `docs/composer/evidence/composer-eval-hardmode-2026-05-03.md`. Include:
 
 1. **Headline** — one-line summary of run health (e.g. "12/15 scenarios
    reached engine; 4/15 ran successfully; 3 convergence-timeouts").
@@ -225,7 +225,7 @@ You should be tracking work with TaskCreate. Suggested task list:
 - [Pre-flight] read references, run --doctor
 - One task per scenario (15 of them)
 - [Aggregate] run aggregate.sh
-- [Report] write notes/composer-eval-hardmode-<date>.md
+- [Report] write docs/composer/evidence/composer-eval-hardmode-<date>.md
 
 Mark each scenario `completed` once its `ledger.json` is written, even if
 the run inside failed. The ledger existing means the harness side is done;

@@ -39,9 +39,9 @@ source "$SCRIPT_DIR/lib.sh"
 # ─────────────────────────────────────────────────────────────
 # Defaults — can be overridden via env or flag.
 # ─────────────────────────────────────────────────────────────
-DEFAULT_SOURCE="$PROJECT_ROOT/notes/composer-walkthrough-2026-05-03.md"
+DEFAULT_SOURCE="$PROJECT_ROOT/docs/composer/evidence/composer-walkthrough-2026-05-03.md"
 DEFAULT_METADATA="$SCRIPT_DIR/walkthrough-metadata.yaml"
-DEFAULT_OUTPUT="$PROJECT_ROOT/docs/assets/composer-walkthrough-2026-05-03.pdf"
+DEFAULT_OUTPUT="$PROJECT_ROOT/tools/pdf/out/composer-walkthrough-2026-05-03.pdf"
 
 SOURCE="${ELSPETH_WALKTHROUGH_SOURCE:-$DEFAULT_SOURCE}"
 METADATA="${ELSPETH_WALKTHROUGH_METADATA:-$DEFAULT_METADATA}"

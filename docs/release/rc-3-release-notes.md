@@ -541,7 +541,10 @@ Aggregation timeout triggers fire when the next row arrives, not during complete
 
 ## Release Guarantees
 
-The full set of RC-3 guarantees is documented in [docs/release/guarantees.md](../release/guarantees.md). Key additions for RC-3:
+The old RC-3 guarantees snapshot has been retired rather than kept as hidden
+release truth. The current visible product contract is
+[Assurance Contract](../contracts/assurance-contract.md). Key additions that
+were true for RC-3:
 
 - Declarative DAG wiring with explicit input/output connections
 - Graceful shutdown with checkpoint creation and resumable interrupted runs

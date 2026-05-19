@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the five Tier 1 reliability items from `notes/composer-passivity-rgr-investigation-2026-05-06.md` and verify the canonical URL→download→line-explode RGR scenario reaches ≥4/6 hard-GREEN under deterministic sampling.
+**Goal:** Land the five Tier 1 reliability items from `docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md` and verify the canonical URL→download→line-explode RGR scenario reaches ≥4/6 hard-GREEN under deterministic sampling.
 
 **Architecture:** Item 1 changes the composer LLM call site to use `temperature=0.0, seed=42` and threads both values into the existing `ComposerLLMCall` audit envelope (frozen L0 dataclass → JSON column on `role=tool` chat messages — no DB migration). Item 2 fixes a single 404'd preflight URL. Items 3–5 are skill/schema-prose changes targeting the connection-name semantic gap that dominates schema-construction failures.
 
@@ -328,7 +328,7 @@ is via the existing JSON tool_calls envelope on role=tool chat messages.
 
 Configurability is Tier 2 — do not read from settings/env without an ADR.
 
-Refs: notes/composer-passivity-rgr-investigation-2026-05-06.md §4.4 §7.1
+Refs: docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md §4.4 §7.1
 Filigree: elspeth-1d3be32a8a
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -477,7 +477,7 @@ Switch the post-login auth round-trip to /api/catalog/sources — one
 endpoint is sufficient for the doctor's purpose (verify host + auth +
 plugin-loader path).
 
-Refs: notes/composer-passivity-rgr-investigation-2026-05-06.md §2.1
+Refs: docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md §2.1
 Filigree: elspeth-1d3be32a8a
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -562,7 +562,7 @@ producer/consumer string-match contract that this section teaches.
 
 Mechanical move only — no content edits.
 
-Refs: notes/composer-passivity-rgr-investigation-2026-05-06.md §7.2
+Refs: docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md §7.2
 Filigree: elspeth-1d3be32a8a
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -691,7 +691,7 @@ with the canonical fix.
 No more than two examples per investigation §8.6 — additional skill prose
 past iteration 3 has marginal value until platform-side fixes land.
 
-Refs: notes/composer-passivity-rgr-investigation-2026-05-06.md §7.3
+Refs: docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md §7.3
 Filigree: elspeth-1d3be32a8a
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -865,7 +865,7 @@ remove_output.sink_name + patch_output_options.sink_name (refer to existing
 sinks, not fresh wiring decisions). Adding connection-name guidance to those
 fields would mislead the model.
 
-Refs: notes/composer-passivity-rgr-investigation-2026-05-06.md §7.4
+Refs: docs/composer/evidence/composer-passivity-rgr-investigation-2026-05-06.md §7.4
 Filigree: elspeth-1d3be32a8a
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>

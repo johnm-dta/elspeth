@@ -6,9 +6,9 @@ snapshot (`tests/unit/web/composer/redaction_policy_snapshot.json`).
 
 **Status.** Current as of spec rev-5 rev-2 iteration (2026-05-12).
 See `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`
-§4.4.5 for the authoritative control definition and
-`docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review-rev2.json`
-for the full review history.
+§4.4.5 for the authoritative control definition. The review findings that
+shaped this guide are summarized in that spec; generated reviewer sidecars are
+not required for day-to-day policy changes.
 
 ---
 
@@ -227,6 +227,5 @@ the label gate.
   class for closure-state mutations)
 - Spec §4.2.3 — summarizer purity requirement
 - Spec §4.2.8 — `arguments_canonical` posture (a) intentional raw
-- `docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-2-redaction.review-rev2.json`
-  — rev-2 four-reviewer BLOCKER_B finding (label-gate direction) and
-  M_governance_single_owner finding
+- Spec §12.3 — rev-2 reviewer finding traceability, including the label-gate
+  direction and single-owner governance finding

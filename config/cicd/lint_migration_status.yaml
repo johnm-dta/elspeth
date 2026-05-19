@@ -3,6 +3,14 @@ version: 1
 # new bespoke scripts/cicd/enforce_*.py file during the elspeth-lints migration.
 # Status lifecycle:
 #   pending -> shadow -> cutover -> deleted
+#
+# Shadow entries must include:
+#   new_rule: <elspeth-lints rule id>
+#   old_command: [<argv tokens emitting JSON findings>]
+#   new_command: [<argv tokens emitting JSON findings>]
+#
+# Supported command placeholders:
+#   {python}, {root}, {old_script}, {new_rule}
 rules:
   - old_script: scripts/cicd/enforce_adapter_budget.py
     new_rule: null

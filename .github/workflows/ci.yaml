@@ -76,6 +76,41 @@ jobs:
             --root .
 
   # ===========================================================================
+  # Stage 1b: elspeth-lints parity harness
+  # ===========================================================================
+  parity-check:
+    name: elspeth-lints parity check
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libsqlcipher-dev
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Compare shadow-mode lints
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python scripts/cicd/parity_harness.py \
+            --manifest config/cicd/lint_migration_status.yaml \
+            --root .
+
+  # ===========================================================================
   # Stage 2a: Tier Model Enforcement
   # ===========================================================================
   enforce-tier-model:
@@ -397,6 +432,7 @@ jobs:
       - enforce-contract-manifest
       - contract-enforcement
       - check-slot-type-cross-language
+      - parity-check
     strategy:
       fail-fast: false
       matrix:
@@ -535,6 +571,7 @@ jobs:
       - enforce-composer-catch-order
       - enforce-contract-manifest
       - contract-enforcement
+      - parity-check
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -772,6 +809,7 @@ jobs:
       - enforce-contract-manifest
       - contract-enforcement
       - check-slot-type-cross-language
+      - parity-check
       - test
       - test-postgres-testcontainer
       - supply-chain-audit
@@ -826,6 +864,10 @@ jobs:
           fi
           if [[ "${{ needs.check-slot-type-cross-language.result }}" != "success" ]]; then
             echo "SlotType cross-language mirror check failed"
+            exit 1
+          fi
+          if [[ "${{ needs.parity-check.result }}" != "success" ]]; then
+            echo "elspeth-lints parity check failed"
             exit 1
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then

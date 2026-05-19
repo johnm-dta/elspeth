@@ -21,8 +21,18 @@ Ports must move through the manifest lifecycle:
 pending -> shadow -> cutover -> deleted
 ```
 
-The parity harness task owns the behavior proof for `shadow` entries. Until that
-task lands, existing scripts stay `pending`.
+`shadow` entries must include command templates for both the legacy script and
+the new rule. The parity harness compares their normalized JSON findings:
+
+```bash
+PYTHONPATH=elspeth-lints/src .venv/bin/python scripts/cicd/parity_harness.py \
+  --manifest config/cicd/lint_migration_status.yaml \
+  --root .
+```
+
+The harness treats exit codes `0` and `1` as successful command execution
+because enforcers conventionally return `1` when they find violations. Any
+finding-set difference fails the run.
 
 ## Toy Rule
 

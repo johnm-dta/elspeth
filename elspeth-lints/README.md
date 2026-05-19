@@ -17,6 +17,10 @@ For rule authorship and protocol details, see
 [the rule author guide](../docs/elspeth-lints/rule-author-guide.md) and
 [the protocol reference](../docs/elspeth-lints/protocols.md).
 
+During migration, `scripts/cicd/parity_harness.py` compares each `shadow`
+manifest entry's legacy-script findings against the corresponding
+`elspeth-lints` rule findings before the old gate can be cut over.
+
 During the skeleton phase, the expected empty invocation is:
 
 ```bash

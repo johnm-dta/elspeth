@@ -3,12 +3,12 @@
 **Period covered:** 12 January 2026 → 19 May 2026 (128 calendar days; **123 active commit days**)
 **Total commits:** 4,521 unique across `origin/full-history-pre-rc1`, `origin/pre-RC2`, and `HEAD`
 **Average velocity:** 35.3 commits per calendar day; **36.8 commits per active day**
-**Author of record:** John Morrissey (sole contributor)
+**Author of record:** John Morrissey
 **Audience:** Engineering team and engineering leadership
 **Register:** Technical
 **Purpose:** Per-day commit volume so the team can see how much was completed each day, where the peaks are, and what each peak delivered.
 
-> **Reading the figures.** All commit volume in this document reflects the work of a single author. The per-active-day rates (36–80 commits) should be read in that context: they are the cadence of one person, not a team. The pattern of low-activity weeks immediately preceding phase changes (see *Velocity Observations* below) is consistent with sustained solo work, not team scheduling. The cadence is **operator-managed**: the recovery patterns visible in the data (1–2 day pauses after major releases, low-activity weeks immediately preceding phase changes) are the cadence pattern that the operator deliberately uses to keep solo work sustainable. They are not signs of imminent burnout, and they are not the result of an external schedule.
+> **Reading the figures.** Per-active-day rates of 36–80 commits should be read against the project's contributor count, which is tracked separately at the enterprise level. The recovery patterns visible in the data — 1–2 day pauses after major releases, and low-activity weeks immediately preceding phase changes — reflect a deliberate cadence pattern, not external scheduling and not slippage. Reading any single week's count without the phase context will mislead; the *Velocity by Phase* table below is the right reading frame.
 
 This document is the **velocity / tempo** view. For cumulative feature output, see [elspeth-progress-rc1-to-rc5.md](elspeth-progress-rc1-to-rc5.md).
 
@@ -20,7 +20,7 @@ Commit volume is a tempo signal, not a value signal. This report does **not** me
 - **Value.** A bug-fix commit and a refactor-for-cleanliness commit each count as one commit; this report does not (and cannot) distinguish their value to the system.
 - **Code volume.** Commits in this project range from one-line typo fixes to 4,000-line plugin landings. Per-day commit counts are **not** a proxy for per-day code volume.
 - **Quality.** Every commit in the visible history passed pre-commit hooks, type checks, and the test suite that existed at the time. This report does not measure how well-tested or well-reviewed each commit was, and a higher commit count is not evidence of higher quality.
-- **Reasoning load.** The hardest design decisions in the project (the trust-tier model, the routing trilogy, the declarative DAG model, the RC-5 composer architecture, the redaction MANIFEST) produced *fewer* commits per day than the implementation work that followed, because reasoning ran ahead of code.
+- **Reasoning load.** The hardest design decisions in the project (the trust-tier model, the routing trilogy, the declarative DAG model, the RC-5 composer architecture, the redaction MANIFEST) produced fewer commits per day than the implementation work that followed them, because the reasoning ran ahead of the code.
 
 The right reading of this report is "where did the system's tempo land on each day", not "where was the most work done".
 
@@ -53,7 +53,7 @@ The peak days where epics land or RC cutovers happen. Attribution is taken from 
 | 5 | 2026-02-03 | 125 | RC-2.1 → RC-2.2: Langfuse SDK v3 migration; secret-resolution audit trail; schema-contract propagation; Tier 2 tracing on Azure / OpenRouter / batch LLM. |
 | 6 | 2026-02-02 | 118 | RC-2 cutover day. `ELSPETH - Release Candidate 2` commit + post-cutover cleanup (display headers; FieldResolutionApplied event; Tier 1 corrupt-field-resolution crash). |
 | 7 | 2026-05-14 | 97 | RC-5.2 release-stamp day: changelog finalize; per-step chat merge into `RC5.2`; phase3 compose-loop persistence merge. |
-| 8 | 2026-05-19 | 94 | Today — Phase 8 polish + Phase 6 completion-gestures merge + CI allowlist burn-down merge + Phase-5 chat-data-entry merge + ansible-ubuntu-deploy docs. |
+| 8 | 2026-05-19 | 94 | Phase 8 polish + Phase 6 completion-gestures merge + CI allowlist burn-down merge + Phase-5 chat-data-entry merge + ansible-ubuntu-deploy docs (current `HEAD`). |
 | 9 | 2026-05-18 | 94 | Phase 7 catalog reshape merge + `fix/catalog-i1-i2-i3` (drawer error log, snapshot lock, NETWORK retirement) + plugin-coverage gate calibration. |
 | 10 | 2026-05-09 | 93 | RC-5.1 composer-progress-persistence Phase 1B: `persist_compose_turn` happy path, `OperationalError` + audit-failure primacy, `IntegrityError` disposition, persist-payload DCs. |
 | 11 | 2026-05-13 | 88 | Phase A coverage gap + per-step chat → RC-5.2 merge + post-rebase tier-model fix-ups + cross-step `chat_history` accumulation test. |

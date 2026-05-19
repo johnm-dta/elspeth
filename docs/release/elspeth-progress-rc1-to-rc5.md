@@ -47,7 +47,7 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 <a id="period-1"></a>
 ## Period 1 — Foundation (Pre-RC1, 12–22 January 2026)
 
-**Outcome:** ELSPETH went from an empty scaffold to a working auditable Sense/Decide/Act pipeline framework with CLI, plugin system, full DAG executor, LLM integration, Azure ecosystem support, and crash-safe recovery — in **eleven days**.
+**Outcome:** Over eleven days, ELSPETH went from an empty scaffold to a working auditable Sense/Decide/Act pipeline framework, with CLI, plugin system, full DAG executor, LLM integration, Azure ecosystem support, and crash-safe recovery.
 
 ### Capabilities delivered
 
@@ -86,7 +86,7 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 <a id="period-2"></a>
 ## Period 2 — RC-1 Hardening (22 January – 2 February 2026)
 
-**Outcome:** The framework moved from "works" to "withstands inquiry". A telemetry subsystem was built from scratch; a chaos-testing infrastructure (ChaosLLM) was added; over 100 bugs were triaged and closed across eight burndown sessions.
+**Outcome:** The framework moved from functional to auditable under inquiry. A telemetry subsystem was built from scratch, a chaos-testing infrastructure (ChaosLLM) was added, and over 100 bugs were triaged and closed across eight burndown sessions.
 
 ### Net additions
 
@@ -112,7 +112,7 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 <a id="period-3"></a>
 ## Period 3 — RC-2 Sub-Releases (2–12 February 2026)
 
-**Outcome:** Five rapid sub-releases delivered the architecture pieces that made the pipeline *typed end-to-end*, *encrypted at rest*, and *declaratively wired*.
+**Outcome:** Five rapid sub-releases delivered the architecture pieces that made the pipeline typed end-to-end, encrypted at rest, and declaratively wired.
 
 ### RC-2.0 (2 Feb)
 Post-cutover cleanup: display-header support for CSV / JSON / Azure Blob sinks; `FieldResolutionApplied` telemetry event; corrupt-field-resolution crash (Tier 1 integrity); 84 stale tier-model allowlist entries pruned.
@@ -315,7 +315,7 @@ A full web application platform for **chat-first pipeline composition**. This is
 <a id="period-7"></a>
 ## Period 7 — RC-5.2 Guided Composer + Recovery (12–19 May 2026)
 
-**Outcome:** The Web Composer crossed from "best-effort interactive surface" into "audited, recoverable authoring system". Every model call, every tool dispatch, every redacted tool payload, every persisted transcript row, every recovery diff, and every operator-visible failure cause now shares one evidence story.
+**Outcome:** The Web Composer became an audited, recoverable authoring system. Model calls, tool dispatches, redacted tool payloads, persisted transcript rows, recovery diffs, and operator-visible failure causes are now recorded against one shared evidence model.
 
 ### Composer Guided Mode
 

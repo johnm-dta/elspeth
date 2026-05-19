@@ -6,7 +6,7 @@
 **Release covered:** RC-5.2 (version 0.5.2)
 **Audience:** Public-service executives, programme sponsors, assurance and risk staff
 **Register:** Australian public-service / institutional
-**Prepared by:** John Morrissey, Digital Transformation Agency (sole contributor and author of record)
+**Prepared by:** John Morrissey, Digital Transformation Agency
 
 ---
 

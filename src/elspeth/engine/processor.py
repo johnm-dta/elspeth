@@ -1231,29 +1231,36 @@ class RowProcessor:
             for i, token in enumerate(fctx.buffered_tokens):
                 if i in quarantined_index_set:
                     error_hash = hashlib.sha256(f"quarantined_in_batch:{fctx.batch_id}:{i}".encode()).hexdigest()[:16]
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.FAILURE,
-                        path=TerminalPath.QUARANTINED_AT_SOURCE,
-                        error_hash=error_hash,
-                    )
-                    self._emit_token_completed(
-                        token,
-                        outcome=TerminalOutcome.FAILURE,
-                        path=TerminalPath.QUARANTINED_AT_SOURCE,
-                    )
+                    batch_id = None
+                    outcome = TerminalOutcome.FAILURE
+                    path = TerminalPath.QUARANTINED_AT_SOURCE
                 else:
+                    error_hash = None
+                    batch_id = fctx.batch_id
+                    outcome = TerminalOutcome.TRANSIENT
+                    path = TerminalPath.BATCH_CONSUMED
+                try:
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.TRANSIENT,
-                        path=TerminalPath.BATCH_CONSUMED,
-                        batch_id=fctx.batch_id,
+                        outcome=outcome,
+                        path=path,
+                        error_hash=error_hash,
+                        batch_id=batch_id,
                     )
-                    self._emit_token_completed(
-                        token,
-                        outcome=TerminalOutcome.TRANSIENT,
-                        path=TerminalPath.BATCH_CONSUMED,
-                    )
+                except LandscapeRecordError as record_failure:
+                    raise AuditIntegrityError(
+                        f"Failed to record batch parent terminal outcome for token {token.token_id!r} "
+                        f"during transform-mode aggregation routing "
+                        f"(transform={fctx.transform.name!r}, node={fctx.node_id!r}, batch_id={fctx.batch_id!r}). "
+                        f"Audit trail is INCOMPLETE — expanded child tokens were already created and "
+                        f"some buffered parents may already be terminalized while others remain BUFFERED. "
+                        f"Recorder failure: {type(record_failure).__name__}: {record_failure}."
+                    ) from record_failure
+                self._emit_token_completed(
+                    token,
+                    outcome=outcome,
+                    path=path,
+                )
 
             # Build triggering RowResult if applicable (count-triggered only).
             # The triggering token is always the last buffered token (buffered

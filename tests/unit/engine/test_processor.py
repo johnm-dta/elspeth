@@ -2000,6 +2000,57 @@ class TestTransformModeOutcomeOrdering:
             f"CONSUMED_IN_BATCH was recorded before expand_token failed — recovery would skip this row. Recorded pairs: {recorded_pairs}"
         )
 
+    def test_parent_terminal_outcome_recorder_failure_raises_audit_integrity_error(self) -> None:
+        """Recorder failure after expansion must surface as audit corruption, not a raw DB error."""
+        _db, factory, processor, transform, agg_node = self._setup_batch_processor()
+        first_token = make_token_info(row_id="row-a", token_id="token-a", data={"value": 10})
+        second_token = make_token_info(row_id="row-b", token_id="token-b", data={"value": 20})
+        child_token = make_token_info(row_id="row-child", token_id="token-child", data={"value": 999})
+        fctx = _FlushContext(
+            node_id=agg_node,
+            transform=transform,
+            settings=AggregationSettings(
+                name="batch_agg",
+                plugin="agg-transform",
+                input="default",
+                on_error="discard",
+                trigger={"count": 2},
+                output_mode="transform",
+            ),
+            buffered_tokens=(first_token, second_token),
+            batch_id="batch-1",
+            error_msg="Batch transform failed",
+            expand_parent_token=first_token,
+            triggering_token=second_token,
+            coalesce_node_id=None,
+            coalesce_name=None,
+        )
+        flush_result = TransformResult.success(
+            make_row({"value": 999}, contract=_make_contract()),
+            success_reason={
+                "action": "batch_processed",
+                "metadata": {"quarantined_indices": [1]},
+            },
+        )
+
+        with (
+            patch.object(
+                processor._token_manager,
+                "expand_token",
+                return_value=([child_token], "expand-group-1"),
+            ),
+            patch.object(
+                factory.data_flow,
+                "record_token_outcome",
+                side_effect=[None, LandscapeRecordError("audit DB down")],
+            ),
+            patch.object(processor, "_emit_token_completed"),
+            pytest.raises(AuditIntegrityError, match="Failed to record batch parent terminal outcome") as exc_info,
+        ):
+            processor._route_transform_results(fctx, flush_result)
+
+        assert isinstance(exc_info.value.__cause__, LandscapeRecordError)
+
 
 class TestProcessRowGateBranching:
     """Tests for non-linear gate branching through next_node_id."""

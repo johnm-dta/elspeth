@@ -248,32 +248,51 @@ allow_hits:
     before runtime settings load
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected exception types propagate
   expires: null
-- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=e3ea7c68bf8a019a
+- key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=80b9586fe7d2729b
   owner: web-composer
   reason: Tier-3 trust boundary — JSONL line-by-line parsing of operator-supplied blob content. JSONDecodeError on a single line is the documented Tier-3 failure
     mode; the line is counted as a parse failure and surfaced via the "N jsonl line(s) failed to parse" warning. Subsequent lines still inspected.
   safety: parse_failures counter accumulates and is reported in warnings; no row is fabricated and the partial sample that did parse is still surfaced.
   expires: null
-- key: web/composer/source_inspection.py:R6:_inspect_json:fp=89a51481c4c122bc
+- key: web/composer/source_inspection.py:R6:_inspect_json:fp=eff265a95a5cfd9f
   owner: web-composer
   reason: Tier-3 trust boundary — full JSON document parsing of operator-supplied blob content. JSONDecodeError is expected when the 8 KiB peek truncates mid-object
     on a large file. Surfaced via warning.
   safety: loaded=None on parse failure; inspection returns 0 sampled rows with the truncation warning, so caller cannot confuse "no rows" with "successfully parsed
     empty array".
   expires: null
-- key: web/composer/source_inspection.py:R8:_facts_from_objects:fp=45f57db550590ed2
+- key: web/composer/source_inspection.py:R8:_facts_from_objects:fp=fd082186cd943e7c
   owner: web-composer
   reason: 'Tier-3 trust boundary — `objects: list[dict[str, Any]]` is the natural shape of parsed JSON sample rows and serves as the input contract to the type-inference
     helper. A TypedDict cannot describe arbitrary external JSON without enumerating every possible operator-supplied schema.'
   safety: All access is via isinstance dispatch (allowlisted as R5 Tier-3) so there is no key-error path; keys absent from a particular row record as "null" rather
     than crashing or coercing.
   expires: null
-- key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=ba36ce466c780739
+- key: web/composer/source_inspection.py:R1:_facts_from_objects:fp=f6303b3354b53025
   owner: web-composer
   reason: Tier-3 trust boundary — `obj.get(h)` for membership probing on operator-supplied JSON. Returns None for absent fields (not a fabricated default — None is
     "absence" per the manifesto), then the next isinstance check routes the value or falls through.
   safety: None values caught explicitly by the isinstance(v, list/dict) gate; no fabrication, no coercion.
   expires: null
+- key: web/composer/source_inspection.py:R5:_declared_field_name:fp=a744c44a68731b93
+  owner: web-composer
+  reason: Union-arm discrimination on `DeclaredFieldSpec = str | Mapping[str, Any]` introduced by commit 5cab72f3b "handle structured schema fields in preview".
+    The isinstance(field, str) check is mandatory typed dispatch — the two arms extract the field name differently (split on ":" for the legacy "name:type" string
+    form, lookup "name" key for the structured-spec form). Not defensive programming; without it the str-only `.split` branch cannot be reached safely.
+  safety: Both arms are exhaustive over the declared union; neither fabricates a name when the input is malformed (returns None).
+  expires: '2026-08-20'
+- key: web/composer/source_inspection.py:R1:_declared_field_name:fp=45f3e1b0e919c73f
+  owner: web-composer
+  reason: Tier-3 trust boundary — `field.get("name")` probes an operator-supplied declared-field Mapping for an optional "name" key. Returns None when absent (manifesto
+    "absence-is-None"); the caller (derive_extra_column_risk) then drops the entry from the declared-lower set so no synthetic column name is invented.
+  safety: None is the documented "field has no name" path; subsequent isinstance(name_raw, str) gate prevents any non-string value from leaking through as a name.
+  expires: '2026-08-20'
+- key: web/composer/source_inspection.py:R5:_declared_field_name:fp=9aa98f2a46780363
+  owner: web-composer
+  reason: 'Tier-3 value validation — `isinstance(name_raw, str)` guards against operator-supplied non-string "name" values (numeric, null, list, nested object).
+    Without the guard, `.strip()` would crash on the non-str path; with the guard we return None and let the caller decide what absent-name means in context.'
+  safety: Non-str name values return None (absence), not a coerced string. No fabrication, no crash.
+  expires: '2026-08-20'
 - key: web/composer/recipes.py:R1:get_recipe:fp=2669127d1300bf00
   owner: web-composer
   reason: Internal-registry membership probe — `_RECIPES.get(name)` returns None when ``name`` is not a registered recipe. Not a Tier-3 trust boundary; the registry

@@ -27,7 +27,18 @@ defaults:
     # inside ``_dispatch_guided_respond_impl`` are the highest-value
     # remediation target — consolidating that validation behind a single
     # Pydantic validator at the boundary would retire that whole block.
-    max_allow_hits: 411
+    #
+    # Bumped from 411 → 414 on 2026-05-20 (net +3) to accommodate the
+    # ``_declared_field_name`` helper introduced by commit 5cab72f3b
+    # ("fix(composer): handle structured schema fields in preview"). The
+    # helper discriminates between the two arms of
+    # ``DeclaredFieldSpec = str | Mapping[str, Any]`` and validates the
+    # optional ``"name"`` key on the structured arm — three legitimate
+    # Tier-3 boundary patterns (R5 union-arm, R1 mapping probe, R5 value
+    # validation). All three entries bounded 2026-08-20 to force
+    # re-evaluation; if the structured schema-field shape stabilises into
+    # a Pydantic model at the boundary, the whole block retires.
+    max_allow_hits: 414
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -42,7 +53,11 @@ defaults:
     #
     # Bumped from 486 → 504 on 2026-05-20 for the same session-routes
     # resource split bump as ``max_allow_hits`` above (net +18).
-    max_total_entries: 504
+    #
+    # Bumped from 504 → 507 on 2026-05-20 for the
+    # ``_declared_field_name`` helper bump as ``max_allow_hits`` above
+    # (net +3).
+    max_total_entries: 507
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

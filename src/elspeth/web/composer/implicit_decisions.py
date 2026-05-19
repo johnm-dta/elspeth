@@ -80,10 +80,10 @@ def build_implicit_decisions_report(state: CompositionState) -> ImplicitDecision
 def merge_implicit_decisions_meta(
     composer_meta: Mapping[str, Any] | None,
     state: CompositionState,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Merge the current implicit-decision report into ``composer_meta``."""
 
-    merged = dict(deep_thaw(composer_meta)) if composer_meta is not None else {}
+    merged: dict[str, object] = dict(deep_thaw(composer_meta)) if composer_meta is not None else {}
     merged["implicit_decisions"] = build_implicit_decisions_report(state)
     return merged
 

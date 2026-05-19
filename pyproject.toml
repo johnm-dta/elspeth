@@ -64,6 +64,23 @@ dependencies = [
 
     # Diffing (for verify mode)
     "deepdiff>=8.6.2,<9",  # Deep comparison for data structures
+
+    # === Plugin catalog dependencies ===
+    # These deps back plugin entries that appear in
+    # `src/elspeth/web/audit_readiness/boundary_expectations.py`'s
+    # EXPECTED_* frozensets. Those frozensets are the audit-readiness
+    # discoverability gesture: parity tests
+    # (tests/unit/web/audit_readiness/test_boundary_predicate_parity.py,
+    # tests/unit/web/catalog/test_knob_schema_golden.py,
+    # tests/unit/web/composer/test_skill_drift.py) assert the live
+    # builtin catalog matches the expected partition. Plugins that
+    # silently skip-on-missing-dep would make those tests pass with
+    # an incomplete catalog and let a Tier-3 crossing escape the audit
+    # PR-discoverability gesture. The rule: if a non-optional unit
+    # test references a plugin, that plugin's deps live here.
+    "chromadb>=1.5,<2",  # backs chroma_sink + rag_retrieval plugins
+    "html2text>=2024.2.26",  # backs web_scrape + web_scrape_extraction transforms
+    "beautifulsoup4>=4.14,<5",  # paired with html2text in web_scrape
 ]
 
 [project.optional-dependencies]
@@ -112,17 +129,6 @@ azure = [
     "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error  # Azure Monitor / App Insights telemetry
     "azure-monitor-opentelemetry>=1.8,<2",  # Azure Monitor OpenTelemetry Distro — required for azure_ai tracing
     "jinja2>=3.1,<4",  # Template engine for path templating
-]
-
-web = [
-    # Web scraping and HTML processing
-    "html2text>=2024.2.26",  # HTML to markdown conversion
-    "beautifulsoup4>=4.14,<5",  # HTML parsing and element stripping
-]
-
-rag = [
-    # RAG retrieval plugin pack — ChromaDB provider
-    "chromadb>=1.5,<2",
 ]
 
 mcp = [
@@ -197,9 +203,6 @@ all = [
     "azure-identity>=1.25,<2",
     "azure-keyvault-secrets>=4.11,<5",
     "azure-monitor-opentelemetry-exporter>=1.0.0b46,<2",  # b46+ fixes LogData import error
-    # web dependencies
-    "html2text>=2024.2.26",
-    "beautifulsoup4>=4.14,<5",
     # mcp dependencies
     "mcp>=1.27,<2",
     # tracing dependencies
@@ -207,8 +210,6 @@ all = [
     "langfuse>=3.14,<4",
     # security dependencies
     "sqlcipher3>=0.6.2,<1",
-    # rag dependencies
-    "chromadb>=1.5,<2",
     # webui dependencies
     "fastapi>=0.136,<1",
     "uvicorn[standard]>=0.46,<1",

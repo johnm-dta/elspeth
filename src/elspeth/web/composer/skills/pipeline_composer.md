@@ -705,6 +705,16 @@ Never guess plugin names or option fields. The web system context already lists 
 
 Every pipeline needs: **one source**, **one or more sinks**, and **connections between them**.
 
+### Plugin-Authored Hints — Read Before You Configure
+
+Two channels surface plugin-author guidance to you. Read both before declaring a build complete; they are advisory coaching (not contract), but every hint exists because of a real failure shape.
+
+1. **Discovery-time `composer_hints` (before plugin choice).** Every entry returned by `list_sources` / `list_transforms` / `list_sinks` and every response from `get_plugin_schema` carries a `composer_hints` array. The hints are 1-5 short imperatives written by the plugin's author — they describe the gotchas an operator most often gets wrong (CSV header presence, LLM model verification via `list_models`, web_scrape SSRF scheme requirement, sink collision policy, etc.). If a hint applies to the user's request, follow it without being told.
+
+2. **Postscript `post_call_hints` (after a successful mutation).** Successful `set_source`, `upsert_node`, `patch_source_options`, `patch_node_options`, and `patch_output_options` responses may include a `post_call_hints` field. The plugin examined the config you just set and produced forward-looking advice conditional on that config — for example, declaring `schema.mode: fixed` on a csv source surfaces a hint to call `inspect_source` first. When you see `post_call_hints` in a tool response, treat it as a high-priority signal to revise or verify before moving on.
+
+You can also call `get_plugin_assistance` directly with `plugin_type` and `plugin_name` (omit `issue_code` for discovery-time guidance) when you want the same content via an explicit lookup. The discovery DTOs already carry it, so this is rarely necessary.
+
 ### Node Types
 
 | Type | Required | Behaviour |

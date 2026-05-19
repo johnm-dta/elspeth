@@ -558,6 +558,24 @@ class TestAzureAuthConfigValidator:
         config = AzureAuthConfig(connection_string="DefaultEndpointsProtocol=https;AccountName=test")
         assert config.auth_method == "connection_string"
 
+    @pytest.mark.parametrize(
+        "account_url",
+        [
+            "test.blob.core.windows.net",
+            "http://test.blob.core.windows.net",
+            "https://user:pass@test.blob.core.windows.net",
+            "https:///missing-host",
+        ],
+    )
+    def test_account_url_rejects_credential_unsafe_urls(self, account_url: str) -> None:
+        """Credential-bearing Azure auth requires an HTTPS URL with host and no userinfo."""
+        from pydantic import ValidationError
+
+        from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
+
+        with pytest.raises(ValidationError, match="account_url"):
+            AzureAuthConfig(sas_token="sv=2020-08-04&ss=b", account_url=account_url)
+
 
 class TestTransformDataConfig:
     """Tests for TransformDataConfig.
@@ -691,6 +709,13 @@ class TestComponentTypeEnforcement:
 
             class NotExempt(PathConfig):
                 pass
+
+    def test_false_component_type_exemption_is_not_exempt(self) -> None:
+        """Only an explicit true exemption bypasses component type enforcement."""
+        with pytest.raises(TypeError, match="does not set _plugin_component_type"):
+
+            class FalseExempt(DataPluginConfig):
+                _component_type_exempt: ClassVar[bool] = False
 
     def test_error_message_includes_class_name(self) -> None:
         """TypeError message includes the offending class name for debuggability."""

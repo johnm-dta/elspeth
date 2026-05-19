@@ -1,0 +1,296 @@
+{
+  "review_meta": {
+    "reviewer": "QA-agent (Plan Review Quality Agent)",
+    "reviewed_plan": "docs/composer/ux-redesign-2026-05/22-phase-9-migration-runner.md",
+    "review_date": "2026-05-19",
+    "git_branch": "RC5.2",
+    "plan_status_at_review": "PLAN READY — J1 APPROVED 2026-05-16"
+  },
+
+  "status": "needs_revision",
+  "blocking_count": 3,
+  "warning_count": 9,
+
+  "issues": [
+    {
+      "id": "B1",
+      "severity": "blocking",
+      "category": "test_gap",
+      "location_in_plan": "Task 5a — TDD shape, caller-list enumeration",
+      "finding": "Task 5a's enumerated list of `initialize_session_schema` call-sites contains 9 files, but the current codebase has 51 unique files referencing this function. The commit will not converge cleanly — at least 42 call sites will be left broken (compilation errors or silent import failures) after the task's stated implementation steps. The plan's self-acknowledgement ('run grep to confirm') does not resolve this; it defers a known under-count to the implementation agent without a correction.",
+      "evidence": "grep -rn initialize_session_schema tests/ | awk -F: '{print $1}' | sort -u | wc -l → 51. The plan's enumeration names 9 files: tests/integration/web/conftest.py, composer/guided/test_step_handlers.py, test_blobs_ready_hash_postgres.py, test_compose_loop_latency_sanity.py, test_composer_llm_eval_characterization.py, test_inv_audit_ahead_backward.py, test_progressive_disclosure.py, composer/guided/conftest.py, test_compose_loop_concurrent_sessions.py. Missing examples from the uncounted 42: tests/unit/web/composer/conftest.py, tests/unit/web/sessions/test_schema.py, tests/property/web/composer/conftest.py, tests/unit/web/blobs/test_service.py, and 38 others.",
+      "resolution": "Replace the enumerated list with the grep command only, or expand the list to all 51 files. The safest approach: delete the list, leave only the grep command as the authoritative source. If the list is retained for human-review purposes, add a note that it is illustrative and explicitly warn that any unnamed file using the import is also in scope.",
+      "confidence": "high"
+    },
+    {
+      "id": "B2",
+      "severity": "blocking",
+      "category": "observability",
+      "location_in_plan": "§3 steps 4a, 5, Task 4 executor, Task 7, Task 7a",
+      "finding": "Five caretaker refusal paths raise custom exceptions but the plan does not specify a Landscape event emission before the raise. Per CLAUDE.md audit primacy ('if it's not recorded, it didn't happen'), every refusal is an auditable caretaker decision that must be persisted before crashing. Without pre-raise emission, an operator auditing a failed deploy has no Landscape record of the refusal — only a process crash log. The affected paths are: (a) `OrphanLiveTable` / `OrphanLiveColumn` — §3 step 5 describes the refusal but names no event type; (b) `MigrationLockHeld` — Task 7a names no event type; (c) `OrphanMigrationPlanRefusal` — Task 7 names no event type; (d) `NonEmptyDefinitionalTable` — Task 4 names no event type; (e) `DestructiveMigrationRefused` — Task 4 names no event type. By contrast, `UnsupportedDialect` (§3 step 4a) is correctly specified with a `MigrationUnsupportedDialectRefusal` event.",
+      "evidence": "Plan §3 step 4a: 'records a MigrationUnsupportedDialectRefusal Landscape event before raising' — this is the correct pattern, used for exactly one of six refusal paths. Remaining five refusal paths (steps 5, Task 4 twice, Task 7, Task 7a) have no equivalent event-type declaration. Task 3 (contracts dataclasses) does not list event types for these paths. No task adds the missing event types to contracts/migration.py.",
+      "resolution": "Add named event types to contracts/migration.py (Task 3) for each of the five unspecified refusal paths: `MigrationOrphanTableRefusal`, `MigrationOrphanColumnRefusal`, `MigrationLockHeldEvent`, `MigrationOrphanPlanRefusalEvent`, `MigrationNonEmptyDefinitionalRefusal`, `MigrationDestructiveChangeRefusal`. Add record-then-raise contract to each execution path, with a TDD step in the relevant task asserting the event lands in the Landscape before the exception propagates.",
+      "confidence": "high"
+    },
+    {
+      "id": "B3",
+      "severity": "blocking",
+      "category": "test_gap",
+      "location_in_plan": "§3 (Landscape/sessions DB separation invariant), Task 5",
+      "finding": "§3 asserts that a `@model_validator(mode='after')` on `WebSettings` rejects configurations where `landscape_url` and `session_db_url` resolve to the same SQLite path, stating the validator 'catches the misconfiguration at config-construction time, before any engine is constructed.' This validator does not exist in the current codebase. No task in the plan ships it. Task 5 lists an integration test using a 'bad-config fixture' but: (a) the validator to be tested does not exist at Task 5 start, (b) no task implements it, (c) no unit test of the validator itself is specified (only an integration-level activation test). The integration test in Task 5 would be testing a non-existent guard and would trivially pass or be misdirected.",
+      "evidence": "src/elspeth/web/config.py contains four @model_validator methods (lines 447, 462, 472, 447 approx); none check landscape_url vs session_db_url path equivalence. Search: grep -n 'same.*path|path.*same|landscape.*session|session.*landscape' config.py returns only line 262 (@field_validator for URL format), not path-equivalence. The plan's §3 says 'A @model_validator(mode=\"after\") on WebSettings rejects...' in present tense, implying the validator already exists.",
+      "resolution": "Add a sub-task (or expand Task 5) to: (a) implement `_reject_same_path_for_landscape_and_sessions` model_validator in `WebSettings`, (b) add a unit test in `tests/unit/web/test_config.py` asserting that `WebSettings(landscape_url='sqlite:///foo.db', session_db_url='sqlite:///foo.db')` raises ValueError, (c) assert the validator also fires when both use default paths that resolve to the same file via `data_dir`. The integration test in Task 5 remains valid as a second layer of coverage but cannot be the only test for this guard.",
+      "confidence": "high"
+    },
+    {
+      "id": "W1",
+      "severity": "warning",
+      "category": "production_readiness",
+      "location_in_plan": "Task 4 — executor prose",
+      "finding": "Task 4 states 'raw f-string SQL in DDL handlers is forbidden. CI lint enforces this on the migration module.' No task ships this lint script. No precedent CI script exists in scripts/cicd/ with this name. The statement is presented as an existing mechanism, but it is a future requirement with no delivery plan.",
+      "evidence": "scripts/cicd/ contains: enforce_adapter_budget.py, enforce_audit_evidence_nominal.py, enforce_component_type.py, enforce_composer_catch_order.py, enforce_composer_exception_channel.py, enforce_contract_manifest.py, enforce_freeze_guards.py, enforce_frozen_annotations.py, enforce_guard_symmetry.py, enforce_gve_attribution.py, enforce_options_metadata.py, enforce_plugin_hashes.py, enforce_tier_1_decoration.py, enforce_tier_model.py. No enforce_migration_raw_sql.py or equivalent. No task in §4 includes 'Implement CI lint for raw SQL in migration module'.",
+      "resolution": "Either (a) add a task to ship scripts/cicd/enforce_migration_raw_sql.py with a CI gate that fails on f-string interpolation in src/elspeth/web/sessions/migration/*.py, or (b) change the prose to 'CI lint for raw SQL is deferred; this is a code-review enforcement point for Phase 9' and add a filigree backlog item. Do not claim CI enforcement without a delivery plan.",
+      "confidence": "high"
+    },
+    {
+      "id": "W2",
+      "severity": "warning",
+      "category": "test_gap",
+      "location_in_plan": "R6 (risk table), Task 1",
+      "finding": "R6 names `scripts/cicd/enforce_migration_classification.py` as the CI gate that prevents future tables from landing without explicit `migration_class`. Task 1 only verifies existing tables via an in-test assertion; it does not ship the CI script. Without the CI gate, the protection exists only at point-in-time (test run), not at contribution-time (new Table addition).",
+      "evidence": "R6 text: 'Task 1 ships a CI gate (scripts/cicd/enforce_migration_classification.py) that asserts every Table in metadata.tables.values() has explicit info[\"migration_class\"].' Task 1 TDD shape: 'Write failing test: tests/unit/web/sessions/test_migration_classification.py asserts...' — no reference to creating the CI script. scripts/cicd/ does not contain enforce_migration_classification.py.",
+      "resolution": "Add a step to Task 1 to create scripts/cicd/enforce_migration_classification.py and wire it into CI configuration, matching the pattern of existing enforce_*.py scripts. The in-test assertion remains as a fast-feedback layer; the CI script is the durability layer.",
+      "confidence": "high"
+    },
+    {
+      "id": "W3",
+      "severity": "warning",
+      "category": "test_gap",
+      "location_in_plan": "Task 11 — TDD shape; §5 Synthetic-only constraint",
+      "finding": "§5 declares two CI gate requirements for fixtures: (a) delta-check (fixture-freshness — which table actions are expected vs unexpected), and (b) synthetic-only assertion (no real `@` domains, no production session IDs; SHA-256 tamper-detection via FIXTURES.md). Task 11 ships the delta-check half only. The synthetic-only CI gate has no delivery task.",
+      "evidence": "Task 11 TDD shape: 'parametrized over the three generation fixtures; for each, boot the app, run the caretaker, assert the resulting MigrationPlanRecord contains only expected schema-delta actions'. No assertion on domain patterns, session ID formats, or SHA-256 against FIXTURES.md. §5 states 'A required CI gate (NOT a bypassable pre-commit hook) verifies the fixtures contain no production-origin tokens... AND that each fixture binary's SHA-256 matches the entry in FIXTURES.md. CI fails on divergence.'",
+      "resolution": "Expand Task 11 TDD shape to explicitly cover: (a) a separate test or sub-task asserting each fixture file's SHA-256 matches FIXTURES.md, (b) a regex scan over each fixture asserting no @-domain outside [.invalid, .example, .test], (c) FIXTURES.md generation as a deliverable of Task 11. These are distinct from the schema-delta assertion and must each have a TDD step.",
+      "confidence": "high"
+    },
+    {
+      "id": "W4",
+      "severity": "warning",
+      "category": "test_gap",
+      "location_in_plan": "Task 4 — shadow-copy ceremony",
+      "finding": "Task 4's TDD shape tests handler outcomes (table shape before/after) but does not assert that the 12 steps of the shadow-copy ceremony fire in the specified order. Steps 1 and 12 (FK pragma disable/re-enable), steps 4-6 (drop indices/triggers/views), and steps 9-11 (recreate indices/triggers/views) are each load-bearing — omitting step 1 leaves FK enforcement active during the copy (silently preventing some copies), omitting step 12 leaves FK enforcement disabled after success. An outcome test that passes despite step reordering provides false confidence.",
+      "evidence": "Task 4 TDD shape: 'Write failing tests for each handler in isolation... Include separate tests for the create_table path and the recreate path'. No reference to step-sequence assertion. The plan's normative reference is SQLite documentation §7 12 steps; deviation is explicitly forbidden. Comment-block citation is specified but not verified by the test.",
+      "resolution": "Add a TDD step in Task 4 for the shadow-copy handler that captures the sequence of PRAGMA and DDL statements emitted (e.g. via SQLAlchemy event listeners or a statement-capture fixture) and asserts the exact ordering matches the 12-step normative sequence: (1) FK off, (2) create new, (3) copy, (4-6) drop old dependents, (7) drop old, (8) rename, (9-11) recreate dependents, (12) FK check + FK on + commit. This test catches step-reordering regressions that outcome tests cannot.",
+      "confidence": "high"
+    },
+    {
+      "id": "W5",
+      "severity": "warning",
+      "category": "test_gap",
+      "location_in_plan": "Task 6 (audit-write failure test), Task 11 (fixture TDD sequencing), Task 4 (raw_connection leak)",
+      "finding": "Three TDD steps specify what to test but not the test mechanism, leaving implementation agents with ambiguous specifications that may produce testing theatre rather than real coverage. (a) Task 6: 'failing test ... that an audit-write failure aborts the caretaker' — the test mechanism is unspecified. The `MigrationRecorder` Protocol (Task 3) enables a clean fault-injection double; this should be stated. (b) Task 11: fixtures do not exist at Task 11's start, so the parametrized failing test runs over an empty list and trivially passes — this is not a failing test. (c) Task 4 shadow-copy uses `engine.raw_connection()` — no test for connection return-to-pool (leak scenario when ceremony raises mid-step).",
+      "evidence": "(a) Task 6 TDD: 'Write failing test verifying... that an audit-write failure aborts the caretaker.' No mention of the MigrationRecorder Protocol double introduced in Task 3. (b) Task 11 TDD: 'Write failing test... parametrized over the three generation fixtures.' Fixtures are generated/checked in as part of Task 9, which precedes Task 11 — but the failing-test-first discipline requires the test to exist before the fixtures do, creating a sequencing contradiction. (c) Task 4 mentions raw_connection but no test verifies the connection is always returned on exception paths.",
+      "resolution": "(a) Task 6: specify 'use a MigrationRecorder test-double that raises LandscapeWriteError on record_migration_plan(); assert the caretaker raises before any executor call.' (b) Task 11: restructure TDD as: first write the fixture-freshness test parametrized over a placeholder fixture list that asserts zero unexpected actions; then (after Task 9 delivers fixtures) update parametrization to the real three-fixture list. Document this as a two-step sequence explicitly. (c) Task 4: add a test that calls `_shadow_copy_enum_rewrite` with a handler that raises at step 7 and asserts the raw connection has been returned to the pool (via `engine.pool.checkedout()` or equivalent).",
+      "confidence": "medium"
+    },
+    {
+      "id": "W6",
+      "severity": "warning",
+      "category": "edge_case",
+      "location_in_plan": "§3 step 7 (Caretaker records MigrationPlanRecord before executing)",
+      "finding": "On a truly fresh deploy (empty filesystem, no sessions.db, no landscape.db), the caretaker must write a `MigrationPlanRecord` to the Landscape BEFORE executing migrations. However, the Landscape database itself may require its own schema initialization. If Landscape's `create_all` has not yet run, the insert will fail. The plan does not specify the bootstrap ordering between Landscape schema initialization and caretaker startup. This may not occur in practice (Landscape initialization happens in create_app() before caretaker), but the sequence is not documented as an invariant, and a future refactor could break it silently.",
+      "evidence": "§3 step 7: 'Caretaker records the action plan as a MigrationPlanRecord Landscape event BEFORE executing.' The plan also states caretaker is 'invoked from create_app() after session engine construction and before any router is mounted' — but the Landscape engine and its schema initialization site are not identified in relation to this call site. src/elspeth/web/app.py:518 has landscape_url setup; its create_all equivalent is not identified in the plan.",
+      "resolution": "Add a one-sentence invariant statement to §3: 'Landscape schema is initialized before caretaker invocation — the caretaker assumes a structurally valid (potentially empty) Landscape at startup.' Add a TDD step in Task 6 asserting that the caretaker correctly emits a `MigrationPlanRecord` on a truly fresh deploy (both sessions.db and landscape.db created from empty in the test fixture).",
+      "confidence": "medium"
+    },
+    {
+      "id": "W7",
+      "severity": "warning",
+      "category": "production_readiness",
+      "location_in_plan": "Task 10 — Runbook: Orphan plan-record cleanup, step (2)",
+      "finding": "The orphan plan-record cleanup runbook (Task 10) step (2) instructs the operator to 'verify the sessions DB shape is consistent' before clearing the orphan, but provides no mechanism. The operator is given a verb without a tool, forcing ad hoc investigation at incident time. The adjacent risk is that an operator clears an orphan when the DB is actually in a half-migrated state, then the next caretaker run proceeds against corrupted schema.",
+      "evidence": "Task 10 runbook excerpt: '(2) verify the sessions DB shape is consistent; (3) if DB is consistent, run elspeth migration force-clear-orphan-plan...' No tool or SQL is specified for step (2). No `elspeth migration verify-shape` command is defined.",
+      "resolution": "Either (a) add an `elspeth migration verify-shape <db>` CLI subcommand (alongside `force-clear-orphan-plan`) that runs SQLAlchemy reflection against the sessions DB and compares to metadata, emitting a structured consistency report, or (b) document the exact manual SQL a operator would run (`pragma table_info(<table>)` for each declared table, comparison against expected columns). The runbook must give operators a deterministic yes/no answer, not an open-ended investigation.",
+      "confidence": "high"
+    },
+    {
+      "id": "W8",
+      "severity": "warning",
+      "category": "security",
+      "location_in_plan": "Task 7 — force-clear-orphan-plan --reason flag",
+      "finding": "The `elspeth migration force-clear-orphan-plan <plan_id> --reason \"<text>\"` subcommand lands operator-supplied justification text verbatim into a `MigrationOrphanCleared` Landscape event. This is a Tier 3 boundary (operator CLI input). Per CLAUDE.md data manifesto, Tier 3 input requires validation at the boundary: no length cap is specified, no sanitisation of control characters is specified, and the Landscape event content is not quarantined on failure to validate. An excessively long or control-character-laden reason string could corrupt the Landscape event record.",
+      "evidence": "Task 7 CLI description: 'elspeth migration force-clear-orphan-plan <id> --reason \"<text>\"'. No max-length annotation. No character set restriction. CLAUDE.md §Data Manifesto Tier 3: 'Can be literal trash... Validate at the boundary, coerce where possible, record what we got.' No validation step is specified for the --reason text.",
+      "resolution": "Add a Typer argument annotation with `max_length=500` (or project-standard), strip leading/trailing whitespace, reject or quarantine inputs containing ASCII control characters (0x00-0x1F excluding tab/newline), and document the constraint in the CLI help text. Add a unit test in Task 7's TDD shape asserting that excessively long or control-character input is rejected before the Landscape write.",
+      "confidence": "high"
+    },
+    {
+      "id": "W9",
+      "severity": "warning",
+      "category": "test_gap",
+      "location_in_plan": "Task 5a — _validate_partial_index_dialect_symmetry relocation",
+      "finding": "Task 5a's TDD shape for the `_validate_partial_index_dialect_symmetry` relocation uses soft language ('may need retargeting') rather than a hard TDD step. The relocated helper is described as 'load-bearing (closes elspeth-obs-2ef48619d5)' and 'called at the end of run_caretaker regardless of whether any DDL was issued' — these are strong invariants that deserve a specific, non-optional test.",
+      "evidence": "Task 5a TDD: 'Confirm _validate_partial_index_dialect_symmetry is exercised by the caretaker path (existing test_schema.py assertions for it may need retargeting to caretaker.py).' The word 'may' makes this optional. The function's contract ('called once at end of run_caretaker, before returning, regardless of DDL volume') should be a hard assertion not a retargeting suggestion.",
+      "resolution": "Replace the soft language with a hard TDD step: 'Write a test asserting that run_caretaker calls _validate_partial_index_dialect_symmetry exactly once at the end of execution — after all DDL, before returning — even when the plan is all-noop. Use a spy/mock on the function to assert the call count and position.' Make the existing test_schema.py assertions a deletion target rather than a retargeting suggestion: they should be deleted and rebuilt in test_caretaker_activation.py.",
+      "confidence": "high"
+    }
+  ],
+
+  "coverage_assessment": {
+    "invariants_with_stated_test": [
+      {
+        "invariant": "Every existing Table has explicit migration_class classification",
+        "task": "Task 1",
+        "test_file": "tests/unit/web/sessions/test_migration_classification.py",
+        "status": "specified"
+      },
+      {
+        "invariant": "Table with no migration_class defaults to 'data' AND omission recorded in every MigrationPlanRecord",
+        "task": "Tasks 1 + 8",
+        "test_file": "test_migration_classification.py + test idempotence",
+        "status": "specified"
+      },
+      {
+        "invariant": "Empty DB (first deploy) produces create_table for all tables",
+        "task": "Task 2 scenario (d)",
+        "test_file": "tests/unit/web/sessions/migration/test_detector.py",
+        "status": "specified"
+      },
+      {
+        "invariant": "DB missing a data table produces create_table (not recreate)",
+        "task": "Task 2 scenario (b)",
+        "test_file": "tests/unit/web/sessions/migration/test_detector.py",
+        "status": "specified"
+      },
+      {
+        "invariant": "DB missing a definitional table produces recreate",
+        "task": "Task 2 scenario (b2)",
+        "test_file": "tests/unit/web/sessions/migration/test_detector.py",
+        "status": "specified"
+      },
+      {
+        "invariant": "_recreate_definitional refuses to drop non-empty table",
+        "task": "Task 4",
+        "test_file": "executor handler tests",
+        "status": "specified"
+      },
+      {
+        "invariant": "MigrationPlanRecord frozen dataclass with deep_freeze on container fields",
+        "task": "Task 3",
+        "test_file": "introspection-based freeze test",
+        "status": "specified"
+      },
+      {
+        "invariant": "Landscape write failure aborts caretaker (pre-execution path)",
+        "task": "Task 6",
+        "test_file": "tests for audit emission order",
+        "status": "specified (mechanism unspecified — see W5)"
+      },
+      {
+        "invariant": "Orphan MigrationPlanRecord at startup raises OrphanMigrationPlanRefusal",
+        "task": "Task 7",
+        "test_file": "Task 7 failing test",
+        "status": "specified"
+      },
+      {
+        "invariant": "Cross-process advisory lock — second process raises MigrationLockHeld",
+        "task": "Task 7a",
+        "test_file": "multiprocessing.Process test against temp SQLite paths",
+        "status": "specified (temp SQLite path design is correct — in-memory per-process isolation noted in task)"
+      },
+      {
+        "invariant": "Second caretaker run on up-to-date DB emits zero DDL",
+        "task": "Task 8",
+        "test_file": "idempotence test",
+        "status": "specified"
+      },
+      {
+        "invariant": "Three-generation migration preserves all seeded data",
+        "task": "Task 9",
+        "test_file": "tests/integration/web/test_three_generation_migration.py",
+        "status": "specified"
+      },
+      {
+        "invariant": "Dry-run mode exits cleanly without DDL; emits MigrationDryRunRecord",
+        "task": "Task 10",
+        "test_file": "smoke test",
+        "status": "specified"
+      },
+      {
+        "invariant": "Column type mismatch (same column name, different type) causes refusal",
+        "task": "§5 failure-mode tests",
+        "test_file": "executor handler tests",
+        "status": "listed in §5 but not enumerated as TDD step in any task"
+      },
+      {
+        "invariant": "Action-handler failure mid-plan rolls back; DB unchanged",
+        "task": "Task 7",
+        "test_file": "rollback test",
+        "status": "specified"
+      }
+    ],
+
+    "invariants_claimed_but_untested": [
+      {
+        "invariant": "UnsupportedDialect refusal emits MigrationUnsupportedDialectRefusal event and raises",
+        "claimed_in": "§3 step 4a ('mechanically enforced, not advisory')",
+        "gap": "No TDD step in any task names a test for this refusal path. §3 step 4a describes the behaviour but no task writes a failing test for it before implementing the guard.",
+        "severity": "warning"
+      },
+      {
+        "invariant": "WebSettings @model_validator rejects same-path landscape_url and session_db_url",
+        "claimed_in": "§3 Landscape/sessions DB separation invariant",
+        "gap": "Validator does not exist in codebase. No task implements it. No unit test specified for the validator itself. See B3.",
+        "severity": "blocking"
+      },
+      {
+        "invariant": "OrphanLiveTable / OrphanLiveColumn refusal emits a Landscape event before raising",
+        "claimed_in": "§5 failure-mode tests (listed) + §3 step 5 (refusal described)",
+        "gap": "§5 names these in the failure-mode list but Tasks 4/5 do not enumerate them as TDD steps with emit-before-raise assertions. The event types are not named in Task 3 contracts.",
+        "severity": "blocking"
+      },
+      {
+        "invariant": "DestructiveMigrationRefused emits a Landscape event before raising",
+        "claimed_in": "Task 4 prose describes the exception",
+        "gap": "No event type named in Task 3. No TDD step asserts event emission before raise.",
+        "severity": "blocking"
+      },
+      {
+        "invariant": "NonEmptyDefinitionalTable emits a Landscape event before raising",
+        "claimed_in": "Task 4 + R1 (explicit refusal with table name and row count)",
+        "gap": "No event type named in Task 3. No TDD step asserts event emission before raise.",
+        "severity": "blocking"
+      },
+      {
+        "invariant": "12-step shadow-copy ceremony fires in normative order (FK off → ... → FK check → FK on → commit)",
+        "claimed_in": "Task 4 normative reference to SQLite documentation §7",
+        "gap": "Task 4 TDD shape tests outcomes (table shape) not step ordering. A mis-ordered implementation that produces the correct final shape would pass the specified tests.",
+        "severity": "warning"
+      },
+      {
+        "invariant": "Synthetic-only fixture CI gate (no real @-domains, no production session IDs, SHA-256 matches FIXTURES.md)",
+        "claimed_in": "§5 Synthetic-only constraint ('required CI gate, NOT a bypassable pre-commit hook')",
+        "gap": "Task 11 TDD shape covers only schema-delta freshness. Neither SHA-256 tamper-detection nor domain/session-ID pattern checks have a delivery task.",
+        "severity": "warning"
+      },
+      {
+        "invariant": "FK pragma toggle (steps 1 + 12) is explicitly asserted in shadow-copy tests",
+        "claimed_in": "§3 step 8 and executor description ('ceremony is responsible for restoring FK enforcement')",
+        "gap": "No test step verifies FK enforcement state at entry, during copy, and after commit. FK enforcement left disabled after a mid-ceremony crash is a silent data-integrity risk on the next write.",
+        "severity": "warning"
+      },
+      {
+        "invariant": "engine.raw_connection() is returned to pool on all exit paths (success and exception)",
+        "claimed_in": "Task 4 executor description ('shadow-copy executor obtains a raw DBAPI connection')",
+        "gap": "No connection-leak test specified.",
+        "severity": "warning"
+      }
+    ]
+  },
+
+  "summary": {
+    "test_gaps": 7,
+    "observability_gaps": 5,
+    "edge_cases_missing": 2,
+    "security_issues": 1,
+    "production_readiness_gaps": 2
+  }
+}

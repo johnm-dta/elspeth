@@ -246,10 +246,14 @@ deploy/
 # Temporary
 .codex
 
-# Build-artefact PDFs from tools/pdf/ (regeneratable; exceed
-# the pre-commit large-file threshold).
+# Build-artefact PDFs (regeneratable; exceed the pre-commit
+# large-file threshold). Narrow scope to PDF outputs only — the
+# `docs/release/pdf/` pipeline source (build.sh, *.typ, README,
+# Makefile, etc.) IS tracked so the pipeline is reproducible from
+# a fresh checkout.
 docs/assets/*.pdf
-docs/release/pdf/
+docs/release/pdf/out/
 .claude/scheduled_tasks.lock
 *.db-shm
 *.db-wal
+docs/release/pdf/

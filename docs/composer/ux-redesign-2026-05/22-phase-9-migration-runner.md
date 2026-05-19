@@ -186,6 +186,8 @@ startup:
 | `audit_access_log` | data | Access audit trail; preserve unconditionally per audit primacy. |
 | `user_preferences` (added by Phase 1A; Phase 9 hard-blocks on Phase 1A shipping) | data | Per-user opt-out, banner-dismissal, tutorial-completion. |
 | `interpretation_events` (added by Phase 5b; Phase 9 hard-blocks on Phase 5b shipping) | data | Audit-shaped interpretation-event history; preserve unconditionally. |
+| `composer_completion_events` (added by Phase 6; protected by SQLite triggers) | data | Completion-gesture audit trail — preserve unconditionally per audit primacy. |
+| `skill_markdown_history` (added by Phase 6) | data | Skill-markdown revision history; user-authored content trail. Preserve. |
 | (any future caches, indexes, materialised views) | definitional | Re-derivable from data tables. |
 
 **Trade-offs.**
@@ -229,7 +231,7 @@ The remainder of this plan is written for Option (c) per the approved verdict.
 as **new code**. No caretaker hook exists today; `metadata.create_all()` is called
 inertly at app startup and silently no-ops on existing tables.
 
-**Activation site.** Caretaker is invoked from `create_app()` after session engine construction and before any router is mounted. This is the same call site as `initialize_session_schema` at `app.py:441`, which Task 5a displaces. No lifespan event is used; the call is synchronous inside `create_app()`.
+**Activation site.** Caretaker is invoked from `create_app()` after session engine construction and before any router is mounted. This is the same call site as `initialize_session_schema` at `app.py:581`, which Task 5a displaces. No lifespan event is used; the call is synchronous inside `create_app()`.
 
 **Activation contract:**
 
@@ -258,13 +260,38 @@ inertly at app startup and silently no-ops on existing tables.
    "shadow_copy_enum_rewrite", "recreate", "noop")`.
 7. Caretaker records the action plan as a `MigrationPlanRecord` Landscape event BEFORE
    executing.
-8. Caretaker executes the plan inside a single transaction. SQLite supports transactional DDL with partial constraints; the executor handles the documented SQLite-specific cases (e.g. `CREATE TABLE` is transactional, `PRAGMA` is not). No per-dialect adapter is required.
+8. Caretaker executes the plan action-by-action with per-action transactional discipline. Actions that SQLite transacts (`CREATE TABLE`, `ALTER TABLE ADD COLUMN`) are wrapped in their own transaction and either commit-or-rollback atomically. The shadow-copy ceremony is atomic at the *ceremony level*, not the SQLite-transaction level: SQLite's `PRAGMA foreign_keys` is connection-scoped and not transactional, so the ceremony cannot be wrapped in a single rollback-safe transaction. The ceremony's atomicity is enforced by the rename step (step 8 of the 12-step ceremony) being the only externally-visible commit point; pre-rename failures leave the original table untouched. See R3 for the SQLite documentation reference. The two failure record types (`MigrationFailedRecord` and `MigrationPartialFailureRecord`) fire under disjoint conditions defined in Task 7.
 9. Caretaker records a `MigrationCompletedRecord` (or `MigrationFailedRecord` with
    exception details, chained via `from exc`) Landscape event AFTER execution. No retry:
    if the Landscape write fails, the caretaker crashes immediately with the offending
    exception. Landscape write failure aborts the caretaker; there is no recovery path.
 10. On any failure: caretaker **does not start the app**. The deploy fails loudly. The
     operator sees the audit event, the SQL that failed, and the exception.
+
+**Record-then-raise contract for refusal paths.** Every caretaker refusal MUST emit its corresponding `Migration*Refusal` Landscape event BEFORE raising the exception. The order is: (1) construct the refusal record; (2) call the recorder method; (3) raise the exception with the same context preserved via `from exc` if a wrapped exception triggered the refusal, or `from None` for fresh refusals. If the Landscape write itself fails during a refusal-path emission, the caretaker re-raises the Landscape write exception with the original refusal exception chained — per audit primacy, the inability to record the refusal is itself the headline failure. This is consistent with §6 R4's two-window analysis.
+
+The refusal paths and their event types:
+
+- Dialect check fails → `MigrationUnsupportedDialectRefusal` → `UnsupportedDialect`
+- Orphan-plan scan finds an orphan → `MigrationOrphanPlanRefusal` → `OrphanMigrationPlanRefusal`
+- Orphan live table → `MigrationOrphanLiveTableRefusal` → `OrphanLiveTable`
+- Orphan live column → `MigrationOrphanLiveColumnRefusal` → `OrphanLiveColumn`
+- Lock acquisition fails → `MigrationLockHeldRefusal` → `MigrationLockHeld`
+- Column drop detected on data table → `MigrationDestructiveRefused` → `DestructiveMigrationRefused`
+- Non-empty definitional table → `MigrationNonEmptyDefinitionalRefused` → `NonEmptyDefinitionalTable`
+- Application-id mismatch → `MigrationWrongApplicationRefusal` → `WrongApplicationDatabase`
+- Post-ceremony FK enforcement lost → `MigrationFKEnforcementLost` → same
+- Trigger recreation incomplete after shadow-copy step 10 → `MigrationTriggerRecreationFailed` → same
+
+**Bootstrap-ordering invariant (first deploy).** The caretaker requires a working Landscape engine to record `MigrationPlanRecord` BEFORE plan execution (step 7). On a truly fresh deploy where neither the sessions DB nor the Landscape DB has been initialised, the Landscape's own schema must be created BEFORE the caretaker runs. The ordering inside `create_app()` is:
+
+1. Construct settings (incl. same-path validator from Task 4a).
+2. Construct Landscape engine; call `LandscapeDB.bootstrap_schema(url, passphrase)` (idempotent — creates Landscape tables if absent). This is the existing pattern used elsewhere in the web subsystem.
+3. Construct session engine.
+4. Run caretaker (`run_caretaker(session_engine, metadata, recorder)`).
+5. Mount routers.
+
+Steps 2 and 4 are independent (Landscape DB ≠ sessions DB per Task 4a same-path validator); step 2 cannot fail in a way that leaves caretaker stranded mid-execution because step 4 has not yet started.
 
 **Dry-run mode.** Caretaker accepts a `--dry-run` flag (env var
 `ELSPETH_WEB__MIGRATION_DRY_RUN=1`, following the Dynaconf `ELSPETH_WEB__` nested-key
@@ -291,6 +318,26 @@ at config-construction time, before any engine is constructed.
 ## 4. Tasks (TDD-shaped: failing test → run-to-fail → implement → run-to-pass → commit)
 
 > **Implements J1 verdict (c) per-table preserve-on-recreate (APPROVED 2026-05-16).**
+
+### Task 0 — Ground-truth refresh (no-commit precondition gate)
+
+**Goal.** This plan was authored over multiple cycles; line numbers, caller counts, and table inventories drift between cycles. Task 0 is a precondition gate: before any other task begins, the implementer runs a kickoff script that asserts the plan's load-bearing facts match HEAD. Failures BLOCK the rest of the plan until the plan text is refreshed.
+
+**Mechanism.** Create `scripts/preconditions/check_phase9_ground_truth.py` (not committed; ephemeral) that asserts:
+
+- `grep -c 'def initialize_session_schema' src/elspeth/web/sessions/schema.py` returns 1; capture the line number; assert it matches the value in the plan's Task 5a wording.
+- `grep -c 'initialize_session_schema(session_engine)' src/elspeth/web/app.py` returns 1; capture the line number; assert it matches `app.py:581` (the value cited in §3 and Task 5a).
+- `grep -c 'def _validate_partial_index_dialect_symmetry' src/elspeth/web/sessions/schema.py` returns 1; capture line number; assert it matches `schema.py:377` (the value cited in Task 5a).
+- `grep -rln initialize_session_schema tests/ src/ | wc -l` returns a number; print it; assert the plan's Task 5a does NOT contain an enumerated caller list (the prior enumerated list was removed in this revision in favour of the authoritative grep directive).
+- Count of `Table()` declarations in `src/elspeth/web/sessions/models.py` matches the number of classification entries in §2 plus the two future-cache placeholder rows.
+- `_stamp_schema_sentinels` and `_assert_schema_sentinels` exist in `schema.py` at the expected line range.
+- `_REQUIRED_SQLITE_TRIGGERS` exists in `schema.py:55-64` (the trigger constant referenced by Task 4's step-10 trigger-recreation specification).
+
+If any assertion fails, the kickoff script exits non-zero with a clear message identifying which fact has drifted. The implementer refreshes the plan text BEFORE proceeding to Task 1.
+
+**No commit.** Task 0 produces no code commit; it is a precondition check only. The kickoff script is run once at the start of the Phase 9 implementation session and discarded.
+
+**Rationale.** Both the Cycle-1 and Cycle-2 plan reviews caught the same staleness defects (test-caller undercount; line numbers in `app.py`/`schema.py`). Moving load-bearing assertions from plan prose into an executable precondition prevents future cycles from inheriting the same staleness.
 
 ### Task 1 — Classify every existing table
 
@@ -342,15 +389,12 @@ DB, returns a frozen plan dataclass listing per-table actions.
 
 ### Task 3 — Migration plan dataclass + Landscape event records
 
-**Goal.** Frozen dataclasses `MigrationPlan`, `MigrationPlanRecord`,
-`MigrationCompletedRecord`, `MigrationFailedRecord`, `MigrationDryRunRecord` in
+**Goal.** Frozen dataclasses `MigrationPlan`, `MigrationPlanRecord`, `MigrationCompletedRecord`, `MigrationFailedRecord`, `MigrationPartialFailureRecord`, `MigrationDryRunRecord`, `MigrationActionStartedRecord`, `MigrationActionCompletedRecord`, `MigrationOrphanCleared`, `MigrationFreshDatabaseStamped`, `MigrationEpochAdvanced`, plus the refusal-path records: `MigrationUnsupportedDialectRefusal`, `MigrationOrphanLiveTableRefusal`, `MigrationOrphanLiveColumnRefusal`, `MigrationLockHeldRefusal`, `MigrationOrphanPlanRefusal`, `MigrationDestructiveRefused`, `MigrationNonEmptyDefinitionalRefused`, `MigrationWrongApplicationRefusal`, `MigrationFKEnforcementLost`, `MigrationTriggerRecreationFailed` in
 `src/elspeth/contracts/migration.py`. Per CLAUDE.md `deep_freeze` contract: containers
 guarded via `freeze_fields`. Also define a `MigrationRecorder` Protocol in
-`contracts/migration.py` declaring `record_migration_plan`, `record_migration_completed`,
-`record_migration_failed`, `record_migration_dry_run`, `record_migration_orphan_cleared`,
-`record_migration_action_started`, `record_migration_action_completed`. The caretaker
+`contracts/migration.py` declaring `record_migration_plan`, `record_migration_completed`, `record_migration_failed`, `record_migration_partial_failure`, `record_migration_dry_run`, `record_migration_orphan_cleared`, `record_migration_action_started`, `record_migration_action_completed`, `record_migration_fresh_database_stamped`, `record_migration_epoch_advanced`, plus refusal-path methods: `record_migration_unsupported_dialect_refusal`, `record_migration_orphan_live_table_refusal`, `record_migration_orphan_live_column_refusal`, `record_migration_lock_held_refusal`, `record_migration_orphan_plan_refusal`, `record_migration_destructive_refused`, `record_migration_non_empty_definitional_refused`, `record_migration_wrong_application_refusal`, `record_migration_fk_enforcement_lost`, `record_migration_trigger_recreation_failed`. The caretaker
 accepts a `MigrationRecorder` parameter; the concrete Landscape recorder is wired at L3
-startup. Keeps caretaker layer-pure and test doubles zero-cost.
+startup. **Wiring strategy: per-call context manager.** The concrete recorder is constructed with `(url, passphrase)` and opens a fresh `LandscapeDB` via `LandscapeDB.from_url(url, passphrase=...)` per `record_*` call, matching the established per-call pattern at `auth/audit.py:174,197,226` and `composer/tutorial_service.py:268,371`. Rationale: the caretaker is a startup-blocking synchronous path; introducing a long-lived `app.state.landscape_engine` for this single use case would diverge from the rest of the subsystem and add a lifetime-management surface the project does not currently maintain. The cost (one open/close per audit event; ~26 cycles for a 12-step shadow-copy with per-action records) is acceptable on a startup path. A future optimisation — held-open engine for the duration of `run_caretaker` only — is documented as Phase-11 work but is NOT part of Phase 9. Keeps caretaker layer-pure and test doubles zero-cost.
 
 **TDD shape:**
 
@@ -394,30 +438,84 @@ triggers on old table; (6) drop views that reference old table; (7) drop old tab
 implementation file must include a comment block at the top of the shadow-copy handler
 citing this reference URL and listing these 12 steps by number.
 
+**Trigger recreation (step 10).** The session DB has six required SQLite triggers declared via `_REQUIRED_SQLITE_TRIGGERS` in `schema.py:55-64` and registered via SQLAlchemy `event.listen(Table, 'after_create', DDL(...))` listeners. These DDL events fire on `metadata.create_all()` but do NOT fire on direct `schema.CreateTable(tbl)` calls inside the shadow-copy ceremony. The executor MUST therefore enumerate the required triggers for the table being shadow-copied and emit each `CREATE TRIGGER` statement as part of step 10. The enumeration source is the same `_REQUIRED_SQLITE_TRIGGERS` constant (relocated alongside `_validate_partial_index_dialect_symmetry` into `caretaker.py` per Task 5a). A post-step-10 assertion confirms the trigger names present on the table match the expected set; mismatch raises `MigrationTriggerRecreationFailed`, which appears in §3's refusal-event list and Task 3's record-list and is bound to the record-then-raise contract.
+
 DDL is emitted exclusively via SQLAlchemy schema objects (`schema.CreateTable(tbl)`,
 `tbl.append_column()`, `AddColumn`, `text()` with bound parameters); raw f-string SQL in
 DDL handlers is forbidden. CI lint enforces this on the migration module.
 
 The shadow-copy executor obtains a raw DBAPI connection (`engine.raw_connection()`) for
 the duration of the 12-step ceremony, bypassing the engine-level `connect` event listener
-that re-enables `PRAGMA foreign_keys=ON`. The ceremony is responsible for restoring FK
-enforcement at step 12 before commit. (SQLite-only path; the engine's `connect` event
-listener that re-enables `PRAGMA foreign_keys=ON` is SQLite-specific.)
+that re-enables `PRAGMA foreign_keys=ON`. The ceremony is responsible for restoring FK enforcement at step 12 before commit.
+
+**Pool-poisoning prevention (load-bearing).** A naive implementation that toggles `PRAGMA foreign_keys=OFF` on a raw connection and then encounters an exception will return that connection to the SQLAlchemy pool with FK enforcement still disabled. Subsequent pool checkouts silently skip FK enforcement — a Tier-1 audit integrity failure per `engine.py:96-100`. The ceremony MUST therefore:
+
+1. Wrap steps 1–12 in `try/finally`.
+2. In the `finally` block, on ANY exception path (and only on the exception path), call `raw_conn.detach()` to force-discard the poisoned DBAPI connection from the pool before re-raising. The connect listener will re-stamp `foreign_keys=ON` on the next pool fill.
+3. After commit (success path), acquire a NEW pooled connection via `engine.connect()` and assert `result = conn.execute(text('PRAGMA foreign_keys')).scalar(); assert result == 1, ...`. If the assertion fails, raise `MigrationFKEnforcementLost` and treat as a partial-migration failure. This converts a silent Tier-1 failure into an immediate detectable crash.
+
+Both invariants — `detach()` on error path, `foreign_keys=1` assertion on success path — are independently tested in Task 4 (see TDD shape below).
 
 **TDD shape:**
 
 - [ ] Write failing tests for each handler in isolation, using in-memory SQLite engines.
   Include separate tests for the `create_table` path (table absent → created; no count
   guard called) and the `recreate` path (table present → count guard checked; non-empty
-  definitional table → `NonEmptyDefinitionalTable` raised).
+  definitional table → `NonEmptyDefinitionalTable` raised). The shadow-copy outcome test additionally asserts that after the ceremony completes, `SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=<table>` returns exactly the expected set of required triggers.
+- [ ] Write failing test (`test_executor_raw_connection_pool_safety.py`): simulate an exception inside the shadow-copy ceremony (monkey-patch step 5 to raise); assert that on the next `engine.connect()` checkout, `PRAGMA foreign_keys` returns `1` (the poisoned connection was detached, the pool refilled, and the connect listener re-stamped FK enforcement). The test MUST FAIL without the `try/finally` + `detach()` discipline.
+- [ ] Write failing test (`test_executor_fk_post_assertion.py`): construct a scenario where the ceremony forgets to re-issue `PRAGMA foreign_keys=ON` before commit (monkey-patch step 12 to no-op); assert `MigrationFKEnforcementLost` is raised by the post-ceremony assertion.
+- [ ] Write failing test `test_executor_shadow_copy_step_order.py`: instrument the shadow-copy handler with a statement-capture recorder (custom DBAPI cursor that records every SQL statement); execute a shadow-copy against a small fixture; assert the captured sequence matches the normative 12-step order from sqlite.org/lang_altertable.html §7 exactly. Steps 1 (FK off) and 12 (FK on + check) are independently asserted as the first and last statements respectively. A correctly-outcome-but-mis-ordered implementation MUST fail this test.
 - [ ] Run → fail.
 - [ ] Implement handlers. The shadow-copy ceremony is SQLite-specific; no per-dialect adapter is needed. The executor follows the SQLite documentation §7 normative reference cited above. `_create_table` is the fresh-creation path; `_recreate_definitional` is the present-but-recreate path with the `SELECT COUNT(*)` guard.
 - [ ] Run → pass.
 - [ ] Commit: `migration: executor with five action handlers (Phase 9 Task 4)`.
 
+### Task 4a — WebSettings fields + same-path model_validator
+
+**Goal.** Wire the Phase 9 configuration into `src/elspeth/web/config.py`. The plan's §3 step 4a and §3 Landscape/sessions DB separation invariant currently assume these settings and the same-path validator already exist; they do not. This task ships them BEFORE Task 5 wires the caretaker.
+
+Add to `WebSettings`:
+
+- `migration_dry_run: bool = False` (env: `ELSPETH_WEB__MIGRATION_DRY_RUN`)
+- `migration_orphan_scan_days: int = 90` (env: `ELSPETH_WEB__MIGRATION_ORPHAN_SCAN_DAYS`)
+
+Add an `@model_validator(mode='after')` named `_reject_same_path_for_landscape_and_sessions`. It must:
+
+- Parse both `landscape_url` and `session_db_url` as SQLAlchemy URLs.
+- For each, if `dialect == 'sqlite'`, resolve the `database` component to an absolute filesystem path (`pathlib.Path.resolve()`).
+- If both resolve to the same path, raise `ValueError("landscape_url and session_db_url resolve to the same SQLite path: {path}. Sharing one SQLite file between Landscape and sessions DBs is forbidden — it intermixes schema with audit data.")`.
+- Skip the check entirely if either dialect is non-SQLite (no equivalence concern; SQLite is the only Phase 9 target).
+
+**TDD shape:**
+
+- [ ] Write failing unit test `tests/unit/web/test_config_migration_settings.py`: assert `WebSettings(migration_dry_run=True).migration_dry_run is True`; assert `ELSPETH_WEB__MIGRATION_DRY_RUN=1 elspeth-web` parses to `migration_dry_run=True`; assert same-path config raises `ValidationError` with a message containing both 'same SQLite path' and the conflicting path.
+- [ ] Run → fail (fields and validator absent).
+- [ ] Implement fields and `_reject_same_path_for_landscape_and_sessions` following the precedent at `config.py:447,462,472`.
+- [ ] Run → pass.
+- [ ] Commit: `migration: WebSettings fields + same-path model_validator (Phase 9 Task 4a)`.
+
+The integration-level same-path test referenced in §3 ("the integration test in Task 5 asserts this invariant with a bad-config fixture") remains as Task 5's bad-config fixture and serves as a second coverage layer on top of this unit test.
+
+### Task 4.5 — No-op caretaker tracer-bullet
+
+**Goal.** Validate the caretaker activation contract end-to-end with a minimal no-op caretaker BEFORE the full executor (Task 4) is integrated into the startup path. This is a tracer bullet: it proves the `MigrationRecorder` Protocol, the `create_app()` call site, the per-call Landscape write pattern, and the orphan-scan guard all work together — under one integration test — before Task 5 commits to wiring the full caretaker.
+
+Implementation:
+
+- Module `src/elspeth/web/sessions/migration/_tracer.py` exposes `run_noop_caretaker(engine, metadata, recorder)`. It performs steps 1-7 of the §3 activation contract (read metadata; connect; classify; dialect check; orphan-scan; compute plan as all-noop; emit `MigrationPlanRecord`) and step 9 (`MigrationCompletedRecord` with empty actions). Steps 4a (dialect refusal), 5 (orphan-table refusal), and the orphan-plan startup guard ARE exercised; no DDL is emitted.
+- The tracer is gated by an env var `ELSPETH_WEB__MIGRATION_TRACER=1` and is automatically replaced by `run_caretaker` (Task 5) when Task 5 lands.
+
+**TDD shape:**
+
+- [ ] Write integration test `tests/integration/web/test_caretaker_tracer.py` exercising: clean start (all-noop plan recorded); orphan-table (refusal recorded + raised); orphan-plan-record-from-prior-run (refusal recorded + raised); dialect=postgres (refusal recorded + raised); same-path config (refusal raised at config-validation time, before caretaker runs).
+- [ ] Run → fail.
+- [ ] Implement `_tracer.py` and the `create_app()` integration.
+- [ ] Run → pass.
+- [ ] Commit: `migration: no-op caretaker tracer-bullet (Phase 9 Task 4.5)`.
+
 ### Task 5 — Caretaker activation hook
 
-**Goal.** Wire the caretaker into `create_app()` synchronously, immediately after session engine construction and before `include_router` is called. Module `src/elspeth/web/sessions/migration/caretaker.py` exports `run_caretaker(engine, metadata) -> None`. This is the same call site that `initialize_session_schema` (displaced by Task 5a) occupies at `app.py:441`; Task 5 replaces that call with `run_caretaker`. Dry-run mode honoured via `ELSPETH_WEB__MIGRATION_DRY_RUN`.
+**Goal.** Wire the caretaker into `create_app()` synchronously, immediately after session engine construction and before `include_router` is called. Module `src/elspeth/web/sessions/migration/caretaker.py` exports `run_caretaker(engine, metadata) -> None`. This is the same call site that `initialize_session_schema` (displaced by Task 5a) occupies at `app.py:581`; Task 5 replaces that call with `run_caretaker`. Dry-run mode honoured via `ELSPETH_WEB__MIGRATION_DRY_RUN`. Task 5 supersedes the Task 4.5 tracer-bullet by replacing the `_tracer.run_noop_caretaker` import with the full `caretaker.run_caretaker`. The tracer module is deleted in the same commit per the No Legacy Code Policy.
 
 **TDD shape:**
 
@@ -433,7 +531,7 @@ listener that re-enables `PRAGMA foreign_keys=ON` is SQLite-specific.)
 ### Task 5a — Displace `initialize_session_schema`
 
 **Goal.** Remove `src/elspeth/web/sessions/schema.py`'s `initialize_session_schema`
-function (called at `app.py:441`) — it crashes on any schema drift via
+function (called at `app.py:581`) — it crashes on any schema drift via
 `SessionSchemaError`, which antagonises the caretaker. Per the No Legacy Code Policy,
 the function is deleted entirely; the caretaker is the new schema gate.
 
@@ -442,12 +540,23 @@ entirely.** Option (b) — hollow it out to call the caretaker — introduces a 
 shim that survives exactly one refactor cycle before becoming confusing. Delete it.
 
 **The `_validate_partial_index_dialect_symmetry` module-level helper is load-bearing**
-(closes elspeth-obs-2ef48619d5). It is a module-level function at `schema.py:226` called
-from `initialize_session_schema` at line 60; it is NOT a closure. It MUST NOT be deleted.
+(closes elspeth-obs-2ef48619d5). It is a module-level function at `schema.py:377` called from `initialize_session_schema` (defined at `schema.py:75`) via line 185; it is NOT a closure. It MUST NOT be deleted.
 Relocate it to the caretaker module (`src/elspeth/web/sessions/migration/caretaker.py`)
 as a module-level function; call it at the end of `run_caretaker` as a post-execution
 sanity check. The caretaker calls it after every run regardless of whether any DDL was
 issued.
+
+**The schema-sentinel system at `schema.py:109-168` is also load-bearing** and MUST NOT be silently deleted with `initialize_session_schema`. It comprises two functions performing distinct safety roles:
+
+- `_stamp_schema_sentinels(engine)` — writes `PRAGMA application_id = SESSION_DB_APPLICATION_ID` (0x454C5350 — the 'ELSP' identifier) and `PRAGMA user_version = SESSION_SCHEMA_EPOCH` to a freshly-created sessions DB. The application_id refuses opening a SQLite file that belongs to a different application; the user_version is a fast-path schema-generation watermark.
+- `_assert_schema_sentinels(engine)` — refuses to proceed if the live DB's `PRAGMA application_id` does not match the expected value. This guards against accidentally pointing the caretaker at, for example, a Landscape DB file (a misconfiguration which would otherwise pass `OrphanLiveTable` and proceed to mutate the wrong file).
+
+Relocate BOTH functions into `src/elspeth/web/sessions/migration/caretaker.py`:
+
+- `_assert_schema_sentinels` runs FIRST in `run_caretaker`, before the dialect check (§3 step 4a), the orphan-table scan (§3 step 5), and plan computation. A mismatched `application_id` aborts the caretaker with `WrongApplicationDatabase(actual_application_id, expected_application_id, db_path)` and records the refusal as `MigrationWrongApplicationRefusal` (see §3's record-then-raise contract) before raising.
+- `_stamp_schema_sentinels` runs in the fresh-DB path within the executor's `_create_table` handler (and only on the first action when reflection reports zero tables). The caretaker emits a `MigrationFreshDatabaseStamped` audit event after the stamps are written.
+
+The `SESSION_SCHEMA_EPOCH` watermark continues to advance per release. The caretaker writes the current epoch on every successful run completion (a `MigrationEpochAdvanced` event records the old and new values). This preserves the existing rollback-detection capability that `_assert_schema_sentinels` provides today.
 
 **TDD shape:**
 
@@ -461,27 +570,23 @@ issued.
 - [ ] Run → fail (function still exists).
 - [ ] Delete `initialize_session_schema` from `schema.py`. Move
   `_validate_partial_index_dialect_symmetry` into `caretaker.py`; call it at the end of
-  `run_caretaker`. Update `app.py:441` to remove the `initialize_session_schema` call
+  `run_caretaker`. Update `app.py:581` to remove the `initialize_session_schema` call
   (the caretaker hook from Task 5 replaces it).
-- [ ] Update ALL caller sites in the same commit — these must not be left referencing
-  the deleted function (exhaustive list at HEAD — run
-  `grep -rn initialize_session_schema tests/` to confirm no other test call sites exist
-  before committing; also run `grep -rn initialize_session_schema src/` to confirm
-  production callers: `app.py:441` should be the only production caller; if grep finds
-  others, those must be updated in the same commit):
-  - `tests/integration/web/conftest.py`
-  - `tests/integration/web/composer/guided/test_step_handlers.py`
-  - `tests/integration/web/test_blobs_ready_hash_postgres.py`
-  - `tests/integration/web/test_compose_loop_latency_sanity.py`
-  - `tests/integration/pipeline/test_composer_llm_eval_characterization.py`
-  - `tests/integration/web/test_inv_audit_ahead_backward.py` (line 39)
-  - `tests/integration/web/composer/guided/test_progressive_disclosure.py` (line 111)
-  - `tests/integration/web/composer/guided/conftest.py` (line 64)
-  - `tests/integration/web/test_compose_loop_concurrent_sessions.py` (line 52)
-  Each of these currently calls `initialize_session_schema(engine)` to set up the
-  schema before test bodies run. Replace with direct `metadata.create_all(engine)` or
-  a shared fixture that calls the caretaker, depending on whether the test is
-  exercising the caretaker path or just needs a schema-initialised DB.
+- [ ] Exhaustive caller list: at the start of Task 5a, run both of these greps and treat their output as the authoritative call-site enumeration:
+
+  ```
+  grep -rln initialize_session_schema tests/
+  grep -rln initialize_session_schema src/
+  ```
+
+  At HEAD on 2026-05-19 these greps return approximately 50 test files and `src/elspeth/web/app.py` as the sole production caller. The exact set drifts as the codebase evolves — the prior plan revision's enumerated 9-file list became stale and was removed. The grep is authoritative.
+
+  Update **every file returned by the greps** in the same commit. For each call site, replace `initialize_session_schema(engine)` with one of:
+
+  - `metadata.create_all(engine)` — for tests/fixtures that only need a schema-initialised DB and are NOT exercising the caretaker path.
+  - A shared `caretaker_initialised_engine` fixture — for tests that ARE exercising or asserting the caretaker activation path.
+
+  Run the greps again BEFORE committing to confirm zero residual references. The commit MUST land with the grep returning empty.
 - [ ] Run → pass.
 - [ ] Commit: `migration: remove initialize_session_schema; caretaker is new schema gate (Phase 9 Task 5a)`.
 
@@ -510,6 +615,7 @@ idempotence and orphan-scan logic.
 
 - [ ] Write failing test verifying record emission order (plan-before-execution,
   completion-after-execution), and that an audit-write failure aborts the caretaker.
+- [ ] Write failing test (`test_refusal_path_events.py`): for each of the nine refusal paths above, construct a caretaker scenario that triggers the refusal; assert the corresponding Landscape event was recorded BEFORE the exception propagates (use a `MigrationRecorder` test double that records call order). Parametrize over all nine refusal paths.
 - [ ] Run → fail.
 - [ ] Implement Landscape recorder methods (`record_migration_plan`,
   `record_migration_completed`, `record_migration_failed`, `record_migration_dry_run`)
@@ -526,6 +632,13 @@ with partial constraints; the executor handles the documented SQLite-specific ca
 `CREATE TABLE` is transactional, `PRAGMA` is not). Where transactional DDL is unavailable
 for a specific operation, the executor runs per-table transactions and emits a
 `MigrationPartialFailureRecord` listing which tables succeeded and which did not.
+
+**Disjoint failure-record conditions.** The two failure record types fire under non-overlapping conditions:
+
+- `MigrationFailedRecord` — emitted when the plan fails BEFORE any action's transaction has committed, OR when a per-action rollback completes cleanly leaving the DB at its pre-plan state. The "DB UNCHANGED" marker is correct only in this case.
+- `MigrationPartialFailureRecord` — emitted when AT LEAST ONE action's transaction has committed before a subsequent action fails. The record enumerates which actions committed (their SQL is durable) and which did not. The DB is in a *partially migrated* state and the operator's recovery path is the Task 10 runbook entry for partial-migration recovery.
+
+Determining which record fires is a load-bearing executor concern: the executor maintains a `committed_actions: list[MigrationActionRecord]` accumulator and emits `MigrationFailedRecord` iff that list is empty at failure time.
 
 The fail-safe must also handle the case where `MigrationFailedRecord` write itself
 fails after a successful rollback. Per CLAUDE.md audit primacy: no retry; the caretaker
@@ -553,6 +666,14 @@ Add an `elspeth migration force-clear-orphan-plan <plan_id>` subcommand to the e
 text, then exits. Documented in the Task 10 runbook step (3): `elspeth migration
 force-clear-orphan-plan <id> --reason "<text>"`. The escape hatch preserves the audit
 chain.
+
+**Input sanitisation.** The `--reason "<text>"` argument is Tier 3 operator input and must be bounded before reaching the Landscape:
+
+- Length cap: 500 characters. Typer annotation: `Annotated[str, typer.Option(..., max_length=500)]`.
+- Character set: printable ASCII + common Unicode word-chars; control characters (anything matching `[\x00-\x1F\x7F]`) rejected.
+- Empty/whitespace-only rejected.
+
+A unit test (`tests/unit/cli/test_migration_force_clear_orphan_plan.py`) asserts each rejection path emits a clear Typer error and does NOT write any Landscape event.
 
 **TDD shape:**
 
@@ -661,11 +782,19 @@ The runbook must also document:
   newer tables (no DDL, classification only). Option (a) is preferred; option (b) is a
   code-level emergency override.
 
-- **Mid-ceremony SIGKILL recovery.** If the process dies during the 12-step shadow-copy
-  ceremony, the next caretaker boot's orphan-scan fires. The operator uses the per-action
-  audit records (from Task 6) to reconstruct which ceremony steps committed. If FK
-  enforcement is in an indeterminate state, the executor runs `PRAGMA foreign_key_check`
-  on next boot and refuses to start if any violation is reported.
+- **Mid-ceremony SIGKILL recovery.** If the process dies during the 12-step shadow-copy ceremony, the next caretaker boot's orphan-plan scan fires (Task 7). The operator uses the per-action audit records (Task 6) to reconstruct which ceremony steps committed. After running `elspeth migration force-clear-orphan-plan <id>` to clear the orphan-plan record, the next caretaker boot encounters a SECOND refusal: the live DB now contains a `<table>_new` orphan (if SIGKILL occurred between steps 2 and 8), which triggers `OrphanLiveTable`. Recovery procedure:
+  1. Inspect per-action records to determine the last completed ceremony step.
+  2. If steps 1-7 committed but step 8 (rename) did NOT: drop the `<table>_new` table manually (the original `<table>` is intact since drop was step 7, but the rename never happened — actually no, step 7 drops `<table>` and step 8 renames `<table>_new` to `<table>`, so this state is: no `<table>`, has `<table>_new`). Manually `ALTER TABLE <table>_new RENAME TO <table>` and run `PRAGMA foreign_key_check`; if clean, retry deploy.
+  3. If steps 1-6 committed but step 7 did NOT: drop the orphan `<table>_new` (the original `<table>` is intact); retry deploy.
+  4. If FK enforcement is in an indeterminate state (the process died after step 1 disabled FK but before step 12 re-enabled): the executor's post-ceremony assertion in Task 4 catches this on next boot (`MigrationFKEnforcementLost`); the operator runs `PRAGMA foreign_keys=ON; PRAGMA foreign_key_check;` to confirm integrity before retrying.
+  5. In all paths, ensure `application_id` and `user_version` (the schema sentinels relocated by Task 5a) are intact via `PRAGMA application_id; PRAGMA user_version;` before retrying. If the sentinels were lost, restore from backup.
+
+- **Landscape DB failure recovery.** If the Landscape DB itself is the source of caretaker refusal (disk full, file corruption, locked by another process), the `force-clear-orphan-plan` recovery tool will ALSO fail because it writes to the same Landscape. Recovery procedure:
+  1. Diagnose the Landscape failure via direct SQLite inspection of the Landscape DB file (`sqlite3 <landscape_path> '.tables'`).
+  2. If disk full: free space; re-run caretaker.
+  3. If corruption: the operator MUST restore the Landscape DB from backup before any other recovery. Phase 9 has no path to write to a corrupt Landscape — by audit-primacy design, the caretaker cannot proceed without a working audit channel. The sessions DB is unmodified in this scenario (the caretaker aborted before plan execution).
+  4. If locked by another process: identify the holder via `fuser <landscape_path>` or `lsof <landscape_path>`; resolve the conflict; re-run caretaker.
+  5. After Landscape recovery, retry caretaker normally. If the sessions DB had an orphan plan from a prior crash, the orphan-plan-scan refusal will now succeed in recording a `MigrationOrphanPlanRefusal` and the operator can proceed with the orphan-cleanup procedure above.
 
 Update `project_db_migration_policy` memory entry: mark superseded by Phase 9; reference
 the runbook.
@@ -689,6 +818,12 @@ schema changes land without corresponding fixture regeneration: if a Phase-10 sc
 addition creates a new table, the gen-3 fixture no longer contains it, and the
 fixture-freshness job fails until the fixture is regenerated.
 
+**Second CI gate: synthetic-only + tamper-detection.** Phase 9 ships a second job (`ci-fixture-content-integrity`) that runs on every PR touching `tests/fixtures/migration/` or `FIXTURES.md`. The job:
+
+1. Verifies each fixture binary's SHA-256 matches the entry in `tests/fixtures/migration/FIXTURES.md`. Mismatch → fail.
+2. Opens each fixture in read-only mode and asserts the synthetic-only constraint: every text column matching session-content/user-identifier patterns (`session_id`, `user_id`, email fields, preference content text) is scanned. Rules: emails must end in `.invalid`, `.example`, or `.test`; UUIDs must come from a documented synthetic-UUID set declared in `tests/fixtures/migration/synthetic_uuid_set.json`. Violation → fail with the offending row+column identified.
+3. The synthetic-UUID set is a CHECKED-IN allowlist (~50 UUIDs generated by `uuid.uuid5(namespace=DNS, name='elspeth-fixture-NNNN.invalid')`) — deterministic, regenerable, and easily auditable. Any UUID in a fixture not in the allowlist fails the gate. This addresses the systems reviewer's concern that UUIDs are otherwise indistinguishable from production-origin UUIDs.
+
 **TDD shape:**
 
 - [ ] Write failing test: `tests/integration/web/test_fixture_freshness.py` — parametrized
@@ -696,10 +831,12 @@ fixture-freshness job fails until the fixture is regenerated.
   the resulting `MigrationPlanRecord` contains only expected schema-delta actions (none
   unexpected; fixture is fresh relative to HEAD schema minus the known generational
   delta). A fixture that requires unexpected actions → test failure.
-- [ ] Run → fail (test infrastructure absent).
+- [ ] Write failing test `tests/integration/web/test_fixture_content_integrity.py`: parametrized over the three fixtures + a synthetic 'tampered' fixture; for the legitimate three, assert pass; for the tampered fixture (a fixture binary with one byte flipped), assert fail with a SHA-256 mismatch error; for a fixture seeded with a non-allowlist UUID, assert fail with a synthetic-only-violation error.
+- [ ] Run → fail (both test infrastructure and CI scripts absent).
 - [ ] Implement parametrized fixture-freshness test and wire into CI as a matrix job
   over all three fixtures (add to `.github/workflows/` or equivalent CI config as
   `ci-fixture-freshness` job with matrix `fixture: [gen_1, gen_2, gen_3]`).
+- [ ] Implement the second CI job script `scripts/cicd/verify_migration_fixtures.py` and wire it into the workflow alongside the schema-freshness job (`ci-fixture-content-integrity`).
 - [ ] Run → pass.
 - [ ] Commit: `migration: CI fixture-freshness gate (Phase 9 Task 11)`.
 
@@ -806,6 +943,7 @@ schema.
 | 1A (plan 12) | `user_preferences_table` (user_id PK, default_composer_mode, banner_dismissed_at, updated_at) | **None.** Phase 9 only adds `info={"migration_class": "data"}` to the `Table()` call (Task 1). |
 | 4A (plan 21a) | `tutorial_completed_at` column on `user_preferences_table` | **None.** Phase 9's executor handles "new column on data table" via the `preserve_add_columns` action. |
 | 5b (plan 18a) | `interpretation_events_table` + `composition_states.provenance` enum extension (`interpretation_resolve`) | **None to the table definition.** Phase 9 adds the `migration_class` info and handles the closed-enum extension via the shadow-copy ceremony. |
+| 6 (shipped) | `composer_completion_events_table` + `skill_markdown_history_table` | **None.** Phase 9 only adds `info={"migration_class": "data"}` to both `Table()` calls (Task 1). |
 
 The upstream plans explicitly defer to Phase 9 (plan 12 implicit via roadmap §D6; plan
 21a §"DB-delete cadence (Phase 9 owns the structural fix)"; plan 18a §"Migration runner
@@ -831,6 +969,7 @@ Phase 9 is SQLite-only by design (operator decision 2026-05-16). Future Postgres
 - **Phase 5b shipping** — `interpretation_events_table` and the
   `composition_states.provenance` enum extension are added by Phase 5b. Phase 9 cannot
   ship before Phase 5b is present in git history.
+- Phase 6 (already shipped at RC5.2 commit 93c374d63) — defines `composer_completion_events_table` and `skill_markdown_history_table`. Phase 9 classifies both as `data`.
 - **Operator decision: fixture-generation approach (historical-revision-checkout vs
   synthetic-from-MetaData)** — the three-generation fixture used in Tasks 7/8/9 can be
   produced either by checking out a historical git revision to obtain old schema
@@ -860,3 +999,5 @@ roadmap §B Phase 9 row from NOT STARTED to SHIPPED.
 ---
 
 2026-05-16 — Cycle-2 fix-up applied: 16 of 21 findings from 4-reviewer panel addressed. 5 items deferred to operator: sub-phase split, activation site (create_app vs lifespan), cross-process advisory lock strategy, plus operator-confirmation on §H1 cumulative-loop closure and policy-supersession memory update. 2026-05-16 — Operator decision: Phase 9 scope cut to SQLite only. Postgres deferred. Resolved: advisory-lock dialect strategy (Task 7a `flock` sidecar), per-dialect DDL adapter (removed), FK pragma fight (SQLite-only). Activation site resolved to `create_app()` synchronous path. Remaining operator items: sub-phase split (9A/9B/9C); policy-supersession memory update on ship.
+
+2026-05-19 — Cycle-3 revision: 8 blockers from the 4-reviewer panel applied (transaction-scope contradiction, raw_connection pool poisoning, schema-sentinel preservation, MigrationRecorder wiring, WebSettings fields + same-path validator, Phase 6 classification gap, refusal-path event types, test-caller list staleness). 10 warnings applied (trigger recreation in shadow-copy, tracer-bullet Task 4.5, fixture content-integrity CI gate, step-ordering test, --reason input sanitisation, mid-SIGKILL refusal-ordering runbook, Landscape DB failure runbook, bootstrap-ordering invariant, Task 0 ground-truth refresh, line-number corrections). Cycle-3 sign-off pending.

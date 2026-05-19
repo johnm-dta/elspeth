@@ -1,0 +1,255 @@
+{
+  "review_metadata": {
+    "reviewer": "architecture-review-agent",
+    "model": "claude-sonnet-4-6",
+    "date": "2026-05-19",
+    "plan_path": "docs/composer/ux-redesign-2026-05/22-phase-9-migration-runner.md",
+    "cycle": 2,
+    "scope": "Structural execution of J1-approved Option (c) per-table preserve-on-recreate. J1 verdict NOT relitigated.",
+    "branch": "RC5.2"
+  },
+  "status": "CONDITIONAL_APPROVE",
+  "blocking_count": 2,
+  "warning_count": 5,
+  "issues": [
+    {
+      "id": "A-001",
+      "severity": "BLOCKING",
+      "category": "structural_contradiction",
+      "location_in_plan": "§3 step 8 vs Task 4 vs Task 7",
+      "finding": "The plan makes three mutually inconsistent claims about transaction boundaries during migration execution. §3 step 8 states 'Caretaker executes the plan inside a single transaction.' Task 4 specifies the 12-step shadow-copy ceremony uses `engine.raw_connection()` to toggle `PRAGMA foreign_keys` — a pragma that is explicitly non-transactional in SQLite's own documentation. Task 7 then introduces `MigrationPartialFailureRecord` for 'dialects without transactional DDL,' implying a per-table transaction fallback. These three descriptions cannot simultaneously be true. Concretely: a `PRAGMA foreign_keys=OFF` issued inside a transaction in SQLite takes immediate effect outside the transaction boundary; the pragma toggle is never rolled back. The 'single transaction' framing in §3 is false for any plan that includes the shadow-copy action.",
+      "evidence": "sqlite.org/lang_altertable.html §7 explicitly states the FK pragma toggle is step 1 of the ceremony (disable) and step 12 (re-enable); SQLite pragma changes are connection-scoped, not transaction-scoped. Task 7 acknowledges 'documented SQLite-specific cases' require per-table transactions but does not name them or reconcile with the §3 single-transaction claim. The relationship between `MigrationFailedRecord` and `MigrationPartialFailureRecord` is undefined — both failure records can apparently fire but the conditions that trigger each are not disjoint.",
+      "resolution": "Replace the single-transaction claim in §3 step 8 with the accurate model: the executor uses per-action transactional discipline. DDL actions that SQLite transacts (CREATE TABLE, ADD COLUMN, DROP TABLE) are wrapped in explicit transactions with rollback on failure. The shadow-copy ceremony is atomic at the ceremony level (not at the SQLite transaction level) because PRAGMA toggles are connection-scoped. Define exactly two failure records with non-overlapping trigger conditions: `MigrationFailedRecord` fires when the ENTIRE migration plan fails with full rollback (i.e., no action has committed yet, or rollback was complete); `MigrationPartialFailureRecord` fires when at least one per-table action committed before a subsequent action failed (partial state). Remove the §3 'single transaction' claim entirely — replace with 'the executor uses the strongest transactional discipline available per action type.'",
+      "confidence": "HIGH"
+    },
+    {
+      "id": "A-002",
+      "severity": "BLOCKING",
+      "category": "new_escape_hatch_bypasses_tier1_guarantee",
+      "location_in_plan": "Task 4 — shadow-copy ceremony",
+      "finding": "The plan's 12-step shadow-copy ceremony obtains a raw DBAPI connection via `engine.raw_connection()` to bypass the engine's `connect` event listener that re-enables `PRAGMA foreign_keys=ON`. This is the only location in the entire codebase that uses `engine.raw_connection()` — verified by grep across `src/`. The ceremony disables FK enforcement at step 1 and re-enables it at step 12. If any of steps 2-11 raise an exception, the DBAPI connection returns to the SQLAlchemy connection pool with `foreign_keys=OFF`. The engine's `connect` event listener (`engine.py:69-81`) fires ONLY on new DBAPI connections — it does NOT fire on pool checkout of an existing connection. Subsequent operations from that pooled connection silently skip FK enforcement — a Tier 1 audit integrity failure per `engine.py:96-100`'s own contract. The engine itself would fail its startup FK probe (`foreign_keys != 1 → RuntimeError`) but that probe runs once at engine construction, not on every checkout.",
+      "evidence": "src/elspeth/web/sessions/engine.py:69-81 registers the `connect` listener. `connect` fires on new DBAPI connections, not on pool checkouts. grep `raw_connection` across src/ returns zero results — this is a new escape hatch. engine.py:96-100 declares 'Tier 1 integrity requires foreign-key enforcement on SQLite' and crashes on startup if FK is off. The Task 10 mitigation ('executor runs `PRAGMA foreign_key_check` on next boot') only detects existing violations, not the enforcement-disabled window between ceremony failure and process restart.",
+      "resolution": "The ceremony's error path must either: (a) call `raw_conn.detach()` to force-discard the poisoned connection from the pool before re-raising (SQLAlchemy's `detach()` prevents the connection from being returned to the pool), OR (b) restore `PRAGMA foreign_keys=ON` in a `finally` block before the connection can be returned to the pool — this is safer because it handles both normal and error paths. Additionally, add a post-ceremony assertion: after the `raw_conn.close()` or `detach()`, acquire a new pooled connection and assert `PRAGMA foreign_keys = 1`; crash if not 1. This converts a silent Tier-1 integrity failure into an immediate detectable crash. The Task 7a `flock` advisory lock is necessary but not sufficient — it serializes process entry but does not protect the pool poisoning that occurs within a single process's error path.",
+      "confidence": "HIGH"
+    },
+    {
+      "id": "A-003",
+      "severity": "WARNING",
+      "category": "caller_count_underestimate",
+      "location_in_plan": "Task 5a — 'exhaustive list' of initialize_session_schema call sites",
+      "finding": "Task 5a presents a 9-file 'exhaustive list' of test files that call `initialize_session_schema` and must be updated when the function is deleted. The actual count at HEAD is 51 unique test files across integration, unit, and property-based test directories. The plan explicitly says 'run `grep -rn initialize_session_schema tests/` to confirm no other test call sites exist before committing' — that grep instruction is correct, but calling the 9-file list 'exhaustive' is misleading. An implementer who treats the 9 files as the complete set will ship a broken test suite.",
+      "evidence": "grep -rn initialize_session_schema tests/ at HEAD returns 178 lines across 51 unique files. The plan lists 9. The missed files span: tests/unit/web/ (conftest.py, 30+ unit test files), tests/property/web/composer/ (conftest.py + test file), and 5 additional integration test files not listed. The plan's own grep-before-committing instruction would catch this at implementation time, but the 'exhaustive list' framing creates a false safety signal.",
+      "resolution": "Remove the word 'exhaustive' from the list description. Retitle it 'partial list — run grep to find all callers before committing.' The grep instruction already in the plan is correct; the label around the list is not. The implementation commit must replace all 51 call sites atomically per the No Legacy Code Policy.",
+      "confidence": "HIGH"
+    },
+    {
+      "id": "A-004",
+      "severity": "WARNING",
+      "category": "blast_radius_not_sub_phased",
+      "location_in_plan": "§4 task sequence; §8 'sub-phase split (9A/9B/9C)' deferred",
+      "finding": "The plan sequences 11 tasks without any end-to-end demonstration of the activation contract before Task 5. This means Tasks 1-4 (classification, detector, dataclasses, executor) are completed before anyone confirms that the L0/L3 Protocol split, the synchronous `create_app()` hook, and the Landscape write path work together. If the activation contract has a structural flaw (e.g., the `MigrationRecorder` Protocol is too narrow, or the synchronous call site interacts badly with `lifespan` startup timing), it is discovered after 4 committed tasks that must be partially unwound. A sub-phase split would expose this risk earlier.",
+      "evidence": "Task 5 ('caretaker activation hook') is the first task that exercises the end-to-end path. Tasks 1-4 are all pre-activation: classification annotations, detector logic, dataclass definitions, executor handlers. The plan defers the 9A/9B/9C split decision to operator (§862). The blast-radius weighted file count for the full plan is approximately 23 weighted points (4 new core L3 migration modules × 2 = 8; 1 new L0 contracts module × 2 = 2; 3 new CI scripts × 0.5 = 1.5; ~8 new test files × 0.5 = 4; 1 models.py edit × 2 = 2; 1 schema.py deletion × 2 = 2; 1 app.py edit × 2 = 2; 3 binary fixtures × 1 = 3; total ≈ 24.5), placing this firmly in the High risk band.",
+      "resolution": "See recommendation R-002 for a concrete sub-phase split with rationale. The operator decision deferred in §862 should be resolved now rather than left open: the natural split is non-ambiguous and does not require operator judgment beyond acknowledging it.",
+      "confidence": "MEDIUM"
+    },
+    {
+      "id": "A-005",
+      "severity": "WARNING",
+      "category": "one_way_door_trigger_recreation",
+      "location_in_plan": "Task 4 — _recreate_definitional and shadow-copy ceremony",
+      "finding": "The 12-step shadow-copy ceremony for `_shadow_copy_enum_rewrite` and `_recreate_definitional` must recreate all triggers, indexes, and views on the table being ceremonially replaced (steps 5, 4, 6, 9, 10, 11 in the normative reference). The plan's ceremony description lists all 12 steps but does not address how the executor discovers and recreates existing triggers and views on the tables being operated on. The session DB has 6 required triggers (defined in schema.py:56-64) with non-trivial DDL. These triggers are not declared in SQLAlchemy `metadata` — they are registered via `event.listen` DDL events on the `Table` objects. The `_validate_required_triggers` function in schema.py already checks for them post-creation. If the shadow-copy ceremony recreates `composition_states_table` or any other table covered by a trigger without also recreating the trigger, the post-run `_validate_partial_index_dialect_symmetry` check (moved into caretaker by Task 5a) does not check triggers — but the `_validate_required_triggers` check in the existing schema.py does. The question is: does the caretaker call `_validate_required_triggers` after the ceremony, or does it rely solely on the moved `_validate_partial_index_dialect_symmetry`?",
+      "evidence": "schema.py:55-64 declares `_REQUIRED_SQLITE_TRIGGERS` as a frozenset of 6 trigger names. schema.py:207-228 implements `_validate_required_triggers` which checks `sqlite_master` for these triggers post-creation. Task 5a says `_validate_partial_index_dialect_symmetry` is moved into caretaker.py and called after every run — but makes no mention of `_validate_required_triggers`. The triggers are registered via `event.listens_for(composition_states_table, 'after_create')` DDL events (likely in models.py) — this DDL fires on `metadata.create_all()` but does NOT fire on `CREATE TABLE` statements emitted directly by the executor via `schema.CreateTable(tbl)` in the shadow-copy ceremony.",
+      "resolution": "Explicitly include `_validate_required_triggers` in the caretaker's post-run validation sequence alongside `_validate_partial_index_dialect_symmetry`. For each table that goes through the shadow-copy or recreate ceremony, the executor must independently recreate all registered DDL event listeners (triggers) for that table — not rely on `metadata.create_all()` DDL events, which do not fire when the executor uses `schema.CreateTable()` directly. Document this as an explicit step 9.5 in the ceremony: 'For each registered DDL `after_create` listener on this table, emit the DDL text directly.' Alternatively, use `Table.create(engine)` instead of `schema.CreateTable(tbl)` to trigger the DDL events — but verify this interacts correctly with the raw DBAPI connection.",
+      "confidence": "HIGH"
+    },
+    {
+      "id": "A-006",
+      "severity": "WARNING",
+      "category": "alembic_rejection_cost_acknowledgment",
+      "location_in_plan": "§2 Option (b) trade-offs",
+      "finding": "The plan's rejection of Alembic cites two arguments: (a) auditability deficit — Alembic records which revision was applied, not individual DDL statements; (b) closed-enum uniformity — Option (c) handles the shadow-copy ceremony in a single generalised path while Alembic requires per-migration hand-written SQL for the same ceremony. Both arguments are defensible. However, the plan understates the long-term maintenance cost that the operator is accepting in choosing Option (c): ~400 LOC of custom runner + ~8 new test files + 3 binary fixtures + FIXTURES.md ceremony + CI fixture-freshness job + full runbook with 4 emergency procedures + `enforce_migration_classification.py` CI gate + `force-clear-orphan-plan` CLI subcommand. The 'lower ceremony than Option (b)' trade-off claim is only true for the steady state; the construction cost for Option (c) is comparable to a barebones Alembic setup. This is not a reason to reverse the decision; it is a reason to be honest about what the operator is buying.",
+      "evidence": "Option (b) trade-offs table says 'Simplicity: Poor — high ceremony.' Option (c) trade-offs table says 'Simplicity: Good — ~400 LOC.' The actual Option (c) scope is: 4 migration modules + 1 contracts module + 1 CI script + 8+ test files + 3 binary fixtures + FIXTURES.md + operator runbook (4 emergency procedures) + CLI subcommand + CI matrix job. A minimal Alembic setup (env.py + alembic.ini + one migration file + thin Landscape-event wrapper) is fewer moving parts. The J1 decision is sound on the auditability axis; the simplicity axis is mischaracterized.",
+      "resolution": "Add a sentence to Option (c)'s trade-offs table acknowledging the construction cost: 'Initial construction cost is comparable to Alembic; the simplicity advantage accrues over time as no migrations directory accumulates and no revision graph requires maintenance.' Do not relitigate the verdict; correct the framing.",
+      "confidence": "MEDIUM"
+    },
+    {
+      "id": "A-007",
+      "severity": "WARNING",
+      "category": "schema_sentinel_interaction",
+      "location_in_plan": "§3 activation contract; Task 5a",
+      "finding": "The existing `initialize_session_schema` writes `SESSION_SCHEMA_EPOCH` and `SESSION_DB_APPLICATION_ID` as SQLite PRAGMAs on fresh DBs (`_stamp_schema_sentinels`) and validates them on existing DBs (`_assert_schema_sentinels`). The plan does not specify what the caretaker does with these PRAGMAs. If the caretaker leaves the sentinel stamping in `initialize_session_schema` and then `initialize_session_schema` is deleted, no code stamps new DBs with the sentinels. If the caretaker omits the sentinel check, a DB with a wrong `user_version` (stale epoch) no longer triggers the actionable 'delete and restart' error — instead, the caretaker runs a drift-detect-and-migrate that may succeed when the operator intended the old crash behavior.",
+      "evidence": "schema.py:109-123 (`_stamp_schema_sentinels`) writes both PRAGMAs. schema.py:126-168 (`_assert_schema_sentinels`) validates them and raises `SessionSchemaError` with the actionable message. Neither function is mentioned in the caretaker spec (§3), Task 5, or Task 5a. Task 5a says 'Delete `initialize_session_schema` from `schema.py`' without specifying the disposition of `_stamp_schema_sentinels` and `_assert_schema_sentinels`.",
+      "resolution": "Phase 9's caretaker supersedes the epoch-based crash posture — after Phase 9, the DB can be at any prior generation and the caretaker migrates it rather than refusing. The plan must explicitly state: (a) `_assert_schema_sentinels` is DELETED (its purpose — crash on old epoch — is superseded by the caretaker); (b) `_stamp_schema_sentinels` is MOVED into the caretaker and called after a successful fresh-DB creation (the caretaker's `_create_table` action for a fresh DB); (c) the `SESSION_SCHEMA_EPOCH` constant is retained as a documentation artifact but is no longer enforced at runtime.",
+      "confidence": "HIGH"
+    }
+  ],
+  "blast_radius": {
+    "raw_file_count": 31,
+    "weighted_score": 24.5,
+    "risk_level": "HIGH",
+    "breakdown": [
+      {"path": "src/elspeth/web/sessions/migration/__init__.py", "type": "new L3 core", "weight": 2.0, "note": "new package init"},
+      {"path": "src/elspeth/web/sessions/migration/detector.py", "type": "new L3 core", "weight": 2.0, "note": "drift detector"},
+      {"path": "src/elspeth/web/sessions/migration/executor.py", "type": "new L3 core", "weight": 2.0, "note": "DDL executor — critical path"},
+      {"path": "src/elspeth/web/sessions/migration/caretaker.py", "type": "new L3 core", "weight": 2.0, "note": "activation hook — critical path"},
+      {"path": "src/elspeth/contracts/migration.py", "type": "new L0 contracts", "weight": 2.0, "note": "public Protocol surface"},
+      {"path": "src/elspeth/web/sessions/models.py", "type": "existing core — 15 Table annotations", "weight": 2.0, "note": "classification annotations"},
+      {"path": "src/elspeth/web/sessions/schema.py", "type": "existing core — deleted function", "weight": 2.0, "note": "delete initialize_session_schema; move validator"},
+      {"path": "src/elspeth/web/app.py", "type": "existing core — call site", "weight": 2.0, "note": "replace call at line 581"},
+      {"path": "scripts/cicd/enforce_migration_classification.py", "type": "new CI script", "weight": 0.5},
+      {"path": "tests/fixtures/migration/*.sqlite (x3)", "type": "new binary fixtures — one-way", "weight": 1.0, "note": "checked-in binary SQLite files"},
+      {"path": "tests/fixtures/migration/FIXTURES.md", "type": "new fixture manifest", "weight": 0.5},
+      {"path": "new test files x8 approx", "type": "tests", "weight": 0.5, "note": "unit + integration + fixture-freshness"},
+      {"path": "51 existing test files calling initialize_session_schema", "type": "tests — all must be updated", "weight": 0.5, "note": "Task 5a caller sweep"},
+      {".github/workflows/ci-fixture-freshness (or equivalent)", "type": "new CI workflow", "weight": 0.5}
+    ],
+    "recommendation": "Consider sub-phasing per R-002. The blast radius is justified by the goal — this is a one-time structural migration runner — but 51 test files updating in a single Task 5a commit creates a large atomic commit that is difficult to review and easy to miss call sites in."
+  },
+  "one_way_doors": [
+    {
+      "change": "Checked-in binary SQLite fixtures (3 files under tests/fixtures/migration/)",
+      "risk": "MEDIUM",
+      "mitigation_in_plan": "PARTIAL — FIXTURES.md SHA-256 tamper detection and CI fixture-freshness job. However, the plan does not specify a fixture REGENERATION procedure when they need updating. It says 'iterate detector/executor until all matrix entries pass' but the generation ceremony (checkout historical revision, boot app, seed data, copy file) is documented only as a description, not as a script checked into the repo.",
+      "recommendation": "Add a `scripts/fixtures/generate_migration_fixtures.py` script that performs the three-generation generation ceremony deterministically. Without a script, the next person who must regenerate (because Phase 10 adds a table) has only prose instructions. This is the 'fixture rot' risk (R5) expressed at the ceremony level rather than the detection level."
+    },
+    {
+      "change": "Deletion of initialize_session_schema and _assert_schema_sentinels",
+      "risk": "HIGH",
+      "mitigation_in_plan": "YES — No Legacy Code Policy applies; the caretaker is the new gate. Mitigation is the caretaker itself. Rollback requires reverting the commit and restoring the deleted function.",
+      "recommendation": "Ensure the sentinel stamping (_stamp_schema_sentinels) is explicitly transferred to the caretaker's fresh-DB path. See A-007."
+    },
+    {
+      "change": "user_secrets table classified non-negotiably as data",
+      "risk": "LOW",
+      "mitigation_in_plan": "YES — _recreate_definitional's SELECT COUNT(*) guard mechanically prevents any data table with rows from being dropped, making misclassification-as-definitional a loud crash rather than silent destruction. The 'non-negotiable' language in the plan acknowledges the sensitivity without providing a reclassification path — but the COUNT(*) guard IS the rollback: reclassifying user_secrets as definitional on a non-empty DB crashes loudly rather than destroying data.",
+      "recommendation": "No action required; the COUNT(*) guard is the correct mitigation."
+    },
+    {
+      "change": "Post-ship defect recovery (R8) defaults to delete-the-DB",
+      "risk": "MEDIUM",
+      "mitigation_in_plan": "YES — Task 10 runbook explicitly documents the 'operator backs up sessions DB, performs delete-the-DB, restarts' procedure. The accepted cost is named.",
+      "recommendation": "No action required; cost is named and accepted."
+    }
+  ],
+  "tracer_bullet_opportunity": {
+    "available": true,
+    "description": "Tasks 1-4 complete before any end-to-end path is exercised. The natural tracer bullet is a minimal Task 5 that wires a no-op caretaker: it reads metadata, classifies tables, emits a MigrationPlanRecord, and exits — no executor, no DDL. This validates: (a) the MigrationRecorder Protocol at L0 works with the Landscape at L3; (b) the synchronous create_app() call site is viable; (c) the Landscape write path accepts the new record types. If the activation contract has a structural flaw, it is discovered after 1 commit instead of 4.",
+    "suggested_insertion": "Insert a 'Task 4.5 — Tracer bullet activation (no DDL)' between Tasks 4 and 5 proper: implement run_caretaker() as classify-and-record-only; wire it into create_app(); write the integration test that confirms a MigrationPlanRecord appears in the Landscape and the app starts. Gate Task 5 (executor wiring) on Task 4.5 passing."
+  },
+  "sub_phase_split": {
+    "recommended": true,
+    "rationale": "The plan explicitly defers this decision to operator (§862). The natural carving is non-ambiguous. The constraint that MUST be respected: Task 5a (delete initialize_session_schema) cannot ship before Task 5 (wire caretaker), otherwise the app has no schema gate.",
+    "phases": {
+      "9A": {
+        "tasks": ["Task 1", "Task 3 (dataclasses only)", "enforce_migration_classification.py CI gate"],
+        "description": "Classification + contracts, zero runtime behavior change. All existing tests continue to pass unchanged. The CI gate (enforce_migration_classification.py) ships in 9A so the discipline is mechanically enforced from the start.",
+        "one_way_doors": "None — no runtime behavior change, no deleted code.",
+        "landing_criterion": "Every Table in metadata has explicit migration_class; CI gate passes; unit test for classification walker passes."
+      },
+      "9B": {
+        "tasks": ["Task 2 (detector)", "Task 4 (executor)", "Tracer-bullet activation (A-001/A-002 resolved)", "Task 5 (caretaker wiring)", "Task 5a (delete initialize_session_schema + ALL 51 test callers)", "Task 6 (audit logging)", "Task 7 (rollback)", "Task 7a (flock lock)"],
+        "description": "Full executor + activation + validator removal. This is the atomic unit: Tasks 5 and 5a MUST land in the same phase because 5a removes the old gate and 5 supplies the new one. All executor concerns (A-001, A-002, A-005, A-007) must be resolved before this phase lands.",
+        "one_way_doors": "High — initialize_session_schema deleted, 51 test files updated, caretaker is live.",
+        "landing_criterion": "All existing tests pass; caretaker activation integration test passes; audit events appear in Landscape on startup with a seeded old-shape DB; FK enforcement is intact after a ceremony error path."
+      },
+      "9C": {
+        "tasks": ["Task 8 (idempotence)", "Task 9 (three-generation integration test)", "Task 10 (dry-run + runbook)", "Task 11 (CI fixture-freshness gate)"],
+        "description": "Verification, documentation, and observability. No new production code; only tests, runbook, and CI.",
+        "one_way_doors": "Medium — checked-in binary SQLite fixtures are a one-way door; see R-003.",
+        "landing_criterion": "Three-generation test matrix passes; fixture-freshness CI job green; runbook reviewed by operator."
+      }
+    },
+    "note_on_task_3": "The MigrationPlan and record dataclasses (Task 3) must ship in 9A (before the executor needs them) or at the start of 9B. If shipped in 9A alongside classification, the L0 contracts surface is stable before executor work begins."
+  },
+  "pattern_alignment": {
+    "migration_recorder_protocol": {
+      "verdict": "ALIGNED",
+      "finding": "MigrationRecorder Protocol in L0 contracts/ with implementation wired at L3 matches the CallRecorder and PluginAuditWriter pattern in contracts/audit_protocols.py. The method-count (7 record_* methods) is within the 20-method budget documented in audit_protocols.py.",
+      "note": "The per-action record granularity (MigrationActionStarted/Completed per step of the 12-step ceremony) is consistent with ComposerToolInvocation's per-dispatch recording posture in composer_audit.py."
+    },
+    "table_info_annotation": {
+      "verdict": "NEW_PATTERN_WITH_CI_ENFORCEMENT",
+      "finding": "Table.info['migration_class'] has zero prior uses in the codebase (grep confirmed). This is a new pattern. The R6 CI gate (enforce_migration_classification.py) is the correct mitigation — it makes the omission a build failure rather than a silent caretaker default. A separate MIGRATION_CLASSIFICATIONS registry dict would split the source of truth from the Table definition and weaken the 'adjacent declaration' invariant the project favors for load-bearing model attributes. Table.info is the right call.",
+      "note": "SQLAlchemy's Table.info dict is the canonical extensible metadata slot; use is idiomatic."
+    },
+    "raw_connection_usage": {
+      "verdict": "NEW_ESCAPE_HATCH — requires hardening per A-002",
+      "finding": "engine.raw_connection() is used nowhere else in src/. This is a new escape hatch that bypasses the load-bearing connect event listener. See A-002 for the blocking finding and required resolution."
+    },
+    "per_action_audit_granularity": {
+      "verdict": "ALIGNED",
+      "finding": "5+ audit record types (MigrationPlanRecord, MigrationActionStartedRecord, MigrationActionCompletedRecord, MigrationCompletedRecord, MigrationFailedRecord, MigrationDryRunRecord, MigrationOrphanCleared) is consistent with the project's 'if it's not recorded, it didn't happen' audit primacy. The per-step records during the 12-step ceremony allow forensic reconstruction of mid-ceremony SIGKILL state, which is a valid audit requirement for a 12-step non-atomic ceremony."
+    }
+  },
+  "custom_code_vs_libraries": {
+    "finding": "Alembic is intentionally rejected (J1 decision not relitigated). The custom runner is justified by the auditability requirement and the closed-enum uniformity argument. However, the plan should acknowledge the actual construction cost is closer to parity with Alembic than the 'lower ceremony' framing suggests. See A-006.",
+    "dependencies_to_add": "None — Option (c) correctly avoids adding Alembic. The `fcntl` module for the advisory lock (Task 7a) is stdlib and already used in composer_mcp/session.py."
+  },
+  "recommendations": [
+    {
+      "id": "R-001",
+      "priority": "BLOCKING",
+      "title": "Resolve transaction-boundary contradiction before implementation",
+      "detail": "Replace §3 step 8's 'single transaction' claim with an accurate per-action model. Define MigrationFailedRecord vs MigrationPartialFailureRecord trigger conditions as non-overlapping. Document which DDL operations SQLite transacts and which do not. See A-001."
+    },
+    {
+      "id": "R-002",
+      "priority": "BLOCKING",
+      "title": "Adopt the recommended 9A/9B/9C sub-phase split",
+      "detail": "9A: classification + dataclasses + CI gate (no runtime change). 9B: executor + caretaker + validator removal (atomic; must include Task 5 and 5a together + A-001/A-002/A-005/A-007 resolved). 9C: idempotence + three-generation test + runbook + CI. Task 5a's 51-file test sweep belongs in 9B alongside the caretaker activation, not as a stand-alone task. See sub_phase_split section."
+    },
+    {
+      "id": "R-003",
+      "priority": "HIGH",
+      "title": "Harden raw_connection() error path against pool poisoning",
+      "detail": "Add raw_conn.detach() on all error paths inside the shadow-copy ceremony to prevent a FK=OFF connection returning to the pool. Add a post-ceremony PRAGMA foreign_keys assertion that crashes if FK enforcement is not 1. See A-002."
+    },
+    {
+      "id": "R-004",
+      "priority": "HIGH",
+      "title": "Explicitly specify trigger recreation in shadow-copy ceremony",
+      "detail": "The 12-step ceremony must recreate all DDL event-registered triggers (the 6 in _REQUIRED_SQLITE_TRIGGERS) for any table it touches. The plan relies on SQLAlchemy DDL events that do NOT fire on executor-emitted CREATE TABLE statements. See A-005."
+    },
+    {
+      "id": "R-005",
+      "priority": "HIGH",
+      "title": "Explicitly specify sentinel PRAGMA disposition in Task 5a",
+      "detail": "_stamp_schema_sentinels moves into caretaker's fresh-DB path; _assert_schema_sentinels is deleted (superseded by caretaker). SESSION_SCHEMA_EPOCH is retained as a documentation constant. See A-007."
+    },
+    {
+      "id": "R-006",
+      "priority": "MEDIUM",
+      "title": "Correct 'exhaustive list' label in Task 5a",
+      "detail": "The 9-file list is not exhaustive. At HEAD, 51 unique test files call initialize_session_schema. Relabel the list 'partial list — run grep to find all callers.' The existing grep instruction in Task 5a already provides the correct safety net; the label around the list is the only change needed. See A-003."
+    },
+    {
+      "id": "R-007",
+      "priority": "MEDIUM",
+      "title": "Add a tracer-bullet Task 4.5 before the full executor",
+      "detail": "Wire a no-op caretaker (classify + emit MigrationPlanRecord only, no DDL) into create_app() as Task 4.5. This validates the activation contract and the Landscape write path before the executor exists. See tracer_bullet_opportunity section."
+    },
+    {
+      "id": "R-008",
+      "priority": "LOW",
+      "title": "Add a fixture regeneration script",
+      "detail": "The 3-generation fixture generation ceremony is prose only. Add scripts/fixtures/generate_migration_fixtures.py so the next developer who must regenerate (e.g., after Phase 10 adds a table) has a deterministic script rather than prose instructions. This is the R5 'fixture rot' risk expressed at the ceremony level."
+    },
+    {
+      "id": "R-009",
+      "priority": "LOW",
+      "title": "Correct Option (c) simplicity framing",
+      "detail": "The plan claims Option (c) has lower ceremony than Alembic. The construction cost is comparable. Add a sentence acknowledging the initial cost and framing the simplicity advantage as accruing over time (no migrations directory, no revision graph). Does not affect the J1 verdict. See A-006."
+    }
+  ],
+  "summary": {
+    "architectural_concerns": 2,
+    "one_way_doors_without_mitigation": 1,
+    "complexity_flags": 1,
+    "pattern_violations": 1,
+    "blocking_issues": [
+      "A-001: §3 single-transaction claim is structurally false for any plan that includes the shadow-copy ceremony. The failure record taxonomy (MigrationFailedRecord vs MigrationPartialFailureRecord) is undefined.",
+      "A-002: engine.raw_connection() bypasses the FK-pragma connect listener; a ceremony error path returns a FK=OFF connection to the pool — silent Tier-1 integrity failure."
+    ],
+    "notes": "The overall architecture is sound. Option (c)'s L0/L3 Protocol split, the Table.info annotation with CI gate, the MigrationRecorder Protocol pattern, and the per-action audit granularity are all well-aligned with project conventions. The two blockers are correctness issues in the execution of the design, not in the design itself. Both are resolvable without changing the approach."
+  }
+}

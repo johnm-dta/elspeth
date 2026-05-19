@@ -39,20 +39,34 @@ account-level helpers (``record_mode_opted_out`` /
 ``record_mode_opted_in``) take no mode kwarg and use no Literal —
 they're post-state-only per §"Account-level scope narrowing
 (B2.b — load-bearing)". The completion helper
-(``record_session_completed``) uses a separate ``_AccountMode``
-Literal (``guided`` / ``freeform``) because completion is reported on
-account-level mode, not per-session trust_mode. A pass-1 draft used a
-single shared mode Literal across both surfaces; B1-r2 caught that the
-per-session helper would assert-fail on every emit because its inputs
-come from a different column with a disjoint value set.
+(``record_session_completed``) uses a separate ``_CompletionVerb``
+Literal whose value set MIRRORS the CHECK constraint on
+``composer_completion_events_table.event_type`` at
+``src/elspeth/web/sessions/models.py:735`` —
+``mark_ready_for_review`` / ``export_yaml``. This is the DB-authoritative
+audit vocabulary (Tier 1 trust-store; the audit row is the legal record
+the counter aggregates over per CLAUDE.md superset rule). A pre-wire
+draft of this helper carried a UI-facing vocabulary
+(``save_for_review`` / ``run_pipeline`` / ``export_yaml``) plus an
+``_AccountMode`` (``guided`` / ``freeform``) attribute; the overall-plan
+reviewer for Sub-task 7c surfaced that ``save_for_review`` was UI vocab
+that drifts from the DB audit row, and ``run_pipeline`` is a UX-level
+verb that does NOT write a ``composer_completion_events_table`` row
+(its audit lives under ``runs/``). Per the superset rule the counter
+attributes must be a strict subset of audit-recorded reality; both
+mismatches were resolved by aligning to the DB CHECK constraint. If a
+future phase needs an aggregate over run-completions, file a separate
+``composer.run.started_total`` counter that mirrors the ``runs``-table
+event — do NOT re-broaden ``_CompletionVerb`` to include
+``run_pipeline``.
 
 OTel exporter failure handling (W5). Every ``record_*`` helper wraps
 the underlying ``.add(...)`` call in ``try / except Exception`` that
 swallows and returns ``None``. Telemetry is best-effort per CLAUDE.md
 "Telemetry and Logging" — a broken exporter must not 500 a PATCH whose
 audit row already wrote. The ``_assert_session_trust_mode`` /
-``_assert_account_mode`` ValueErrors are programmer-error guards and
-intentionally escape (they fire BEFORE the try/except so input
+``_assert_completion_verb`` ValueErrors are programmer-error guards
+and intentionally escape (they fire BEFORE the try/except so input
 validation still crashes loudly).
 """
 
@@ -107,17 +121,29 @@ _SessionTrustMode = Literal["explicit_approve", "auto_commit"]
 _KNOWN_SESSION_TRUST_MODES: frozenset[str] = frozenset({"explicit_approve", "auto_commit"})
 
 
-# ── Account-level mode vocabulary (completion gestures, Phase 6) ────────
-# Sourced from the CHECK constraint on
-# ``user_preferences_table.default_composer_mode``. Distinct from
-# ``_SessionTrustMode`` — see module docstring vocabulary discipline.
-_AccountMode = Literal["guided", "freeform"]
-_KNOWN_ACCOUNT_MODES: frozenset[str] = frozenset({"guided", "freeform"})
-
-
 # ── Completion verb vocabulary (Phase 6) ────────────────────────────────
-_CompletionVerb = Literal["save_for_review", "run_pipeline", "export_yaml"]
-_KNOWN_COMPLETION_VERBS: frozenset[str] = frozenset({"save_for_review", "run_pipeline", "export_yaml"})
+# Sourced from the CHECK constraint on
+# ``composer_completion_events_table.event_type`` at
+# ``src/elspeth/web/sessions/models.py:735``:
+#
+#     CheckConstraint(
+#         "event_type IN ('mark_ready_for_review', 'export_yaml')",
+#         name="ck_composer_completion_events_type",
+#     )
+#
+# The two values that appear in audit rows are the only two valid
+# attribute values for ``composer.session.completed_total`` — the counter
+# aggregates over those rows per the CLAUDE.md superset rule. UI-facing
+# vocabulary (``save_for_review``) MUST NOT appear here; it would drift
+# from the audit row and silently break aggregation. The Phase 6 UX
+# verb ``run_pipeline`` is also intentionally absent: a pipeline run is
+# recorded under the ``runs`` table, not the
+# ``composer_completion_events_table``, so it has no audit row this
+# counter could aggregate over. A future phase wanting a run-started
+# aggregate must define a SEPARATE counter (e.g.
+# ``composer.run.started_total``) over the runs table.
+_CompletionVerb = Literal["mark_ready_for_review", "export_yaml"]
+_KNOWN_COMPLETION_VERBS: frozenset[str] = frozenset({"mark_ready_for_review", "export_yaml"})
 
 
 def _assert_session_trust_mode(name: str, value: str) -> None:
@@ -131,14 +157,14 @@ def _assert_session_trust_mode(name: str, value: str) -> None:
         raise ValueError(f"{name} must be one of {sorted(_KNOWN_SESSION_TRUST_MODES)!r}; got {value!r}")
 
 
-def _assert_account_mode(name: str, value: str) -> None:
-    """Offensive guard for the account-level ``default_composer_mode`` Literal."""
-    if value not in _KNOWN_ACCOUNT_MODES:
-        raise ValueError(f"{name} must be one of {sorted(_KNOWN_ACCOUNT_MODES)!r}; got {value!r}")
-
-
 def _assert_completion_verb(name: str, value: str) -> None:
-    """Offensive guard for the Phase 6 completion-verb Literal."""
+    """Offensive guard for the Phase 6 completion-verb Literal.
+
+    The accepted value set is the CHECK constraint on
+    ``composer_completion_events_table.event_type`` (DB-authoritative).
+    See module docstring §"Vocabulary discipline" for the superset-rule
+    rationale.
+    """
     if value not in _KNOWN_COMPLETION_VERBS:
         raise ValueError(f"{name} must be one of {sorted(_KNOWN_COMPLETION_VERBS)!r}; got {value!r}")
 
@@ -248,25 +274,39 @@ def record_tutorial_completed(tel: SessionsTelemetry) -> None:
 def record_session_completed(
     tel: SessionsTelemetry,
     *,
-    mode: _AccountMode,
     completion_verb: _CompletionVerb,
 ) -> None:
     """Composer session terminated via a completion gesture.
 
-    ``mode`` is account-level vocabulary (``guided`` / ``freeform``)
-    because completion is reported on account-level mode (the user's
-    persisted default at completion time), NOT on the per-session
-    ``trust_mode``. See module docstring vocabulary discipline.
+    ``completion_verb`` is sourced from the CHECK constraint on
+    ``composer_completion_events_table.event_type`` (see
+    ``src/elspeth/web/sessions/models.py:735``). The valid values are
+    ``mark_ready_for_review`` and ``export_yaml`` — those are the two
+    completion gestures that write an audit row in the
+    ``composer_completion_events_table``. Per the CLAUDE.md superset
+    rule, the counter aggregates over committed audit rows, so its
+    attribute set MUST be a strict subset of the audit-row vocabulary.
 
-    ``completion_verb`` enumerates the Phase 6 completion gestures
-    documented in ``09-completion-gestures.md``.
+    No ``mode`` attribute is carried. An earlier draft tagged each emit
+    with the user's account-level ``default_composer_mode``
+    (``guided`` / ``freeform``); the overall-plan reviewer for Sub-task
+    7c flagged that as additional state read at emit-time with no
+    corresponding column on ``composer_completion_events_table`` — i.e.
+    a telemetry attribute not present in the audit row, which is the
+    exact superset-rule violation the rule exists to prevent.
+
+    Audit primacy. Call sites MUST place this helper AFTER the
+    ``engine.begin()`` block that writes the corresponding
+    ``composer_completion_events_table`` row has exited. If the audit
+    write raises, control never reaches the helper and the counter
+    stays at zero — that's the structural enforcement of the primacy
+    invariant.
     """
-    _assert_account_mode("mode", mode)
     _assert_completion_verb("completion_verb", completion_verb)
     try:
         tel.session_completed_total.add(
             1,
-            attributes={"mode": mode, "completion_verb": completion_verb},
+            attributes={"completion_verb": completion_verb},
         )
     except Exception:
         return None

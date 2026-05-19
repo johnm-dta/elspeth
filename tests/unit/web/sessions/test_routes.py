@@ -415,9 +415,10 @@ def _make_app(
         connect_args={"check_same_thread": False},
     )
     initialize_session_schema(engine)
+    telemetry = build_sessions_telemetry()
     service = SessionServiceImpl(
         engine,
-        telemetry=build_sessions_telemetry(),
+        telemetry=telemetry,
         log=structlog.get_logger("test"),
     )
 
@@ -436,6 +437,13 @@ def _make_app(
     # Phase 6A B3 — YAML export route's audit-write reaches into
     # ``app.state.session_engine`` for the composer_completion_events insert.
     app.state.session_engine = engine
+    # Phase 8 Sub-task 7c — the YAML-export route emits
+    # ``composer.session.completed_total`` via
+    # ``request.app.state.sessions_telemetry``. Mirror the same
+    # container the service holds so route-emit and service-emit
+    # observe a single counter (matches production wiring in
+    # ``web/app.py:586``).
+    app.state.sessions_telemetry = telemetry
     app.state.settings = WebSettings(
         data_dir=tmp_path,
         max_upload_bytes=max_upload_bytes,

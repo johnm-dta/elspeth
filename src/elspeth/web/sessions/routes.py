@@ -114,7 +114,11 @@ from elspeth.web.composer.protocol import (
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
-from elspeth.web.composer.telemetry_phase8 import SessionsTelemetry, record_session_switched
+from elspeth.web.composer.telemetry_phase8 import (
+    SessionsTelemetry,
+    record_session_completed,
+    record_session_switched,
+)
 from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
 from elspeth.web.composer.yaml_generator import generate_yaml
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
@@ -5656,6 +5660,18 @@ def create_session_router() -> APIRouter:
                     expires_at=None,
                 )
             )
+
+        # Phase 8 Sub-task 7c (telemetry-backfill: phase-6).
+        # composer.session.completed_total — fires AFTER the audit
+        # engine.begin() block has exited cleanly. If the audit INSERT
+        # raises, the with-block exits via exception, FastAPI converts
+        # it to a 5xx, and control never reaches this line — the counter
+        # stays at zero and the superset invariant (counter aggregates
+        # over committed audit rows) is structurally enforced.
+        record_session_completed(
+            request.app.state.sessions_telemetry,
+            completion_verb="export_yaml",
+        )
 
         response = {"yaml": yaml_str}
         if state.source is not None and "blob_ref" in state.source.options:

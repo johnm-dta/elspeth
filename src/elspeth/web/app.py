@@ -305,6 +305,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
         sessions_db_engine=app.state.session_engine,
         payload_store=payload_store,
+        # Phase 8 Sub-task 7c — composer.session.completed_total counter.
+        # ``app.state.sessions_telemetry`` is set in ``create_app`` (the
+        # synchronous factory) BEFORE the lifespan runs, so it is
+        # available here. Mirrors the
+        # ``telemetry=app.state.sessions_telemetry`` pattern at line 259
+        # for the execution service.
+        telemetry=app.state.sessions_telemetry,
     )
 
     # Periodic orphan cleanup — catches runs orphaned by SIGKILL/OOM

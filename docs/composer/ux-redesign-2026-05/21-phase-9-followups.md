@@ -35,6 +35,7 @@ the `feat/composer-phase-8-polish` worktree branched from RC5.2
 |---|---|---|---|---|
 | `grep -rn 'telemetry: deferred to Phase 8' src/elspeth/` | 0 | Task 1 Sub-task 7a markers-harvest framing | Probe-miss no-op | Class B — scope OUT of Phase 8 |
 | `grep -rn 'verify_token\|verify_share_token' src/elspeth/web/` | 0 | Task 1 Sub-task 7d (B3 cohort a — Phase 6 verify-failure / expiry-hit emits) | Probe-miss no-op | Class B — scope OUT of Phase 8 |
+| `grep -rn 'export_yaml\|Export YAML' src/elspeth/web/frontend/src/` | ≥8 | Task 1 Sub-task 7c (Phase 6 completion-gesture emit — composer.session.completed_total) | (HIT — scoped IN, wired post-review 2026-05-19) | n/a |
 | `grep -rn 'auto_interpreted_opt_out' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7e (B3 cohort b1 — Phase 5b interpretation-opt-out emit) | (HIT — scoped IN) | n/a |
 | `grep -rn 'audit_readiness\|composer/audit/readiness' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7f (B3 cohort b2 — Phase 2C audit-fetch-failure emit) | (HIT — scoped IN) | n/a |
 | `ls src/elspeth/web/frontend/src/components/sessions/HeaderSessionSwitcher.tsx` | file exists | Task 4 (session-sidebar migration) | (HIT — scoped IN) | n/a |
@@ -45,11 +46,49 @@ unconditional Phase 8 task. Tasks 0, 1 infra, 2, 3, 5, 7, and 8 ran
 regardless. The three Class-B sub-tasks above each route to the
 follow-up entries listed below.
 
+**Post-review correction — Sub-task 7c (2026-05-19).** The Phase 8
+overall-plan reviewer surfaced that Sub-task 7c (plan §2039–2047 —
+the conditional Phase 6 YAML-export completion-gesture emit) was
+silently missed: the `record_session_completed` helper landed at
+`src/elspeth/web/composer/telemetry_phase8.py:248` and the
+`session_completed_total` slot at
+`src/elspeth/web/sessions/telemetry.py:198, 253, 317` were both
+present, but the two call sites that actually write the
+`composer_completion_events_table` audit row
+(`shareable_reviews/service.py:319` for `mark_ready_for_review` and
+`sessions/routes.py:5652` for `export_yaml`) never invoked the helper.
+The probe shape above (`grep -rn 'export_yaml\|Export YAML'
+src/elspeth/web/frontend/src/`) HITS — the frontend has long had the
+Export YAML surface — so the plan's wire-it branch fires. The wire-up
+was completed post-review per the plan §2039–2047 directive (no
+deferral to Phase 9; the operator's "fix any issues you find
+automatically" directive governs). The `_CompletionVerb` Literal was
+also reconciled at the same time to mirror the DB CHECK constraint at
+`src/elspeth/web/sessions/models.py:735` (eliminating the
+`save_for_review` UI-vs-DB vocabulary drift and the `run_pipeline`
+audit-row absence — see commit body for the superset-rule rationale).
+
 ---
 
 ## Deferred items
 
-### 1. Cohort (a) — Phase 6 completion-gesture telemetry markers
+### 1. Cohort (a) — Phase 6 share-counter increment-site emits
+
+> **Note (2026-05-19, post-review):** the heading was previously
+> "Phase 6 completion-gesture telemetry markers", which conflated this
+> cohort (the share-counter increment sites for
+> `composer.share.token_verify_failure_total` and
+> `composer.share.link_expiry_hit_total`, which depend on a Phase 6
+> token-verify path that has NOT yet shipped) with Sub-task 7c (the
+> completion-gesture counter `composer.session.completed_total`, whose
+> emit sites at `mark_ready_for_review` and `export_yaml` HAD shipped
+> by 2026-05-19 — the wire-up landed post-review). The body of this
+> section is, and always was, about the share-counter cohort; the
+> rename realigns the title with the body so a future reader does not
+> assume the completion-gesture follow-up still applies. The
+> Sub-task 7c follow-up is closed by the post-review wire-up commit;
+> see the pre-flight gate probe table above for its row.
+
 
 - **Class:** Probe-miss no-op (Probe 1 + Probe 2) — **counters defined,
   increment sites absent**.

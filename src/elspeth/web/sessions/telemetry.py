@@ -318,9 +318,15 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             "composer.session.completed_total",
             description=(
                 "Composer session terminated via a completion gesture "
-                "(Phase 6). Attributes: mode ∈ {guided, freeform} "
-                "(account-level vocabulary), completion_verb ∈ "
-                "{save_for_review, run_pipeline, export_yaml}."
+                "(Phase 6). Attributes: completion_verb ∈ "
+                "{mark_ready_for_review, export_yaml} — sourced from "
+                "the CHECK constraint on "
+                "composer_completion_events_table.event_type (see "
+                "src/elspeth/web/sessions/models.py:735). The counter "
+                "aggregates over committed audit rows in that table; "
+                "no UI-only verbs (e.g. save_for_review) and no "
+                "run-completion verbs (e.g. run_pipeline — see runs/) "
+                "appear here, per the CLAUDE.md superset rule."
             ),
         ),
         share_token_verify_failure_total=meter.create_counter(

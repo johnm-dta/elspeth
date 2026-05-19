@@ -361,40 +361,65 @@ def test_record_tutorial_completed_increments_counter(sessions_telemetry: Sessio
 
 
 def test_record_session_completed_increments_counter(sessions_telemetry: SessionsTelemetry) -> None:
-    """Completion-gesture helper: account-level mode vocabulary
-    (guided/freeform), not per-session trust_mode.
+    """Completion-gesture helper: DB-authoritative completion-verb
+    vocabulary sourced from
+    ``composer_completion_events_table.event_type`` CHECK constraint
+    (``src/elspeth/web/sessions/models.py:735``).
     """
-    record_session_completed(sessions_telemetry, mode="guided", completion_verb="save_for_review")
+    record_session_completed(sessions_telemetry, completion_verb="mark_ready_for_review")
     assert observed_value(sessions_telemetry.session_completed_total) == 1
     calls = _fake_calls(sessions_telemetry.session_completed_total)
     assert calls == [
-        (1, {"mode": "guided", "completion_verb": "save_for_review"}, None),
+        (1, {"completion_verb": "mark_ready_for_review"}, None),
     ]
 
 
-@pytest.mark.parametrize("mode", ["guided", "freeform"])
-@pytest.mark.parametrize("completion_verb", ["save_for_review", "run_pipeline", "export_yaml"])
-def test_record_session_completed_accepts_all_valid_combinations(
-    sessions_telemetry: SessionsTelemetry, mode: str, completion_verb: str
-) -> None:
-    """Every combination of account-level mode x completion verb is accepted."""
-    record_session_completed(sessions_telemetry, mode=mode, completion_verb=completion_verb)  # type: ignore[arg-type]
+@pytest.mark.parametrize("completion_verb", ["mark_ready_for_review", "export_yaml"])
+def test_record_session_completed_accepts_all_valid_combinations(sessions_telemetry: SessionsTelemetry, completion_verb: str) -> None:
+    """Every value in the DB CHECK constraint vocabulary is accepted.
+
+    Note: the parametrize set is INTENTIONALLY narrowed to the two
+    values in the audit-row CHECK constraint. ``save_for_review`` is
+    UI-only vocabulary (different from the DB audit row) and
+    ``run_pipeline`` has no audit row in
+    ``composer_completion_events_table`` (its audit lives under
+    ``runs/``); both would violate the CLAUDE.md superset rule and
+    are rejected by the negative tests below.
+    """
+    record_session_completed(sessions_telemetry, completion_verb=completion_verb)  # type: ignore[arg-type]
     assert observed_value(sessions_telemetry.session_completed_total) == 1
 
 
-def test_record_session_completed_rejects_per_session_trust_mode_vocabulary(sessions_telemetry: SessionsTelemetry) -> None:
-    """Cross-vocabulary regression in the opposite direction:
-    ``"explicit_approve"`` is per-session trust_mode vocabulary and
-    INVALID for the completion helper's account-level mode argument.
+def test_record_session_completed_rejects_save_for_review_ui_vocab(sessions_telemetry: SessionsTelemetry) -> None:
+    """Regression for the Sub-task 7c overall-plan reviewer finding:
+    ``"save_for_review"`` is UI-facing vocabulary that DRIFTS from the
+    DB CHECK-constraint value (``"mark_ready_for_review"`` is what the
+    audit row carries). Accepting it here would silently break the
+    superset rule because aggregation by ``completion_verb`` would
+    return a value that has no corresponding row in
+    ``composer_completion_events_table``.
     """
-    with pytest.raises(ValueError, match=r"mode must be"):
-        record_session_completed(sessions_telemetry, mode="explicit_approve", completion_verb="save_for_review")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match=r"completion_verb must be"):
+        record_session_completed(sessions_telemetry, completion_verb="save_for_review")  # type: ignore[arg-type]
+
+
+def test_record_session_completed_rejects_run_pipeline(sessions_telemetry: SessionsTelemetry) -> None:
+    """``run_pipeline`` is a UX-level verb that does NOT write a
+    ``composer_completion_events_table`` row (pipeline runs are audited
+    under the ``runs`` table). Including it here would violate the
+    superset rule: the counter aggregates over committed
+    completion-events rows, and ``run_pipeline`` has none. A future
+    aggregate over runs must be a separate counter
+    (``composer.run.started_total`` or similar).
+    """
+    with pytest.raises(ValueError, match=r"completion_verb must be"):
+        record_session_completed(sessions_telemetry, completion_verb="run_pipeline")  # type: ignore[arg-type]
 
 
 def test_record_session_completed_rejects_unknown_completion_verb(sessions_telemetry: SessionsTelemetry) -> None:
     """Out-of-set completion verb is rejected."""
     with pytest.raises(ValueError, match=r"completion_verb must be"):
-        record_session_completed(sessions_telemetry, mode="guided", completion_verb="abandon")  # type: ignore[arg-type]
+        record_session_completed(sessions_telemetry, completion_verb="abandon")  # type: ignore[arg-type]
 
 
 def test_record_share_token_verify_failure_increments_counter(sessions_telemetry: SessionsTelemetry) -> None:
@@ -475,7 +500,7 @@ def _swap_counter(tel: SessionsTelemetry, field: str, replacement: _RaisingCount
         ("tutorial_completed_total", lambda tel: record_tutorial_completed(tel)),
         (
             "session_completed_total",
-            lambda tel: record_session_completed(tel, mode="guided", completion_verb="save_for_review"),
+            lambda tel: record_session_completed(tel, completion_verb="mark_ready_for_review"),
         ),
         ("share_token_verify_failure_total", lambda tel: record_share_token_verify_failure(tel)),
         ("share_link_expiry_hit_total", lambda tel: record_share_link_expiry_hit(tel)),

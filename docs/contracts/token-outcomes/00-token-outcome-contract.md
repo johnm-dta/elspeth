@@ -1,60 +1,68 @@
 # Token Outcome Contract
 
-This is the canonical contract for token terminal states and their audit fields.
-It is derived from:
-- `src/elspeth/contracts/enums.py` (RowOutcome, is_terminal)
-- `src/elspeth/core/landscape/schema.py` (token_outcomes table)
-- `src/elspeth/core/landscape/recorder.py` (record_token_outcome)
+Current as of 2026-05-20.
+
+This is the durable contract for token outcome records in Landscape. The
+authoritative implementation lives in:
+
+- `src/elspeth/contracts/enums.py`
+- `src/elspeth/contracts/audit.py`
+- `src/elspeth/core/landscape/schema.py`
+- `src/elspeth/core/landscape/data_flow_repository.py`
 
 ## Definitions
 
-- Token: a single row instance flowing through a specific DAG path.
-- Terminal outcome: a final state (token will not reappear).
-- Non-terminal outcome: temporary state (token will reappear).
+- **Token**: one instance of a source row moving through a DAG path.
+- **Terminal row**: a `token_outcomes` row with `completed = 1`.
+- **Non-terminal row**: a `token_outcomes` row with `completed = 0`; currently
+  only `(NULL, buffered)`.
+- **Outcome**: lifecycle answer: `success`, `failure`, `transient`, or `NULL`.
+- **Path**: producer-declared provenance answer.
 
-## Contract: outcomes and required fields
+## Legal Pairs
 
-| Outcome | Terminal | Required fields | Primary recorder |
-|---------|----------|-----------------|------------------|
-| COMPLETED | yes | sink_name | Orchestrator (after sink write) |
-| ROUTED | yes | sink_name | RowProcessor (gate route_to_sink, MOVE only) |
-| GATE_DISCARDED | yes | none | RowProcessor (gate route target `"discard"`) |
-| ROUTED_ON_ERROR | yes | sink_name, error_hash | RowProcessor (transform on_error reroute via DIVERT) |
-| FORKED | yes | fork_group_id | RowProcessor (after gate fork) |
-| FAILED | yes | error_hash | RowProcessor or CoalesceExecutor |
-| QUARANTINED | yes | error_hash | RowProcessor or Orchestrator (source quarantine) |
-| DIVERTED | yes | sink_name, error_hash | SinkExecutor (failsink redirect or discard) |
-| CONSUMED_IN_BATCH | yes | batch_id | RowProcessor (aggregation) |
-| COALESCED | yes | join_group_id | CoalesceExecutor (consumed tokens) |
-| EXPANDED | yes | expand_group_id | RowProcessor (deaggregation parent) |
-| BUFFERED | no | batch_id | RowProcessor (aggregation passthrough) |
+| completed | outcome | path | Required discriminator fields |
+|-----------|---------|------|-------------------------------|
+| 1 | `success` | `default_flow` | `sink_name` |
+| 1 | `success` | `gate_routed` | `sink_name` |
+| 1 | `success` | `gate_discarded` | none |
+| 1 | `failure` | `on_error_routed` | `sink_name`, `error_hash` |
+| 1 | `success` | `filter_dropped` | none |
+| 1 | `success` | `coalesced` | `join_group_id` |
+| 1 | `failure` | `unrouted` | `error_hash` |
+| 1 | `failure` | `quarantined_at_source` | `error_hash` |
+| 1 | `transient` | `sink_fallback_to_failsink` | `sink_name`, `error_hash` |
+| 1 | `failure` | `sink_discarded` | `sink_name`, `error_hash`; `sink_name` must be `__discard__` |
+| 1 | `transient` | `fork_parent` | `fork_group_id` |
+| 1 | `transient` | `expand_parent` | `expand_group_id` |
+| 1 | `transient` | `batch_consumed` | `batch_id` |
+| 0 | `NULL` | `buffered` | `batch_id` |
 
-Notes:
-- BUFFERED is the only non-terminal outcome. It must be followed by exactly one
-  terminal outcome before the run is marked completed.
-- Only one terminal outcome is allowed per token (enforced by partial unique
-  index in `token_outcomes`).
+Fields not listed for a pair are forbidden unless explicitly allowed by
+`src/elspeth/contracts/audit.py`.
 
-## Contract: invariants
+## Invariants
 
-1. Exactly one terminal outcome per token.
-2. No terminal outcome may be missing a required field (see table above).
-3. COMPLETED implies the token has a completed sink node_state.
-4. Completed sink node_state implies a COMPLETED token_outcome with sink_name.
-5. GATE_DISCARDED implies the token terminated at a gate route target `"discard"` and has no sink_name.
-6. BUFFERED outcomes must be followed by a terminal outcome before run completion.
-7. FORKED outcome implies child tokens exist (token_parents table) sharing fork_group_id.
-8. EXPANDED outcome implies child tokens exist (token_parents table) sharing expand_group_id.
-9. COALESCED outcome implies join_group_id points to the merged token's join_group_id.
+1. Every token in a terminal run has exactly one completed token outcome.
+2. A token may have non-terminal `buffered` rows before its terminal outcome.
+3. `completed = 0` requires `outcome IS NULL` and `path = 'buffered'`.
+4. `completed = 1` requires a legal `(outcome, path)` pair.
+5. Required discriminator fields must be present for the pair.
+6. Forbidden discriminator fields must be absent for the pair.
+7. Parent/delegation paths (`fork_parent`, `expand_parent`, `batch_consumed`)
+   must have corresponding lineage, child, batch, or recovery evidence.
+8. `token_outcomes` is the authoritative token lifecycle record. `node_states`
+   and `artifacts` explain work, but do not replace the lifecycle row.
 
-## Terminal vs non-terminal behavior
+## Schema Notes
 
-- Terminal outcomes represent the final state for that token. It should not
-  appear in any subsequent processing or results.
-- Non-terminal outcomes (BUFFERED) represent a hold state. The token must
-  reappear and later receive a terminal outcome.
+`token_outcomes` stores:
 
-## Single-source-of-truth
+- identity: `outcome_id`, `run_id`, `token_id`
+- lifecycle: `outcome`, `path`, `completed`, `recorded_at`
+- discriminators: `sink_name`, `batch_id`, `fork_group_id`, `join_group_id`,
+  `expand_group_id`, `error_hash`
+- context: `context_json`, `expected_branches_json`
 
-- `token_outcomes` is the authoritative terminal state record.
-- `node_states` provide lineage detail but do NOT replace token_outcomes.
+The schema has a partial unique index that permits multiple non-terminal rows
+but allows only one terminal row per token.

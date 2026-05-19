@@ -763,8 +763,11 @@ name = "elspeth"
 version = "0.5.1"
 source = { editable = "." }
 dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "chromadb" },
     { name = "deepdiff" },
     { name = "dynaconf" },
+    { name = "html2text" },
     { name = "httpx" },
     { name = "networkx" },
     { name = "numpy" },
@@ -794,11 +797,8 @@ all = [
     { name = "azure-monitor-opentelemetry-exporter" },
     { name = "azure-storage-blob" },
     { name = "bcrypt" },
-    { name = "beautifulsoup4" },
-    { name = "chromadb" },
     { name = "errorworks" },
     { name = "fastapi" },
-    { name = "html2text" },
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "jinja2" },
@@ -872,9 +872,6 @@ llm = [
 mcp = [
     { name = "mcp" },
 ]
-rag = [
-    { name = "chromadb" },
-]
 security = [
     { name = "sqlcipher3" },
 ]
@@ -889,10 +886,6 @@ tracing = [
 ]
 tracing-langfuse = [
     { name = "langfuse" },
-]
-web = [
-    { name = "beautifulsoup4" },
-    { name = "html2text" },
 ]
 webui = [
     { name = "bcrypt" },
@@ -923,10 +916,8 @@ requires-dist = [
     { name = "azure-storage-blob", marker = "extra == 'azure'", specifier = ">=12.28,<13" },
     { name = "bcrypt", marker = "extra == 'all'", specifier = ">=4.3,<5" },
     { name = "bcrypt", marker = "extra == 'webui'", specifier = ">=4.3,<5" },
-    { name = "beautifulsoup4", marker = "extra == 'all'", specifier = ">=4.14,<5" },
-    { name = "beautifulsoup4", marker = "extra == 'web'", specifier = ">=4.14,<5" },
-    { name = "chromadb", marker = "extra == 'all'", specifier = ">=1.5,<2" },
-    { name = "chromadb", marker = "extra == 'rag'", specifier = ">=1.5,<2" },
+    { name = "beautifulsoup4", specifier = ">=4.14,<5" },
+    { name = "chromadb", specifier = ">=1.5,<2" },
     { name = "deepdiff", specifier = ">=8.6.2,<9" },
     { name = "dynaconf", specifier = ">=3.2.13,<4" },
     { name = "elspeth", extras = ["azure", "tracing-langfuse"], marker = "extra == 'tracing'" },
@@ -934,8 +925,7 @@ requires-dist = [
     { name = "errorworks", marker = "extra == 'dev'", specifier = ">=0.1.1" },
     { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.136,<1" },
     { name = "fastapi", marker = "extra == 'webui'", specifier = ">=0.136,<1" },
-    { name = "html2text", marker = "extra == 'all'", specifier = ">=2024.2.26" },
-    { name = "html2text", marker = "extra == 'web'", specifier = ">=2024.2.26" },
+    { name = "html2text", specifier = ">=2024.2.26" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "httpx", marker = "extra == 'all'", specifier = ">=0.28,<1" },
     { name = "httpx", marker = "extra == 'llm'", specifier = ">=0.28,<1" },
@@ -1022,7 +1012,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'all'", specifier = ">=14.2,<15" },
     { name = "websockets", marker = "extra == 'webui'", specifier = ">=14.2,<15" },
 ]
-provides-extras = ["dev", "llm", "azure", "web", "rag", "mcp", "security", "webui", "tracing-langfuse", "tracing", "all"]
+provides-extras = ["dev", "llm", "azure", "mcp", "security", "webui", "tracing-langfuse", "tracing", "all"]
 
 [[package]]
 name = "errorworks"

@@ -324,6 +324,18 @@ export function ChatPanel({
   // turn — see ./turns.ts for the grouping rules. Memoised on the messages
   // reference because the store updates the array on append, not in place.
   const chatTurns = useMemo(() => groupIntoTurns(messages), [messages]);
+  // Last complete agent turn id — the inline-source summary attaches to this
+  // turn's bubble. null when no complete agent turn exists yet (e.g. fresh
+  // session, mid-flight first turn, or session-restore before any chat); the
+  // standalone fallback widget further down handles those cases. Recomputed
+  // on every chatTurns change since the value rolls forward across turns.
+  const inlineSourceTargetTurnId = useMemo<string | null>(() => {
+    for (let i = chatTurns.length - 1; i >= 0; i--) {
+      const t = chatTurns[i];
+      if (t.kind === "agent" && t.isComplete) return t.id;
+    }
+    return null;
+  }, [chatTurns]);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
   const compositionState = useSessionStore((s) => s.compositionState);
@@ -410,10 +422,11 @@ export function ChatPanel({
   // When the active composition's `source.options["blob_ref"]` resolves to a
   // session blob that was created from an inline-blob path (any of the four
   // CreationModality enum values), project that blob's metadata + a bounded
-  // content preview into the inlineSourceStore. The rendered
-  // <InlineSourceCreatedTurn> below reads from the store, not from this
-  // effect directly — the store is the projection layer for downstream
-  // consumers (Task 4 disambiguation widget, Task 7 audit-readiness row).
+  // content preview into the inlineSourceStore. The summary is rendered
+  // inside the agent bubble (MessageBubble's "Sources created" disclosure
+  // group) — the store is the projection layer for downstream consumers
+  // (Task 4 disambiguation widget, Task 7 audit-readiness row, and the
+  // bubble's sources-created group).
   //
   // The effect is cancelled via a `cancelled` flag set in the cleanup so that
   // a session-switch or composition-replace mid-fetch does not race the
@@ -1147,6 +1160,13 @@ export function ChatPanel({
       id="chat-main"
       className="chat-panel"
       aria-label="Chat panel"
+      // data-composing surfaces the "agent is thinking" state to CSS so the
+      // textarea and send-button cursors flip to `progress` while the compose
+      // request is in-flight. The ComposingIndicator block below is the
+      // primary affordance; the cursor change reinforces "system is busy"
+      // for users whose pointer is hovering the input area. See App.css
+      // [data-composing="true"] rules.
+      data-composing={isComposing ? "true" : undefined}
     >
       {/* Session title header.  The "Switch to guided" affordance lives in
           the header so it's always visible without competing with the chat
@@ -1247,25 +1267,57 @@ export function ChatPanel({
           // user-visible turns so a single user prompt becomes one user
           // bubble + one agent bubble that aggregates every tool call and the
           // final answer. See ./turns.ts.
-          chatTurns.map((turn: ChatTurn) => {
-            const repr = turnRepresentativeMessage(turn);
-            return (
-              <MessageBubble
-                key={turn.id}
-                message={repr}
-                isComposing={isComposing}
-                onRetry={turn.kind === "user" ? retryMessage : undefined}
-                onFork={turn.kind === "user" ? handleFork : undefined}
-                proposalsByToolCallId={proposalsByToolCallId}
-                staleProposalIds={staleProposalIds}
-                proposalActionPendingIds={proposalActionPendingIds}
-                onAcceptProposal={acceptProposal}
-                onRejectProposal={rejectProposal}
-              />
-            );
-          })
+          //
+          // Atomic-reveal gate: agent turns that are mid-flight (only
+          // tool-call rows landed, no LLM text reply yet) are hidden from the
+          // timeline. The ComposingIndicator (rendered further down while
+          // `isComposing` is true) is the visible affordance for "the agent
+          // is thinking" — leaking a half-assembled bubble on top of it
+          // creates a confusing race between tool calls and the eventual
+          // answer. User and system turns are always complete, so the gate
+          // is a no-op for them. See turns.ts → ChatTurn.isComplete.
+          chatTurns
+            .filter((turn: ChatTurn) => turn.isComplete)
+            .map((turn: ChatTurn) => {
+              const repr = turnRepresentativeMessage(turn);
+              // Attach the inline-source summary to the most recent complete
+              // agent turn — that's the turn whose audit narrative includes
+              // the source-creation event. The store holds at most one
+              // summary per session today; passing it as a list keeps the
+              // bubble's contract ready for multi-source turns without a
+              // future refactor here. When no agent turn is present (e.g.
+              // session-restore loaded a composition before any chat), the
+              // summary falls through to the standalone widget rendered
+              // below the message stream.
+              const sourcesForThisTurn =
+                inlineSourceSummary && turn.id === inlineSourceTargetTurnId
+                  ? [inlineSourceSummary]
+                  : undefined;
+              return (
+                <MessageBubble
+                  key={turn.id}
+                  message={repr}
+                  isComposing={isComposing}
+                  onRetry={turn.kind === "user" ? retryMessage : undefined}
+                  onFork={turn.kind === "user" ? handleFork : undefined}
+                  proposalsByToolCallId={proposalsByToolCallId}
+                  staleProposalIds={staleProposalIds}
+                  proposalActionPendingIds={proposalActionPendingIds}
+                  onAcceptProposal={acceptProposal}
+                  onRejectProposal={rejectProposal}
+                  sourcesCreated={sourcesForThisTurn}
+                  onEditInlineSource={handleEditInlineSource}
+                />
+              );
+            })
         )}
-        {inlineSourceSummary && (
+        {/* Standalone fallback for the inline-source summary: only painted
+            when no complete agent turn exists to absorb it into the bubble
+            (e.g. session-restore where a composition was loaded before any
+            chat turn happened). The hybrid keeps the operator's stated UX —
+            sources-created appears inside the bubble like tool calls do —
+            while not silently dropping the summary in pre-chat states. */}
+        {inlineSourceSummary && inlineSourceTargetTurnId === null && (
           <InlineSourceCreatedTurn
             summary={inlineSourceSummary}
             onEdit={handleEditInlineSource}

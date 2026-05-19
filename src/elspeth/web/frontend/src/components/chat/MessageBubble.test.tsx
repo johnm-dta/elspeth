@@ -190,4 +190,142 @@ describe("MessageBubble", () => {
       expect(onRejectProposal).not.toHaveBeenCalled();
     });
   });
+
+  // ------------------------------------------------------------------
+  // Sources-created in-bubble group
+  // ------------------------------------------------------------------
+  // The bubble surfaces dynamic-source events created by the LLM as a
+  // second collapsible group below the tool-calls group, separated by a
+  // horizontal ruler. Pattern mirrors tool calls so users only learn one
+  // disclosure affordance. Starts collapsed; the inner widget (with its
+  // own audit-info disclosure) renders only when expanded.
+  describe("sources-created group", () => {
+    function makeSummary(overrides = {}) {
+      return {
+        filename: "rows.csv",
+        mimeType: "text/csv",
+        rowCount: 5,
+        contentHash: "a".repeat(64),
+        blobId: "blob-1",
+        provenance: "llm-generated" as const,
+        contentPreview: "row 1\nrow 2",
+        ...overrides,
+      };
+    }
+
+    it("renders no Sources-created group when sourcesCreated is empty/undefined", () => {
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      render(<MessageBubble message={message} />);
+      expect(screen.queryByLabelText(/Sources created/)).not.toBeInTheDocument();
+    });
+
+    it("renders Sources created (N) toggle button when summaries are supplied", () => {
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Sources created (1)" }),
+      ).toBeInTheDocument();
+    });
+
+    it("starts collapsed — the inner widget is not in the DOM until clicked", () => {
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
+      );
+      expect(
+        screen.queryByTestId("inline-source-created-turn"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("expands to reveal the InlineSourceCreatedTurn when the toggle is clicked", async () => {
+      const user = userEvent.setup();
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
+      );
+      await user.click(
+        screen.getByRole("button", { name: "Sources created (1)" }),
+      );
+      expect(
+        screen.getByTestId("inline-source-created-turn"),
+      ).toBeInTheDocument();
+    });
+
+    it("renders a horizontal ruler between Tool calls and Sources created when BOTH are present", () => {
+      const message = makeMessage({
+        role: "assistant",
+        content: "Done.",
+        tool_calls: [
+          {
+            id: "tc-1",
+            type: "function",
+            function: { name: "list_models", arguments: "{}" },
+          },
+        ],
+      });
+      const { container } = render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
+      );
+      expect(container.querySelector("hr.message-group-separator")).not.toBeNull();
+    });
+
+    it("omits the horizontal ruler when only Sources created is present (no tool calls)", () => {
+      // First-message hello-world shape: the LLM produces a dynamic source
+      // from the user's prompt text directly, without invoking any tools.
+      // A ruler in that case would float above nothing.
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      const { container } = render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
+      );
+      expect(container.querySelector("hr.message-group-separator")).toBeNull();
+    });
+
+    it("omits the horizontal ruler when only Tool calls are present (no sources)", () => {
+      const message = makeMessage({
+        role: "assistant",
+        content: "Done.",
+        tool_calls: [
+          {
+            id: "tc-1",
+            type: "function",
+            function: { name: "list_models", arguments: "{}" },
+          },
+        ],
+      });
+      const { container } = render(<MessageBubble message={message} />);
+      expect(container.querySelector("hr.message-group-separator")).toBeNull();
+    });
+
+    it("aria-expanded reflects the disclosure state", async () => {
+      const user = userEvent.setup();
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
+      );
+      const toggle = screen.getByRole("button", { name: "Sources created (1)" });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await user.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+    });
+  });
 });

@@ -157,20 +157,64 @@ async def test_update_trust_mode_writes_audit_event_before_return(service) -> No
     with service._engine.begin() as conn:
         _insert_session(conn, str(session_id))
 
-    prefs = await service.update_composer_preferences(
+    transition = await service.update_composer_preferences(
         session_id,
         trust_mode="auto_commit",
         density_default="medium",
         actor="user:alice",
     )
 
-    assert prefs.trust_mode == "auto_commit"
-    assert prefs.density_default == "medium"
+    # B2 (Phase 8a-2): service returns a transition wrapper exposing
+    # both prior and current state. ``current`` is the post-write
+    # record; ``prior`` reflects the row state observed inside the same
+    # transaction *before* the UPDATE — here the row's seed values from
+    # ``_insert_session`` (trust_mode='explicit_approve',
+    # density_default='high').
+    assert transition.current.trust_mode == "auto_commit"
+    assert transition.current.density_default == "medium"
+    assert transition.prior.trust_mode == "explicit_approve"
+    assert transition.prior.density_default == "high"
     events = await service.list_proposal_events(session_id)
     assert [event.event_type for event in events] == ["trust_mode.changed"]
+    # B1 (Phase 8a-1): payload now carries ``prior_trust_mode`` alongside
+    # the existing keys. The strict-equality assertion is preserved —
+    # the post-extension payload is the new Tier-1 schema.
     assert events[0].payload == {
         "trust_mode": "auto_commit",
+        "prior_trust_mode": "explicit_approve",
         "density_default": "medium",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_trust_mode_no_op_returns_prior_equal_current(service) -> None:
+    """B2 contract: a write that does not change the field still returns
+    a (prior, current) pair where ``prior == current`` for the unchanged
+    fields. Verifies the prior-load runs unconditionally inside the
+    transaction rather than being skipped on no-op writes."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+
+    # The session seed has trust_mode='explicit_approve'; PATCH back
+    # the same value.
+    transition = await service.update_composer_preferences(
+        session_id,
+        trust_mode="explicit_approve",
+        density_default="high",
+        actor="user:alice",
+    )
+
+    assert transition.prior.trust_mode == transition.current.trust_mode == "explicit_approve"
+    assert transition.prior.density_default == transition.current.density_default == "high"
+    events = await service.list_proposal_events(session_id)
+    # The audit row is still written — ``trust_mode.changed`` records
+    # the PATCH event, not a transition delta; the recorded
+    # ``prior_trust_mode`` makes the no-op explicit downstream.
+    assert events[0].payload == {
+        "trust_mode": "explicit_approve",
+        "prior_trust_mode": "explicit_approve",
+        "density_default": "high",
     }
 
 

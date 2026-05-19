@@ -20,7 +20,7 @@
  */
 
 import { useReadOnly } from "../../contexts/ReadOnlyContext";
-import type { ReadinessRow, ReadinessRowId, ReadinessStatus } from "../../types/api";
+import type { ReadinessRowId, ReadinessStatus } from "../../types/api";
 
 /**
  * Prepared presentation values for a single row. Callers pre-compute
@@ -61,30 +61,6 @@ export interface AuditReadinessRowProps {
    * (non-clickable) variant. This is the read-only contract.
    */
   onSelect?: (rowId: ReadinessRowId) => void;
-}
-
-/**
- * Backwards-compatible adapter: build a `RowPresentation` from a raw
- * backend `ReadinessRow` using the panel's default glyph/heading
- * mapping. The live panel uses this for the generic rows that don't
- * need an override; the llm-interpretations and inline-blob branches
- * construct their own `RowPresentation` directly.
- */
-export function presentationFromRow(
-  row: ReadinessRow,
-  heading: string,
-  glyph: string,
-  ariaStatusLabel: string,
-  summaryOverride?: string,
-): RowPresentation {
-  return {
-    id: row.id,
-    status: row.status,
-    heading,
-    summaryText: summaryOverride ?? row.summary,
-    glyph,
-    ariaStatusLabel,
-  };
 }
 
 export function AuditReadinessRow({

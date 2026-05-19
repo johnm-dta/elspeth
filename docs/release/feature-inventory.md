@@ -1,9 +1,16 @@
 # ELSPETH Feature Inventory - March 1, 2026
 
+> **ARCHIVED SNAPSHOT — RC-3.3 (1 March 2026).**
+> This inventory captures plugin and capability state as of RC-3.3. It has **not** been maintained since, and ELSPETH has shipped multiple major releases (RC-3.4, RC-4.0, RC-4.1, RC-5.0, RC-5.1, RC-5.2) since this was written — including the Web UX Composer, Dataverse and RAG plugins, ChromaSink, ten statistical batch plugins, guided composer, and composer progress persistence.
+>
+> **For the current state, see** [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (updated 19 May 2026, RC-5.2) and the canonical line-by-line record in [`../../CHANGELOG.md`](../../CHANGELOG.md).
+>
+> Read this document only for historical context.
+
 **Version:** RC-3.3
 **Purpose:** Complete inventory of what ELSPETH actually does today, reconciled against the original architecture.md (Jan 12) and requirements.md (Jan 22). Updated for RC-3.3 architectural remediation.
 
-**This document is the truth.** If code exists, it's listed. If it's listed but doesn't exist, that's a bug in this document.
+**This document was the truth at RC-3.3.** If code existed at that point, it's listed. *(As of 19 May 2026 this claim no longer holds — see banner above.)*
 
 ---
 

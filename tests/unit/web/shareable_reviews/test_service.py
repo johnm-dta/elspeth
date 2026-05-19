@@ -49,6 +49,7 @@ from elspeth.web.sessions.models import (
     sessions_table,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from elspeth.web.shareable_reviews.service import (
     CompositionNotRunnableError,
     ShareableReviewService,
@@ -265,6 +266,15 @@ def _build_service(
     settings = MagicMock()
     settings.shareable_link_lifetime_seconds = 30 * 24 * 3600
 
+    # Phase 8 Sub-task 7c — the constructor now requires a telemetry
+    # container. Build a fresh fake-counter container per service
+    # instance (Q10 isolation per the Phase 8 telemetry test discipline).
+    # Tests asserting on the counter retrieve it via
+    # ``service._telemetry`` (the test file in
+    # ``test_telemetry_session_completed.py`` exercises that path
+    # explicitly).
+    telemetry = build_sessions_telemetry()
+
     service = ShareableReviewService(
         session_service=session_service,
         execution_service=execution_service,
@@ -273,6 +283,7 @@ def _build_service(
         settings=settings,
         sessions_db_engine=engine,
         payload_store=payload_store,
+        telemetry=telemetry,
     )
     return service, session_service, execution_service, readiness_service
 

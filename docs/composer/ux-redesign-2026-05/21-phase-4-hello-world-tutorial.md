@@ -20,8 +20,11 @@ tutorial is **frontend-orchestrated** over backend primitives that already exist
   preference state.
 - A flat-file `tutorial_cache` keyed by `(canonical_prompt_sha256, model_id)` to
   cache the canonical-seed-prompt run output and keep the tutorial fast and
-  cheap. Cache hits return the recorded run output verbatim, including the
-  audit-trail snippets the design doc's turn 5 promises ("Hash a7f3e2…").
+  cheap. Cache hits cause the run-path to synthesise a new current-session-owned
+  Landscape entry from the cached deterministic content (`rows`,
+  `source_data_hash`, `pipeline_yaml`); the entry is marked
+  `seeded_from_cache: true` and carries the cache key for cross-run lineage
+  joins — see §Auditability boundary.
 - A `HelloWorldTutorial.tsx` container plus six turn components.
 - Frontend routing logic: on session bootstrap, if the user has no
   `tutorial_completed_at`, the composer renders the tutorial container in place
@@ -113,12 +116,12 @@ The tutorial flow has three distinct trust surfaces, each with a specific tier:
    done."
 
 3. **Tutorial cache file** (`~/.elspeth_web/tutorial_cache/<sha>.json` or
-   equivalent — operator-configurable): **Tier 1** — our data. We wrote the
-   file; we trust the file. If the file exists, it must JSON-parse to the
+   equivalent — operator-configurable): **Server-generated cache content**
+   (final tier classification deferred to P23). We wrote the file; corruption
+   is a fault we must surface, not paper over. If the file exists, it must JSON-parse to the
    expected shape; if not, crash. The cache is an **optimisation, not a
-   fallback**: cache corruption is a fault we must surface, not paper over.
-   Cache misses (key not present) are not faults — they fall through to a real
-   LLM call.
+   fallback**. Cache misses (key not present) are not faults — they fall
+   through to a real LLM call.
 
 4. **LLM-generated source URLs** (the 5 government URLs returned by the LLM in
    turn 2's `set_pipeline` call): **Tier 3 at the composer LLM boundary** —
@@ -320,12 +323,24 @@ What the tutorial layer adds that is **not** in the Landscape:
   Phase 1A "Auditability boundary" note, composer mode and tutorial state are
   authoring-time UI affordances, not pipeline behaviour. Runtime pipeline
   execution and outputs do not vary by whether the user is in the tutorial.
-- Cache hits — when the cache hits, the cached run output is rendered to the
-  user. The audit-trail snippets the user sees in turn 5 are from the cached
-  run (which **was** a real run when it was first recorded). The user's
-  current session's Landscape entry shows their **actual** run, not the
-  cached one. (See §Risks for the cache-key-collision risk if this isn't
-  handled correctly.)
+- Cache hits — when the cache hits, the run-path does **not** return a foreign
+  run's audit-trail snippets. Instead:
+  - A new `run_id` is created under the current session via
+    `_replay_cached_content_to_landscape` (21a Task 7). The synthesised
+    Landscape entry is owned by the current session, populated from the
+    cached deterministic content (`rows`, `source_data_hash`, `pipeline_yaml`).
+  - The synthesised entry carries `seeded_from_cache: true` and the cache key
+    (`SHA-256(canonical_prompt + ":" + model_id)`) on its metadata, which is
+    how a future query joins back to the original seeding run for cross-run
+    lineage.
+  - `source_data_hash` carries genuine determinism evidence from the cache —
+    it is the *content* hash, reproducible across runs — not a copied
+    identity. Identity (`run_id`, `interpretation_event_id`) is **never**
+    stored in the cache; the cache holds content, not pointers.
+  - The attributability test still holds: `explain(recorder, run_id,
+    token_id)` on the cache-replay run returns the cache-replay's full
+    lineage, including the cache-key join to the original seeding run. No
+    cross-ownership query is required.
 
 The `attributability test`: for any output of the tutorial run, `explain(
 recorder, run_id, token_id)` proves complete lineage back to source. The
@@ -352,10 +367,11 @@ fresh LLM run — is the cost we're trying to avoid).
 | Risk | Mitigation |
 |---|---|
 | **LLM picks URLs that don't load.** | The `web_scrape` transform's error handling is already audit-aware. The tutorial's turn 4 result table shows the failure inline ("page 3: HTTP 503 — recorded in audit") and treats it as a teaching moment about robust pipelines (per design doc 04 §Risks). If the cache is in use, the cached output is selected from a known-good run with all URLs reachable at cache-creation time. |
+| **Cache hit obscures provenance of LLM responses.** | On a cache hit the synthesised current-session run records `seeded_from_cache: true` and the SHA-256 cache key (`canonical_prompt:model_id`). An auditor querying `explain(recorder, run_id, token_id)` for a cache-hit run sees both the local lineage and the cache-key join back to the original seeding run. Turn 5's narration also acknowledges the cache replay in user-facing copy — neither the audit trail nor the UX hides the replay. |
 | **Tutorial cache key collision.** | The key is `SHA-256(canonical_prompt + ":" + model_id)`. Collisions are cryptographically negligible. The risk is **not** collision; the risk is **stale entries**: if the model rotates (e.g., the deployment switches from claude-opus-4.7 to a newer model), the previously cached entry is for a different model and must miss. The key includes `model_id` precisely to force a miss on model rotation. There is no LRU eviction (the cache is small — one canonical key per model the deployment has used); operators may delete the cache directory at will. |
 | **User edits the seed prompt to something the composer can't handle.** | Composer validation falls back to the existing error path. The tutorial surfaces the validation error in audit-readiness style ("here's what couldn't be built and why") and offers a "restore canonical seed" affordance per design doc 04 §Risks. The edited prompt is **not** cached (the cache key matches the canonical seed prompt exactly). |
 | **User refreshes the page mid-tutorial.** | The tutorial state machine is in-memory (Zustand-free; lives in `HelloWorldTutorial.tsx` `useReducer` state). On refresh, the user lands back at turn 1 — unless the tutorial reached the point where the pipeline was created (turn 2b onwards). At turn 2b, the session exists in the backend; the tutorial detection logic considers a user with `tutorial_completed_at IS NULL` AND `>=1 session` as "tutorial interrupted." The recovery path is to re-show turn 1 with a small "You started the tutorial earlier — pick it up from where you left off?" note. **However**, recovering mid-tutorial state cleanly is genuinely hard (turn 2b depends on the LLM's interpretation event from Phase 5b being still-pending, turn 4's run output may or may not exist, etc.). **Accepted simplification:** on refresh, restart at turn 1. The unsaved-on-the-way work is fine to lose; the canonical seed produces a fresh pipeline each time, and the cache makes that fast. |
-| **Cache corruption.** | The cache is Tier-1 data; corruption is a fault. The tutorial cache reader uses Pydantic to parse the JSON file. If the parse fails, crash with the file path and the parse error chained via `from`. The operator's recovery is to delete the cache directory. **Do not** silently fall back to a live LLM call: that would mask the corruption and ship demonstrably wrong audit snippets to the user. |
+| **Cache corruption.** | Cache files are server-generated content; corruption is a fault (final tier classification deferred to P23). The tutorial cache reader uses Pydantic to parse the JSON file. If the parse fails, crash with the file path and the parse error chained via `from`. The operator's recovery is to delete the cache directory. **Do not** silently fall back to a live LLM call: that would mask the corruption and ship demonstrably wrong audit snippets to the user. |
 | **Concurrent first-session for the same user (two browser tabs).** | Two tabs may both decide "tutorial not yet done" and both render the tutorial container. The user finishes in tab A; PATCH writes `tutorial_completed_at`. Tab B continues rendering its tutorial container until its next preference read. Outcome: tab B may produce a second pipeline/session named "hello-world (cool government pages)". This is acceptable — the user has two pipelines they can run/edit/delete independently. No locking is added (the Phase 1A "Concurrent PATCH race window" mitigation applies: SQLite `ON CONFLICT DO UPDATE` resolves to the last write). |
 | **User explicitly clicks "skip" but immediately wants to come back.** | The skip affordance writes `tutorial_completed_at = now()`. Phase 8 Task 6 ships a "Replay hello-world tutorial" button in settings that PATCHes `{"tutorial_completed_at": null}` to re-enter tutorial mode (the Phase 4 PATCH contract supports this directly — see §"Cross-plan contract" in 21a). Between Phase 4 ship and Phase 8 ship, an operator can clear the row via SQL. |
 | **User edits the LLM's interpretation in turn 2b but then changes their mind.** | The Phase 5b interpretation-events table records every resolution; if the user wants to revisit, the standard composer flow surfaces pending interpretation events. The tutorial's turn 2b is just a styled wrapper around the existing `InterpretationReviewTurn` from Phase 5b. The user cannot "undo" an interpretation acceptance from inside the tutorial; the design doc 04 implicit choice is that this is acceptable for a 3-minute hello-world. |
@@ -386,6 +402,20 @@ promise mapped to its Phase 4 implementation:
   copy module.
 - **"Tutorial session"** — the session created during turn 2. Named
   "hello-world (cool government pages)" at finalisation time (turn 6).
+- **"Cache entry"** — a record under `~/.elspeth_web/tutorial_cache/<sha>.json`
+  storing the deterministic output (`rows`, `source_data_hash`,
+  `llm_call_count`, `pipeline_yaml`) of a canonical-seed-prompt run. Never
+  stores identity (`run_id`, `session_id`, `interpretation_event_id`) — the
+  content-not-identity invariant.
+- **"Cache hit"** — `lookup(canonical_prompt, model_id)` finds an existing
+  entry. The run-path synthesises a new current-session-owned Landscape entry
+  from the cached content via `_replay_cached_content_to_landscape`.
+- **"Cache replay"** — the synthesised Landscape entry produced on a cache
+  hit. Carries `seeded_from_cache: true` plus the cache key for cross-run
+  lineage joins.
+- **"Cache key"** — `SHA-256(canonical_prompt + ":" + model_id)` (hex).
+  Recorded on the cache-replay's metadata; appears in the audit trail and
+  (short-prefix) in turn 5's narration.
 
 ## Review history
 

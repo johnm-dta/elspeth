@@ -6031,23 +6031,33 @@ class TestPassThroughCrossCheck:
     def test_cross_check_increments_telemetry_counter_on_violation(self) -> None:
         """Violation increments pass_through_cross_check_violations_total{transform=...}.
 
-        Builds its own InMemoryMetricReader rather than depending on the
-        shared ``in_memory_metric_reader`` fixture from
-        ``tests/unit/telemetry/conftest.py`` — that conftest is scoped to
-        telemetry tests. Inline build keeps the fixture exposure local.
+        Uses direct counter injection (via monkeypatching pass_through._VIOLATIONS_COUNTER)
+        rather than overriding the global OTel MeterProvider. After B1-r3, a real
+        MeterProvider is set at app module-import time and OTel 1.41+ prohibits
+        subsequent set_meter_provider calls.  The prior save/restore pattern was
+        always semantically fragile — it relied on the provider being overridable, which
+        OTel guarantees only for the NoOp → real transition (do_once semantics).
+        Monkeypatching the module-level singleton is the correct post-B1-r3 approach.
         """
-        from opentelemetry import metrics
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
+        import elspeth.engine.executors.pass_through as pass_through_mod
+
         reader = InMemoryMetricReader()
         provider = MeterProvider(metric_readers=[reader])
-        prior = metrics.get_meter_provider()
-        metrics.set_meter_provider(provider)
+        # Create the counter directly from a local provider — bypasses the global
+        # OTel provider singleton so the test is hermetic regardless of what
+        # app.py or other tests installed globally.
+        injected_counter = provider.get_meter(pass_through_mod.__name__).create_counter(
+            "pass_through_cross_check_violations_total",
+            description="Count of passes_through_input=True transforms that dropped input fields at runtime",
+        )
+
+        saved = pass_through_mod._VIOLATIONS_COUNTER
+        pass_through_mod._VIOLATIONS_COUNTER = injected_counter
         try:
             factory = _make_factory()
-            # Build executor AFTER setting the global meter provider so the
-            # counter binds to the in-memory reader.
             executor = TransformExecutor(
                 factory.execution,
                 _make_span_factory(),
@@ -6082,5 +6092,5 @@ class TestPassThroughCrossCheck:
                 "Expected pass_through_cross_check_violations_total counter to be incremented with transform=test_transform attribute."
             )
         finally:
-            metrics.set_meter_provider(prior)
+            pass_through_mod._VIOLATIONS_COUNTER = saved
             reader.shutdown()

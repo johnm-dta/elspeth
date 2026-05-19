@@ -2,7 +2,7 @@
 
 Index of the documentation shipped in this repository.
 
-**Framework status:** `0.5.1` (RC-5.1 line)
+**Framework status:** `0.5.2` (RC-5.2 line)
 **Tracking note:** active delivery work lives in Filigree; many docs under `release/`,
 `plans/`, `analysis/`, `audits/`, and `arch-analysis-*` are intentionally
 point-in-time snapshots.
@@ -82,11 +82,19 @@ Runbooks and production procedures.
 - [Configure Key Vault Secrets](runbooks/configure-keyvault-secrets.md)
 - [Ansible Ubuntu Deployment](runbooks/ansible-ubuntu-deployment.md)
 
+## Release History
+
+Cross-release progress, velocity, and assurance documents. See the [release docs README](release/README.md) for an index.
+
+- [Progress Report: RC-1 to RC-5](release/elspeth-progress-rc1-to-rc5.md) — current cumulative-output view (RC-5.2, May 2026): what shipped, period by period
+- [Velocity Report: RC-1 to RC-5](release/elspeth-velocity-rc1-to-rc5.md) — current per-day commit volume (RC-5.2, May 2026): tempo and peak-day attribution
+- [Audit and Lineage Guarantees](release/guarantees.md) — long-lived assurance narrative; refreshed per release
+- [Archived RC snapshots](release/) — `feature-inventory.md` (RC-3.3), `rc4-executive-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix.md` — historical context only
+
 ## Historical Snapshots
 
 Intentional point-in-time documents retained for reference.
 
-- [Release docs](release/) — RC2 through RC4 checklists, notes, guarantees, and briefs
 - [Plans index](plans/README.md) — curated in-tree design and implementation plans
 - [Audits](audits/) — audit reports and verification sweeps
 - [Analysis](analysis/) — analysis and posture briefs

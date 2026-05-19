@@ -426,6 +426,41 @@ composition_proposals_table = Table(
     ),
 )
 
+# Per-event ``payload`` JSON contract (Tier-1 schema; CLAUDE.md
+# §"Three-Tier Trust Model" — values written here are our own data and
+# must satisfy the contract on read or crash):
+#
+# Payload contract for event_type="trust_mode.changed":
+#   trust_mode: str — the new value the PATCH set
+#       (vocabulary: 'explicit_approve' | 'auto_commit' per the
+#       CHECK constraint on sessions_table.trust_mode; see
+#       models.py:150).
+#   prior_trust_mode: str — the value the PATCH overwrote
+#       (added Phase 8 B1; same vocabulary as trust_mode above;
+#       required for the per-session session-switched telemetry
+#       counter to satisfy the audit-primacy superset rule).
+#   density_default: str — the new density_default value
+#       (vocabulary per the column's CHECK constraint).
+# Adding a new key here is a Tier-1 schema-cohort change (per
+# CLAUDE.md "DB migration = delete the old DB"); document the
+# key, its vocabulary, and the owning phase at the same time.
+#
+# Payload contract for event_type="proposal.created":
+#   tool_call_id: str — the OpenAI tool-call id.
+#   tool_name: str — the LLM-supplied tool name.
+#   status: Literal["pending"] — always "pending" for this event_type.
+#
+# Payload contract for event_type="proposal.accepted":
+#   tool_call_id: str
+#   tool_name: str
+#   status: Literal["committed"]
+#   committed_state_id: str | None — uuid of the resulting state row.
+#
+# Payload contract for event_type="proposal.rejected":
+#   tool_call_id: str
+#   tool_name: str
+#   status: Literal["rejected"]
+#   reason: str — operator-supplied or system-supplied rejection note.
 proposal_events_table = Table(
     "proposal_events",
     metadata,

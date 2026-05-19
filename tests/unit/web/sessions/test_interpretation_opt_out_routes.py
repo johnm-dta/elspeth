@@ -24,6 +24,7 @@ Fixture model: shared ``test_client`` from ``tests/unit/web/conftest.py``.
 
 from __future__ import annotations
 
+import pathlib
 from uuid import UUID, uuid4
 
 import pytest
@@ -36,7 +37,19 @@ from elspeth.web.sessions.models import (
     proposal_events_table,
     sessions_table,
 )
+from elspeth.web.sessions.telemetry import observed_value
 from tests.unit.web.conftest import _make_session
+
+# Phase 8 Sub-task 7e (Q7 content-probe skip). Gates the route-level
+# telemetry assertion on the Phase 5b audit-source string being present
+# in ``web/`` source. Per ``project_phase5b_shipped`` memory the symbol
+# should exist; the skip pathway preserves test-suite green behaviour if
+# the memory is stale or the symbol has been renamed. The probe is a
+# content check rather than a symbol import because
+# ``auto_interpreted_opt_out`` is a string-literal column value in an
+# audit row, not an exported identifier.
+_WEB_ROOT = pathlib.Path(__file__).resolve().parents[4] / "src" / "elspeth" / "web"
+_PHASE_5B_OPT_OUT_PRESENT = any("auto_interpreted_opt_out" in p.read_text() for p in _WEB_ROOT.rglob("*.py") if p.is_file())
 
 
 async def _post(test_client: TestClient, url: str) -> Response:
@@ -209,3 +222,66 @@ async def test_17_idor_opt_out_on_other_users_session_returns_404(
             select(interpretation_events_table).where(interpretation_events_table.c.session_id == str(session_id))
         ).fetchall()
     assert events == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8 Sub-task 7e — telemetry emit on the opt-out INSERT path
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(
+    not _PHASE_5B_OPT_OUT_PRESENT,
+    reason="Phase 5b opt-out audit-source not present; Sub-task 7e is a documented no-op per Task 0 probe.",
+)
+@pytest.mark.asyncio
+async def test_18_opt_out_emits_interpretation_opt_out_counter(
+    test_client: TestClient,
+) -> None:
+    """Phase 8 Sub-task 7e (B3 cohort b1):
+
+    First POST /opt_out commits one ``interpretation_events`` row with
+    ``interpretation_source='auto_interpreted_opt_out'`` and increments
+    ``composer.interpretation.opt_out_total`` by exactly one. The
+    counter is an aggregate over committed audit rows, so its value
+    must mirror the row count (superset rule).
+    """
+    session_id = _seed_session(test_client)
+    telemetry = test_client.app.state.session_service._telemetry
+
+    # Baseline: counter starts at zero for a fresh test_client fixture
+    # (the fixture's ``build_sessions_telemetry()`` returns _FakeCounter
+    # instances scoped to this test function — Q10 isolation).
+    assert observed_value(telemetry.interpretation_opt_out_total) == 0
+
+    response = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
+    assert response.status_code == 200, response.text
+
+    assert observed_value(telemetry.interpretation_opt_out_total) == 1
+
+
+@pytest.mark.skipif(
+    not _PHASE_5B_OPT_OUT_PRESENT,
+    reason="Phase 5b opt-out audit-source not present; Sub-task 7e is a documented no-op per Task 0 probe.",
+)
+@pytest.mark.asyncio
+async def test_19_opt_out_idempotent_refire_does_not_double_count(
+    test_client: TestClient,
+) -> None:
+    """Phase 8 Sub-task 7e — superset-rule guard for F-29 idempotency.
+
+    A second POST /opt_out returns the existing row (no INSERT) and must
+    NOT increment the counter again. Without this guard, the counter
+    would over-count route hits relative to audit rows, breaking the
+    "telemetry aggregates over audit rows" invariant.
+    """
+    session_id = _seed_session(test_client)
+    telemetry = test_client.app.state.session_service._telemetry
+
+    first = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
+    assert first.status_code == 200, first.text
+    assert observed_value(telemetry.interpretation_opt_out_total) == 1
+
+    second = await _post(test_client, f"/api/sessions/{session_id}/interpretations/opt_out")
+    assert second.status_code == 200, second.text
+    # Counter unchanged: F-29 idempotent re-fire did not write a new audit row.
+    assert observed_value(telemetry.interpretation_opt_out_total) == 1

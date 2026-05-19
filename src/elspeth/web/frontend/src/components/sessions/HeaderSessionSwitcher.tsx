@@ -28,9 +28,13 @@ export function HeaderSessionSwitcher(): JSX.Element {
   const [open, setOpen] = useState(false);
   const [focusIndex, setFocusIndex] = useState(0);
   const [archiveTarget, setArchiveTarget] = useState<Session | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [renamePending, setRenamePending] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [filterText, setFilterText] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<(HTMLElement | null)[]>([]);
@@ -38,7 +42,12 @@ export function HeaderSessionSwitcher(): JSX.Element {
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const triggerLabel = activeSession?.title || "Untitled";
-  const itemCount = 1 + sessions.length * 3;
+  const filteredSessions = sessions.filter(
+    (s) =>
+      (showArchived || !s.archived) &&
+      s.title.toLowerCase().includes(filterText.toLowerCase()),
+  );
+  const itemCount = 1 + filteredSessions.length * 3;
 
   const closeAndReturnFocus = useCallback(() => {
     setOpen(false);
@@ -103,6 +112,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
     setRenamingSessionId(null);
     setRenameText("");
     setRenamePending(false);
+    setRenameError(null);
   }, []);
 
   const saveRename = useCallback(async () => {
@@ -112,20 +122,42 @@ export function HeaderSessionSwitcher(): JSX.Element {
     setRenamePending(true);
     try {
       await renameSession(renamingSessionId, trimmed);
+      setRenameError(null);
       setRenamingSessionId(null);
       setRenameText("");
       closeAndReturnFocus();
+    } catch (err) {
+      // Mirror confirmArchive: preserve the backend's diagnostic message
+      // when the rejection is an Error, fall back to a friendly message
+      // otherwise.  Inline rather than relying on the composer-level
+      // error region so the alert is co-located with the rename form.
+      const detail = err instanceof Error && err.message ? err.message : null;
+      setRenameError(
+        detail !== null
+          ? `Could not rename session: ${detail}`
+          : "Could not rename session. Please try again.",
+      );
     } finally {
       setRenamePending(false);
     }
   }, [closeAndReturnFocus, renamePending, renameSession, renameText, renamingSessionId]);
 
-  const confirmArchive = useCallback(() => {
+  const confirmArchive = useCallback(async () => {
     if (!archiveTarget) return;
     const targetId = archiveTarget.id;
     setArchiveTarget(null);
     closeAndReturnFocus();
-    void archiveSession(targetId);
+    try {
+      await archiveSession(targetId);
+      setArchiveError(null);
+    } catch (err) {
+      // Preserve the backend's diagnostic message when available — an
+      // auditable system shouldn't drop the actual failure reason.  Fall
+      // back to a friendly message when the rejection isn't an Error
+      // (e.g. a string thrown manually somewhere in the call chain).
+      const detail = err instanceof Error && err.message ? err.message : null;
+      setArchiveError(detail !== null ? `Could not archive session: ${detail}` : "Could not archive session. Please try again.");
+    }
   }, [archiveSession, archiveTarget, closeAndReturnFocus]);
 
   const activateMenuIndex = useCallback(
@@ -135,7 +167,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
         return;
       }
       const offset = index - 1;
-      const session = sessions[Math.floor(offset / 3)];
+      const session = filteredSessions[Math.floor(offset / 3)];
       if (!session) return;
       const action = offset % 3;
       if (action === 0) {
@@ -146,7 +178,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
         setArchiveTarget(session);
       }
     },
-    [onNewSession, onSelect, sessions, startRename],
+    [onNewSession, onSelect, filteredSessions, startRename],
   );
 
   const onMenuKeyDown = useCallback(
@@ -204,21 +236,76 @@ export function HeaderSessionSwitcher(): JSX.Element {
           aria-expanded={open}
           aria-controls={MENU_ID}
           aria-label={`Session switcher: ${triggerLabel}`}
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            setOpen((v) => {
+              // Reopening the menu clears stale inline alerts (archive,
+              // rename) so the user doesn't see a previous failure
+              // persisting next to a fresh menu interaction.  The alerts
+              // still render when their state is set; this just stops
+              // them sticking around after dismiss-and-reopen.
+              if (!v) {
+                setArchiveError(null);
+                setRenameError(null);
+              }
+              return !v;
+            });
+          }}
           className="header-session-switcher-trigger"
         >
           <span aria-hidden="true">Session:</span>{" "}
           <strong>{triggerLabel}</strong>
           <span aria-hidden="true"> ▾</span>
         </button>
+        {archiveError !== null && (
+          <div role="alert" className="header-session-switcher-archive-error">
+            {archiveError}
+          </div>
+        )}
         {open && (
-          <ul
-            id={MENU_ID}
-            role="menu"
-            aria-label="Sessions"
-            className="header-session-switcher-menu"
-            onKeyDown={onMenuKeyDown}
-          >
+          <>
+            {/*
+              Filter input and show-archived toggle are NOT menu items —
+              they control the menu's contents.  They previously sat
+              inside ``<ul role="menu">`` and axe-core flagged this as
+              ``aria-required-children`` (a menu can only contain
+              menuitem/menuitemcheckbox/menuitemradio children).  Hoisted
+              out into a sibling controls strip so the menu only contains
+              real menuitems.  The strip carries its own
+              ``role="group"`` + ``aria-label`` so screen readers
+              announce it as the filter-controls group rather than as
+              part of the session list.
+            */}
+            <div
+              role="group"
+              aria-label="Filter sessions"
+              className="header-session-switcher-controls"
+            >
+              <input
+                type="text"
+                aria-label="Find a session…"
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                onKeyDown={(e) => e.stopPropagation()}
+                className="header-session-switcher-filter"
+                placeholder="Find a session…"
+              />
+              <label className="header-session-switcher-show-archived">
+                <input
+                  type="checkbox"
+                  aria-label="Show archived"
+                  checked={showArchived}
+                  onChange={(e) => setShowArchived(e.target.checked)}
+                />
+                {" "}Show archived
+              </label>
+            </div>
+            <ul
+              id={MENU_ID}
+              role="menu"
+              aria-label="Sessions"
+              className="header-session-switcher-menu"
+              onKeyDown={onMenuKeyDown}
+            >
             <li
               ref={(el) => {
                 itemRefs.current[0] = el;
@@ -230,7 +317,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
             >
               + New session
             </li>
-            {sessions.map((session, idx) => {
+            {filteredSessions.map((session, idx) => {
               const title = session.title || `Session ${session.id.slice(0, 8)}`;
               const selectIndex = 1 + idx * 3;
               const renameIndex = selectIndex + 1;
@@ -278,6 +365,14 @@ export function HeaderSessionSwitcher(): JSX.Element {
                         Cancel
                       </button>
                     </form>
+                    {renameError !== null && (
+                      <div
+                        role="alert"
+                        className="header-session-switcher-rename-error"
+                      >
+                        {renameError}
+                      </div>
+                    )}
                   </li>
                 );
               }
@@ -325,7 +420,8 @@ export function HeaderSessionSwitcher(): JSX.Element {
                 </li>
               );
             })}
-          </ul>
+            </ul>
+          </>
         )}
       </div>
       {archiveTarget && (

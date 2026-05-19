@@ -31,6 +31,7 @@ from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -61,6 +62,10 @@ def _make_app(
     app.state.preferences_service = PreferencesService(engine)
     app.state.session_engine = engine
     app.state.rate_limiter = ComposerRateLimiter(limit=rate_limit)
+    # Phase 8 Task 2: the PATCH route emits ``record_mode_opted_*``
+    # via ``request.app.state.sessions_telemetry``. Attach a fresh
+    # fake-counter container per app build (function-scoped per Q10).
+    app.state.sessions_telemetry = build_sessions_telemetry()
 
     if user_id is not None:
         identity = UserIdentity(user_id=user_id, username=user_id)

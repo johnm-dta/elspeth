@@ -22,14 +22,35 @@ would force a structural lie.
 ``web/sessions/telemetry.py`` because ``SessionServiceImpl`` owns
 the persistence counters. The OTel metric strings remain
 ``composer.audit.*`` because operators consume them as part of the
-composer-progress surface, but metric naming does not justify an
-import from ``web/sessions/service.py`` up into ``web/composer``.
-Composer code may import the sessions-owned container or receive it
-from app wiring; sessions code must not import composer-owned modules.
+composer-progress surface — naming reflects the dashboard/consumer
+view, not the import direction.
+
+Import direction is unrestricted within the L3 application layer.
+Both composer code AND sessions code may import this container, and
+sessions code may import composer-owned helpers (e.g. the
+``record_*`` emit helpers in ``web/composer/telemetry_phase8.py``).
+An earlier draft of this docstring said "sessions code must not
+import composer-owned modules"; that prohibition lived only as
+docstring text (no CI gate, no enforcement script — verified via
+``config/cicd/`` and ``scripts/cicd/`` for the retirement) and was
+contradicted by 31+ pre-existing ``from elspeth.web.composer.*``
+imports across ``src/elspeth/web/sessions/`` from the day the rule
+was first written. The Phase 8b-1b cohort emits made the dead-
+letter rule visibly inconsistent, so it has been retired. The
+retirement is recorded in the cohort's docstring-corrections
+commit (search ``git log -S 'must not import composer'`` to walk
+the history).
+The practical constraint is the tier-model layer rule
+(``contracts/`` → ``core/`` → ``engine/`` → ``plugins/`` + L3
+application). Inside L3, composer / sessions / audit_readiness /
+preferences / etc. may import each other freely as long as imports
+flow within L3 and respect the contract-layer boundaries above.
+
 Phase 2 (redaction counters) and Phase 3 (compose-loop counters) may
 extend this container only if ownership still belongs to the sessions
 persistence surface; otherwise those phases add composer-owned
-telemetry separately.
+telemetry separately (a naming/discoverability convention, not an
+import-direction rule).
 """
 
 from __future__ import annotations
@@ -67,9 +88,17 @@ class _Counter(Protocol):
 
 class _Meter(Protocol):
     """Subset of ``opentelemetry.metrics.Meter`` that
-    ``build_sessions_telemetry`` uses for production wiring."""
+    ``build_sessions_telemetry`` uses for production wiring.
 
-    def create_counter(self, name: str) -> _Counter: ...
+    ``description`` is keyword-only and optional — the real OTel
+    ``Meter.create_counter(name, unit="", description="")`` signature
+    accepts it, and the Phase 8 counters wire descriptions to match
+    the existing ``_PREFERENCES_PATCH_COUNTER`` precedent in
+    ``preferences/service.py``. The Protocol stays minimal otherwise;
+    ``unit=`` is not used by this surface today.
+    """
+
+    def create_counter(self, name: str, *, description: str = "") -> _Counter: ...
 
 
 class _FakeCounter:
@@ -121,6 +150,14 @@ class _SessionsTelemetry:
     """Container for the named counters introduced by composer progress
     persistence. All counters default to fakes so tests can assert without
     wiring the real OTel SDK; production wiring replaces them at startup.
+
+    Note: no ``__post_init__`` deep-freeze guard is required even though
+    this is ``frozen=True``.  Every field is a ``_Counter`` Protocol
+    reference whose internal state (call list / aggregated value) is
+    mutable by design — that's what makes a counter useful.  ``frozen``
+    blocks slot reassignment, which is the only invariant we want.  The
+    CLAUDE.md ``deep_freeze`` contract applies to ``Mapping/Sequence/Set``
+    container fields; ``_Counter`` is neither.
     """
 
     tool_row_tier1_violation_total: _Counter
@@ -152,6 +189,51 @@ class _SessionsTelemetry:
     # this counter catches). Purpose: catches LLM under-firing after a model
     # upgrade without waiting for offline eval refresh.
     interpretation_placeholder_unresolved_at_runtime_total: _Counter
+    # ── Phase 8 (mode / session-switched / tutorial / B3 cohort / B5) ──
+    # Counters added unconditionally to the container even when the
+    # consuming emit-site is conditional on an earlier-phase surface
+    # shipping (B3 cohort a/b1/b2, B5 dynamic-source). The cost of an
+    # unused counter slot is effectively zero; the cost of branching
+    # the container shape on probe outcomes is real bootstrap-order
+    # complexity. Probe gates live at the emit sites, not here.
+    mode_opted_out_total: _Counter
+    mode_opted_in_total: _Counter
+    session_switched_total: _Counter
+    # Tutorial counters wired by Task 6 (conditional on Phase 4 ship).
+    tutorial_started_total: _Counter
+    tutorial_completed_total: _Counter
+    # tutorial_replayed_total — DELIBERATELY ABSENT (Phase 9 deferred per
+    # Decision 2 / Option C in 20-phase-8-polish-and-telemetry.md §"Phase
+    # 9 follow-ups"). The replay button ships without the counter slot;
+    # Phase 9 adds both the slot and the boundary-question resolution
+    # (audit-row vs telemetry-only). Do NOT add this field without
+    # re-opening Decision 2.
+    session_completed_total: _Counter
+    # B3 cohort (a) — Phase 6 share-counter emits (Sub-task 7d). Added
+    # unconditionally; emit fires only if the Phase 6 token-verify path
+    # has shipped (probe in Task 0).
+    share_token_verify_failure_total: _Counter
+    share_link_expiry_hit_total: _Counter
+    # B3 cohort (b1) — Phase 5b interpretation opt-out (Sub-task 7e).
+    interpretation_opt_out_total: _Counter
+    # B3 cohort (b2) — Phase 2C audit-readiness fetch failure (Sub-task 7f).
+    # Telemetry-only signal; superset exception for non-decision read.
+    audit_fetch_failure_total: _Counter
+    # B4 (W8-r2 module-local counter) — DELIBERATELY ABSENT: the Task 0
+    # probe-failure counter (``composer.phase_8.probe_failed_total``)
+    # is NOT a field on this container. Per W8-r2 / A5, it lives as a
+    # module-local OTel counter in ``telemetry_phase8.py``
+    # (``_PHASE_8_PROBE_FAILED_COUNTER``), constructed at module import
+    # time via ``meter.create_counter``. Matches the existing
+    # ``_PREFERENCES_PATCH_COUNTER`` pattern in
+    # ``src/elspeth/web/preferences/service.py``. Motivation: remove the
+    # bootstrap-order coupling that would otherwise require Task 1
+    # Step 5 (this container extension) to land before Task 0 Step 2
+    # could emit. See 20-phase-8-polish-and-telemetry.md Task 1 Step 4
+    # module shape + §Risks "Phase 8 probe-failure counter bootstrap-
+    # order coupling (W8-r2)".
+    # B5 — Phase 5a dynamic-source emit (Sub-task 7b).
+    source_dynamic_created_total: _Counter
 
 
 def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemetry:
@@ -175,6 +257,18 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             audit_access_log_write_failed_total=_FakeCounter(),
             interpretation_rate_cap_exceeded_total=_FakeCounter(),
             interpretation_placeholder_unresolved_at_runtime_total=_FakeCounter(),
+            # Phase 8 counters.
+            mode_opted_out_total=_FakeCounter(),
+            mode_opted_in_total=_FakeCounter(),
+            session_switched_total=_FakeCounter(),
+            tutorial_started_total=_FakeCounter(),
+            tutorial_completed_total=_FakeCounter(),
+            session_completed_total=_FakeCounter(),
+            share_token_verify_failure_total=_FakeCounter(),
+            share_link_expiry_hit_total=_FakeCounter(),
+            interpretation_opt_out_total=_FakeCounter(),
+            audit_fetch_failure_total=_FakeCounter(),
+            source_dynamic_created_total=_FakeCounter(),
         )
 
     # Production wiring against the real OTel meter. The ``_Meter``
@@ -192,5 +286,87 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         interpretation_rate_cap_exceeded_total=meter.create_counter("composer.interpretation_rate_cap_exceeded_total"),
         interpretation_placeholder_unresolved_at_runtime_total=meter.create_counter(
             "composer.interpretation_placeholder_unresolved_at_runtime_total"
+        ),
+        # ── Phase 8 wire names (real-meter branch) ──
+        # Naming: ``composer.<domain>.<verb>_total``. The
+        # ``description`` keyword argument is supplied so the
+        # Prometheus exposition (B1-r3 MeterProvider) carries
+        # operator-readable HELP text for each metric.
+        mode_opted_out_total=meter.create_counter(
+            "composer.mode.opted_out_total",
+            description=(
+                "Composer account-level opt-outs from guided mode "
+                "(default_mode set to 'freeform' on PATCH /api/composer-preferences). "
+                "Post-state counter: fires on every PATCH whose body sets "
+                "default_mode=freeform, regardless of prior state. "
+                "Denominator is composer.preferences.patch_total."
+            ),
+        ),
+        mode_opted_in_total=meter.create_counter(
+            "composer.mode.opted_in_total",
+            description=(
+                "Composer account-level opt-ins to guided mode "
+                "(default_mode set to 'guided' on PATCH /api/composer-preferences). "
+                "Post-state counter; symmetric to composer.mode.opted_out_total."
+            ),
+        ),
+        session_switched_total=meter.create_counter(
+            "composer.session.switched_total",
+            description=(
+                "Per-session trust-mode switch on "
+                "PATCH /api/sessions/{session_id}/composer/preferences. "
+                "Attributes: from_mode, to_mode ∈ {explicit_approve, auto_commit} "
+                "drawn from the session row's trust_mode CHECK constraint."
+            ),
+        ),
+        tutorial_started_total=meter.create_counter(
+            "composer.tutorial.started_total",
+            description="Composer first-run tutorial started (Phase 4 surface; helper wired in Phase 8 for forward-fit).",
+        ),
+        tutorial_completed_total=meter.create_counter(
+            "composer.tutorial.completed_total",
+            description="Composer first-run tutorial completed (Phase 4 surface; helper wired in Phase 8 for forward-fit).",
+        ),
+        session_completed_total=meter.create_counter(
+            "composer.session.completed_total",
+            description=(
+                "Composer session terminated via a completion gesture "
+                "(Phase 6). Attributes: completion_verb ∈ "
+                "{mark_ready_for_review, export_yaml} — sourced from "
+                "the CHECK constraint on "
+                "composer_completion_events_table.event_type (see "
+                "src/elspeth/web/sessions/models.py:735). The counter "
+                "aggregates over committed audit rows in that table; "
+                "no UI-only verbs (e.g. save_for_review) and no "
+                "run-completion verbs (e.g. run_pipeline — see runs/) "
+                "appear here, per the CLAUDE.md superset rule."
+            ),
+        ),
+        share_token_verify_failure_total=meter.create_counter(
+            "composer.share.token_verify_failure_total",
+            description="Shareable-review token verification failure (B3 cohort a — Phase 6 surface).",
+        ),
+        share_link_expiry_hit_total=meter.create_counter(
+            "composer.share.link_expiry_hit_total",
+            description="Shareable-review link visited after expiry (B3 cohort a — Phase 6 surface).",
+        ),
+        interpretation_opt_out_total=meter.create_counter(
+            "composer.interpretation.opt_out_total",
+            description=(
+                "Interpretation auto-opt-out (B3 cohort b1 — Phase 5b surface). "
+                "Fires alongside the audit row whose interpretation_source "
+                "is 'auto_interpreted_opt_out'."
+            ),
+        ),
+        audit_fetch_failure_total=meter.create_counter(
+            "composer.audit.fetch_failure_total",
+            description=(
+                "Audit-readiness panel fetch failure (B3 cohort b2 — Phase 2C surface). "
+                "Telemetry-only signal; superset exception for non-decision read."
+            ),
+        ),
+        source_dynamic_created_total=meter.create_counter(
+            "composer.source.dynamic_created_total",
+            description="Dynamic source created from chat (B5 — Phase 5a surface).",
         ),
     )

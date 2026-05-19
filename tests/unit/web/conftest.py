@@ -131,6 +131,12 @@ def test_client(tmp_path: Path) -> TestClient:
     app.dependency_overrides[get_current_user] = mock_user
     app.add_exception_handler(AuditAccessLogWriteError, audit_access_log_write_error_handler)
     app.state.session_service = service
+    # Phase 8 Task 2: route-level telemetry emits read
+    # ``request.app.state.sessions_telemetry``. The service already
+    # holds the same container as ``_telemetry``; mirror it on
+    # ``app.state`` so route-level tests can observe via either name
+    # (matches production wiring in ``web/app.py:579``).
+    app.state.sessions_telemetry = service._telemetry
     app.state.session_engine = eng
     app.state.settings = WebSettings(
         data_dir=tmp_path,

@@ -129,6 +129,10 @@ describe('TutorialTurn4Run', () => {
     await waitFor(() =>
       expect(screen.getByText(/australia\.gov\.au/)).toBeInTheDocument(),
     );
+    // Note: runTutorialPipeline / getRunAuditSummary / renameSession are
+    // NEW functions added to api/client.ts by Tasks 8/9/10. Verify each
+    // is exported and typed against the response shape used in these
+    // spies before writing the implementation. See 21a §"New endpoints".
     expect(screen.getByText('6')).toBeInTheDocument();
     expect(screen.getByText('9')).toBeInTheDocument();
     expect(screen.getByText(/dated/)).toBeInTheDocument();
@@ -502,6 +506,8 @@ interface AuditSummary {
   output_file_hash: string;
   run_started_at: string;
   plugin_versions: Record<string, string>;
+  seeded_from_cache: boolean;
+  cache_key: string | null;
 }
 
 export function TutorialTurn5AuditStory({
@@ -542,6 +548,15 @@ export function TutorialTurn5AuditStory({
   return (
     <div className="tutorial-turn tutorial-turn-5">
       <p>{TURN_5_INTRO}</p>
+      {summary.seeded_from_cache && summary.cache_key && (
+        <p className="tutorial-cache-replay">
+          Your run reused cached LLM responses from a prior canonical run; the
+          audit trail records the cache key{' '}
+          <code>{summary.cache_key.slice(0, 6)}…</code> so the original
+          generation can be traced. This replay made {summary.llm_call_count}{' '}
+          calls to the LLM.
+        </p>
+      )}
       <ul className="tutorial-audit-bullets">
         <li>
           Every URL you started with — hash <code>{shortHash}…</code>
@@ -631,12 +646,19 @@ The session rename happens here, not in turn 4 or 5, because:
 - [ ] **Step 1: Recon the session-rename API.**
 
 ```bash
-grep -rn "renameSession\|updateSession.*title" \
+grep -rn "renameSession\|updateSessionTitle" \
   src/elspeth/web/frontend/src/api --include="*.ts" | head -10
 ```
 
-Confirm the function name and signature. If renames go through
-`sessionStore`, prefer the store path.
+At RC5.2 HEAD the live name is `updateSessionTitle(sessionId, title)`.
+PR-21a (Phase 4 backend) Task 7.3 renames it to `renameSession` per
+the No Legacy Code Policy; PR-21b (this plan) merges after PR-21a, so
+by the time these tests run `renameSession` IS the live name. Use
+`renameSession` here. If recon at task-start shows PR-21a has not yet
+landed, halt and surface to the operator — do not introduce a
+temporary `updateSessionTitle` call site, as PR-21a's rename will then
+break this turn (CLAUDE.md No Legacy Code Policy: change all call
+sites in the same commit).
 
 - [ ] **Step 2: Write the failing test.**
 
@@ -1046,7 +1068,7 @@ cat src/elspeth/web/frontend/src/App.tsx | head -100
 
 Identify:
 - Where the user-loaded check happens.
-- Where preferences are loaded (likely `useEffect(() => loadPreferences(), [])`).
+- Where preferences are loaded. Live (`App.tsx`): `usePreferencesStore((s) => s.bootstrap)` slice + `useEffect(() => bootstrap(), [bootstrap])`. The action is `bootstrap`, not `loadPreferences`.
 - The point in the render tree where the composer surface mounts (we replace
   this with the tutorial container when `tutorialCompleted === false`).
 
@@ -1063,7 +1085,7 @@ import * as api from './api/client';
 
 describe('App — tutorial routing', () => {
   it('renders HelloWorldTutorial when tutorialCompleted=false', async () => {
-    vi.spyOn(api, 'getComposerPreferences').mockResolvedValue({
+    vi.spyOn(api, 'fetchUserComposerPreferences').mockResolvedValue({
       default_mode: 'guided',
       banner_dismissed_at: null,
       tutorial_completed_at: null,
@@ -1076,7 +1098,7 @@ describe('App — tutorial routing', () => {
   });
 
   it('renders the normal composer when tutorialCompleted=true', async () => {
-    vi.spyOn(api, 'getComposerPreferences').mockResolvedValue({
+    vi.spyOn(api, 'fetchUserComposerPreferences').mockResolvedValue({
       default_mode: 'guided',
       banner_dismissed_at: null,
       tutorial_completed_at: '2026-05-14T12:00:00Z',
@@ -1090,7 +1112,7 @@ describe('App — tutorial routing', () => {
 
   it('transitions to the normal composer when tutorial finalises', async () => {
     // Setup: tutorial not yet complete.
-    vi.spyOn(api, 'getComposerPreferences').mockResolvedValue({
+    vi.spyOn(api, 'fetchUserComposerPreferences').mockResolvedValue({
       default_mode: 'guided',
       banner_dismissed_at: null,
       tutorial_completed_at: null,
@@ -1131,11 +1153,24 @@ import { usePreferencesStore } from './stores/preferencesStore';
 const PROGRESS_KEY = 'elspeth_tutorial_progress';
 
 export function App() {
-  const tutorialCompleted = usePreferencesStore((s) => s.tutorialCompleted);
+  // Derive tutorialCompleted at the call site via inline selector. The
+  // store does NOT expose a `tutorialCompleted` field — see plan 21b1
+  // Task 1 §"Notes" and the existing `selectTutorialCompleted` export.
+  const tutorialCompleted = usePreferencesStore(
+    (s) => s.tutorialCompletedAt !== null,
+  );
   const loaded = usePreferencesStore((s) => s.loaded);
-  const loadPreferences = usePreferencesStore((s) => s.loadPreferences);
+  const bootstrap = usePreferencesStore((s) => s.bootstrap);
 
-  useEffect(() => { loadPreferences(); }, [loadPreferences]);
+  // Phase 1B Panel C2: bootstrap may fail (no-row 5xx, network); errors
+  // are surfaced via the existing prefs writeError surface rather than
+  // swallowed. The existing App.tsx bootstrap effect already has this
+  // shape — preserve it.
+  useEffect(() => {
+    bootstrap().catch((err) => {
+      console.error("[preferences] bootstrap failed:", err);
+    });
+  }, [bootstrap]);
 
   if (!loaded) return <div>Loading…</div>;
 
@@ -1195,8 +1230,21 @@ Append to `HelloWorldTutorial.test.tsx`:
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { HelloWorldTutorial } from './HelloWorldTutorial';
-import * as api from '../../api/client';
-import * as interpretationApi from '../../api/interpretationEvents';
+import * as api from '@/api/client';
+import { useInterpretationEventsStore } from '@/stores/interpretationEventsStore';
+import type { InterpretationEvent } from '@/types/interpretation';
+
+const PENDING_EVENT: InterpretationEvent = {
+  id: 'evt-1',
+  session_id: 'sess-1',
+  user_term: 'cool',
+  llm_draft: 'modern design',
+  choice: 'pending',
+  created_at: '2026-05-15T12:00:00Z',
+  resolved_at: null,
+  amendment: null,
+  interpretation_source: null,
+};
 
 describe('HelloWorldTutorial — full 6-turn integration', () => {
   it('walks from welcome to done with cached run', async () => {
@@ -1208,17 +1256,15 @@ describe('HelloWorldTutorial — full 6-turn integration', () => {
         sinks: [{ type: 'jsonl' }],
       },
     });
-    vi.spyOn(
-      interpretationApi,
-      'listPendingInterpretationEvents',
-    ).mockResolvedValue([
-      { id: 'evt-1', tool_call_id: 'tc-1', draft_value: 'modern design' },
-    ]);
-    vi.spyOn(interpretationApi, 'resolveInterpretationEvent').mockResolvedValue({
-      id: 'evt-1',
-      status: 'accepted',
-      accepted_value: 'modern design',
+    // Live: interpretation events come through the store, not a wire
+    // module. Seed pendingBySession and spy on store actions.
+    useInterpretationEventsStore.setState({
+      pendingBySession: { 'sess-1': { 'evt-1': PENDING_EVENT } },
     });
+    vi.spyOn(useInterpretationEventsStore.getState(), 'refreshPending')
+      .mockResolvedValue();
+    vi.spyOn(useInterpretationEventsStore.getState(), 'resolveEvent')
+      .mockResolvedValue({ new_state: null as never });
     vi.spyOn(api, 'runTutorialPipeline').mockResolvedValue({
       run_id: 'r1',
       source_data_hash: 'a7f3e2',
@@ -1229,13 +1275,15 @@ describe('HelloWorldTutorial — full 6-turn integration', () => {
       output_file_hash: 'cafebabe',
       run_started_at: '2026-05-15T12:00:00Z',
       plugin_versions: {},
+      seeded_from_cache: false,
+      cache_key: null,
     });
     vi.spyOn(api, 'renameSession').mockResolvedValue({
       id: 'sess-1',
       title: 'hello-world (cool government pages)',
     });
     const patchSpy = vi
-      .spyOn(api, 'updateComposerPreferences')
+      .spyOn(api, 'updateUserComposerPreferences')
       .mockResolvedValue({
         default_mode: 'guided',
         banner_dismissed_at: null,

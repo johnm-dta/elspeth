@@ -709,6 +709,45 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
+  # Frontend unit tests + type check (vitest, gating)
+  # ===========================================================================
+  # Phase 8 post-merge fix: before this job existed, the entire vitest
+  # suite under ``src/elspeth/web/frontend/src/**/*.test.{ts,tsx}`` ran
+  # only locally — no workflow invoked ``npm test`` or ``npm run
+  # typecheck``.  That meant the ~525-case HeaderSessionSwitcher /
+  # ComposerPreferencesPanel / TemplateCards / a11y-harness etc. test
+  # corpus was advisory documentation rather than regression protection.
+  # This lane is in ``ci-success.needs`` below so a red vitest run
+  # blocks merge.
+  frontend-unit:
+    name: Frontend unit (vitest + typecheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: src/elspeth/web/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: src/elspeth/web/frontend
+        run: npm ci
+
+      - name: Type check
+        working-directory: src/elspeth/web/frontend
+        run: npm run typecheck
+
+      - name: Run vitest
+        working-directory: src/elspeth/web/frontend
+        env:
+          CI: "true"
+        run: npm test -- --run
+
+  # ===========================================================================
   # Summary Job - Required for branch protection
   # ===========================================================================
   ci-success:
@@ -730,6 +769,7 @@ jobs:
       - test
       - test-postgres-testcontainer
       - supply-chain-audit
+      - frontend-unit
     if: always()
     steps:
       - name: Check all jobs passed
@@ -792,6 +832,10 @@ jobs:
           fi
           if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then
             echo "Dependency/license audit job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.frontend-unit.result }}" != "success" ]]; then
+            echo "Frontend unit (vitest + typecheck) job failed"
             exit 1
           fi
           echo "All CI checks passed!"

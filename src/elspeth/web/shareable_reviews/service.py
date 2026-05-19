@@ -59,6 +59,10 @@ from sqlalchemy.engine import Engine
 from elspeth.core.canonical import canonical_json
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.audit_readiness.models import AuditReadinessSnapshot
+from elspeth.web.composer.telemetry_phase8 import (
+    SessionsTelemetry,
+    record_session_completed,
+)
 from elspeth.web.composer.yaml_generator import generate_yaml
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.converters import state_from_record
@@ -284,6 +288,7 @@ class ShareableReviewService:
         settings: WebSettings,
         sessions_db_engine: Engine,
         payload_store: FilesystemPayloadStore,
+        telemetry: SessionsTelemetry,
     ) -> None:
         self._session_service = session_service
         self._execution_service = execution_service
@@ -292,6 +297,14 @@ class ShareableReviewService:
         self._settings = settings
         self._sessions_db_engine = sessions_db_engine
         self._payload_store = payload_store
+        # Phase 8 Sub-task 7c — composer.session.completed_total counter.
+        # Mirrors the sessions/service.py pattern at line 48/2446 (the
+        # cohort b1 interpretation-opt-out emit). The container is owned
+        # by the FastAPI app and threaded through app.state; we hold a
+        # reference so the audit-row-then-counter sequence at
+        # mark_ready_for_review can fire the helper after engine.begin()
+        # exits cleanly.
+        self._telemetry = telemetry
 
     async def mark_ready_for_review(self, *, session_id: UUID, user_id: str) -> MarkReadyForReviewResponse:
         """Build a signed share artifact for ``(session_id, current state)``.
@@ -354,6 +367,14 @@ class ShareableReviewService:
                     expires_at=expires_at,
                 )
             )
+
+        # Phase 8 Sub-task 7c (telemetry-backfill: phase-6).
+        # Audit primacy: the helper runs AFTER the engine.begin() block
+        # commits the audit row. If the INSERT above raises, control
+        # never reaches this line and the counter stays at zero — the
+        # superset rule (counter aggregates over committed audit rows)
+        # is structurally enforced by the placement.
+        record_session_completed(self._telemetry, completion_verb="mark_ready_for_review")
 
         # Then blob.
         stored_hex = self._payload_store.store(snapshot.canonical_bytes)

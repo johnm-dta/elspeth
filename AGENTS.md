@@ -136,7 +136,7 @@ systemd path unit. Sudoers alone cannot override the sandbox's
 
 | Skill | Contains |
 |-------|----------|
-| `engine-patterns-reference` | Composite PKs, schema contracts, header normalization, canonical JSON, retry semantics, secret handling, test path integrity, offensive programming examples, `hasattr` ban, layer architecture & `enforce_tier_model.py` (`check` and `dump-edges`) |
+| `engine-patterns-reference` | Composite PKs, schema contracts, header normalization, canonical JSON, retry semantics, secret handling, test path integrity, offensive programming examples, `hasattr` ban, layer architecture & `trust_tier.tier_model` / `dump-edges` |
 | `tier-model-deep-dive` | External call boundaries in transforms, coercion rules by plugin type, operation wrapping rules, serialization trust preservation, pipeline template error categories |
 | `logging-telemetry-policy` | Audit primacy, permitted/forbidden logger uses, superset rule, telemetry-only exemptions, the primacy test |
 | `config-contracts-guide` | Settings→Runtime mapping, protocol-based verification, `from_settings()` pattern, adding new Settings fields, tier model enforcement allowlist |

@@ -275,19 +275,17 @@ jobs:
 
       - name: Run tier model enforcement
         run: |
-          python scripts/cicd/enforce_tier_model.py check \
+          PYTHONPATH=elspeth-lints/src python -m elspeth_lints.core.cli check \
+            --rules trust_tier.tier_model \
             --root src/elspeth \
-            --allowlist config/cicd/enforce_tier_model \
-            --exclude "**/__pycache__/*" \
             --format text
 
       - name: Write tier model JSON report on failure
         if: failure()
         run: |
-          python scripts/cicd/enforce_tier_model.py check \
+          PYTHONPATH=elspeth-lints/src python -m elspeth_lints.core.cli check \
+            --rules trust_tier.tier_model \
             --root src/elspeth \
-            --allowlist config/cicd/enforce_tier_model \
-            --exclude "**/__pycache__/*" \
             --format json > enforce-tier-model-report.json || true
 
       - name: Upload tier model JSON report

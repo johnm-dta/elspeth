@@ -123,11 +123,12 @@ repos:
         files: ^(src/elspeth/|tests/|config/cicd/adr019_(symbol|test)_inventory/|elspeth-lints/src/elspeth_lints/rules/manifest/(symbol_inventory|test_to_source_mapping)/)
         pass_filenames: false
 
-      - id: enforce-tier-model
-        name: Enforce Tier Model
-        entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*" --exclude "web/frontend/node_modules"
+      - id: elspeth-lints-trust-tier
+        name: elspeth-lints trust-tier
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
         language: system
         types: [python]
+        files: ^(src/elspeth/|config/cicd/enforce_tier_model/|elspeth-lints/src/elspeth_lints/rules/trust_tier/)
         pass_filenames: false
 
       - id: check-contracts

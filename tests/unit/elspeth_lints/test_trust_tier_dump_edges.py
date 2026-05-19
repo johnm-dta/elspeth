@@ -356,7 +356,7 @@ def test_case08_determinism(temp_root: Path) -> None:
 
 def test_case09_cli_invalid_layer(temp_root: Path) -> None:
     """``--include-layer L9`` must be rejected by argparse with non-zero exit."""
-    project_root = Path(__file__).resolve().parents[4]
+    project_root = Path(__file__).resolve().parents[3]
     pythonpath = str(project_root / "elspeth-lints" / "src")
     existing_pythonpath = os.environ.get("PYTHONPATH")
     env = {

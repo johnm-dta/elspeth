@@ -15,9 +15,8 @@ Enforces ELSPETH's data manifesto (see CLAUDE.md):
 - Tier 3 (External Data): Zero trust - validate at boundary, coerce where possible
 
 Usage:
-    python scripts/cicd/enforce_tier_model.py check --root src
-    python scripts/cicd/enforce_tier_model.py check --root src --allowlist config/cicd/enforce_tier_model
-    python scripts/cicd/enforce_tier_model.py check --root src --allowlist config/cicd/enforce_tier_model.yaml
+    python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
+    python -m elspeth_lints.core.cli dump-edges --root src/elspeth --format json --output edges.json
 """
 
 from __future__ import annotations

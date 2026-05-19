@@ -1612,7 +1612,7 @@ class TestDirectoryLoadingSuggestModuleFile:
 
 
 # =============================================================================
-# Bug fix tests: enforce_tier_model.py bug cluster
+# Bug fix tests: trust-tier analyzer bug cluster
 # =============================================================================
 
 

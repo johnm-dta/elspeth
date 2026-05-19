@@ -426,6 +426,13 @@ Filed:
 
 - `elspeth-975f45dfcb`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-975f45dfcb` resolved. The mixed primary/failsink
+  artifact registration test now uses distinct artifact descriptors and asserts
+  exact registration payloads for primary and failsink state IDs, sink node IDs,
+  paths, hashes, and sizes.
+
 ## Filed issues
 
 | ID | Title | Type | Priority |

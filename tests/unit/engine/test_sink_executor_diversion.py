@@ -456,6 +456,21 @@ class TestFailsinkMode:
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
         sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
         failsink = _make_failsink()
+        primary_artifact = ArtifactDescriptor.for_file(
+            path="/tmp/primary.csv",
+            content_hash="a" * 64,
+            size_bytes=101,
+        )
+        failsink_artifact = ArtifactDescriptor.for_file(
+            path="/tmp/failsink.csv",
+            content_hash="b" * 64,
+            size_bytes=202,
+        )
+        sink.write.return_value = SinkWriteResult(
+            artifact=primary_artifact,
+            diversions=diversions,
+        )
+        failsink.write.return_value = SinkWriteResult(artifact=failsink_artifact)
         tokens = [_make_token("t0"), _make_token("t1")]
         executor.write(
             sink=sink,
@@ -468,8 +483,38 @@ class TestFailsinkMode:
             failsink_name="csv_failsink",
             failsink_edge_id="edge-failsink-1",
         )
-        # Both primary and failsink artifacts should be registered
-        assert execution.register_artifact.call_count == 2
+
+        begin_calls = execution.begin_node_state.call_args_list
+        assert [(call.kwargs["token_id"], call.kwargs["node_id"]) for call in begin_calls] == [
+            ("t0", "node-primary"),
+            ("t1", "node-primary"),
+            ("t1", "node-failsink"),
+        ]
+
+        artifact_calls = [call.kwargs for call in execution.register_artifact.call_args_list]
+        assert artifact_calls == [
+            {
+                "run_id": "run-1",
+                "state_id": "state-1",
+                "sink_node_id": "node-primary",
+                "artifact_type": primary_artifact.artifact_type,
+                "path": primary_artifact.path_or_uri,
+                "content_hash": primary_artifact.content_hash,
+                "size_bytes": primary_artifact.size_bytes,
+            },
+            {
+                "run_id": "run-1",
+                "state_id": "state-3",
+                "sink_node_id": "node-failsink",
+                "artifact_type": failsink_artifact.artifact_type,
+                "path": failsink_artifact.path_or_uri,
+                "content_hash": failsink_artifact.content_hash,
+                "size_bytes": failsink_artifact.size_bytes,
+            },
+        ]
+        assert artifact_calls[0]["state_id"] != artifact_calls[1]["state_id"]
+        assert artifact_calls[0]["path"] != artifact_calls[1]["path"]
+        assert artifact_calls[0]["content_hash"] != artifact_calls[1]["content_hash"]
 
     def test_node_states_opened_at_correct_nodes(self) -> None:
         """Primary tokens get states at primary node, diverted at failsink node."""

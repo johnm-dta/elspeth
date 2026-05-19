@@ -491,21 +491,14 @@ jobs:
           retention-days: 30
 
   # ===========================================================================
-  # Stage 4: Frontend E2E (Playwright) — INFORMATIONAL until baseline lands
+  # Stage 4: Frontend E2E (Playwright)
   # ===========================================================================
   # Boots the FastAPI backend + Vite dev server, runs Playwright tests
-  # against a real Chromium. This remains informational until the
-  # no-earlier-than 2026-05-20 baseline review in elspeth-cba983b073.
-  # Once pass-rate is >=99% across the reviewed run history, flip the flag
-  # and add this job to ci-success.needs to make it gating.
-  #
-  # The job is NOT in ci-success.needs by design — that's what keeps it
-  # informational. continue-on-error makes failed runs render as ✓ in the
-  # PR check list while still uploading artefacts for diagnosis.
+  # against a real Chromium. This job is in ci-success.needs so a red
+  # browser journey blocks merge instead of being waved through.
   e2e-frontend:
-    name: Frontend E2E (Playwright, informational)
+    name: Frontend E2E (Playwright)
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -615,6 +608,7 @@ jobs:
       - test
       - test-postgres-testcontainer
       - supply-chain-audit
+      - e2e-frontend
       - frontend-unit
     if: always()
     steps:
@@ -634,6 +628,10 @@ jobs:
           fi
           if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then
             echo "Dependency/license audit job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.e2e-frontend.result }}" != "success" ]]; then
+            echo "Frontend E2E (Playwright) job failed"
             exit 1
           fi
           if [[ "${{ needs.frontend-unit.result }}" != "success" ]]; then

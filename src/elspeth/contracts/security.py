@@ -26,9 +26,8 @@ import hashlib
 import os
 
 _ENV_VAR = "ELSPETH_FINGERPRINT_KEY"
-_BLAKE2B_KEY_SIZE = 64
-_FINGERPRINT_PERSON = b"elspeth-sec-fp"
-_FINGERPRINT_KEY_PERSON = b"elspeth-fp-key"
+_FINGERPRINT_CONTEXT = b"elspeth-secret-fingerprint-v1:"
+_FINGERPRINT_PBKDF2_ITERATIONS = 210_000
 
 
 class SecretFingerprintError(Exception):
@@ -68,7 +67,7 @@ def get_fingerprint_key() -> bytes:
 
 
 def secret_fingerprint(secret: str, *, key: bytes | None = None) -> str:
-    """Compute a keyed BLAKE2b fingerprint of a secret.
+    """Compute a PBKDF2-HMAC-SHA256 fingerprint of a secret.
 
     The fingerprint can be stored in the audit trail to verify that
     the same secret was used across runs, without exposing the secret.
@@ -94,17 +93,14 @@ def secret_fingerprint(secret: str, *, key: bytes | None = None) -> str:
         key = get_fingerprint_key()
 
     if len(key) == 0:
-        raise ValueError("Fingerprint key must not be empty — an empty keyed hash key produces meaningless fingerprints")
+        raise ValueError("Fingerprint key must not be empty — an empty keyed derivation salt produces meaningless fingerprints")
 
-    blake2_key = key
-    if len(blake2_key) > _BLAKE2B_KEY_SIZE:
-        blake2_key = hashlib.blake2b(blake2_key, digest_size=_BLAKE2B_KEY_SIZE, person=_FINGERPRINT_KEY_PERSON).digest()
-
-    digest = hashlib.blake2b(
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
         secret.encode("utf-8"),
-        digest_size=32,
-        key=blake2_key,
-        person=_FINGERPRINT_PERSON,
-    ).hexdigest()
+        _FINGERPRINT_CONTEXT + key,
+        _FINGERPRINT_PBKDF2_ITERATIONS,
+        dklen=32,
+    ).hex()
 
     return digest

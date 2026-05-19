@@ -358,7 +358,7 @@ allow_hits:
   safety: Failure raises immediately at construction or parse time; no fallback value
     is fabricated.
   expires: null
-- key: contracts/security.py:R1:get_fingerprint_key:fp=0987285cffe06047
+- key: contracts/security.py:R1:get_fingerprint_key:fp=e763a5c875c64b76
   owner: architecture
   reason: os.environ.get() is the correct API for checking env var existence — followed
     by explicit ValueError raise

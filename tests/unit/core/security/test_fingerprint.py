@@ -41,15 +41,15 @@ class TestSecretFingerprint:
         assert len(result) == 64
 
     def test_fingerprint_golden_vector(self) -> None:
-        """Verify the keyed BLAKE2b algorithm with a known test vector.
+        """Verify the PBKDF2-HMAC-SHA256 algorithm with a known test vector.
 
-        This locks the algorithm to keyed BLAKE2b. If the implementation
+        This locks the algorithm to PBKDF2-HMAC-SHA256. If the implementation
         changes to an unkeyed hash or another algorithm, this test will fail.
         """
         result = secret_fingerprint("my-secret", key=b"test-key")
 
-        # Precomputed with keyed BLAKE2b, digest_size=32, person=b"elspeth-sec-fp".
-        expected = "32a1498af9d10d3f08b3260f33ddd8ddbb3dce959edb3680cc234b45c68dda19"
+        # Precomputed with PBKDF2-HMAC-SHA256, 210000 iterations, dklen=32.
+        expected = "e50795d435c7dc95af053d8112410b16ccc7f2b82df4ede8022fc47d5f618d5e"
         assert result == expected
 
     def test_fingerprint_without_key_uses_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,8 +58,8 @@ class TestSecretFingerprint:
 
         result = secret_fingerprint("my-secret")
 
-        # Verify the env key is actually used by checking against expected keyed BLAKE2b.
-        expected = "43a92fd427188bc923aa0423a883aeb8f47098c1cc85cdba362f361a00bcec47"
+        # Verify the env key is actually used by checking against expected PBKDF2.
+        expected = "ff4d30a6dfcf2c96442d555f620dcb7a57fc5f508672b02c11098d467a43c4cf"
         assert result == expected
 
     def test_fingerprint_without_key_raises_if_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -126,6 +126,5 @@ Additional evidence from this refresh:
 As of this refresh, PR #39 is open at
 `https://github.com/johnm-dta/elspeth/pull/39`.
 
-The final release-doc refresh push started a fresh check set. The latest
-observed remote state after that push showed CodeQL `Analyze Python` in
-progress; re-check GitHub before treating this PR as merge-ready.
+The final release-doc refresh push starts a fresh check set. Re-check GitHub
+before treating this PR as merge-ready.

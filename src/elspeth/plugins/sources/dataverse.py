@@ -33,6 +33,7 @@ from elspeth.plugins.infrastructure.clients.dataverse import (
 )
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.sources.field_normalization import (
     FieldResolution,
     normalize_field_name,
@@ -118,13 +119,7 @@ class DataverseSourceConfig(DataPluginConfig):
     @classmethod
     def validate_environment_url_https(cls, v: str) -> str:
         """HTTPS required. Bearer tokens sent over plain HTTP would be unencrypted."""
-        parsed = urllib.parse.urlparse(v)
-        if parsed.scheme != "https":
-            raise ValueError(
-                f"environment_url must use HTTPS scheme, got {parsed.scheme!r}. "
-                f"Bearer tokens are sent in Authorization headers — HTTP would expose them in transit."
-            )
-        return v
+        return validate_credential_safe_https_url(v, field_name="environment_url")
 
     @field_validator("additional_domains")
     @classmethod

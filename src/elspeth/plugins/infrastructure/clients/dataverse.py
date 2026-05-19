@@ -29,6 +29,7 @@ from elspeth.plugins.infrastructure.clients.fingerprinting import (
     fingerprint_headers,
 )
 from elspeth.plugins.infrastructure.clients.json_utils import parse_json_strict
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 
 if TYPE_CHECKING:
     from typing import Self
@@ -251,7 +252,21 @@ class DataverseClient:
         retry_after_cap: float = 60.0,
         additional_domains: tuple[str, ...] = (),
     ) -> None:
-        self._environment_url = environment_url.rstrip("/")
+        raw_environment_url = environment_url.rstrip("/")
+        parsed = urllib.parse.urlparse(raw_environment_url)
+        hostname = parsed.hostname
+        if hostname is None:
+            raise DataverseClientError(
+                f"Cannot extract hostname from environment_url: {environment_url!r}",
+                retryable=False,
+            )
+
+        try:
+            safe_environment_url = validate_credential_safe_https_url(raw_environment_url, field_name="environment_url")
+        except ValueError as exc:
+            raise DataverseClientError(str(exc), retryable=False) from exc
+
+        self._environment_url = safe_environment_url.rstrip("/")
         self._credential = credential
         self._api_version = api_version
         self._limiter = limiter
@@ -259,13 +274,6 @@ class DataverseClient:
         self._additional_domains = additional_domains
 
         # Validate environment_url against domain allowlist
-        parsed = urllib.parse.urlparse(self._environment_url)
-        hostname = parsed.hostname
-        if hostname is None:
-            raise DataverseClientError(
-                f"Cannot extract hostname from environment_url: {environment_url!r}",
-                retryable=False,
-            )
         if not _validate_domain_allowlist(hostname, self._additional_domains):
             raise DataverseClientError(
                 f"environment_url hostname {hostname!r} does not match any Dataverse "

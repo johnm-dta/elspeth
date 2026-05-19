@@ -399,6 +399,14 @@ class TestDataverseSourceConfigValidation:
         cfg = DataverseSourceConfig.from_dict(_base_config())
         assert cfg.environment_url.startswith("https://")
 
+    def test_environment_url_rejects_embedded_credentials(self) -> None:
+        """environment_url must not carry userinfo into token scopes or audit URLs."""
+        from elspeth.plugins.sources.dataverse import DataverseSourceConfig
+
+        config = _base_config(environment_url="https://user:pass@myorg.crm.dynamics.com")
+        with pytest.raises(PluginConfigError, match="embedded credentials"):
+            DataverseSourceConfig.from_dict(config)
+
     def test_on_validation_failure_required(self) -> None:
         """on_validation_failure cannot be omitted."""
         from elspeth.plugins.sources.dataverse import DataverseSourceConfig

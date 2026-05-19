@@ -114,6 +114,10 @@ class TestDataverseSinkConfig:
         with pytest.raises(PluginConfigError):
             DataverseSinkConfig.from_dict(_config(environment_url="myorg.crm.dynamics.com"))
 
+    def test_environment_url_rejects_embedded_credentials(self) -> None:
+        with pytest.raises(PluginConfigError, match="embedded credentials"):
+            DataverseSinkConfig.from_dict(_config(environment_url="https://user:pass@myorg.crm.dynamics.com"))
+
     def test_lookup_config_valid(self) -> None:
         cfg = DataverseSinkConfig.from_dict(
             _config(

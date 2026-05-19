@@ -542,6 +542,53 @@ describe("AuditReadinessPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/Internal server error/);
   });
 
+  it("renders a Retry button in the error state that re-invokes loadSnapshot with force:true (P0.1)", async () => {
+    // P0.1: a transient 5xx previously left the panel dead until the
+    // user mutated the pipeline. The error branch now ships a Retry
+    // affordance that force-refreshes the same composition version.
+    vi.mocked(api.fetchAuditReadiness).mockRejectedValueOnce({
+      status: 503,
+      detail: "Service unavailable",
+    });
+    render(<AuditReadinessPanel />);
+
+    const retry = await screen.findByRole("button", { name: /Retry audit/i });
+    expect(retry).toBeInTheDocument();
+
+    // Second attempt resolves cleanly; the panel must clear the error
+    // region once a snapshot is available.
+    vi.mocked(api.fetchAuditReadiness).mockResolvedValueOnce(allGreenSnapshot(1));
+    const user = userEvent.setup();
+    await user.click(retry);
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+    // fetchAuditReadiness was called twice — initial render + retry.
+    expect(api.fetchAuditReadiness).toHaveBeenCalledTimes(2);
+  });
+
+  it("marks loading and error sections with aria-busy for assistive-tech parity with expanded views (P0.1)", async () => {
+    // P0.1 (amended): the spec said only the loading branch was
+    // missing aria-busy. Verification showed BOTH loading and error
+    // sections lacked it, while expanded/collapsed views set it
+    // conditionally. This test pins the new parity: loading is
+    // always busy=true; error reflects the live isLoading flag (and
+    // is absent when not loading, matching the expanded pattern).
+    let resolve!: (s: AuditReadinessSnapshot) => void;
+    vi.mocked(api.fetchAuditReadiness).mockReturnValueOnce(
+      new Promise<AuditReadinessSnapshot>((r) => {
+        resolve = r;
+      }),
+    );
+    render(<AuditReadinessPanel />);
+    const loading = screen.getByLabelText("Audit readiness");
+    expect(loading).toHaveAttribute("aria-busy", "true");
+    resolve(allGreenSnapshot(1));
+    await waitFor(() => {
+      expect(screen.queryByText(/Checking audit readiness/i)).not.toBeInTheDocument();
+    });
+  });
+
   it("mounts the Explain dialog when Explain → is clicked", async () => {
     vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
       (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),

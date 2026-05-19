@@ -96,6 +96,44 @@ describe("SideRail", () => {
     expect(container.querySelector("[class*='transitional']")).toBeNull();
   });
 
+  describe("no Validate button in the inspector surface (P0.6 re-home)", () => {
+    // P0.6: plan 14c Task 8 specified a negative-assertion test in
+    // InspectorPanel.test.tsx confirming no Validate button renders.
+    // InspectorPanel.tsx was abandoned in favour of the SideRail
+    // architecture — the audit-readiness panel now mounts via the
+    // `auditReadinessSlot` prop (see App.tsx). This re-homed test
+    // pins the absence on the new inspector surface so a future
+    // regression that re-introduces a Validate button inside any
+    // SideRail slot is caught at the unit level.
+    //
+    // Out of scope: the App-level Ctrl+Shift+V keyboard shortcut at
+    // App.tsx near line 211–222 is the legitimate, intentional
+    // Validate trigger. It lives outside the SideRail tree and is
+    // not exercised by this test.
+
+    it("renders no Validate button across all SideRail slots", () => {
+      render(
+        <SideRail
+          auditReadinessSlot={<div>Audit readiness</div>}
+          validationBannerSlot={<div>Validation banner</div>}
+          graphMiniSlot={<div>Graph mini</div>}
+          catalogSlot={<div>Catalog</div>}
+          completionBarSlot={<div>Completion bar</div>}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: /^validate$/i }),
+      ).toBeNull();
+    });
+
+    it("renders no Validate button when SideRail mounts with default (empty) slots", () => {
+      render(<SideRail />);
+      expect(
+        screen.queryByRole("button", { name: /^validate$/i }),
+      ).toBeNull();
+    });
+  });
+
   it("no longer exposes the retired exportYaml / executeButton slot regions", () => {
     // Phase 6B Tasks 9-10 retired the standalone ExportYaml + Execute
     // button slots in favour of the consolidated CompletionBar slot.

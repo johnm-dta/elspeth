@@ -278,7 +278,8 @@ class PreferencesService:
         """
         now = self._now()
         tutorial_in_payload = "tutorial_completed_at" in payload.model_fields_set
-        payload_is_empty = payload.default_mode is None and payload.banner_dismissed_at is None and not tutorial_in_payload
+        banner_in_payload = "banner_dismissed_at" in payload.model_fields_set
+        payload_is_empty = payload.default_mode is None and not banner_in_payload and not tutorial_in_payload
 
         def _sync() -> tuple[ComposerMode, datetime | None, datetime | None, bool, ComposerPreferences | None]:
             """Returns (resolved_mode, resolved_banner_dismissed_at, resolved_tutorial_completed_at, wrote, prior_prefs).
@@ -363,11 +364,11 @@ class PreferencesService:
                         # read path raised a less-informative type).
                         raise CorruptPreferencesError(user_id, existing_raw)
 
-                # If the caller did not set banner_dismissed_at, preserve
-                # the existing value (read in the same transaction so the
-                # full post-write state is returned without a second
-                # round-trip).
-                if payload.banner_dismissed_at is not None:
+                # banner_dismissed_at uses `model_fields_set` to distinguish
+                # "absent from JSON" (preserve existing) from "explicit null"
+                # (clear the dismissal — re-show the banner on next session).
+                # Symmetric with tutorial_completed_at; see models.py docstring.
+                if banner_in_payload:
                     resolved_banner: datetime | None = payload.banner_dismissed_at
                 else:
                     resolved_banner = conn.execute(
@@ -384,7 +385,7 @@ class PreferencesService:
                 values: dict[str, object] = {
                     "user_id": user_id,
                     "default_composer_mode": insert_mode,
-                    "banner_dismissed_at": payload.banner_dismissed_at,
+                    "banner_dismissed_at": resolved_banner,
                     "tutorial_completed_at": resolved_tutorial,
                     "updated_at": now,
                 }
@@ -392,7 +393,7 @@ class PreferencesService:
                 update_clause: dict[str, object] = {"updated_at": now}
                 if payload.default_mode is not None:
                     update_clause["default_composer_mode"] = payload.default_mode
-                if payload.banner_dismissed_at is not None:
+                if banner_in_payload:
                     update_clause["banner_dismissed_at"] = payload.banner_dismissed_at
                 if tutorial_in_payload:
                     update_clause["tutorial_completed_at"] = payload.tutorial_completed_at

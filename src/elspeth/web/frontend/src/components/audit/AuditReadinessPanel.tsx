@@ -344,6 +344,7 @@ export function AuditReadinessPanel() {
       <section
         aria-label="Audit readiness"
         className="audit-readiness audit-readiness--loading"
+        aria-busy="true"
       >
         <div
           className="audit-readiness-live-region"
@@ -363,10 +364,32 @@ export function AuditReadinessPanel() {
       <section
         aria-label="Audit readiness"
         className="audit-readiness audit-readiness--error"
+        aria-busy={isLoading ? "true" : undefined}
       >
         <div role="alert" className="audit-readiness-error">
           {error}
         </div>
+        <button
+          type="button"
+          className="btn audit-readiness-action-btn audit-readiness-action-btn--ghost"
+          onClick={() =>
+            void loadSnapshot(
+              activeSessionId,
+              compositionState.version,
+              { force: true },
+            ).then(() =>
+              projectMatchingSnapshotToExecution(
+                activeSessionId,
+                compositionState.version,
+                setValidationResult,
+              ),
+            )
+          }
+          disabled={isLoading}
+          aria-label="Retry audit readiness check"
+        >
+          Retry
+        </button>
       </section>
     );
   }

@@ -192,6 +192,27 @@ def test_patch_atomic_finalisation_payload(client_as_alice: TestClient) -> None:
     assert "2026-05-15T12:35:00" in body["tutorial_completed_at"]
 
 
+def test_patch_with_explicit_null_clears_banner_dismissal(client_as_alice: TestClient) -> None:
+    """PATCH ``{"banner_dismissed_at": null}`` re-shows the banner. Symmetric
+    with the tutorial-clear route test below."""
+    set_response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"banner_dismissed_at": "2026-05-15T12:45:00Z"},
+    )
+    assert set_response.status_code == 200
+    assert set_response.json()["banner_dismissed_at"] is not None
+
+    clear_response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"banner_dismissed_at": None},
+    )
+    assert clear_response.status_code == 200
+    assert clear_response.json()["banner_dismissed_at"] is None
+
+    follow_up = client_as_alice.get("/api/composer-preferences")
+    assert follow_up.json()["banner_dismissed_at"] is None
+
+
 def test_patch_with_explicit_null_clears_tutorial(client_as_alice: TestClient) -> None:
     set_response = client_as_alice.patch(
         "/api/composer-preferences",

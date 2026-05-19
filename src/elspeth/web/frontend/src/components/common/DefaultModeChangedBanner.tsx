@@ -30,6 +30,7 @@ export function DefaultModeChangedBanner(): JSX.Element | null {
     (s) => s.optedOutAtSessionId,
   );
   const writeError = usePreferencesStore((s) => s.writeError);
+  const writing = usePreferencesStore((s) => s.writing);
   const dismiss = usePreferencesStore((s) => s.dismissDefaultChangedBanner);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
 
@@ -99,7 +100,12 @@ export function DefaultModeChangedBanner(): JSX.Element | null {
           {writeError}
         </p>
       ) : null}
-      <button type="button" onClick={onDismiss} style={{ minHeight: 24 }}>
+      <button
+        type="button"
+        onClick={onDismiss}
+        disabled={writing}
+        style={{ minHeight: 24 }}
+      >
         Got it
       </button>
     </div>

@@ -136,8 +136,13 @@ export function HeaderSessionSwitcher(): JSX.Element {
     try {
       await archiveSession(targetId);
       setArchiveError(null);
-    } catch {
-      setArchiveError("Could not archive session. Please try again.");
+    } catch (err) {
+      // Preserve the backend's diagnostic message when available — an
+      // auditable system shouldn't drop the actual failure reason.  Fall
+      // back to a friendly message when the rejection isn't an Error
+      // (e.g. a string thrown manually somewhere in the call chain).
+      const detail = err instanceof Error && err.message ? err.message : null;
+      setArchiveError(detail !== null ? `Could not archive session: ${detail}` : "Could not archive session. Please try again.");
     }
   }, [archiveSession, archiveTarget, closeAndReturnFocus]);
 
@@ -216,7 +221,19 @@ export function HeaderSessionSwitcher(): JSX.Element {
           aria-haspopup="menu"
           aria-expanded={open}
           aria-controls={MENU_ID}
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            setOpen((v) => {
+              // Reopening the menu clears a stale archive-error alert so the
+              // user doesn't see a previous failure persisting next to a
+              // fresh menu interaction.  The alert still renders when
+              // archiveError is set; this just stops it sticking around
+              // after the user has dismissed and reopened the menu.
+              if (!v) {
+                setArchiveError(null);
+              }
+              return !v;
+            });
+          }}
           className="header-session-switcher-trigger"
         >
           <span aria-hidden="true">Session:</span>{" "}

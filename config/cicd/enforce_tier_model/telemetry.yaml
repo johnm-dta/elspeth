@@ -35,9 +35,9 @@ per_file_rules:
 - pattern: telemetry/manager.py
   rules:
   - R5
-  reason: TELEMETRY_TRANSPORT_ERRORS isinstance guards for inverted exception pattern
+  reason: TELEMETRY_TRANSPORT_ERRORS and stored-exception raiseability guards for inverted exception pattern
   expires: null
-  max_hits: 4
+  max_hits: 5
 allow_hits:
 - key: telemetry/manager.py:R1:TelemetryManager:_export_loop:fp=ff397de66d5f4424
   owner: architecture

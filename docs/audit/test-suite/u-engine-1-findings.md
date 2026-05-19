@@ -201,6 +201,13 @@ Filed:
 
 - `elspeth-9a1262dbc7`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-9a1262dbc7` resolved. The no-transform
+  `process_row()` and resume `process_existing_row()` tests now assert exactly
+  one terminal result and destructure that singleton instead of inspecting
+  `results[0]`.
+
 ### UENG-6 — Source-node audit tests allow extra node_state rows
 
 Evidence:

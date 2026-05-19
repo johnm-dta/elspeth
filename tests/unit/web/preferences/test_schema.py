@@ -16,6 +16,7 @@ def test_user_preferences_table_columns() -> None:
         "user_id",
         "default_composer_mode",
         "banner_dismissed_at",
+        "tutorial_completed_at",
         "updated_at",
     }
 
@@ -52,3 +53,10 @@ def test_default_composer_mode_check_constraint_closes_the_enum() -> None:
     table = metadata.tables["user_preferences"]
     check_names = {c.name for c in table.constraints if isinstance(c, CheckConstraint)}
     assert "ck_user_preferences_default_composer_mode" in check_names
+
+
+def test_tutorial_completed_at_is_nullable_timestamp() -> None:
+    """NULL means first-run tutorial is not complete; timestamp means done."""
+    table = metadata.tables["user_preferences"]
+    column = table.c.tutorial_completed_at
+    assert column.nullable

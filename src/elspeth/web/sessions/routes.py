@@ -41,6 +41,7 @@ from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
 from elspeth.core.canonical import stable_hash
 from elspeth.core.dag.models import GraphValidationError
+from elspeth.core.landscape.database import LandscapeDB
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.async_workers import run_sync_in_worker
@@ -128,6 +129,8 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limi
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
 from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
+from elspeth.web.sessions.audit_story_models import RunAuditStoryResponse
+from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryService
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
 from elspeth.web.sessions.models import composer_completion_events_table
 from elspeth.web.sessions.protocol import (
@@ -5230,6 +5233,47 @@ def create_session_router() -> APIRouter:
                 )
             )
         return responses
+
+    @router.get(
+        "/{session_id}/runs/{run_id}/audit-story",
+        response_model=RunAuditStoryResponse,
+    )
+    async def get_run_audit_story(
+        session_id: UUID,
+        run_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> RunAuditStoryResponse:
+        """Return the Landscape-backed audit story for a run."""
+        session = await _verify_session_ownership(session_id, user, request)
+        service: SessionServiceProtocol = request.app.state.session_service
+        try:
+            run = await service.get_run(run_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Run not found") from None
+        if run.session_id != session.id:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.landscape_run_id is None:
+            raise RuntimeError(f"Run {run_id} has no Landscape run id; audit story cannot be reconstructed")
+        landscape_run_id = run.landscape_run_id
+
+        settings = request.app.state.settings
+
+        def _load_story() -> RunAuditStoryResponse:
+            db = LandscapeDB(
+                connection_string=settings.get_landscape_url(),
+                passphrase=settings.landscape_passphrase,
+            )
+            return AuditStoryService(db).get_run_audit_story(
+                landscape_run_id,
+                public_run_id=str(run.id),
+                session_id=str(session.id),
+            )
+
+        try:
+            return await run_sync_in_worker(_load_story)
+        except AuditStoryIntegrityError as exc:
+            raise RuntimeError(f"Run {run_id} audit story is incomplete") from exc
 
     @router.get("/{session_id}/state")
     async def get_current_state(

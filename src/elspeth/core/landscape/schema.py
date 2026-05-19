@@ -5,6 +5,7 @@ and compatibility with multiple database backends.
 """
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -19,6 +20,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 
 # Shared metadata for all tables
@@ -50,7 +52,9 @@ metadata = MetaData()
 #   8 → Phase 5b interpretation-review audit anchor:
 #        calls.resolved_prompt_template_hash records the runtime-side hash used
 #        to join Landscape LLM calls back to session interpretation_events.
-SQLITE_SCHEMA_EPOCH = 8
+#   9 → Phase 4 hello-world tutorial audit-story fields:
+#        runs.llm_call_count, runs.seeded_from_cache, and runs.cache_key.
+SQLITE_SCHEMA_EPOCH = 9
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -95,6 +99,12 @@ runs_table = Table(
     # runs X and Y?"). The column is nullable for resume paths and for
     # tests that skip the full bootstrap path.
     Column("runtime_val_manifest_json", Text),
+    # Phase 4 audit-story projection fields. `started_at` already exists
+    # above; source_data_hash and plugin_versions remain on rows/nodes and
+    # are aggregated by the read side instead of denormalized here.
+    Column("llm_call_count", Integer, nullable=True),
+    Column("seeded_from_cache", Boolean, nullable=False, default=False, server_default=text("0")),
+    Column("cache_key", String(64), nullable=True),
 )
 
 run_attributions_table = Table(

@@ -22,6 +22,7 @@ function makePayload(
   return {
     default_mode: "guided",
     banner_dismissed_at: null,
+    tutorial_completed_at: null,
     updated_at: "2026-05-16T00:00:00Z",
     ...overrides,
   };
@@ -50,6 +51,7 @@ describe("api/client user composer preferences", () => {
 
     expect(prefs.default_mode).toBe("guided");
     expect(prefs.banner_dismissed_at).toBeNull();
+    expect(prefs.tutorial_completed_at).toBeNull();
     const [url, init] = fetchSpy.mock.calls[0];
     expect(url).toBe("/api/composer-preferences");
     expect(init?.method).toBeUndefined();

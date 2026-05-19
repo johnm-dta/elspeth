@@ -34,6 +34,8 @@ describe("authStore account-scoped store reset", () => {
       loaded: true,
       defaultMode: "freeform",
       bannerDismissedAt: "2026-05-16T00:00:00Z",
+      tutorialCompletedAt: "2026-05-19T00:00:00Z",
+      tutorialCompleted: true,
       optedOutAtSessionId: "alice-session",
     });
 
@@ -43,6 +45,8 @@ describe("authStore account-scoped store reset", () => {
       loaded: false,
       defaultMode: null,
       bannerDismissedAt: null,
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
       optedOutAtSessionId: null,
       writeError: null,
     });

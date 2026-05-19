@@ -89,6 +89,10 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Phase 5b interpretation-review audit anchor — runtime LLM calls must
     # carry the resolved prompt hash used to join back to session DB events.
     ("calls", "resolved_prompt_template_hash"),
+    # Phase 4 tutorial audit-story projection fields.
+    ("runs", "llm_call_count"),
+    ("runs", "seeded_from_cache"),
+    ("runs", "cache_key"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).

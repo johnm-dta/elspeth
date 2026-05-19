@@ -111,7 +111,7 @@ docker run --rm \
 
 All checkpoints created before 2026-01-24 are invalid due to node ID format changes introduced in the routing refactor. Attempting to resume from a pre-2026-01-24 checkpoint will fail. Delete old checkpoint files and re-run affected pipelines.
 
-See [RC-2 Checkpoint Fix](../release/rc-2-checkpoint-fix.md) for full details on the checkpoint format migration.
+See the [RC-2 Checkpoint Fix Post-Mortem](../release/archive/rc-2-checkpoint-fix-postmortem.md) for full details on the checkpoint format migration.
 
 ### "Run not found"
 

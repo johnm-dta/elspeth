@@ -1,17 +1,17 @@
-# RC 4.0 Executive Brief — Semi-Autonomous Pipeline Platform
+# RC 4.0 Planning Brief — Semi-Autonomous Pipeline Platform
 
-> **ARCHIVED PLANNING BRIEF — RC-4.0 planning, 3 March 2026.**
-> This brief described the planned RC-4 work package as of 3 March 2026. Scope evolved during execution and the semi-autonomous-platform deliverables described here ultimately shipped as part of the **RC-5 cut on 3 April 2026** (Web UX Composer + Composer MCP server + audited tool loop). The version-number framing ("RC 4 / v4.0.0") in this document does not match how the work was ultimately released.
+> **ARCHIVED — Planning brief captured at 3 March 2026 (RC-4.0 planning).**
+> This document records the planned RC-4 work package as it stood at 3 March 2026.
+> Scope evolved during execution; the semi-autonomous-platform deliverables described here ultimately shipped as part of the **RC-5 cut on 3 April 2026** (Web UX Composer + Composer MCP server + audited tool loop). The version-number framing ("RC 4 / v4.0.0") in this document does not match how the work was eventually released.
 >
-> **For what actually shipped, see** [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (Periods 4–5) and [`../../CHANGELOG.md`](../../CHANGELOG.md) ([0.4.0], [0.4.1], [0.5.0] sections).
->
-> Read this document only for historical context on how the RC-5 deliverables were originally scoped.
+> **For what actually shipped, see** [`../elspeth-progress-rc1-to-rc5.md`](../elspeth-progress-rc1-to-rc5.md) (Periods 4–5) and [`../../../CHANGELOG.md`](../../../CHANGELOG.md) ([0.4.0], [0.4.1], [0.5.0] sections). A mapping from each planned feature in this brief to its actual RC-5 outcome appears in the *What actually shipped* appendix at the end of this document.
 
 **Date:** 2026-03-03
-**Release:** RC 4 (v4.0.0)
-**Status:** Planning complete, ready to begin implementation *(superseded — see banner above)*
+**Release:** RC 4 (v4.0.0) — **superseded; work shipped as RC-5 (v0.5.0) on 3 April 2026**
+**Status:** Planning complete *(superseded — see banner above)*
 **Prepared by:** Architecture analysis, synthesized from design document and Filigree work package
-**Intended audience:** Project stakeholders evaluating scope, sequencing, and risk for the 4.0 release
+**Audience:** Project stakeholders evaluating scope, sequencing, and risk for the planned 4.0 release — preserved for historical context
+**Register:** Technical / engineering-stakeholder
 
 ---
 
@@ -123,7 +123,29 @@ The 4.0 work package comprises **9 new features** (the semi-autonomous platform)
 
 ## Starting Conditions
 
-**Branch:** `RC4-user-interface` (current)
+**Branch:** `RC4-user-interface` (current at time of writing)
 **Design document:** `docs/architecture/semi-autonomous/design.md`
 **Filigree tracking:** 14 items under milestones Autonomous Pipeline + Code Quality & Architectural Remediation
 **Immediate next actions:** Begin the 5 unblocked items — recorder facade evaluation, config decomposition, plugin registry pattern, LLM template rewrite, telemetry exporter cleanup
+
+---
+
+## Appendix: What actually shipped
+
+This appendix maps each of the 9 planned semi-autonomous features above to the deliverable that ultimately shipped. The mapping is approximate; some scope was absorbed into adjacent items, some was deferred, and some shipped under a different framing.
+
+| # | Planned (3 March 2026) | What shipped (RC-5, 3 April 2026 onwards) | Notes |
+|---|---|---|---|
+| 1 | Engine API Extraction | Refactored engine surface used by the composer; no separate "Engine API" published as a public package | The composer drives the engine via the composition primitives (#2) rather than a separate programmatic API |
+| 2 | Pipeline Composition API | Frozen `SourceSpec` / `NodeSpec` / `EdgeSpec` / `OutputSpec` / `PipelineMetadata` DTOs + composition tools + YAML generator | Shipped as planned; reachable both from the composer and from the MCP server |
+| 3 | LLM Pipeline Composer | `ComposerService` with LLM tool-use loop; sub-4x hardening (dual-counter loop guard, discovery cache, partial state recovery, rate limiting, tool registry) | Shipped as planned; later (RC-5.1) extended with the advisor-escalation contract and forced-repair loop |
+| 4 | Conversation Service | Web sessions subsystem (SQLAlchemy Core tables, `SessionServiceImpl` with CRUD + versioning + run enforcement, fork-from-message) — embedded in the `elspeth web` FastAPI app rather than published as a standalone "Conversation Service" | Naming evolved; behaviour matches the original intent |
+| 5 | Review Classification & Meta-Audit | Three-provider authentication shipped (Local / OIDC / Entra); pipeline-review trust-tier framework deferred and partially absorbed into the audit-MANIFEST work in RC-5.2 | Original "plugin trust tiers (transparent → approval_required)" framing not adopted; the substantive audit-completeness work happened differently |
+| 6 | Workflow & Worker Infrastructure | **Not shipped as Temporal + K8s.** Background pipeline execution shipped using FastAPI's `BackgroundTasks` + WebSocket progress streaming; durable execution via the existing checkpoint/resume mechanism | The Temporal + K8s + PostgreSQL infrastructure was the largest scope cut; the resulting deployment surface is much lighter than originally planned |
+| 7 | Real-Time Telemetry Pipeline | WebSocket progress streaming directly from the execution service; no Redis pub/sub layer | The Redis + WebSocket gateway design was simplified to a direct WebSocket because the simpler design met the requirement |
+| 8 | Frontend | React SPA with AGDS theming, catalog drawer, inspector panel, run-evidence widgets, recovery panel, guided composer | Shipped substantially as planned; framework evolved from "ComfyUI-inspired React Flow editor" to a graph view + inspector pattern after early iteration |
+| 9 | Shared Storage & Task Database | Blob storage manager (6 phases — data model, REST API, frontend integration, composer tools, execution integration, schema inference); session DB on SQLite | PostgreSQL deferred; SQLite became the deployable session-DB target; Postgres portability validated by RC-5.2's testcontainer lane but Postgres is not the default deployment |
+
+**Enablers (pulled forward from backlog):** All five enablers (plugin registry pattern, LLM template rewrite, telemetry exporter cleanup, recorder facade evaluation, config decomposition) landed in some form across RC-3.3 and RC-4 — the recorder evaluation produced the repository pattern (T19), the LLM template rewrite landed as the T10 consolidation, and the plugin registry pattern landed as the SDA-aligned plugin tree.
+
+**Net effect on the original scope:** The semi-autonomous platform shipped, with a significantly lighter infrastructure footprint than the planning brief anticipated (no Temporal, no K8s, no Redis, no PostgreSQL by default), and with the audit-completeness story landing later (RC-5.1 and RC-5.2) than originally bundled into the cut. The "configuration generator with zero relaxation of audit, lineage, or trust-tier guarantees" invariant held throughout.

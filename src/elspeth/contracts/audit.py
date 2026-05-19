@@ -88,12 +88,20 @@ class Run:
     exported_at: datetime | None = None
     export_format: str | None = None
     export_sink: str | None = None
+    llm_call_count: int | None = None
+    seeded_from_cache: bool = False
+    cache_key: str | None = None
 
     def __post_init__(self) -> None:
         """Validate enum fields - Tier 1 crash on invalid types."""
+        require_int(self.llm_call_count, "llm_call_count", optional=True, min_value=0)
         _validate_enum(self.status, RunStatus, "status")
         _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade")
         _validate_enum(self.export_status, ExportStatus, "export_status")
+        if type(self.seeded_from_cache) is not bool:
+            raise TypeError(f"seeded_from_cache must be bool, got {type(self.seeded_from_cache).__name__}: {self.seeded_from_cache!r}")
+        if self.cache_key is not None and not _SHA256_HEX_PATTERN.fullmatch(self.cache_key):
+            raise ValueError(f"cache_key must be 64 lowercase hex chars or None, got {self.cache_key!r} for run {self.run_id!r}")
 
 
 @dataclass(frozen=True, slots=True)

@@ -53,6 +53,10 @@ import type {
 } from "@/types/interpretation";
 import type { RecoveryTranscriptRow } from "@/types/recovery";
 import type {
+  RunAuditStoryResponse,
+  TutorialOrphanCleanupResponse,
+  TutorialRunRequest,
+  TutorialRunResponse,
   UserComposerPreferencesPayload,
   UpdateUserComposerPreferencesPayload,
 } from "@/types/api";
@@ -325,7 +329,7 @@ export async function getSession(sessionId: string): Promise<Session> {
 }
 
 /** Update the user-visible title for a session. */
-export async function updateSessionTitle(
+export async function renameSession(
   sessionId: string,
   title: string,
 ): Promise<Session> {
@@ -335,6 +339,39 @@ export async function updateSessionTitle(
     body: JSON.stringify({ title }),
   });
   return parseResponse<Session>(response);
+}
+
+/** Run the tutorial pipeline for an already-built tutorial session. */
+export async function runTutorialPipeline(
+  body: TutorialRunRequest,
+): Promise<TutorialRunResponse> {
+  const response = await fetch("/api/tutorial/run", {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+  });
+  return parseResponse<TutorialRunResponse>(response);
+}
+
+/** Read the audit-story projection for a completed tutorial run. */
+export async function getRunAuditSummary(
+  sessionId: string,
+  runId: string,
+): Promise<RunAuditStoryResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/runs/${runId}/audit-story`,
+    { headers: authHeaders() },
+  );
+  return parseResponse<RunAuditStoryResponse>(response);
+}
+
+/** Clean up orphaned tutorial sessions for the authenticated user. */
+export async function deleteTutorialOrphans(): Promise<TutorialOrphanCleanupResponse> {
+  const response = await fetch("/api/tutorial/orphans", {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  return parseResponse<TutorialOrphanCleanupResponse>(response);
 }
 
 /** Archive (soft-delete) a session. Backend returns 204 No Content. */

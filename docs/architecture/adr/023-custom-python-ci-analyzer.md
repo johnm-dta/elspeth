@@ -83,7 +83,7 @@ The four candidates considered were CodeQL (already in the toolchain via `.githu
 
 ### D6. CodeQL findings and elspeth-lints findings coexist via SARIF `category`
 
-**Decision:** Both analyzers upload to GitHub Code Scanning. To prevent collision in the Security tab, `elspeth-lints` will upload with `category: elspeth-lints` (the upload mechanism is tracked in filigree `elspeth-b79958739e`). CodeQL uses the default category. Findings are visually distinguishable in the Security tab, the Code Scanning API, and any downstream dashboard.
+**Decision:** Both analyzers upload to GitHub Code Scanning. To prevent collision in the Security tab, `elspeth-lints` uploads with `category: elspeth-lints` (the upload mechanism is tracked in filigree `elspeth-b79958739e`). CodeQL uses the default category. Findings are visually distinguishable in the Security tab, the Code Scanning API, and any downstream dashboard.
 
 ## Revisit Triggers
 

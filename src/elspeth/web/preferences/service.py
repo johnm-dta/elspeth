@@ -32,11 +32,13 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from opentelemetry import metrics
-from sqlalchemy import select
+from sqlalchemy import String, select
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.composer.tutorial_telemetry import record_tutorial_completed_path
 from elspeth.web.preferences.models import (
     ComposerMode,
     ComposerPreferences,
@@ -97,13 +99,15 @@ class CorruptPreferencesError(RuntimeError):
     Attributes:
       user_id: the row's primary key, included so the operator can
         locate it.
+      field_name: the closed/typed field that failed its Tier-1 guard.
       bad_value: the offending value, named exactly as stored, so the
         operator can confirm the corruption rather than re-derive it.
     """
 
-    def __init__(self, user_id: str, bad_value: object) -> None:
-        super().__init__(f"user_preferences row for {user_id!r} has invalid default_composer_mode={bad_value!r}")
+    def __init__(self, user_id: str, bad_value: object, *, field_name: str = "default_composer_mode") -> None:
+        super().__init__(f"user_preferences row for {user_id!r} has invalid {field_name}={bad_value!r}")
         self.user_id = user_id
+        self.field_name = field_name
         self.bad_value = bad_value
 
 
@@ -122,7 +126,10 @@ class CorruptPreferencesError(RuntimeError):
 _meter = metrics.get_meter(__name__)
 _PREFERENCES_PATCH_COUNTER = _meter.create_counter(
     "composer.preferences.patch_total",
-    description=("Composer-preferences PATCH operations. Attributes: mode_changed (bool), banner_dismissed (bool), wrote_row (bool)."),
+    description=(
+        "Composer-preferences PATCH operations. Attributes: mode_changed (bool), "
+        "banner_dismissed (bool), tutorial_changed (bool), wrote_row (bool)."
+    ),
 )
 
 _DEFAULT_MODE: ComposerMode = "guided"
@@ -131,6 +138,43 @@ _VALID_MODES: frozenset[ComposerMode] = frozenset({"guided", "freeform"})
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _select_preferences_for_user(user_id: str) -> Any:
+    """Select preferences with tutorial timestamp kept as raw text.
+
+    SQLAlchemy's SQLite DateTime result processor raises before the
+    service can name the corrupt field if a direct SQL write stores a
+    non-datetime string. The tutorial column is new and has an explicit
+    Tier-1 guard, so select it as text and parse it in `_row_to_prefs`.
+    """
+    return select(
+        user_preferences_table.c.default_composer_mode,
+        user_preferences_table.c.banner_dismissed_at,
+        sql_cast(user_preferences_table.c.tutorial_completed_at, String).label("tutorial_completed_at"),
+        user_preferences_table.c.updated_at,
+    ).where(user_preferences_table.c.user_id == user_id)
+
+
+def _decode_tutorial_completed_at(user_id: str, raw_value: object) -> datetime | None:
+    if raw_value is None:
+        return None
+    if type(raw_value) is datetime:
+        return raw_value
+    if type(raw_value) is str:
+        try:
+            return datetime.fromisoformat(raw_value.removesuffix("Z") + "+00:00" if raw_value.endswith("Z") else raw_value)
+        except ValueError as exc:
+            raise CorruptPreferencesError(
+                user_id,
+                {"tutorial_completed_at": raw_value},
+                field_name="tutorial_completed_at",
+            ) from exc
+    raise CorruptPreferencesError(
+        user_id,
+        {"tutorial_completed_at": raw_value},
+        field_name="tutorial_completed_at",
+    )
 
 
 class PreferencesService:
@@ -153,7 +197,7 @@ class PreferencesService:
 
         def _sync() -> ComposerPreferences:
             with self._engine.connect() as conn:
-                row = conn.execute(select(user_preferences_table).where(user_preferences_table.c.user_id == user_id)).first()
+                row = conn.execute(_select_preferences_for_user(user_id)).first()
                 if row is not None:
                     return self._row_to_prefs(row, user_id)
 
@@ -166,6 +210,7 @@ class PreferencesService:
             return ComposerPreferences(
                 default_mode=_DEFAULT_MODE,
                 banner_dismissed_at=None,
+                tutorial_completed_at=None,
                 updated_at=None,
             )
 
@@ -187,9 +232,11 @@ class PreferencesService:
         mode = row.default_composer_mode
         if mode not in _VALID_MODES:
             raise CorruptPreferencesError(user_id, mode)
+        tutorial_completed_at = _decode_tutorial_completed_at(user_id, row.tutorial_completed_at)
         return ComposerPreferences(
             default_mode=mode,
             banner_dismissed_at=row.banner_dismissed_at,
+            tutorial_completed_at=tutorial_completed_at,
             updated_at=row.updated_at,
         )
 
@@ -230,10 +277,11 @@ class PreferencesService:
         contradicted the documented lazy-write contract on the GET side.
         """
         now = self._now()
-        payload_is_empty = payload.default_mode is None and payload.banner_dismissed_at is None
+        tutorial_in_payload = "tutorial_completed_at" in payload.model_fields_set
+        payload_is_empty = payload.default_mode is None and payload.banner_dismissed_at is None and not tutorial_in_payload
 
-        def _sync() -> tuple[ComposerMode, datetime | None, bool, ComposerPreferences | None]:
-            """Returns (resolved_mode, resolved_banner_dismissed_at, wrote, prior_prefs).
+        def _sync() -> tuple[ComposerMode, datetime | None, datetime | None, bool, ComposerPreferences | None]:
+            """Returns (resolved_mode, resolved_banner_dismissed_at, resolved_tutorial_completed_at, wrote, prior_prefs).
 
             Race window — TRACKED, not fixed in this commit. The
             read-then-decide-to-upsert structure has a TOCTOU window:
@@ -270,7 +318,7 @@ class PreferencesService:
                 # sentinel here would fabricate state the system never
                 # wrote (see ComposerPreferencesTransition docstring and
                 # CLAUDE.md §"Three-Tier Trust Model" fabrication test).
-                prior_row = conn.execute(select(user_preferences_table).where(user_preferences_table.c.user_id == user_id)).first()
+                prior_row = conn.execute(_select_preferences_for_user(user_id)).first()
                 prior_prefs: ComposerPreferences | None
                 if prior_row is None:
                     prior_prefs = None
@@ -285,7 +333,7 @@ class PreferencesService:
                 # interposing between this check and a downstream PATCH
                 # affects only response staleness, not DB integrity.
                 if payload_is_empty and prior_row is None:
-                    return _DEFAULT_MODE, None, False, prior_prefs
+                    return _DEFAULT_MODE, None, None, False, prior_prefs
 
                 # Determine the mode to insert (NOT NULL column). On
                 # conflict, only fields the caller set are updated.
@@ -326,10 +374,18 @@ class PreferencesService:
                         select(user_preferences_table.c.banner_dismissed_at).where(user_preferences_table.c.user_id == user_id)
                     ).scalar_one_or_none()
 
+                if tutorial_in_payload:
+                    resolved_tutorial: datetime | None = payload.tutorial_completed_at
+                elif prior_prefs is not None:
+                    resolved_tutorial = prior_prefs.tutorial_completed_at
+                else:
+                    resolved_tutorial = None
+
                 values: dict[str, object] = {
                     "user_id": user_id,
                     "default_composer_mode": insert_mode,
                     "banner_dismissed_at": payload.banner_dismissed_at,
+                    "tutorial_completed_at": resolved_tutorial,
                     "updated_at": now,
                 }
                 stmt = sqlite_insert(user_preferences_table).values(**values)
@@ -338,12 +394,14 @@ class PreferencesService:
                     update_clause["default_composer_mode"] = payload.default_mode
                 if payload.banner_dismissed_at is not None:
                     update_clause["banner_dismissed_at"] = payload.banner_dismissed_at
+                if tutorial_in_payload:
+                    update_clause["tutorial_completed_at"] = payload.tutorial_completed_at
                 stmt = stmt.on_conflict_do_update(index_elements=["user_id"], set_=update_clause)
                 conn.execute(stmt)
 
-            return insert_mode, resolved_banner, True, prior_prefs
+            return insert_mode, resolved_banner, resolved_tutorial, True, prior_prefs
 
-        written_mode, written_banner, wrote, prior_prefs = await run_sync_in_worker(_sync)
+        written_mode, written_banner, written_tutorial, wrote, prior_prefs = await run_sync_in_worker(_sync)
         # Panel S1: operational telemetry only — no Landscape (user state,
         # not pipeline decision boundary). See module-level comment for
         # the no-Landscape rationale and the future-promote criterion.
@@ -352,12 +410,25 @@ class PreferencesService:
             attributes={
                 "mode_changed": payload.default_mode is not None,
                 "banner_dismissed": payload.banner_dismissed_at is not None,
+                "tutorial_changed": tutorial_in_payload,
                 "wrote_row": wrote,
             },
         )
+        if tutorial_in_payload:
+            prior_tutorial = prior_prefs.tutorial_completed_at if prior_prefs is not None else None
+            addressed_mode = "default_mode" in payload.model_fields_set
+            if prior_tutorial is None and payload.tutorial_completed_at is not None and addressed_mode:
+                record_tutorial_completed_path("first_time")
+            elif prior_tutorial is None and payload.tutorial_completed_at is not None and not addressed_mode:
+                record_tutorial_completed_path("skip")
+            elif prior_tutorial is not None and payload.tutorial_completed_at is None:
+                record_tutorial_completed_path("retake")
+            elif prior_tutorial is not None and payload.tutorial_completed_at is not None:
+                record_tutorial_completed_path("repeat")
         current = ComposerPreferences(
             default_mode=written_mode,
             banner_dismissed_at=written_banner,
+            tutorial_completed_at=written_tutorial,
             # Panel U1 corollary: when the empty-PATCH guard short-circuits
             # (no row exists, no fields supplied) no `updated_at` was
             # written or read; return None to match the no-row GET semantic

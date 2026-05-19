@@ -81,6 +81,7 @@ export type ComposerMode = "guided" | "freeform";
 export interface UserComposerPreferencesPayload {
   default_mode: ComposerMode;
   banner_dismissed_at: string | null;
+  tutorial_completed_at: string | null;
   // Nullable to mirror the backend Panel-U1 contract: when no DB row
   // exists for the user, the GET response represents the in-server
   // default and updated_at is null (no write event has occurred to
@@ -92,6 +93,41 @@ export interface UserComposerPreferencesPayload {
 export interface UpdateUserComposerPreferencesPayload {
   default_mode?: ComposerMode;
   banner_dismissed_at?: string | null;
+  tutorial_completed_at?: string | null;
+}
+
+// ── First-run tutorial (Phase 4) ───────────────────────────────────────────
+
+export interface TutorialRunRequest {
+  session_id: string;
+  prompt: string;
+}
+
+export interface TutorialRunOutput {
+  rows: Array<Record<string, unknown>>;
+  source_data_hash: string;
+}
+
+export interface TutorialRunResponse {
+  run_id: string;
+  output: TutorialRunOutput;
+  seeded_from_cache: boolean;
+  cache_key: string | null;
+}
+
+export interface RunAuditStoryResponse {
+  run_id: string;
+  session_id: string;
+  llm_call_count: number;
+  output_file_hash: string;
+  started_at: string;
+  plugin_versions: Record<string, string>;
+  seeded_from_cache: boolean;
+  cache_key: string | null;
+}
+
+export interface TutorialOrphanCleanupResponse {
+  deleted_count: number;
 }
 
 // ── Shareable reviews (Phase 6A) ───────────────────────────────────────────

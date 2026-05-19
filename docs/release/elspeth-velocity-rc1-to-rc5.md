@@ -3,12 +3,26 @@
 **Period covered:** 12 January 2026 → 19 May 2026 (128 calendar days; **123 active commit days**)
 **Total commits:** 4,521 unique across `origin/full-history-pre-rc1`, `origin/pre-RC2`, and `HEAD`
 **Average velocity:** 35.3 commits per calendar day; **36.8 commits per active day**
-**Author of record:** John Morrissey (sole contributor)
+**Author of record:** John Morrissey
+**Audience:** Engineering team and engineering leadership
+**Register:** Technical
 **Purpose:** Per-day commit volume so the team can see how much was completed each day, where the peaks are, and what each peak delivered.
 
-> **Reading the figures.** All commit volume in this document reflects the work of a single author. The per-active-day rates (36–80 commits) should be read in that context: they are the cadence of one person, not a team. The pattern of low-activity weeks immediately preceding phase changes (see *Velocity Observations* below) is consistent with sustained solo work, not team scheduling.
+> **Reading the figures.** Per-active-day rates of 36–80 commits should be read against the project's contributor count, which is tracked separately at the enterprise level. The recovery patterns visible in the data — 1–2 day pauses after major releases, and low-activity weeks immediately preceding phase changes — reflect a deliberate cadence pattern, not external scheduling and not slippage. Reading any single week's count without the phase context will mislead; the *Velocity by Phase* table below is the right reading frame.
 
 This document is the **velocity / tempo** view. For cumulative feature output, see [elspeth-progress-rc1-to-rc5.md](elspeth-progress-rc1-to-rc5.md).
+
+## What this report does not measure
+
+Commit volume is a tempo signal, not a value signal. This report does **not** measure:
+
+- **Effort.** A single 200-line commit and a single one-line commit each count as one commit. Days of architecture analysis that produced no commits do not appear here at all.
+- **Value.** A bug-fix commit and a refactor-for-cleanliness commit each count as one commit; this report does not (and cannot) distinguish their value to the system.
+- **Code volume.** Commits in this project range from one-line typo fixes to 4,000-line plugin landings. Per-day commit counts are **not** a proxy for per-day code volume.
+- **Quality.** Every commit in the visible history passed pre-commit hooks, type checks, and the test suite that existed at the time. This report does not measure how well-tested or well-reviewed each commit was, and a higher commit count is not evidence of higher quality.
+- **Reasoning load.** The hardest design decisions in the project (the trust-tier model, the routing trilogy, the declarative DAG model, the RC-5 composer architecture, the redaction MANIFEST) produced fewer commits per day than the implementation work that followed them, because the reasoning ran ahead of the code.
+
+The right reading of this report is "where did the system's tempo land on each day", not "where was the most work done".
 
 ---
 
@@ -39,7 +53,7 @@ The peak days where epics land or RC cutovers happen. Attribution is taken from 
 | 5 | 2026-02-03 | 125 | RC-2.1 → RC-2.2: Langfuse SDK v3 migration; secret-resolution audit trail; schema-contract propagation; Tier 2 tracing on Azure / OpenRouter / batch LLM. |
 | 6 | 2026-02-02 | 118 | RC-2 cutover day. `ELSPETH - Release Candidate 2` commit + post-cutover cleanup (display headers; FieldResolutionApplied event; Tier 1 corrupt-field-resolution crash). |
 | 7 | 2026-05-14 | 97 | RC-5.2 release-stamp day: changelog finalize; per-step chat merge into `RC5.2`; phase3 compose-loop persistence merge. |
-| 8 | 2026-05-19 | 94 | Today — Phase 8 polish + Phase 6 completion-gestures merge + CI allowlist burn-down merge + Phase-5 chat-data-entry merge + ansible-ubuntu-deploy docs. |
+| 8 | 2026-05-19 | 94 | Phase 8 polish + Phase 6 completion-gestures merge + CI allowlist burn-down merge + Phase-5 chat-data-entry merge + ansible-ubuntu-deploy docs (current `HEAD`). |
 | 9 | 2026-05-18 | 94 | Phase 7 catalog reshape merge + `fix/catalog-i1-i2-i3` (drawer error log, snapshot lock, NETWORK retirement) + plugin-coverage gate calibration. |
 | 10 | 2026-05-09 | 93 | RC-5.1 composer-progress-persistence Phase 1B: `persist_compose_turn` happy path, `OperationalError` + audit-failure primacy, `IntegrityError` disposition, persist-payload DCs. |
 | 11 | 2026-05-13 | 88 | Phase A coverage gap + per-step chat → RC-5.2 merge + post-rebase tier-model fix-ups + cross-step `chat_history` accumulation test. |
@@ -51,6 +65,14 @@ The peak days where epics land or RC cutovers happen. Attribution is taken from 
 ---
 
 ## Velocity by Phase
+
+> **Skim aid — three velocity tiers across the project's life.**
+>
+> 1. **Hot cuts (Pre-RC1, RC-1 Hardening, RC-5.2 Composer Maturation): 71–80 commits / active day.** Empty-scaffold-to-shipping foundation work, plus high-tempo merge sprints around major releases.
+> 2. **Mid-cadence sub-release stream (RC-2): 52.7 commits / active day.** Five rapid sub-releases each ~3–5 days apart, with shorter individual review cycles.
+> 3. **Architectural-remediation and correctness sprints (RC-3, RC-4 + RC-5 cut, RC-5.1): 19–23 commits / active day.** Smaller, more carefully audited changes; each commit tends to be a focused fix with paired tests.
+>
+> The current RC-5.2 surge (May 12–19) is the **highest sustained tempo since RC-1 cutover** — 79.8 commits / active day over 8 consecutive active days. See the per-phase table below for the underlying numbers.
 
 The seven canonical phases of the project, with per-day averages.
 
@@ -65,17 +87,11 @@ The seven canonical phases of the project, with per-day averages.
 | **RC-5.2 Composer Maturation** | 2026-05-12 → 05-19 | 8 | 8 | 638 | **79.8** | Guided mode, 4 phases of composer progress persistence, frontend recovery UX, MANIFEST redaction walker, RC-5.2 hot-fix integration |
 | **Total** | 2026-01-12 → 05-19 | 128 | 123 | **4,521** | **36.8** | — |
 
-**Reading the table:** velocity has three tiers, not two:
-
-- **Hot cuts (Pre-RC1, RC-1 Hardening, RC-5.2 Composer Maturation)** — **71–80 commits / active day**. Empty-scaffold-to-shipping foundation work, plus high-tempo merge sprints around major releases.
-- **Mid-cadence sub-release stream (RC-2)** — **52.7 commits / active day**. Five rapid sub-releases each ~3–5 days apart, with shorter individual review cycles.
-- **Architectural-remediation and correctness sprints (RC-3, RC-4 + RC-5 cut, RC-5.1)** — **19–23 commits / active day**. Smaller, more carefully audited changes; each commit tends to be a focused fix with paired tests.
-
-The current RC-5.2 surge (May 12–19) is the **highest sustained tempo since RC-1 cutover** — 79.8 commits / active day over 8 consecutive active days.
-
 ---
 
 ## Full Per-Day Commit Table
+
+> **Skim guide for the table below.** The full table preserves every active day so that any specific date can be traced. For the highlights view, use the *Top 15 Peak Days* table above. Days at ≥ 50 commits are RC cutovers, merge sprints, or land-day clusters; days at < 10 commits are typically narrow correctness/test follow-ups or recovery days after a major release. The "Notes" column is populated only for days where a notable event is attributable; absence of a note means a routine commit cluster with no single landmark.
 
 ```
 Date          Commits   Notes
@@ -127,9 +143,9 @@ Date          Commits   Notes
 2026-02-26         26
 2026-02-27         34
 2026-02-28         11
-2026-03-01         27   feature-inventory.md generated at RC-3.3 prep
+2026-03-01         27   archive/feature-inventory.md generated at RC-3.3 prep
 2026-03-02         17   0.3.3 release (commit 736c96804)
-2026-03-03          7   rc4-executive-brief.md (planning complete)
+2026-03-03          7   archive/rc4-planning-brief.md (planning complete)
 2026-03-04         12
 2026-03-05         24
 2026-03-06         23

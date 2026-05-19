@@ -89,7 +89,8 @@ Cross-release progress, velocity, and assurance documents. See the [release docs
 - [Progress Report: RC-1 to RC-5](release/elspeth-progress-rc1-to-rc5.md) — current cumulative-output view (RC-5.2, May 2026): what shipped, period by period
 - [Velocity Report: RC-1 to RC-5](release/elspeth-velocity-rc1-to-rc5.md) — current per-day commit volume (RC-5.2, May 2026): tempo and peak-day attribution
 - [Audit and Lineage Guarantees](release/guarantees.md) — long-lived assurance narrative; refreshed per release
-- [Archived RC snapshots](release/) — `feature-inventory.md` (RC-3.3), `rc4-executive-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix.md` — historical context only
+- [Executive Summary (RC-5.2)](release/executive-summary.md) — capability and assurance brief for Australian public-sector evaluators *(DRAFT — awaiting operator sign-off)*
+- [Archived RC snapshots](release/archive/) — `feature-inventory.md` (RC-3.3), `rc4-planning-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix-postmortem.md` — historical context only
 
 ## Historical Snapshots
 

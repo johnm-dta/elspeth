@@ -61,7 +61,12 @@ from sqlalchemy.types import JSON
 #        composition_state_id is NOT NULL for both event types. SQLite
 #        does not support ALTER TABLE ADD CONSTRAINT, so the constraint
 #        change is a fresh-schema bump.
-SESSION_SCHEMA_EPOCH = 5
+#   6 → user_preferences gains tutorial_completed_at for the Phase 4
+#        hello-world tutorial first-run/completed gate. Pre-release
+#        policy remains delete-and-recreate for stale session DBs.
+#   7 → resolved interpretation DELETE trigger permits whole-session
+#        archival cascades while preserving direct-delete protection.
+SESSION_SCHEMA_EPOCH = 7
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -809,8 +814,12 @@ skill_markdown_history_table = Table(
 # decision is not.
 #
 # ``trg_interpretation_events_no_delete_resolved`` extends that resolved-row
-# protection to DELETE while deliberately leaving unresolved PENDING rows
-# deletable for orphan recovery.
+# protection to direct DELETE while deliberately leaving unresolved PENDING
+# rows deletable for orphan recovery. Whole-session archival remains allowed:
+# SQLite foreign-key cascades execute the child BEFORE DELETE trigger after
+# the parent ``sessions`` row is gone from the trigger's view, so the trigger
+# uses parent-row existence to distinguish direct child deletion from the
+# schema-owned archive cascade.
 #
 # ``trg_chat_messages_immutable_content`` enforces append-only semantics
 # for ``chat_messages.content`` — once a message is written, its body
@@ -854,6 +863,7 @@ event.listen(
         "BEFORE DELETE ON interpretation_events "
         "FOR EACH ROW "
         "WHEN OLD.resolved_at IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = OLD.session_id) "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'interpretation_events: resolved rows are append-only'); "
         "END;"
@@ -1208,9 +1218,11 @@ Index("ix_user_secrets_user_provider", user_secrets_table.c.user_id, user_secret
 # ``user_preferences`` — per-user composer settings.
 #
 # One row per user holding (a) the user's chosen default composer mode for
-# NEW sessions and (b) the dismissal timestamp for the one-time "we changed
-# the default" banner. Per-session mode toggles live in chat panel state
-# and do NOT touch this row; this is exclusively the account-level default.
+# NEW sessions, (b) the dismissal timestamp for the one-time "we changed
+# the default" banner, and (c) the completed-at timestamp for the first-run
+# hello-world tutorial. Per-session mode toggles live in chat panel state
+# and do NOT touch this row; this is exclusively account-level preference
+# state.
 #
 # ``user_id`` is opaque and matches ``sessions_table.user_id``. No FK is
 # declared because auth providers vary across deployments and there is no
@@ -1235,6 +1247,8 @@ user_preferences_table = Table(
     ),
     # NULL = banner not yet dismissed; non-NULL = dismissed-at timestamp.
     Column("banner_dismissed_at", DateTime(timezone=True), nullable=True),
+    # NULL = tutorial not completed/reset; non-NULL = completed-at timestamp.
+    Column("tutorial_completed_at", DateTime(timezone=True), nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(
         "default_composer_mode IN ('guided', 'freeform')",

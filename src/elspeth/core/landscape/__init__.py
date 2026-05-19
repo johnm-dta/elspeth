@@ -88,6 +88,7 @@ from elspeth.core.landscape.schema import (
     token_parents_table,
     tokens_table,
 )
+from elspeth.core.landscape.write_repository import LandscapeWriteRepository
 
 __all__ = [
     "Artifact",
@@ -109,6 +110,7 @@ __all__ = [
     "JSONFormatter",
     "LandscapeDB",
     "LandscapeExporter",
+    "LandscapeWriteRepository",
     "LineageResult",
     "LineageTextFormatter",
     "Node",

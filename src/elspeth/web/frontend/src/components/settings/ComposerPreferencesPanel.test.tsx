@@ -25,6 +25,8 @@ describe("ComposerPreferencesForm", () => {
       loaded: true,
       defaultMode: "guided",
       bannerDismissedAt: null,
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
       writing: false,
       writeError: null,
       optedOutAtSessionId: null,
@@ -91,6 +93,21 @@ describe("ComposerPreferencesForm", () => {
     expect(alert).toBeInTheDocument();
     expect(alert).toHaveTextContent(/503 Service Unavailable/);
   });
+
+  it("shows Reset tutorial after completion and calls resetTutorial", async () => {
+    usePreferencesStore.setState({
+      tutorialCompletedAt: "2026-05-19T12:00:00Z",
+      tutorialCompleted: true,
+    });
+    const resetTutorial = vi
+      .spyOn(usePreferencesStore.getState(), "resetTutorial")
+      .mockResolvedValueOnce(undefined);
+
+    render(<ComposerPreferencesForm />);
+    await userEvent.click(screen.getByRole("button", { name: /reset tutorial/i }));
+
+    expect(resetTutorial).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ── Modal chrome (Panel test analyzer #2) ────────────────────────────────
@@ -106,6 +123,8 @@ describe("ComposerPreferencesPanel — modal chrome", () => {
       loaded: true,
       defaultMode: "guided",
       bannerDismissedAt: null,
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
       writing: false,
       writeError: null,
       optedOutAtSessionId: null,

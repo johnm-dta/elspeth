@@ -63,6 +63,12 @@ allowed_dict_patterns:
   # Plugin utilities
   - "src/elspeth/plugins/infrastructure/utils.py:get_nested_field:data"
 
+  # Tutorial artifact projection - row data is read back from user pipeline
+  # sink artifacts. The schema is intentionally arbitrary and is carried in
+  # typed response/cache containers at the boundary.
+  - "src/elspeth/web/composer/tutorial_service.py:_rows_from_artifacts:return (list)"
+  - "src/elspeth/web/composer/tutorial_service.py:_parse_rows_file:return (list)"
+
   # Sink plugins - row output (batch writes)
   - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink._ensure_table:row"
   - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink._create_columns_from_schema_or_row:row"

@@ -78,7 +78,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        "uv run uvicorn elspeth.web.app:create_app --factory " +
+        "uv run --extra webui python -m uvicorn elspeth.web.app:create_app --factory " +
         `--host 127.0.0.1 --port ${BACKEND_PORT}`,
       cwd: REPO_ROOT_FROM_FRONTEND,
       url: BACKEND_HEALTH_URL,

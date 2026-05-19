@@ -22,6 +22,8 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.composer import tutorial_telemetry as tutorial_telemetry_module
+from elspeth.web.preferences import service as service_module
 from elspeth.web.preferences.models import UpdateComposerPreferencesRequest
 from elspeth.web.preferences.service import (
     CorruptPreferencesError,
@@ -53,11 +55,34 @@ def service(engine):
     return PreferencesService(engine, now=lambda: datetime(2026, 5, 15, tzinfo=UTC))
 
 
+class _RecordingCounter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, dict[str, object]]] = []
+
+    def add(self, amount: int, *, attributes: dict[str, object]) -> None:
+        self.calls.append((amount, dict(attributes)))
+
+
+@pytest.fixture
+def preferences_patch_counter(monkeypatch: pytest.MonkeyPatch) -> _RecordingCounter:
+    counter = _RecordingCounter()
+    monkeypatch.setattr(service_module, "_PREFERENCES_PATCH_COUNTER", counter)
+    return counter
+
+
+@pytest.fixture
+def tutorial_completed_counter(monkeypatch: pytest.MonkeyPatch) -> _RecordingCounter:
+    counter = _RecordingCounter()
+    monkeypatch.setattr(tutorial_telemetry_module, "_TUTORIAL_COMPLETED_COUNTER", counter)
+    return counter
+
+
 def test_get_for_new_user_returns_guided_default(service):
     """A user with no row gets the server-side default 'guided'."""
     prefs = asyncio.run(service.get_composer_preferences("alice-get-default"))
     assert prefs.default_mode == "guided"
     assert prefs.banner_dismissed_at is None
+    assert prefs.tutorial_completed_at is None
     # Panel U1: updated_at is None when no row exists — no write event
     # to associate a timestamp with; fabricating one would put a value
     # the system never wrote into an audit-visible field.
@@ -86,8 +111,233 @@ def test_update_persists_and_round_trips(service):
     result = asyncio.run(service.update_composer_preferences("alice-update-persist", payload))
     assert result.prior is None
     assert result.current.default_mode == "freeform"
+    assert result.current.tutorial_completed_at is None
     prefs = asyncio.run(service.get_composer_preferences("alice-update-persist"))
     assert prefs.default_mode == "freeform"
+    assert prefs.tutorial_completed_at is None
+
+
+def test_patch_sets_tutorial_completed_at(service):
+    stamp = datetime(2026, 5, 15, 13, 0, tzinfo=UTC)
+    result = asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-set",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+    assert result.prior is None
+    assert result.current.tutorial_completed_at == stamp
+
+    prefs = asyncio.run(service.get_composer_preferences("alice-tutorial-set"))
+    assert prefs.tutorial_completed_at == stamp.replace(tzinfo=None) or prefs.tutorial_completed_at == stamp
+
+
+def test_patch_can_set_mode_and_tutorial_in_one_call(service):
+    stamp = datetime(2026, 5, 15, 13, 5, tzinfo=UTC)
+    result = asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-final",
+            UpdateComposerPreferencesRequest(
+                default_mode="freeform",
+                tutorial_completed_at=stamp,
+            ),
+        )
+    )
+    assert result.current.default_mode == "freeform"
+    assert result.current.tutorial_completed_at == stamp
+
+
+def test_partial_update_preserves_tutorial_completed_at(service):
+    stamp = datetime(2026, 5, 15, 13, 10, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-preserve",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-preserve",
+            UpdateComposerPreferencesRequest(default_mode="freeform"),
+        )
+    )
+
+    prefs = asyncio.run(service.get_composer_preferences("alice-tutorial-preserve"))
+    assert prefs.default_mode == "freeform"
+    assert prefs.tutorial_completed_at == stamp.replace(tzinfo=None) or prefs.tutorial_completed_at == stamp
+
+
+def test_explicit_null_clears_tutorial_completed_at(service):
+    stamp = datetime(2026, 5, 15, 13, 15, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-retake",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+
+    result = asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-retake",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=None),
+        )
+    )
+
+    assert result.current.tutorial_completed_at is None
+    prefs = asyncio.run(service.get_composer_preferences("alice-tutorial-retake"))
+    assert prefs.tutorial_completed_at is None
+
+
+def test_absent_tutorial_field_preserves_but_explicit_null_clears(service):
+    stamp = datetime(2026, 5, 15, 13, 20, tzinfo=UTC)
+    user = "alice-tutorial-discriminate"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+
+    absent_payload = UpdateComposerPreferencesRequest(default_mode="freeform")
+    assert "tutorial_completed_at" not in absent_payload.model_fields_set
+    asyncio.run(service.update_composer_preferences(user, absent_payload))
+    after_absent = asyncio.run(service.get_composer_preferences(user))
+    assert after_absent.tutorial_completed_at == stamp.replace(tzinfo=None) or after_absent.tutorial_completed_at == stamp
+
+    null_payload = UpdateComposerPreferencesRequest(tutorial_completed_at=None)
+    assert "tutorial_completed_at" in null_payload.model_fields_set
+    asyncio.run(service.update_composer_preferences(user, null_payload))
+    after_null = asyncio.run(service.get_composer_preferences(user))
+    assert after_null.tutorial_completed_at is None
+
+
+def test_corrupt_tutorial_completed_at_crashes_with_named_error(service, engine):
+    user = "alice-tutorial-corrupt"
+    with engine.begin() as conn:
+        conn.execute(
+            user_preferences_table.insert().values(
+                user_id=user,
+                default_composer_mode="guided",
+                banner_dismissed_at=None,
+                tutorial_completed_at=None,
+                updated_at=datetime(2026, 5, 15, tzinfo=UTC),
+            )
+        )
+        conn.exec_driver_sql(
+            "UPDATE user_preferences SET tutorial_completed_at = 'not-a-timestamp' WHERE user_id = 'alice-tutorial-corrupt'"
+        )
+
+    with pytest.raises(CorruptPreferencesError) as exc_info:
+        asyncio.run(service.get_composer_preferences(user))
+    assert exc_info.value.user_id == user
+    assert exc_info.value.bad_value == {"tutorial_completed_at": "not-a-timestamp"}
+    assert exc_info.value.field_name == "tutorial_completed_at"
+
+
+def test_patch_tutorial_emits_counter_with_tutorial_changed_label(service, preferences_patch_counter: _RecordingCounter):
+    stamp = datetime(2026, 5, 15, 13, 25, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-counter",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+
+    assert preferences_patch_counter.calls
+    _amount, attrs = preferences_patch_counter.calls[-1]
+    assert attrs["mode_changed"] is False
+    assert attrs["banner_dismissed"] is False
+    assert attrs["wrote_row"] is True
+    assert attrs["tutorial_changed"] is True
+
+
+def test_patch_without_tutorial_emits_counter_with_tutorial_changed_false(service, preferences_patch_counter: _RecordingCounter):
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-no-tutorial-counter",
+            UpdateComposerPreferencesRequest(default_mode="freeform"),
+        )
+    )
+
+    assert preferences_patch_counter.calls
+    _amount, attrs = preferences_patch_counter.calls[-1]
+    assert attrs["mode_changed"] is True
+    assert attrs["wrote_row"] is True
+    assert attrs["tutorial_changed"] is False
+
+
+def test_tutorial_completed_counter_first_time_label(
+    service,
+    tutorial_completed_counter: _RecordingCounter,
+):
+    stamp = datetime(2026, 5, 15, 14, 0, tzinfo=UTC)
+
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-first-time-counter",
+            UpdateComposerPreferencesRequest(default_mode="freeform", tutorial_completed_at=stamp),
+        )
+    )
+
+    assert tutorial_completed_counter.calls[-1] == (1, {"completion_path": "first_time"})
+
+
+def test_tutorial_completed_counter_skip_label(
+    service,
+    tutorial_completed_counter: _RecordingCounter,
+):
+    stamp = datetime(2026, 5, 15, 14, 5, tzinfo=UTC)
+
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-skip-counter",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+
+    assert tutorial_completed_counter.calls[-1] == (1, {"completion_path": "skip"})
+
+
+def test_tutorial_completed_counter_retake_label(
+    service,
+    tutorial_completed_counter: _RecordingCounter,
+):
+    stamp = datetime(2026, 5, 15, 14, 10, tzinfo=UTC)
+    user = "alice-tutorial-retake-counter"
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(tutorial_completed_at=stamp)))
+
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(tutorial_completed_at=None)))
+
+    assert tutorial_completed_counter.calls[-1] == (1, {"completion_path": "retake"})
+
+
+def test_tutorial_completed_counter_repeat_label(
+    service,
+    tutorial_completed_counter: _RecordingCounter,
+):
+    first = datetime(2026, 5, 15, 14, 15, tzinfo=UTC)
+    second = datetime(2026, 5, 15, 14, 20, tzinfo=UTC)
+    user = "alice-tutorial-repeat-counter"
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(tutorial_completed_at=first)))
+
+    asyncio.run(service.update_composer_preferences(user, UpdateComposerPreferencesRequest(tutorial_completed_at=second)))
+
+    assert tutorial_completed_counter.calls[-1] == (1, {"completion_path": "repeat"})
+
+
+def test_tutorial_completed_counter_does_not_fire_for_mode_only_patch(
+    service,
+    tutorial_completed_counter: _RecordingCounter,
+):
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-mode-only-counter",
+            UpdateComposerPreferencesRequest(default_mode="freeform"),
+        )
+    )
+
+    assert tutorial_completed_counter.calls == []
 
 
 def test_partial_update_only_touches_provided_fields(service):
@@ -388,6 +638,7 @@ def test_empty_user_id_rejected_by_check_constraint(engine):
                 user_id="",
                 default_composer_mode="guided",
                 banner_dismissed_at=None,
+                tutorial_completed_at=None,
                 updated_at=datetime(2026, 5, 16, tzinfo=UTC),
             )
         )

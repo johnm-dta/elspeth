@@ -196,6 +196,7 @@ vi.mock("../api/client", () => ({
   fetchUserComposerPreferences: vi.fn().mockResolvedValue({
     default_mode: "freeform",
     banner_dismissed_at: null,
+    tutorial_completed_at: "2026-05-19T00:00:00Z",
     updated_at: "2026-05-15T00:00:00Z",
   }),
   updateUserComposerPreferences: vi.fn(),

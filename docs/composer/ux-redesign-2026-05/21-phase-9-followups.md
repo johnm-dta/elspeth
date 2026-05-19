@@ -38,7 +38,7 @@ the `feat/composer-phase-8-polish` worktree branched from RC5.2
 | `grep -rn 'auto_interpreted_opt_out' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7e (B3 cohort b1 — Phase 5b interpretation-opt-out emit) | (HIT — scoped IN) | n/a |
 | `grep -rn 'audit_readiness\|composer/audit/readiness' src/elspeth/web/` | ≥1 | Task 1 Sub-task 7f (B3 cohort b2 — Phase 2C audit-fetch-failure emit) | (HIT — scoped IN) | n/a |
 | `ls src/elspeth/web/frontend/src/components/sessions/HeaderSessionSwitcher.tsx` | file exists | Task 4 (session-sidebar migration) | (HIT — scoped IN) | n/a |
-| `grep -rn 'tutorial_completed' src/elspeth/web/` | 0 | Task 6 (tutorial-replay button + counter) | Probe-miss no-op | Class B — scope OUT of Phase 8 |
+| `grep -rn 'tutorial_completed' src/elspeth/web/ \| grep -v 'tutorial_completed_total' \| grep -v 'telemetry_phase8.py' \| grep -v 'sessions/telemetry.py'` | 0 | Task 6 (tutorial-replay button + counter) | Probe-miss no-op | Class B — scope OUT of Phase 8 |
 
 **Operator decision rule applied (S5-reweighted):** no probe gates an
 unconditional Phase 8 task. Tasks 0, 1 infra, 2, 3, 5, 7, and 8 ran
@@ -51,17 +51,28 @@ follow-up entries listed below.
 
 ### 1. Cohort (a) — Phase 6 completion-gesture telemetry markers
 
-- **Class:** Probe-miss no-op (Probe 1 + Probe 2).
+- **Class:** Probe-miss no-op (Probe 1 + Probe 2) — **counters defined,
+  increment sites absent**.
 - **Trigger:** No `'telemetry: deferred to Phase 8'` markers were
   seeded by upstream phases at the 2026-05-19 gate; no
   `verify_token` / `verify_share_token` symbols exist under
   `src/elspeth/web/`. Phase 6 (completion gestures) merged into
-  RC5.2 (commit `dd20888f0`) but did not seed the
-  `composer.share.token_verify_failure_total` or
-  `composer.share.link_expiry_hit_total` emit sites that Phase 8
-  Task 1 Sub-task 7d was scoped to harvest.
-- **What's missing:** Two counter emits inside the future
-  shareable-reviews verify-failure and expiry-hit branches:
+  RC5.2 (commit `dd20888f0`) but did not seed the increment-site
+  call sites that Phase 8 Task 1 Sub-task 7d was scoped to
+  harvest. **The counters themselves are not missing.** Counters
+  `composer.share.token_verify_failure_total` and
+  `composer.share.link_expiry_hit_total` are **defined and
+  registered** at `src/elspeth/web/sessions/telemetry.py:327,331`
+  inside `_SessionsTelemetry`. The follow-up is to add
+  **increment-site call** in the verify-failure and expiry-hit
+  branches under `shareable_reviews/` — the counters ship; what
+  is missing is the `.add(1, attributes={...})` calls.
+- **What's missing:** Two counter `.add(1, attributes={...})` call
+  sites inside the future shareable-reviews verify-failure and
+  expiry-hit branches. The counter objects already exist at
+  `src/elspeth/web/sessions/telemetry.py:327` and `:331`; the
+  follow-up is purely to wire the increments at the right code
+  branches:
   - `composer.share.token_verify_failure_total` (counter, no
     attributes per current B3 cohort-a design — review the
     attribute shape during Phase 9 design pass).
@@ -75,12 +86,15 @@ follow-up entries listed below.
      and the cohort-(a) design in
      `20-phase-8-polish-and-telemetry.md` §"Cross-phase telemetry
      — cohort split (B3 reshape)".
-  3. Wire the emits with the existing 8b helper module shape
-     (`src/elspeth/web/composer/telemetry_phase8.py` for module-local
-     counters or `_SessionsTelemetry` container if cohort lives
-     under sessions). Commit MUST include the
-     `telemetry-backfill: phase-6` trailer (B4-r3 commit-msg
-     hook enforces).
+  3. Wire the **increment calls** at those branches (the counters
+     are already registered on `_SessionsTelemetry` at
+     `src/elspeth/web/sessions/telemetry.py:327,331`; emits go
+     through `tel.share_token_verify_failure_total.add(1, ...)` and
+     `tel.share_link_expiry_hit_total.add(1, ...)`). The 8b helper
+     module pattern at `src/elspeth/web/composer/telemetry_phase8.py`
+     is the canonical wrapper shape for the new emit functions.
+     Commit MUST include the `telemetry-backfill: phase-6` trailer
+     (B4-r3 commit-msg hook enforces).
 - **Definition of done:** The cohort-a counters increment under the
   same Q-cluster test discipline (function-scoped fixture per Q10)
   Phase 8 used for cohorts (b1) and (b2); plan §"Cohort attribution
@@ -90,10 +104,45 @@ follow-up entries listed below.
 ### 2. Task 6 — Tutorial-replay button (Phase 4 hello-world dependency)
 
 - **Class:** Probe-miss no-op (Probe 6).
-- **Trigger:** No `tutorial_completed` symbol exists under
-  `src/elspeth/web/` at the 2026-05-19 gate. Phase 4 (hello-world
-  tutorial) has not yet been planned (plan reference: see roadmap
-  in `00-implementation-roadmap.md`).
+- **Trigger:** No **persisted** `tutorial_completed` field exists
+  under `src/elspeth/web/` at the 2026-05-19 gate. Phase 4
+  (hello-world tutorial) has not yet been planned (plan reference:
+  see roadmap in `00-implementation-roadmap.md`).
+- **Probe shape (post-correction):** The probe targets persisted
+  schema, not any string match. Two equivalent formulations:
+
+  ```bash
+  # Option A (exclusion — preferred):
+  # Probe: no persisted tutorial_completed field in DB schema,
+  # Pydantic models, or PATCH routes. The OTel counter
+  # tutorial_completed_total at telemetry_phase8.py and
+  # sessions/telemetry.py is a separate, intentional artifact —
+  # exclude it from the probe.
+  grep -rn 'tutorial_completed' src/elspeth/web/ \
+    | grep -v 'tutorial_completed_total' \
+    | grep -v 'telemetry_phase8.py' \
+    | grep -v 'sessions/telemetry.py'
+  # Expected: zero hits.
+  ```
+
+  ```bash
+  # Option B (positive assertion — alternative):
+  # Probe: no persisted tutorial_completed field exists.
+  grep -E "tutorial_completed[^_]" src/elspeth/web/sessions/models.py \
+    src/elspeth/web/preferences/models.py \
+    src/elspeth/web/preferences/routes.py
+  # Expected: zero hits. The boundary character class `[^_]`
+  # excludes tutorial_completed_total and tutorial_completed_at
+  # (the timestamp column, which IS persisted but is the correct
+  # shape).
+  ```
+
+  The OTel counter `tutorial_completed_total` (registered at
+  `composer/telemetry_phase8.py:78` and emitted from
+  `sessions/telemetry.py:191`) IS a legitimate telemetry artifact
+  for Phase 8 — the corrected probe above explicitly excludes it.
+  The Phase 9 follow-up is the **persisted-field** absence, not the
+  telemetry-counter absence.
 - **What's missing:** The entire Task 6 surface from
   `20-phase-8-polish-and-telemetry.md`:
   - `src/elspeth/web/frontend/src/components/settings/TutorialReplayButton.tsx`
@@ -117,23 +166,44 @@ follow-up entries listed below.
 ### 3. Decision 2 — `composer.tutorial.replayed_total` counter boundary question
 
 - **Class:** Decision deferral.
+- **Status in code (load-bearing absence markers):** The counter
+  `composer.tutorial.replayed_total` has no runtime emit site,
+  which is correct per the Phase 9 deferral. The string appears in
+  two **deliberate-absence markers** at
+  `composer/telemetry_phase8.py:234` and `sessions/telemetry.py:192`
+  (both labelled `# DELIBERATELY ABSENT — Phase 9 deferred…`);
+  these are load-bearing artifacts
+  that ensure a Phase 9 reader sees the deferral intent and does
+  not silently add the emit prematurely. They are not regressions
+  and must not be removed when this entry is closed — they remain
+  until the Phase 9 resolution lands a real emit (or formally
+  retires the counter).
 - **Trigger:** Pass-2 review surfaced that the
   `composer.tutorial.replayed_total` counter does not cleanly fit
-  CLAUDE.md's "non-decision read" superset exception — the click
-  is user-write-intent, not a read. Three options were considered:
-  - Option A: emit the counter under the superset exception
-    (rejected on pass-3 — would broaden the exception
+  the `logging-telemetry-policy` skill's Superset Rule under
+  account-level preferences — the click is user-write-intent, not
+  a read. Three options were considered:
+  - Option A: emit the counter as an operational-metrics exemption
+    (rejected on pass-3 — would broaden the exemption
     project-wide or require semantic dishonesty).
   - Option B: audit-record the replay (rejected by the original
     B2.b reasoning — account-level preferences are operational
     signal only).
   - Option C: defer the boundary question to Phase 9 (chosen).
-- **What's missing:** A principled resolution. Either:
+- **What's missing:** A principled resolution under the
+  `logging-telemetry-policy` skill's framing. Either:
   - Phase 9 establishes a new project-wide rule that user-write-intent
-    on operational-only surfaces can be telemetry-only (extending
-    the CLAUDE.md superset exception with explicit scope), then
+    on operational-only surfaces can be telemetry-only under the
+    **operational metrics exemption** (`lacks probative value` for
+    an individual decision; only the aggregate matters). Then
     Phase 8's plan text for Task 6 Step 7 is reactivated and the
-    counter ships.
+    counter ships. Per the `logging-telemetry-policy` skill, the
+    **Superset Rule** (every telemetry event must be in the audit
+    superset) is satisfied because tutorial replay is already
+    audited via the Landscape entry's `seeded_from_cache: true`
+    marker (Phase 4 P2); the counter itself is deferred under the
+    operational metrics exemption — only the aggregate matters,
+    which Phase 9 will surface as a hit-rate signal.
   - OR Phase 9 confirms the operational-only surface should
     promote to audit when user-write-intent appears, which
     triggers a Tier-1 schema decision (and a DB-delete) on the
@@ -377,7 +447,21 @@ Manual follow-up required (NOT axe-detectable):
   compute CSS-variable values, so the `color-contrast` rule was disabled.
   At the start of Phase 9, run an authentic-browser axe audit (e.g.
   `@axe-core/playwright` via a Playwright spec, or DevTools axe extension
-  against staging) on the same component set to verify contrast.
+  against staging) on these four surfaces and record any violations as
+  Phase 9 follow-up entries in this file (do not block Phase 8 close on
+  contrast findings — per plan §20 lines 3594–3609, this is the
+  compensating manual control for Task 7's jsdom-blind axe suite):
+    - **Empty-state / template cards (Task 3).** The new audit-domain
+      template cards rendered when no session is active; verify card
+      backgrounds and SDA-list text contrast.
+    - **Audit-readiness panel (Phase 2C surface).** Text colour against
+      the readiness-row backgrounds; severity indicator colour against
+      row backgrounds.
+    - **Header session switcher (Task 4).** Filter input placeholder
+      text; archive-button hover and focus states.
+    - **Settings panel — `TutorialReplayButton` (Task 6 surface, audit
+      deferred to Phase 9 per `19-phase-8-review.md`).** Enabled,
+      disabled, and `role="status"` confirmation states.
 
 _(no individual findings)_
 

@@ -15,7 +15,7 @@ RULE_METADATA = RuleMetadata(
     ),
     severity=Severity.ERROR,
     category=Category.MANIFEST,
-    cwe=(),
+    cwe=("CWE-1059",),
     scope=RuleScope.WHOLE_REPO,
     path_filter=r"^scripts/cicd/(enforce_.*|adr019_(symbol|test)_inventory)\.py$",
     examples_violation_count=1,

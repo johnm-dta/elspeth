@@ -78,7 +78,7 @@ jobs:
             --rules plugin_contract.component_type,plugin_contract.plugin_hashes \
             --root src/elspeth
 
-      - name: Shadow immutability elspeth-lints rules
+      - name: Run immutability elspeth-lints rules
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules immutability.freeze_guards,immutability.frozen_annotations \
@@ -299,37 +299,6 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
-  # Stage 2a: Frozen-Dataclass Freeze-Guard Enforcement (closes
-  # elspeth-obs-c025f9fc15 — CLAUDE.md asserted "Enforced by CI" but no
-  # workflow file existed prior to this lane).
-  #
-  # MUST stay listed in ci-success.needs: below so the gate is real
-  # under branch protection. Mirror the test-postgres-testcontainer
-  # rationale: removing this lane from ci-success.needs would let a red
-  # freeze-guard lane silently leave ci-success green.
-  # ===========================================================================
-  enforce-freeze-guards:
-    name: Enforce Freeze Guards
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install dependencies
-        run: pip install pyyaml
-
-      - name: Run freeze-guard enforcement
-        run: |
-          python scripts/cicd/enforce_freeze_guards.py check \
-            --root src/elspeth \
-            --allowlist config/cicd/enforce_freeze_guards
-
-  # ===========================================================================
   # Stage 2a: Audit Evidence Nominal Enforcement
   # ===========================================================================
   enforce-audit-evidence-nominal:
@@ -496,7 +465,6 @@ jobs:
     needs:
       - lint
       - enforce-tier-model
-      - enforce-freeze-guards
       - enforce-audit-evidence-nominal
       - enforce-tier-1-decoration
       - enforce-component-type
@@ -633,7 +601,6 @@ jobs:
     needs:
       - lint
       - enforce-tier-model
-      - enforce-freeze-guards
       - enforce-audit-evidence-nominal
       - enforce-tier-1-decoration
       - enforce-component-type
@@ -867,7 +834,6 @@ jobs:
     needs:
       - lint
       - enforce-tier-model
-      - enforce-freeze-guards
       - enforce-audit-evidence-nominal
       - enforce-tier-1-decoration
       - enforce-component-type
@@ -889,10 +855,6 @@ jobs:
           fi
           if [[ "${{ needs.enforce-tier-model.result }}" != "success" ]]; then
             echo "Tier model enforcement job failed"
-            exit 1
-          fi
-          if [[ "${{ needs.enforce-freeze-guards.result }}" != "success" ]]; then
-            echo "Freeze-guard enforcement job failed"
             exit 1
           fi
           if [[ "${{ needs.enforce-audit-evidence-nominal.result }}" != "success" ]]; then

@@ -4,7 +4,7 @@ Tests the ComponentTypeScanner AST analysis, cross-file inheritance resolution,
 allowlist matching, and scan integration. Uses tmp_path fixtures with real files
 because cross-file inheritance resolution requires a filesystem.
 
-Follows the pattern established by test_enforce_freeze_guards.py.
+Follows the tmp-path scanner fixture pattern used by the legacy CI scanners.
 """
 
 from __future__ import annotations

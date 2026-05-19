@@ -88,54 +88,12 @@ rules:
     migration_issue: elspeth-48db98bd88
   - old_script: scripts/cicd/enforce_freeze_guards.py
     new_rule: immutability.freeze_guards
-    status: shadow
+    status: deleted
     migration_issue: elspeth-a3f6004c83
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_freeze_guards"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_frozen_annotations.py
     new_rule: immutability.frozen_annotations
-    status: shadow
+    status: deleted
     migration_issue: elspeth-a3f6004c83
-    old_command:
-      - "{python}"
-      - "{old_script}"
-      - check
-      - --root
-      - "{root}/src/elspeth"
-      - --allowlist
-      - "{root}/config/cicd/enforce_frozen_annotations"
-      - --format
-      - json
-    new_command:
-      - "{python}"
-      - -m
-      - elspeth_lints.core.cli
-      - check
-      - --rules
-      - "{new_rule}"
-      - --root
-      - "{root}/src/elspeth"
-      - --format
-      - json
   - old_script: scripts/cicd/enforce_guard_symmetry.py
     new_rule: audit_evidence.guard_symmetry
     status: shadow

@@ -88,8 +88,8 @@ repos:
         files: ^(src/elspeth/plugins/|config/cicd/enforce_component_type/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/(component_type|plugin_hashes)/)
         pass_filenames: false
 
-      - id: elspeth-lints-immutability-shadow
-        name: elspeth-lints immutability shadow
+      - id: elspeth-lints-immutability
+        name: elspeth-lints immutability
         entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules immutability.freeze_guards,immutability.frozen_annotations --root src/elspeth
         language: system
         files: ^(src/elspeth/|config/cicd/enforce_freeze_guards/|config/cicd/enforce_frozen_annotations/|elspeth-lints/src/elspeth_lints/rules/immutability/)
@@ -133,13 +133,6 @@ repos:
       - id: check-contracts
         name: Check Contracts
         entry: .venv/bin/python -m scripts.check_contracts
-        language: system
-        types: [python]
-        pass_filenames: false
-
-      - id: enforce-frozen-annotations
-        name: Enforce Frozen Annotations
-        entry: .venv/bin/python scripts/cicd/enforce_frozen_annotations.py check --root src/elspeth --allowlist config/cicd/enforce_frozen_annotations
         language: system
         types: [python]
         pass_filenames: false

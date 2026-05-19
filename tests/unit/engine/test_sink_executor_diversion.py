@@ -7,6 +7,7 @@ diverted rows to the failsink (or record discard).
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -173,7 +174,7 @@ class TestDiscardMode:
         # t1 (index 1) -> FAILURE / SINK_DISCARDED
         assert outcomes_by_token["t1"]["outcome"] == TerminalOutcome.FAILURE
         assert outcomes_by_token["t1"]["path"] == TerminalPath.SINK_DISCARDED
-        assert outcomes_by_token["t1"]["error_hash"] is not None
+        assert outcomes_by_token["t1"]["error_hash"] == hashlib.sha256(b"bad metadata").hexdigest()[:16]
         assert outcomes_by_token["t1"]["sink_name"] == "__discard__"
 
     def test_discard_mode_opens_primary_state_for_diverted_tokens(self) -> None:

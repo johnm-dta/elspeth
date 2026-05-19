@@ -68,6 +68,16 @@ Filed:
 - `elspeth-bd49237412` — engine chunk remediation.
 - `elspeth-e0afd080cc` — shared hash-binding test infrastructure.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-bd49237412` resolved for the cited engine chunk sites.
+  Transform, batch-transform, dependency settings, and sink diversion hash
+  assertions now compare against the exact `stable_hash`, canonical settings
+  SHA-256, or diversion-reason hash material. A broad run of
+  `tests/unit/engine/test_executors.py` still fails on the unrelated
+  `TestPassThroughCrossCheck.test_cross_check_is_tier_1_registered`
+  subclass assertion; the focused hash-binding tests pass.
+
 ### UENG-2 — Private processor outcome tests mostly test dataclass construction
 
 Evidence:

@@ -98,6 +98,7 @@ from elspeth.contracts.results import ArtifactDescriptor, GateResult
 from elspeth.contracts.routing import RouteDestination, RoutingAction
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, SinkName
+from elspeth.core.canonical import stable_hash
 from elspeth.core.config import AggregationSettings, GateSettings, TriggerConfig
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.executors import (
@@ -632,15 +633,16 @@ class TestTransformExecutor:
         assert kwargs["status"] == NodeStateStatus.COMPLETED
         assert kwargs["state_id"] == "state_001"
 
-    def test_result_has_audit_fields_populated(self) -> None:
-        """Result has input_hash, output_hash, duration_ms populated by executor."""
+    def test_result_hashes_bind_to_input_and_output_payloads(self) -> None:
+        """Result hashes bind to the exact input and output payloads."""
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         token = _make_token(contract=contract)
+        output_row = make_row({"value": "out"}, contract=contract)
         transform = _make_transform()
         transform.process.return_value = TransformResult.success(
-            make_row({"value": "out"}, contract=contract),
+            output_row,
             success_reason={"action": "test"},
         )
         ctx = make_context()
@@ -651,8 +653,8 @@ class TestTransformExecutor:
             ctx,
         )
 
-        assert result.input_hash is not None
-        assert result.output_hash is not None
+        assert result.input_hash == stable_hash(token.row_data.to_dict())
+        assert result.output_hash == stable_hash(output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 
@@ -5716,17 +5718,18 @@ class TestTransformExecutorBatchPath:
 
     # --- Audit fields populated ---
 
-    def test_batch_result_has_audit_fields(self) -> None:
-        """Batch transform results have input_hash, output_hash, duration_ms populated."""
+    def test_batch_result_hashes_bind_to_input_and_output_payloads(self) -> None:
+        """Batch transform hashes bind to the exact input batch and output payload."""
         from elspeth.engine.batch_adapter import SharedBatchAdapter
 
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
+        output_row = make_row({"value": "out"}, contract=contract)
 
         success_result = TransformResult.success(
-            make_row({"value": "out"}, contract=contract),
+            output_row,
             success_reason={"action": "batched"},
         )
         mock_adapter = MagicMock(spec=SharedBatchAdapter)
@@ -5740,8 +5743,8 @@ class TestTransformExecutorBatchPath:
 
         result, _, _ = executor.execute_transform(transform, token, ctx)
 
-        assert result.input_hash is not None
-        assert result.output_hash is not None
+        assert result.input_hash == stable_hash(token.row_data.to_dict())
+        assert result.output_hash == stable_hash(output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 

@@ -340,4 +340,43 @@ follow-up entries listed below.
 > High-severity findings are fixed inline during Task 7 — do not log
 > them here.
 
-_(no entries yet)_
+### Task 7 audit outcome (2026-05-19)
+
+21 components audited with `jest-axe` + `axe-core@4.x` under WCAG 2.0/2.1
+A/AA rule set (color-contrast disabled because jsdom does not compute
+CSS-variable values — verify contrast against design tokens manually).
+
+**Result: zero violations across all 21 components.** No high-severity
+fixes were required, no medium/low findings remain deferred. The
+component-level a11y discipline that Phase 1-7 carried (focus management,
+role contracts, `aria-modal`, `useFocusTrap` reuse, role="alert"/"status"
+regions, `aria-label` on icon-only buttons) is reflected in the audit
+result.
+
+Audited components:
+
+- Phase 1B: ComposerPreferencesPanel, UserMenu, InlineOptOutCheckbox,
+  DefaultModeChangedBanner
+- Phase 2C: AuditReadinessPanel, ReadinessRowDetail, ExplainDialog
+- Phase 3A/3B: AppHeader, HeaderSessionSwitcher, HeaderVersionSelector,
+  SideRail, GraphMiniView, ExportYamlModal
+- Phase 5a: InlineSourceCreatedTurn, InlineSourceDisambiguationTurn,
+  InlineSourceFallbackPrompt
+- Phase 6B: CompletionBar
+- Phase 7B: PluginCard, FilterChipStrip
+- Phase 8: TemplateCards (regrouped), ShortcutsHelp (four-group regroup)
+
+Out of scope per Phase 8 review-findings: TutorialReplayButton (deferred
+to Phase 9 in `19-phase-8-review.md`); the `expert` UI surfaces; the chat
+message stream's full conversational state. These will be audited as part
+of the Phase 9 closeout sweep when the deferred surfaces ship.
+
+Manual follow-up required (NOT axe-detectable):
+
+- **Color-contrast verification against design tokens.** jsdom cannot
+  compute CSS-variable values, so the `color-contrast` rule was disabled.
+  At the start of Phase 9, run an authentic-browser axe audit (e.g.
+  `@axe-core/playwright` via a Playwright spec, or DevTools axe extension
+  against staging) on the same component set to verify contrast.
+
+_(no individual findings)_

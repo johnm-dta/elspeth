@@ -127,9 +127,11 @@
   --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code",
     "Source Code Pro", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 
+  --font-size-3xs:  10px;   /* sub-chrome micro-text (e.g. tab counts, ribbon icons, required-field badge) — a distinct register, smaller than 2xs */
   --font-size-2xs:  11px;   /* chrome hints, micro-text (e.g. .chat-input-hint, breadcrumbs) */
   --font-size-xs:   12px;
   --font-size-sm:   13px;
+  --font-size-md:   15px;   /* preserves the h2/h3 hierarchy step in markdown-body rendering — h3 sits between h2 (base/16) and body (sm/13) */
   --font-size-base: 16px;
   --font-size-lg:   18px;
   --font-size-xl:   22px;   /* empty-state heroes, loud headings (was 18px duplicate of --lg) */
@@ -149,10 +151,11 @@
   --space-2xl: 32px;
 
   /* ── Radius ──────────────────────────────────────────────────────────────── */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:   12px;
+  --radius-pill: 9999px;   /* fully-rounded pills, circular FABs, progress-bar tracks */
 
   /* ── Control heights ─────────────────────────────────────────────────────── */
   /* --size-control is the WCAG 2.5.5 (AAA) 44×44 touch-target floor used by
@@ -244,7 +247,7 @@ pre {
 
 ::-webkit-scrollbar-thumb {
   background: var(--color-scrollbar-thumb);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -364,7 +367,7 @@ summary:focus-visible {
   width: 100%;
   height: 4px;
   background-color: var(--color-surface-elevated);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   position: relative;
 }
@@ -810,7 +813,7 @@ summary:focus-visible {
   left: 50%;
   transform: translateX(-50%);
   z-index: var(--z-panel-controls);
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   padding: 6px var(--space-lg);
   font-size: var(--font-size-sm);
   cursor: pointer;
@@ -827,12 +830,12 @@ summary:focus-visible {
 .blob-action-btn {
   background: none;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: var(--font-size-xs);
   padding: 2px 6px;
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -927,7 +930,7 @@ summary:focus-visible {
 
 .confirm-dialog-btn {
   min-width: 80px;
-  min-height: 44px;
+  min-height: var(--size-control);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1169,7 +1172,7 @@ summary:focus-visible {
   list-style: none;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   min-width: 240px;
   z-index: 100;
   max-height: 60vh;
@@ -1522,7 +1525,7 @@ summary:focus-visible {
 
 .graph-modal-close {
   min-width: 36px;
-  min-height: 36px;
+  min-height: var(--size-control-compact);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
@@ -1571,7 +1574,7 @@ summary:focus-visible {
 
 .yaml-modal-close {
   min-width: 36px;
-  min-height: 36px;
+  min-height: var(--size-control-compact);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
@@ -1634,7 +1637,7 @@ summary:focus-visible {
   align-items: center;
   justify-content: center;
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
 }
 
 .chat-input-icon-btn:disabled {
@@ -1654,7 +1657,7 @@ summary:focus-visible {
   cursor: not-allowed;
   font-size: var(--font-size-base);
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
 }
 
 .chat-input-send-btn:not(:disabled) {
@@ -1729,7 +1732,7 @@ summary:focus-visible {
   font-family: inherit;
   font-weight: 500;
   cursor: pointer;
-  min-height: 44px;
+  min-height: var(--size-control);
   flex-shrink: 0;
   transition: background-color 0.1s ease, border-color 0.1s ease,
     color 0.1s ease;
@@ -1786,7 +1789,7 @@ summary:focus-visible {
   font-size: var(--font-size-lg);
   color: var(--color-error);
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1863,7 +1866,7 @@ summary:focus-visible {
   color: var(--color-link);
   cursor: pointer;
   font: inherit;
-  min-height: 44px;
+  min-height: var(--size-control);
   padding: var(--space-sm) 0;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -2018,7 +2021,7 @@ summary:focus-visible {
      consumer; see Turn 4's status text region). */
   width: 160px;
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   overflow: hidden;
@@ -2210,7 +2213,7 @@ summary:focus-visible {
 .tutorial-progress-dot {
   width: 10px;
   height: 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--color-border-strong);
 }
 
@@ -2509,7 +2512,7 @@ summary:focus-visible {
 /* ── Markdown rendering (A2) ─────────────────────────────────────────────── */
 
 .markdown-body {
-  font-size: 14px;
+  font-size: var(--font-size-sm);
   line-height: 1.5;
   word-break: break-word;
 }
@@ -2523,10 +2526,10 @@ summary:focus-visible {
   color: var(--color-text);
 }
 
-.markdown-body h1 { font-size: 18px; }
-.markdown-body h2 { font-size: 16px; }
-.markdown-body h3 { font-size: 15px; }
-.markdown-body h4 { font-size: 14px; }
+.markdown-body h1 { font-size: var(--font-size-lg); }
+.markdown-body h2 { font-size: var(--font-size-base); }
+.markdown-body h3 { font-size: var(--font-size-md); }
+.markdown-body h4 { font-size: var(--font-size-sm); }
 
 .markdown-body p {
   margin: 4px 0;
@@ -2564,7 +2567,7 @@ summary:focus-visible {
 .markdown-body .inline-code {
   background-color: var(--color-surface-elevated);
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
 }
@@ -2572,7 +2575,7 @@ summary:focus-visible {
 .markdown-body .code-block {
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   margin: 8px 0;
   overflow-x: auto;
@@ -2615,7 +2618,7 @@ summary:focus-visible {
   padding: 12px;
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow-x: auto;
   text-align: center;
 }
@@ -2812,7 +2815,7 @@ summary:focus-visible {
 .command-palette-footer kbd {
   padding: 1px var(--space-xs);
   border: 1px solid var(--color-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -2978,7 +2981,7 @@ summary:focus-visible {
   font-weight: 700;
   text-transform: uppercase;
   padding: 1px var(--space-xs);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
 .graph-node-label {
@@ -3027,7 +3030,7 @@ summary:focus-visible {
   padding: 2px var(--space-xs);
   border-radius: var(--radius-sm);
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3126,7 +3129,7 @@ summary:focus-visible {
   letter-spacing: 0.05em;
   text-transform: uppercase;
   padding: 1px var(--space-xs);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   margin-left: var(--space-xs);
 }
 
@@ -3138,10 +3141,10 @@ summary:focus-visible {
   font-size: var(--font-size-base);
   padding: 2px var(--space-xs);
   line-height: 1;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3253,7 +3256,7 @@ summary:focus-visible {
   padding: 2px 6px;
   border-radius: var(--radius-sm);
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3359,7 +3362,7 @@ summary:focus-visible {
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   padding: var(--space-xs) var(--space-sm);
-  min-height: 44px;
+  min-height: var(--size-control);
   display: inline-flex;
   align-items: center;
 }
@@ -3389,7 +3392,7 @@ summary:focus-visible {
   margin: 2px 0 0;
   padding: var(--space-xs);
   background-color: var(--color-surface-elevated);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   font-size: var(--font-size-2xs);
   white-space: pre-wrap;
   word-break: break-word;
@@ -3416,7 +3419,7 @@ summary:focus-visible {
   height: 16px;
   border: 1px solid var(--color-border-strong);
   border-radius: 50%;
-  font-size: 10px;
+  font-size: var(--font-size-3xs);
   font-weight: 700;
   color: var(--color-text-muted);
 }
@@ -3488,7 +3491,7 @@ summary:focus-visible {
 }
 
 .tool-call-actions .btn {
-  min-height: 36px;
+  min-height: var(--size-control-compact);
 }
 
 .tool-call-stale {
@@ -3566,7 +3569,7 @@ summary:focus-visible {
 }
 
 .pending-proposals-banner-actions .btn {
-  min-height: 36px;
+  min-height: var(--size-control-compact);
 }
 
 .pending-overlay-pill {
@@ -3898,7 +3901,7 @@ summary:focus-visible {
   font-size: var(--font-size-xs);
   padding: 2px var(--space-sm);
   cursor: pointer;
-  min-height: 36px;
+  min-height: var(--size-control-compact);
   min-width: 44px;
 }
 
@@ -4002,7 +4005,7 @@ summary:focus-visible {
 .plugin-card-field-required {
   color: var(--color-warning);
   margin-left: var(--space-sm);
-  font-size: 10px;
+  font-size: var(--font-size-3xs);
 }
 
 .plugin-card-field-desc {
@@ -4255,7 +4258,7 @@ summary:focus-visible {
   font-size: var(--font-size-base);
   line-height: 1;
   min-width: 44px;
-  min-height: 44px;
+  min-height: var(--size-control);
 }
 
 .catalog-search-wrapper {
@@ -4309,9 +4312,9 @@ summary:focus-visible {
 }
 
 .catalog-tab-count {
-  font-size: 10px;
+  font-size: var(--font-size-3xs);
   padding: 1px 5px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   font-weight: 600;
 }
 
@@ -4514,7 +4517,7 @@ summary:focus-visible {
   font-size: var(--font-size-base);
   font-family: inherit;
   text-align: left;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
@@ -4559,7 +4562,7 @@ summary:focus-visible {
   border-radius: var(--radius-md);
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px;
+  min-height: var(--size-control);
 }
 
 .guided-custom-input:focus-visible {
@@ -4576,7 +4579,7 @@ summary:focus-visible {
   cursor: not-allowed;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px;
+  min-height: var(--size-control);
 }
 
 .guided-custom-submit-btn:not(:disabled) {
@@ -4662,7 +4665,7 @@ summary:focus-visible {
   font-size: var(--font-size-base);
   font-family: inherit;
   cursor: pointer;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
@@ -4736,7 +4739,7 @@ summary:focus-visible {
   border-radius: var(--radius-sm);
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 36px;
+  min-height: var(--size-control-compact);
 }
 
 .guided-inspect-editor-input:focus-visible {
@@ -4753,7 +4756,7 @@ summary:focus-visible {
   font-size: var(--font-size-sm);
   font-family: inherit;
   cursor: pointer;
-  min-height: 36px;
+  min-height: var(--size-control-compact);
   white-space: nowrap;
   transition: background-color 0.1s ease, color 0.1s ease;
 }
@@ -4781,7 +4784,7 @@ summary:focus-visible {
   font-size: var(--font-size-base);
   font-family: inherit;
   cursor: pointer;
-  min-height: 44px;
+  min-height: var(--size-control);
   transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
@@ -4915,7 +4918,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease;
 }
 
@@ -4928,7 +4931,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px;
+  min-height: var(--size-control);
   transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
@@ -4992,7 +4995,7 @@ summary:focus-visible {
   border-radius: var(--radius-md);
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: border-color 0.1s ease;
 }
 
@@ -5010,7 +5013,7 @@ summary:focus-visible {
   border-radius: var(--radius-md);
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px;
+  min-height: var(--size-control);
   cursor: pointer;
   transition: border-color 0.1s ease;
 }
@@ -5128,7 +5131,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease;
 }
 
@@ -5303,7 +5306,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease;
 }
 
@@ -5441,7 +5444,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease;
 }
 
@@ -5464,7 +5467,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
@@ -5499,7 +5502,7 @@ summary:focus-visible {
   font-size: var(--font-size-sm);
   font-family: inherit;
   cursor: pointer;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease, border-color 0.1s ease,
     color 0.1s ease;
 }
@@ -5678,7 +5681,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease;
 }
 
@@ -5701,7 +5704,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-base);
   font-family: inherit;
-  min-height: 44px; /* WCAG 2.5.8 minimum target size */
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
   transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 

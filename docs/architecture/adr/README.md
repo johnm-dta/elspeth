@@ -41,6 +41,8 @@ We use a modified version of Michael Nygard's ADR template. See `000-template.md
 | [019](019-two-axis-terminal-model.md) | Two-Axis Terminal Model — Lifecycle, Outcome, and Path | 2026-05-04 | **Accepted** |
 | [020](020-retire-batch-llm-transforms.md) | Retire Batch-LLM Transforms (`azure_batch_llm`, `openrouter_batch_llm`) | 2026-05-06 | **Accepted** |
 | [021](021-sources-and-sinks-uniformly-boundary.md) | Sources and Sinks Are Uniformly Boundary by Architecture | 2026-05-18 | **Accepted** |
+| [022](022-shareable-reviews.md) | Shareable Reviews — Completion Gestures, Signed Tokens, and the Composer Completion Events Table | 2026-05-19 | **Accepted** |
+| [023](023-custom-python-ci-analyzer.md) | Custom Python Static Analyzer for ELSPETH-Specific CI Invariants (the `elspeth-lints` Package) | 2026-05-19 | **Accepted** |
 
 ## Status Definitions
 

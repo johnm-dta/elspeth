@@ -2204,6 +2204,10 @@ summary:focus-visible {
 /* ---------------------------------------------------------------------------
    Shortcuts Help
    --------------------------------------------------------------------------- */
+.shortcuts-group {
+  margin-bottom: var(--space-md);
+}
+
 .shortcuts-list {
   margin: 0 0 var(--space-xl);
   padding: 0;

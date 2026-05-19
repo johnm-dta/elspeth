@@ -51,6 +51,23 @@ Without the registration: a transform with `on_error="quarantine_sink"` would ca
 
 `NodeStateGuard.__exit__` (L2 engine) now populates the new `ExecutionError.context` field (L0 contract) from `PluginContractViolation.to_audit_dict()` when the raised exception is a `PluginContractViolation` or subclass. The `isinstance` check is a Tier-2/Tier-1 boundary discriminator — not defensive programming — and it benefits every `PluginContractViolation` subclass that defines `to_audit_dict()`, not just the pass-through case. The full 9-key structured payload (transform, transform_node_id, run_id, row_id, token_id, static_contract, runtime_observed, divergence_set, exception_type) reaches the Landscape and is queryable via `json_extract(error_data, '$.context.<key>')`.
 
+**Amendment 2026-04-20** (commit `0764ab9fe`, landed during ADR-010 H2
+implementation). The `NodeStateGuard.__exit__` discriminator was widened
+from `isinstance(exc_val, PluginContractViolation)` to
+`isinstance(exc_val, AuditEvidenceBase)` so audit-evidence contribution
+becomes contract-orthogonal: future Tier-1 exceptions (e.g.,
+checkpoint-integrity violations) can supply structured context without
+inheriting `PluginContractViolation`. `AuditEvidenceBase` is the new
+nominal ABC introduced by ADR-010 §Decision 1; every existing
+`PluginContractViolation` subclass (including `PassThroughContractViolation`)
+inherits it via the established class chain, so this widening is a strict
+superset of the original wording's behaviour. This amendment also covers
+the matching wording in §Neutral Consequences below. **Amendment
+2026-05-20** (commit `075508b1d`) further closed the legacy lineage:
+`PassThroughContractViolation` now inherits `DeclarationContractViolation`
+directly rather than `PluginContractViolation`, but still reaches the
+discriminator via `AuditEvidenceBase` — no regression.
+
 ### Tier placement for cross-check data
 
 The cross-check crosses trust tiers. Each tier is explicit per CLAUDE.md's Three-Tier Trust Model:

@@ -84,7 +84,7 @@ class TestToSourceMappingRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[LintFinding]:
         """Run the tests-tree inventory scan."""
         del tree, file_path
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
 class ADR019TestInventoryVisitor(ast.NodeVisitor):
@@ -178,11 +178,14 @@ class ADR019TestInventoryVisitor(ast.NodeVisitor):
                 self._add(FindingKind.OLD_OUTCOME_STRING_MEMBERSHIP, node, ",".join(sorted(values & ROW_OUTCOME_VALUES)))
 
 
-def scan_root(root: Path) -> list[LintFinding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[LintFinding]:
     """Scan tests and apply the ADR-019 test inventory allowlist."""
     tests_root, project_root = tests_scan_roots(root)
     findings = scan_tree(tests_root, project_root)
-    active = filter_findings(findings, allowlist_path_for_root(root, "test_to_source_mapping"))
+    allowlist_dir = (
+        allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "test_to_source_mapping")
+    )
+    active = filter_findings(findings, allowlist_dir)
     return [to_lint_finding(finding) for finding in active]
 
 

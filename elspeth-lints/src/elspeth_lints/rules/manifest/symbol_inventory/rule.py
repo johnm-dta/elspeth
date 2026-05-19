@@ -95,7 +95,7 @@ class SymbolInventoryRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[LintFinding]:
         """Run the source inventory scan."""
         del tree, file_path
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
 class ADR019Visitor(ast.NodeVisitor):
@@ -197,11 +197,12 @@ class ADR019Visitor(ast.NodeVisitor):
             self._add(FindingKind.ROW_OUTCOME_STRING_MEMBERSHIP, node, ",".join(sorted(values & ROW_OUTCOME_VALUES)))
 
 
-def scan_root(root: Path) -> list[LintFinding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[LintFinding]:
     """Scan source files and apply the ADR-019 symbol allowlist."""
     source_root, project_root = source_scan_roots(root)
     findings = scan_tree(source_root, project_root)
-    active = filter_findings(findings, allowlist_path_for_root(root, "symbol_inventory"))
+    allowlist_dir = allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "symbol_inventory")
+    active = filter_findings(findings, allowlist_dir)
     return [to_lint_finding(finding) for finding in active]
 
 

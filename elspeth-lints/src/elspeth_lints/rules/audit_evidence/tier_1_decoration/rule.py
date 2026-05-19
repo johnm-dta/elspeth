@@ -39,12 +39,15 @@ class Tier1DecorationRule:
         """Analyze one syntax tree for tests, or scan the configured errors.py."""
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             return scan_tree(tree, display_path(file_path, context.root), _source_lines(file_path))
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
-def scan_root(root: Path) -> list[Finding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
     """Scan the legacy errors.py target, or fixture roots that lack it."""
-    allowlist = load_class_allowlist(allowlist_path_for_root(root, "enforce_tier_1_decoration"))
+    allowlist_dir = (
+        allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "enforce_tier_1_decoration")
+    )
+    allowlist = load_class_allowlist(allowlist_dir)
     candidates = _scan_candidates(root)
     findings: list[Finding] = []
     for path in candidates:

@@ -40,7 +40,15 @@ def _build_parser() -> argparse.ArgumentParser:
     check.add_argument("--rule-set", choices=("static", "full"), default="static")
     check.add_argument("--format", choices=("text", "json", "sarif", "github"), default="text")
     check.add_argument("--root", type=Path, default=Path.cwd())
-    check.add_argument("--allowlist-dir", type=Path)
+    check.add_argument(
+        "--allowlist-dir",
+        type=Path,
+        help=(
+            "Override every rule's per-rule allowlist directory with this one. "
+            "Useful for shadow runs and cross-branch comparisons. "
+            "When unset, each rule resolves its own per-rule default directory."
+        ),
+    )
     check.add_argument("--files", nargs="*", type=Path)
 
     dump_edges = subparsers.add_parser("dump-edges", help="Dump import edges for architecture review")
@@ -68,7 +76,11 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
         return 2
 
     findings: list[Finding] = []
-    context = RuleContext(root=args.root)
+    allowlist_dir = args.allowlist_dir
+    if allowlist_dir is not None and not allowlist_dir.is_dir():
+        sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
+        return 2
+    context = RuleContext(root=args.root, allowlist_dir_override=allowlist_dir)
     selected_rules = [registry.get(rule_id) for rule_id in requested_rules]
     whole_repo_rules = [rule for rule in selected_rules if rule.scope == RuleScope.WHOLE_REPO]
     incremental_rules = [rule for rule in selected_rules if rule.scope == RuleScope.INCREMENTAL]

@@ -76,10 +76,18 @@ class RuleMetadata:
 
 @dataclass(frozen=True, slots=True)
 class RuleContext:
-    """Repository context shared with rule implementations."""
+    """Repository context shared with rule implementations.
+
+    ``allowlist_dir_override`` lets the CLI (``--allowlist-dir``) force every
+    rule to load its allowlist from a single shared directory instead of each
+    rule's per-rule default. Useful for shadow runs and cross-branch
+    comparisons. ``None`` means "use the rule's own default" — the historical
+    behaviour.
+    """
 
     root: Path
     allowlist: Allowlist | None = None
+    allowlist_dir_override: Path | None = None
 
 
 @runtime_checkable

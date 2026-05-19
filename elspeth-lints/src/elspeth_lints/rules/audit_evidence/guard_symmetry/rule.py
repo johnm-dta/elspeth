@@ -55,7 +55,7 @@ class GuardSymmetryRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[Finding]:
         """Run the repository-scoped guard-symmetry rule."""
         del tree, file_path
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
 class GuardSymmetryVisitor(ast.NodeVisitor):
@@ -87,9 +87,12 @@ class GuardSymmetryVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def scan_root(root: Path) -> list[Finding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
     """Scan a root and apply the legacy per-file allowlist."""
-    allowlist = load_allowlist(allowlist_path_for_root(root, "enforce_guard_symmetry"), valid_rule_ids=_ALL_RULE_IDS)
+    allowlist_dir = (
+        allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "enforce_guard_symmetry")
+    )
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_ALL_RULE_IDS)
     dataclasses: list[DataclassInfo] = []
     loaders: list[LoaderInfo] = []
     for item in walk_python_files(root):

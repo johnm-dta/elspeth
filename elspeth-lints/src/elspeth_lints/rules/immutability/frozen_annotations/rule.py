@@ -27,7 +27,11 @@ class FrozenAnnotationsRule:
         """Analyze one Python syntax tree for mutable frozen dataclass annotations."""
         display = repo_relative_display_path(file_path, context.root)
         findings = find_findings(tree, display)
-        allowlist_dir = allowlist_path_for_root(context.root, "enforce_frozen_annotations")
+        allowlist_dir = (
+            context.allowlist_dir_override
+            if context.allowlist_dir_override is not None
+            else allowlist_path_for_root(context.root, "enforce_frozen_annotations")
+        )
         if not allowlist_dir.exists():
             return findings
         loaded = load_allowlist(allowlist_dir, valid_rule_ids={RULE_ID})

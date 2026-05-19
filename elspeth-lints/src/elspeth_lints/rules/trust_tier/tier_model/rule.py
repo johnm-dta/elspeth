@@ -2016,7 +2016,7 @@ class TierModelRule:
             visitor.visit(tree)
             return [_legacy_finding_to_lint(finding) for finding in visitor.findings]
 
-        result = collect_check_result(context.root)
+        result = collect_check_result(context.root, allowlist_path=context.allowlist_dir_override)
         return [_legacy_finding_to_lint(finding) for finding in result.violations] + _allowlist_diagnostics_to_lints(result)
 
 

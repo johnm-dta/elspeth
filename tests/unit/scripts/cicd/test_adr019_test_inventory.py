@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -125,3 +128,43 @@ def test_cli_uses_directory_allowlist_and_emits_json_lines(tmp_path: Path, capsy
     assert '"kind": "row_outcome_compare"' in captured.out
     assert '"path": "tests/integration/test_real_output.py"' in captured.out
     assert "tests/unit/contracts/test_enums.py" not in captured.out
+
+
+def test_cli_json_mode_emits_parity_findings(tmp_path: Path) -> None:
+    legacy_name = "Row" + "Outcome"
+    _write(
+        tmp_path / "tests/unit/test_old_expectations.py",
+        """
+        from elspeth.contracts.enums import LEGACY
+
+        def test_real_output(result):
+            assert result.outcome == LEGACY.COMPLETED
+        """.replace("LEGACY", legacy_name),
+    )
+    project_root = Path(__file__).resolve().parents[4]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/adr019_test_inventory.py",
+            "check",
+            "--root",
+            str(tmp_path / "tests"),
+            "--format",
+            "json",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert [finding["rule_id"] for finding in payload] == [
+        FindingKind.ROW_OUTCOME_COMPARE.value,
+        FindingKind.ROW_OUTCOME_ATTRIBUTE.value,
+    ]
+    assert payload[0]["file_path"] == "tests/unit/test_old_expectations.py"
+    assert "fingerprint" in payload[0]
+    assert "message" in payload[0]

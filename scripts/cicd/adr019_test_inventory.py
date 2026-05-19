@@ -309,6 +309,35 @@ def filter_findings(findings: Iterable[Finding], allowlist: Path | None) -> list
     return [finding for finding in findings if not _is_allowed(finding.path, patterns)]
 
 
+def finding_fingerprint(finding: Finding) -> str:
+    """Return the stable parity fingerprint for one inventory finding."""
+    return f"{finding.path}:{finding.kind.value}:{finding.symbol}:{finding.line}:{finding.col}"
+
+
+def finding_message(finding: Finding) -> str:
+    """Return the parity message for one inventory finding."""
+    return f"{finding.kind.value}: {finding.symbol} in {finding.context}"
+
+
+def finding_payload(finding: Finding) -> dict[str, object]:
+    """Return an elspeth-lints parity-schema payload."""
+    return {
+        "rule_id": finding.kind.value,
+        "file_path": finding.path,
+        "line": finding.line,
+        "column": finding.col,
+        "message": finding_message(finding),
+        "fingerprint": finding_fingerprint(finding),
+        "severity": "error",
+        "suggestion": "Migrate tests to the ADR-019 two-axis outcome/path contract and avoid raw token_outcomes outcome-only SQL.",
+    }
+
+
+def render_json_findings(findings: Iterable[Finding]) -> str:
+    """Render findings as a JSON list for the parity harness."""
+    return json.dumps([finding_payload(finding) for finding in findings], sort_keys=True) + "\n"
+
+
 def _project_root_for(root: Path) -> Path:
     project_root = Path.cwd()
     try:
@@ -328,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     check = subparsers.add_parser("check", help="Scan a Python tests tree")
     check.add_argument("--root", type=Path, default=Path("tests"))
     check.add_argument("--allowlist", type=Path, default=None)
+    check.add_argument("--format", choices=("jsonl", "json"), default="jsonl")
     args = parser.parse_args(argv)
 
     root = args.root
@@ -336,6 +366,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     findings = run_check(root, args.allowlist)
+    if args.format == "json":
+        print(render_json_findings(findings), end="")
+        return 1 if findings else 0
     for finding in findings:
         print(finding.to_json())
     return 1 if findings else 0

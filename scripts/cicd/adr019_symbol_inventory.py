@@ -158,6 +158,8 @@ class ADR019Visitor(ast.NodeVisitor):
 
     def visit_Dict(self, node: ast.Dict) -> None:
         for key in node.keys:
+            if key is None:
+                continue
             if _string_constant(key) == "is_terminal":
                 self._add(FindingKind.IS_TERMINAL_DICT_KEY, key, "is_terminal")
         self.generic_visit(node)
@@ -289,6 +291,35 @@ def filter_findings(findings: Iterable[Finding], allowlist: Path | None) -> list
     return [finding for finding in findings if not _is_allowed(finding.path, patterns)]
 
 
+def finding_fingerprint(finding: Finding) -> str:
+    """Return the stable parity fingerprint for one inventory finding."""
+    return f"{finding.path}:{finding.kind.value}:{finding.symbol}:{finding.line}:{finding.col}"
+
+
+def finding_message(finding: Finding) -> str:
+    """Return the parity message for one inventory finding."""
+    return f"{finding.kind.value}: {finding.symbol} in {finding.context}"
+
+
+def finding_payload(finding: Finding) -> dict[str, object]:
+    """Return an elspeth-lints parity-schema payload."""
+    return {
+        "rule_id": finding.kind.value,
+        "file_path": finding.path,
+        "line": finding.line,
+        "column": finding.col,
+        "message": finding_message(finding),
+        "fingerprint": finding_fingerprint(finding),
+        "severity": "error",
+        "suggestion": "Replace ADR-019 migration-sensitive symbols and brittle strings with the two-axis outcome/path contract.",
+    }
+
+
+def render_json_findings(findings: Iterable[Finding]) -> str:
+    """Render findings as a JSON list for the parity harness."""
+    return json.dumps([finding_payload(finding) for finding in findings], sort_keys=True) + "\n"
+
+
 def run_check(root: Path, allowlist: Path | None) -> list[Finding]:
     project_root = Path.cwd()
     try:
@@ -304,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     check = subparsers.add_parser("check", help="Scan a Python tree")
     check.add_argument("--root", type=Path, default=Path("src/elspeth"))
     check.add_argument("--allowlist", type=Path, default=None)
+    check.add_argument("--format", choices=("jsonl", "json"), default="jsonl")
     args = parser.parse_args(argv)
 
     root = args.root
@@ -312,6 +344,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     findings = run_check(root, args.allowlist)
+    if args.format == "json":
+        print(render_json_findings(findings), end="")
+        return 1 if findings else 0
     for finding in findings:
         print(finding.to_json())
     return 1 if findings else 0

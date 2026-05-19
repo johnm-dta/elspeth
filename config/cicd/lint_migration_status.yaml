@@ -143,6 +143,56 @@ rules:
       - "{root}/src/elspeth"
       - --format
       - json
+  - old_script: scripts/cicd/adr019_symbol_inventory.py
+    new_rule: manifest.symbol_inventory
+    status: shadow
+    migration_issue: elspeth-48db98bd88
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/src/elspeth"
+      - --allowlist
+      - "{root}/config/cicd/adr019_symbol_inventory"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
+  - old_script: scripts/cicd/adr019_test_inventory.py
+    new_rule: manifest.test_to_source_mapping
+    status: shadow
+    migration_issue: elspeth-48db98bd88
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/tests"
+      - --allowlist
+      - "{root}/config/cicd/adr019_test_inventory"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/tests"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_freeze_guards.py
     new_rule: immutability.freeze_guards
     status: shadow

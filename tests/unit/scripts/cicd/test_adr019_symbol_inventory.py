@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -58,3 +61,29 @@ def test_cli_uses_allowlist_directory_and_emits_json_lines(tmp_path: Path, capsy
     assert '"kind": "is_terminal_attribute"' in captured.out
     assert '"path": "src/elspeth/mcp/types.py"' in captured.out
     assert "src/elspeth/contracts/enums.py" not in captured.out
+
+
+def test_cli_json_mode_emits_parity_findings() -> None:
+    project_root = Path(__file__).resolve().parents[4]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/adr019_symbol_inventory.py",
+            "check",
+            "--root",
+            str(FIXTURE_DIR),
+            "--format",
+            "json",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert {finding["rule_id"] for finding in payload} == {kind.value for kind in FindingKind}
+    assert all("fingerprint" in finding for finding in payload)
+    assert all("message" in finding for finding in payload)

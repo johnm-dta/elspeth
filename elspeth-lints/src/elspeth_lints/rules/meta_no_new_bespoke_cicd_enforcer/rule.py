@@ -16,6 +16,7 @@ MANIFEST_RELATIVE_PATH = Path(MANIFEST_PATH)
 ACTIVE_STATUSES = frozenset({"pending", "shadow", "cutover"})
 DELETED_STATUS = "deleted"
 KNOWN_STATUSES = ACTIVE_STATUSES | frozenset({DELETED_STATUS})
+LEGACY_INVENTORY_SCRIPT_NAMES = frozenset({"adr019_symbol_inventory.py", "adr019_test_inventory.py"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +101,9 @@ def _actual_enforcer_scripts(root: Path) -> tuple[Path, ...]:
     script_dir = root / "scripts/cicd"
     if not script_dir.exists():
         return ()
-    return tuple(sorted(script_dir.glob("enforce_*.py")))
+    enforce_scripts = set(script_dir.glob("enforce_*.py"))
+    inventory_scripts = {script_dir / name for name in LEGACY_INVENTORY_SCRIPT_NAMES if (script_dir / name).exists()}
+    return tuple(sorted(enforce_scripts | inventory_scripts))
 
 
 def _load_manifest(root: Path) -> _MigrationManifest:
@@ -122,14 +125,22 @@ def _load_manifest(root: Path) -> _MigrationManifest:
         if status not in KNOWN_STATUSES:
             expected = ", ".join(sorted(KNOWN_STATUSES))
             raise ValueError(f"rules[{index}].status must be one of: {expected}")
-        if not old_script.startswith("scripts/cicd/enforce_") or not old_script.endswith(".py"):
-            raise ValueError(f"rules[{index}].old_script must point at scripts/cicd/enforce_*.py")
+        if not _is_tracked_legacy_script(old_script):
+            raise ValueError(
+                f"rules[{index}].old_script must point at scripts/cicd/enforce_*.py or a tracked scripts/cicd/adr019_*_inventory.py script"
+            )
         if status == DELETED_STATUS:
             deleted_paths.add(old_script)
         else:
             active_paths.add(old_script)
 
     return _MigrationManifest(active_paths=frozenset(active_paths), deleted_paths=frozenset(deleted_paths))
+
+
+def _is_tracked_legacy_script(old_script: str) -> bool:
+    if old_script.startswith("scripts/cicd/enforce_") and old_script.endswith(".py"):
+        return True
+    return Path(old_script).name in LEGACY_INVENTORY_SCRIPT_NAMES and old_script.startswith("scripts/cicd/")
 
 
 def _mapping_value(value: object, context: str) -> dict[str, Any]:

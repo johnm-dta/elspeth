@@ -29,6 +29,31 @@ rules:
     assert findings == []
 
 
+def test_meta_gate_allows_manifested_adr019_inventory_scripts(tmp_path: Path) -> None:
+    """The ADR-019 inventory scripts are tracked legacy scripts during migration."""
+    _write_file(tmp_path / "scripts/cicd/adr019_symbol_inventory.py", "print('legacy')\n")
+    _write_file(tmp_path / "scripts/cicd/adr019_test_inventory.py", "print('legacy')\n")
+    _write_file(
+        tmp_path / "config/cicd/lint_migration_status.yaml",
+        """
+version: 1
+rules:
+  - old_script: scripts/cicd/adr019_symbol_inventory.py
+    new_rule: manifest.symbol_inventory
+    status: shadow
+    migration_issue: elspeth-test
+  - old_script: scripts/cicd/adr019_test_inventory.py
+    new_rule: manifest.test_to_source_mapping
+    status: shadow
+    migration_issue: elspeth-test
+""",
+    )
+
+    findings = list(RULE.analyze_repository(tmp_path, RuleContext(root=tmp_path)))
+
+    assert findings == []
+
+
 def test_meta_gate_blocks_unmanifested_new_enforcers(tmp_path: Path) -> None:
     """A new bespoke enforce_*.py file fails until it is represented in the manifest."""
     _write_file(tmp_path / "scripts/cicd/enforce_new_thing.py", "print('new')\n")

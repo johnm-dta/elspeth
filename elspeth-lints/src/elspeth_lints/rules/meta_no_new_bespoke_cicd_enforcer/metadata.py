@@ -9,12 +9,15 @@ MANIFEST_PATH = "config/cicd/lint_migration_status.yaml"
 RULE_METADATA = RuleMetadata(
     id=RULE_ID,
     name="No new bespoke CI enforcers",
-    description="New ELSPETH-specific CI checks must be elspeth-lints rules, not new scripts/cicd/enforce_*.py files.",
+    description=(
+        "New ELSPETH-specific CI checks must be elspeth-lints rules, not new "
+        "scripts/cicd/enforce_*.py files or untracked legacy inventory scripts."
+    ),
     severity=Severity.ERROR,
     category=Category.MANIFEST,
     cwe=(),
     scope=RuleScope.WHOLE_REPO,
-    path_filter=r"^scripts/cicd/enforce_.*\.py$",
+    path_filter=r"^scripts/cicd/(enforce_.*|adr019_(symbol|test)_inventory)\.py$",
     examples_violation_count=1,
     examples_clean_count=1,
 )

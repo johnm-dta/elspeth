@@ -105,6 +105,12 @@ jobs:
             --rules manifest.contract_manifest \
             --root src/elspeth
 
+      - name: Shadow ADR-019 inventory elspeth-lints rules
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules manifest.symbol_inventory,manifest.test_to_source_mapping \
+            --root .
+
       - name: Forbid new bespoke CI enforcers
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -189,6 +195,19 @@ jobs:
             exit "$status"
           fi
 
+      - name: Emit elspeth-lints ADR-019 inventory SARIF artifact
+        if: always()
+        run: |
+          set +e
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules manifest.symbol_inventory,manifest.test_to_source_mapping \
+            --root . \
+            --format sarif > elspeth-lints-adr019-inventory.sarif
+          status=$?
+          if [[ "$status" -gt 1 ]]; then
+            exit "$status"
+          fi
+
       - name: Upload elspeth-lints SARIF artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -201,6 +220,7 @@ jobs:
             elspeth-lints-audit-evidence.sarif
             elspeth-lints-composer.sarif
             elspeth-lints-contract-manifest.sarif
+            elspeth-lints-adr019-inventory.sarif
           retention-days: 7
 
   # ===========================================================================

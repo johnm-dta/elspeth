@@ -116,6 +116,13 @@ repos:
         files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/|elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/)
         pass_filenames: false
 
+      - id: elspeth-lints-adr019-inventory-shadow
+        name: elspeth-lints ADR-019 inventory shadow
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.symbol_inventory,manifest.test_to_source_mapping --root .
+        language: system
+        files: ^(src/elspeth/|tests/|scripts/cicd/adr019_(symbol|test)_inventory\.py|config/cicd/adr019_(symbol|test)_inventory/|elspeth-lints/src/elspeth_lints/rules/manifest/(symbol_inventory|test_to_source_mapping)/)
+        pass_filenames: false
+
       - id: enforce-tier-model
         name: Enforce Tier Model
         entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*" --exclude "web/frontend/node_modules"

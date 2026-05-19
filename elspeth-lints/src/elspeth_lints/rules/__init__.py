@@ -10,6 +10,7 @@ from elspeth_lints.rules.audit_evidence import (
 )
 from elspeth_lints.rules.composer import CATCH_ORDER_RULE, EXCEPTION_CHANNEL_RULE
 from elspeth_lints.rules.immutability import FREEZE_GUARDS_RULE, FROZEN_ANNOTATIONS_RULE
+from elspeth_lints.rules.manifest import CONTRACT_MANIFEST_RULE
 from elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer import RULE as META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE
 from elspeth_lints.rules.plugin_contract import COMPONENT_TYPE_RULE, OPTIONS_METADATA_RULE, PLUGIN_HASHES_RULE
 
@@ -26,6 +27,7 @@ BUILTIN_RULES = (
     TIER_1_DECORATION_RULE,
     GUARD_SYMMETRY_RULE,
     GVE_ATTRIBUTION_RULE,
+    CONTRACT_MANIFEST_RULE,
 )
 
 __all__ = [
@@ -33,6 +35,7 @@ __all__ = [
     "BUILTIN_RULES",
     "CATCH_ORDER_RULE",
     "COMPONENT_TYPE_RULE",
+    "CONTRACT_MANIFEST_RULE",
     "EXCEPTION_CHANNEL_RULE",
     "FREEZE_GUARDS_RULE",
     "FROZEN_ANNOTATIONS_RULE",

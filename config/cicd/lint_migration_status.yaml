@@ -117,9 +117,32 @@ rules:
       - --format
       - json
   - old_script: scripts/cicd/enforce_contract_manifest.py
-    new_rule: null
-    status: pending
-    migration_issue: null
+    new_rule: manifest.contract_manifest
+    status: shadow
+    migration_issue: elspeth-48db98bd88
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --source-root
+      - "{root}/src/elspeth"
+      - --manifest-file
+      - "{root}/src/elspeth/contracts/declaration_contracts.py"
+      - --allowlist
+      - "{root}/config/cicd/enforce_contract_manifest"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_freeze_guards.py
     new_rule: immutability.freeze_guards
     status: shadow

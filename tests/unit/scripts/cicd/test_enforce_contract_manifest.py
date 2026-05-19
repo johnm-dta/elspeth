@@ -19,6 +19,9 @@ exercises its real filesystem walk + AST parse + manifest-extract path.
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -241,6 +244,52 @@ class TestHappyPath:
         registrations = scan_source_tree(tmp_path, tmp_path, manifest)
         findings = compute_findings(name_to_sites, name_to_line, registrations, "declaration_contracts.py", assign_line)
         assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# CLI JSON output for migration parity
+# ---------------------------------------------------------------------------
+
+
+class TestCliJsonOutput:
+    def test_json_mode_emits_parity_findings(self, tmp_path: Path) -> None:
+        manifest = _write_manifest(tmp_path, {})
+        _write_registration(
+            tmp_path,
+            "ghost.py",
+            "GhostContract",
+            "ghost_not_in_manifest",
+            marker_sites=["post_emission_check"],
+        )
+        project_root = Path(__file__).resolve().parents[4]
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/cicd/enforce_contract_manifest.py",
+                "check",
+                "--source-root",
+                str(tmp_path),
+                "--manifest-file",
+                str(manifest),
+                "--allowlist",
+                str(tmp_path / "missing-allowlist"),
+                "--format",
+                "json",
+            ],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        payload = json.loads(result.stdout)
+        assert payload[0]["rule_id"] == RULE_ID_EXTRA
+        assert payload[0]["file_path"] == "ghost.py"
+        assert payload[0]["line"] > 0
+        assert payload[0]["column"] == 0
+        assert payload[0]["fingerprint"] == "ghost.py:MC1:ghost_not_in_manifest"
 
     def test_multi_site_contract_no_findings(self, tmp_path: Path) -> None:
         manifest = _write_manifest(

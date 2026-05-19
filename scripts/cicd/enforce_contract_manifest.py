@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -848,6 +849,12 @@ def main() -> int:
         default=None,
         help="Path to allowlist YAML file or directory of YAML files",
     )
+    check_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format",
+    )
 
     args = parser.parse_args()
 
@@ -902,6 +909,10 @@ def run_check(args: argparse.Namespace) -> int:
     expired_entries = allowlist.get_expired_entries() if allowlist.fail_on_expired else []
 
     has_errors = bool(violations or stale_entries or expired_entries)
+
+    if args.format == "json":
+        sys.stdout.write(json_findings(violations))
+        return 1 if has_errors else 0
 
     if violations:
         print(f"\n{'=' * 60}")
@@ -973,6 +984,26 @@ def run_check(args: argparse.Namespace) -> int:
         )
 
     return 1 if has_errors else 0
+
+
+def json_findings(findings: list[Finding]) -> str:
+    """Render findings in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": finding.rule_id,
+            "file_path": finding.file_path,
+            "line": finding.line,
+            "column": 0,
+            "message": finding.detail,
+            "fingerprint": finding.canonical_key,
+            "severity": "error",
+            "suggestion": (
+                "Keep EXPECTED_CONTRACT_SITES, register_declaration_contract(...) calls, and @implements_dispatch_site markers in sync."
+            ),
+        }
+        for finding in findings
+    ]
+    return json.dumps(payload, sort_keys=True) + "\n"
 
 
 if __name__ == "__main__":

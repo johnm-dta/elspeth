@@ -109,6 +109,13 @@ repos:
         files: ^(src/elspeth/web/|config/cicd/enforce_composer_(catch_order|exception_channel)/|elspeth-lints/src/elspeth_lints/rules/composer/)
         pass_filenames: false
 
+      - id: elspeth-lints-contract-manifest-shadow
+        name: elspeth-lints contract manifest shadow
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.contract_manifest --root src/elspeth
+        language: system
+        files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/|elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/)
+        pass_filenames: false
+
       - id: enforce-tier-model
         name: Enforce Tier Model
         entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*" --exclude "web/frontend/node_modules"

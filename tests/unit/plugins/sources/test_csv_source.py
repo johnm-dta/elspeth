@@ -45,6 +45,19 @@ class TestCSVSource:
         )
         assert hasattr(source, "output_schema")
 
+    def test_agent_assistance_explains_headered_and_headerless_paths(self) -> None:
+        """CSVSource hint tells the composer how to reason about headers."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        assistance = CSVSource.get_agent_assistance(issue_code=None)
+
+        assert assistance is not None
+        joined_hints = "\n".join(assistance.composer_hints)
+        assert "first non-skipped row as headers" in joined_hints
+        assert "headerless" in joined_hints
+        assert "columns" in joined_hints
+        assert "Do not copy a header row into inline source data" in joined_hints
+
     def test_load_yields_rows(self, sample_csv: Path, ctx: PluginContext) -> None:
         """load() yields dict rows from CSV."""
         from elspeth.plugins.sources.csv_source import CSVSource

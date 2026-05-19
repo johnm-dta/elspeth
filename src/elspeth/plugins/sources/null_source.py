@@ -12,6 +12,7 @@ from pydantic import ConfigDict
 
 from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.plugins.infrastructure.base import BaseSource
 
 
@@ -53,6 +54,21 @@ class NullSource(BaseSource):
     output_schema: type[PluginSchema] = NullSourceSchema
     # NullSource yields no rows, so it never quarantines - but set to satisfy protocol
     _on_validation_failure: str = "discard"
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Resume-only source placeholder that emits no rows.",
+                composer_hints=(
+                    "Do not choose null for new ingestion; it yields zero rows by design.",
+                    "Use null only for resume/internal workflows where rows come from stored payloads.",
+                    "Downstream schemas are restored from the original audit trail, not from NullSource output.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize NullSource.

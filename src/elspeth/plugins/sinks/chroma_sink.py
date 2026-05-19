@@ -26,6 +26,7 @@ from elspeth.contracts.errors import (
     DuplicateDocumentError,
     FrameworkBugError,
 )
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.url import SanitizedDatabaseUrl
 from elspeth.core.canonical import canonical_json
@@ -177,6 +178,23 @@ class ChromaSink(BaseSink):
     source_file_hash: str | None = "sha256:a1501bc8365cc7f2"
     config_model = ChromaSinkConfig
     supports_resume = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Writes rows to a ChromaDB collection as embedded documents with metadata.",
+                composer_hints=(
+                    "Set field_mapping.document_field and id_field to string fields; non-string required fields are diverted per row.",
+                    "metadata_fields may contain only Chroma-compatible scalar values: str, int, float, bool, or None.",
+                    "Use mode=persistent with persist_directory for local storage, or mode=client with host/port/ssl for a server.",
+                    "Choose on_duplicate as overwrite, skip, or error before running; the default overwrites document IDs.",
+                    "Chroma sink does not support resume, so plan reruns around idempotent document IDs.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

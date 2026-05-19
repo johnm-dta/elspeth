@@ -179,8 +179,10 @@ class BatchDistributionProfile(BaseTransform):
                 issue_code=None,
                 summary="Aggregate numeric descriptive statistics — mean, stddev, quartiles, optionally per group. Numeric-only; categorical counts go to batch_top_k.",
                 composer_hints=(
+                    "Use batch_distribution_profile under aggregations with a trigger; it summarizes a flushed batch.",
                     "value_field must be int or float. Strings (theme/category names) belong in batch_top_k, not here.",
                     "group_by partitions by a categorical field; omit it for a single distribution over all rows.",
+                    "Output is descriptive-statistic summary rows and does not preserve the original row shape.",
                     "Words like 'distribution', 'theme frequency', 'category counts' usually mean batch_top_k unless the user clearly wants numeric stats.",
                 ),
             )

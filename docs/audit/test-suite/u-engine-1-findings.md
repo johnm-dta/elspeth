@@ -359,6 +359,13 @@ Filed:
 
 - `elspeth-0c1c7d5cec`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-0c1c7d5cec` resolved. The aggregation
+  post-processing failure regression now asserts the single guarded FAILED
+  node-state completion and the single FAILED batch completion, binding both to
+  the expected state and batch identifiers.
+
 ### UENG-10 — SinkExecutor cleanup tests do not prove state identity
 
 Evidence:

@@ -4936,17 +4936,17 @@ class TestAggregationExecutorTerminality:
         finally:
             agg_mod.stable_hash = original_hash  # type: ignore[attr-defined]
 
-        # Node state: FAILED (auto-completed by guard)
-        # Find the FAILED call — guard auto-completes with phase="executor_post_process"
-        failed_calls = [c for c in factory.execution.complete_node_state.call_args_list if c[1].get("status") == NodeStateStatus.FAILED]
-        assert len(failed_calls) >= 1
-        # At least one FAILED call should have the guard's phase tag
-        guard_fail = [c for c in failed_calls if getattr(c[1].get("error"), "phase", None) == "executor_post_process"]
-        assert len(guard_fail) == 1
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert failed_kwargs["state_id"] == "state_001"
+        assert getattr(failed_kwargs["error"], "phase", None) == "executor_post_process"
 
         # Batch: FAILED (outer except handler)
-        batch_failed = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
-        assert len(batch_failed) >= 1
+        factory.execution.complete_batch.assert_called_once()
+        batch_kwargs = factory.execution.complete_batch.call_args.kwargs
+        assert batch_kwargs["batch_id"] == "batch_001"
+        assert batch_kwargs["status"] == BatchStatus.FAILED
+        assert batch_kwargs["trigger_type"] == TriggerType.COUNT
+        assert batch_kwargs["state_id"] == "state_001"
 
         # Buffers cleared for recovery
         assert executor.get_buffer_count(nid) == 0

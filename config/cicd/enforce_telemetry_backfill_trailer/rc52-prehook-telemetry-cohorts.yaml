@@ -1,0 +1,289 @@
+entries:
+  - commit_sha: 597411ba673368f8b06e05249eb3962f39f2f2a2
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 51fea578c44efbdc33364bdda778680e4347c91a
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 8c5e8773d7c7f01fe3fadd4c2dfe302cb0593e56
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 6d9e37ac023297f4424d20b16027659459d13688
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 9c029670650e60a907979e902a02c0ba7169dd69
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: f123ddccf81cd75356b9e6523ca289e9c03d8ce1
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 443ec5462ac9b1e61be1cd4d3be3ce84c8a5104c
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 30befa2e54847bef145d97678ad057a1f057f6f8
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 59544112124030adccab52a8b7115d55517c6346
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 75340ab854d95da2feefa3e13d577db0893fca83
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: d1fbdf3fcbcb534be12408a2d3b98fb91e7c4614
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: bd63cc6b9e5b724125dce69610b49617186d701c
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 76df27a21334f8d7b6c20c65eae732a695e25117
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: d8968ccb15b75609a46b296ee95de93d8137583a
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: c76ecc0f2a39ad078a1a78d1b3d22c229822a7ce
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 5f3000423bbf9db1b4fc76f1b6d66d7cb103c9e8
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 4c6f10bd74fb52c7d0a5aa84e855cb0c247bfcd7
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: f28cd2fb0e960b796a90ee50d986915cb3845162
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 9077b62756ba99e101b37a9521978a04b99d0e29
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 233b50c364176a5c5e6a8468933945dad6085194
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 87ecf2e4034019d33bae5a07fd4e7a45a6f58e78
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: ede3000ab65552802cf2ef467b6e0fe4d69e73e1
+    cohort: b1
+    reason: |
+      RC5.2 pre-hook interpretation opt-out implementation commit. The branch
+      was already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 8ce72195e3714520140723cdc4c153ae5ca0ab69
+    cohort: b1
+    reason: |
+      RC5.2 pre-hook interpretation opt-out implementation commit. The branch
+      was already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 426e4babdf45caf868bac2a4b0499ec1fb17aee0
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: d2fbbcaf091fc5efb186c8d2df3225989df696d3
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 01978112004e5bde202602dfdc2c215a4ff268d2
+    cohort: a
+    reason: |
+      RC5.2 pre-hook shareable-reviews implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: beda5d73d6d685089a5f8e3a437add3c78578485
+    cohort: a
+    reason: |
+      RC5.2 pre-hook shareable-reviews implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: a85865a75eeb72a621fa19803bd86e621e1ff263
+    cohort: a
+    reason: |
+      RC5.2 pre-hook shareable-reviews implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 17d11f36b4409b8ce93df8429bfb29a3ab558c74
+    cohort: a
+    reason: |
+      RC5.2 pre-hook shareable-reviews implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 7be3600f1cd1e08c68ca9213fa3252f5faf3289c
+    cohort: a
+    reason: |
+      RC5.2 pre-hook shareable-reviews implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 57455a70790aa42c9fcb210cde3518dce47b9c32
+    cohort: a
+    reason: |
+      RC5.2 pre-hook shareable-reviews implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 6c8debf889fbbb519aa5eb262b312dfad7b947a0
+    cohort: b1
+    reason: |
+      RC5.2 pre-hook interpretation opt-out implementation commit. The branch
+      was already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 7ef5d7c0457bb790a28128e2cd9bbd190bbc9880
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 73d9056f66655520ae7158a357467b84c520ed46
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 0aa1d7d9e14794052f9198230b77116f6b816a73
+    cohort: a
+    reason: |
+      RC5.2 pre-hook shareable-reviews implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30
+  - commit_sha: 4cf063e55dcbda932e2d677f8da99c5a81e40ecf
+    cohort: b2
+    reason: |
+      RC5.2 pre-hook audit-readiness implementation commit. The branch was
+      already pushed before the range backstop learned to read allowlist
+      entries, and history rewrite is not appropriate for this PR.
+    owner: codex
+    expires: 2026-06-30

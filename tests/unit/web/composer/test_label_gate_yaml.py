@@ -57,7 +57,15 @@ def test_workflow_triggers_on_required_paths() -> None:
     # whichever the parser produced.
     on_block = workflow.get("on") or workflow.get(True)
     assert on_block is not None, "workflow must declare an 'on:' trigger block"
-    paths = frozenset(on_block["pull_request"]["paths"])
+    pull_request = on_block["pull_request"]
+    paths = frozenset(pull_request.get("paths", []))
+    if not paths:
+        steps = workflow["jobs"]["redaction-gate"]["steps"]
+        diff_steps = [s for s in steps if s.get("id") == "diff"]
+        assert len(diff_steps) == 1, "exactly one step must carry id=diff"
+        run_block = diff_steps[0]["run"]
+        paths = frozenset(path for path in REQUIRED_PATHS if path in run_block)
+
     missing = REQUIRED_PATHS - paths
     assert not missing, f"workflow paths missing required entries: {sorted(missing)}"
 
@@ -73,6 +81,22 @@ def test_workflow_has_direction_output_step() -> None:
     # check script (changed case). Both paths must appear.
     assert "direction=none" in run_block, "no-change branch must write direction=none"
     assert "check_redaction_direction.py" in run_block, "changed branch must invoke check_redaction_direction.py"
+
+
+def test_workflow_handles_first_snapshot_introduction() -> None:
+    """A PR adding the snapshot for the first time must not fail on ``git show``.
+
+    ``origin/main`` did not always contain the redaction snapshot. When a PR
+    introduces the file, the diff step still needs a base-side empty object so
+    the direction script can classify the change as strengthening.
+    """
+    workflow = _load_workflow()
+    steps = workflow["jobs"]["redaction-gate"]["steps"]
+    diff_steps = [s for s in steps if s.get("id") == "diff"]
+    run_block = diff_steps[0]["run"]
+
+    assert 'git cat-file -e "${BASE_REMOTE}:${SNAPSHOT_PATH}"' in run_block
+    assert "printf '{}' > \"$BASE_TMP\"" in run_block
 
 
 def test_workflow_calls_assert_redaction_label_script() -> None:

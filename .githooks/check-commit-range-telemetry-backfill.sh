@@ -26,6 +26,96 @@ fi
 
 echo "Checking ${#COMMITS[@]} commit(s) in range ${RANGE} for cohort-attribution trailers..."
 
+ALLOWLIST_DIR="config/cicd/enforce_telemetry_backfill_trailer"
+declare -A ALLOWLISTED_COHORTS=()
+
+load_allowlist() {
+    if [[ ! -d "$ALLOWLIST_DIR" ]]; then
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp)"
+python3 - "$ALLOWLIST_DIR" > "$tmp" <<'PY'
+from __future__ import annotations
+
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+allowlist_dir = Path(sys.argv[1])
+today = datetime.now(UTC).date()
+valid_cohorts = {"a", "b1", "b2"}
+
+
+def _extract_entries(path: Path) -> list[dict[str, str]]:
+    """Parse the constrained allowlist YAML shape without external deps.
+
+    CI runs this shell script directly on a GitHub runner, before the project
+    virtualenv exists. Keep the parser intentionally narrow: each entry starts
+    with ``- commit_sha:`` and scalar fields of interest are indented beneath it.
+    Block scalars such as ``reason: |`` are ignored.
+    """
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    in_entries = False
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "entries:":
+            in_entries = True
+            continue
+        if not in_entries:
+            continue
+        if stripped.startswith("- "):
+            if current is not None:
+                entries.append(current)
+            current = {}
+            stripped = stripped[2:].strip()
+        if current is None or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key in {"commit_sha", "cohort", "expires"}:
+            current[key] = value
+
+    if current is not None:
+        entries.append(current)
+    return entries
+
+
+for path in sorted(allowlist_dir.glob("*.yaml")):
+    entries = _extract_entries(path)
+    for index, entry in enumerate(entries):
+        commit_sha = str(entry.get("commit_sha", ""))
+        cohort = str(entry.get("cohort", ""))
+        expires = entry.get("expires")
+
+        if len(commit_sha) != 40:
+            raise SystemExit(f"{path}: entries[{index}].commit_sha must be a 40-character SHA")
+        if cohort not in valid_cohorts:
+            raise SystemExit(f"{path}: entries[{index}].cohort must be one of a, b1, b2")
+        if not expires:
+            raise SystemExit(f"{path}: entries[{index}].expires is required")
+
+        expires_date = datetime.strptime(str(expires), "%Y-%m-%d").date()
+        if expires_date < today:
+            continue
+
+        print(f"{commit_sha} {cohort}")
+PY
+    while read -r commit_sha cohort; do
+        [[ -n "${commit_sha:-}" ]] || continue
+        ALLOWLISTED_COHORTS["${commit_sha}:${cohort}"]=1
+    done < "$tmp"
+    rm -f "$tmp"
+}
+
+load_allowlist
+
 fail=0
 for sha in "${COMMITS[@]}"; do
     subject=$(git log -1 --format='%s' "$sha")
@@ -64,7 +154,12 @@ for sha in "${COMMITS[@]}"; do
 
     check_cohort() {
         local cohort="$1"
-        local trailer_token="$2"
+        local cohort_id="$2"
+        local trailer_token="$3"
+        if [[ -n "${ALLOWLISTED_COHORTS["${sha}:${cohort_id}"]:-}" ]]; then
+            echo "✓ Commit ${sha:0:12} '${subject}' touches cohort ${cohort} and is allowlisted for telemetry-backfill: ${trailer_token}"
+            return 0
+        fi
         if ! echo "$body" | grep -qE "^telemetry-backfill: ${trailer_token}\$"; then
             echo ""
             echo "✗ Commit ${sha:0:12} '${subject}' touches cohort ${cohort} but lacks the required trailer: telemetry-backfill: ${trailer_token}"
@@ -72,9 +167,9 @@ for sha in "${COMMITS[@]}"; do
         fi
     }
 
-    (( cohort_a_hit ))  && check_cohort "(a)  shareable_reviews" "shareable-reviews"
-    (( cohort_b1_hit )) && check_cohort "(b1) sessions opt-out"  "interpretation-opt-out"
-    (( cohort_b2_hit )) && check_cohort "(b2) audit_readiness"   "audit-readiness"
+    (( cohort_a_hit ))  && check_cohort "(a)  shareable_reviews" "a" "shareable-reviews"
+    (( cohort_b1_hit )) && check_cohort "(b1) sessions opt-out"  "b1" "interpretation-opt-out"
+    (( cohort_b2_hit )) && check_cohort "(b2) audit_readiness"   "b2" "audit-readiness"
 done
 
 if (( fail > 0 )); then

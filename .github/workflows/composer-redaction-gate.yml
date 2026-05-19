@@ -68,7 +68,11 @@ jobs:
             echo "snapshot_changed=true" >> "$GITHUB_OUTPUT"
             BASE_TMP="$(mktemp)"
             HEAD_TMP="$(mktemp)"
-            git show "${BASE_REMOTE}:${SNAPSHOT_PATH}" > "$BASE_TMP"
+            if git cat-file -e "${BASE_REMOTE}:${SNAPSHOT_PATH}"; then
+              git show "${BASE_REMOTE}:${SNAPSHOT_PATH}" > "$BASE_TMP"
+            else
+              printf '{}' > "$BASE_TMP"
+            fi
             cp "$SNAPSHOT_PATH" "$HEAD_TMP"
             python3 scripts/cicd/check_redaction_direction.py \
               --base-snapshot "$BASE_TMP" \

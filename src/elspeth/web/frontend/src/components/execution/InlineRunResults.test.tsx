@@ -28,11 +28,8 @@ describe("InlineRunResults", () => {
     // Default: empty catalog so useNarrativeMode resolves to false unless
     // a specific test overrides it. Without these stubs the hook would
     // make a real fetch against the unconfigured test API client.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(apiClient, "listTransforms").mockResolvedValue([] as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(apiClient, "listSources").mockResolvedValue([] as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(apiClient, "listSinks").mockResolvedValue([] as any);
     useSessionStore.setState({ compositionState: null } as never);
     useExecutionStore.setState({
@@ -205,8 +202,7 @@ describe("InlineRunResults", () => {
 
   it("renders NarrativeResults instead of RunOutputsPanel when a composition plugin has the narrative-summary tag (plan 19b:359, 19b:365)", async () => {
     vi.spyOn(apiClient, "listTransforms").mockResolvedValue([
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      { name: "batch_classifier_metrics", capability_tags: ["narrative-summary"] } as any,
+        { name: "batch_classifier_metrics", capability_tags: ["narrative-summary"] } as any,
     ]);
     useSessionStore.setState({
       compositionState: {
@@ -246,8 +242,7 @@ describe("InlineRunResults", () => {
 
   it("renders RunOutputsPanel and not NarrativeResults when no composition plugin carries the narrative-summary tag", async () => {
     vi.spyOn(apiClient, "listTransforms").mockResolvedValue([
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      { name: "passthrough", capability_tags: [] } as any,
+        { name: "passthrough", capability_tags: [] } as any,
     ]);
     useSessionStore.setState({
       compositionState: {

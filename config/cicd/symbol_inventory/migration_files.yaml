@@ -4,8 +4,10 @@
 # `is_terminal` and brittle outcome/path string checks that the RowOutcome lint
 # guard cannot see.
 
-allowed:
-  - file: src/elspeth/contracts/enums.py
-    justification: ADR-019 migration window — defines RowOutcome until Stage 5 and defines the new two-axis enums.
-  - file: src/elspeth/testing/__init__.py
-    justification: ADR-019 migration window — testing pack re-exports RowOutcome until Stage 5 while adding TerminalOutcome and TerminalPath.
+per_file_rules:
+  - pattern: "src/elspeth/contracts/enums.py"
+    rules: ["manifest.symbol_inventory"]
+    reason: "ADR-019 migration window — defines RowOutcome until Stage 5 and defines the new two-axis enums."
+  - pattern: "src/elspeth/testing/__init__.py"
+    rules: ["manifest.symbol_inventory"]
+    reason: "ADR-019 migration window — testing pack re-exports RowOutcome until Stage 5 while adding TerminalOutcome and TerminalPath."

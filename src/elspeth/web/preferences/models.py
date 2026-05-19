@@ -69,16 +69,16 @@ class UpdateComposerPreferencesRequest(BaseModel):
     exists; if no row exists, none is created — see PreferencesService
     Panel C2 guard for the no-insert contract).
 
-    ``banner_dismissed_at`` semantics — IMPORTANT for callers:
+    ``banner_dismissed_at`` semantics:
 
-      - Field absent from JSON OR JSON ``null`` → "not set in this
-        PATCH" — the field is unchanged.
-      - ISO-8601 datetime string → set to that value (one-way
-        dismissal; see spec 12 §"Banner lifecycle").
+      - Field absent from JSON → unchanged.
+      - JSON ``null`` → clear the banner dismissal (the banner re-shows
+        on next session — there is no separate "un-dismiss" RPC).
+      - ISO-8601 datetime string → set to that value (records the
+        dismissal time).
 
-    The service intentionally preserves the historical banner behavior:
-    it does not branch on explicit banner ``null`` even though Pydantic
-    v2 exposes ``model_fields_set``.
+    This field uses ``model_fields_set`` in the service so the
+    re-show affordance can distinguish "not mentioned" from "clear it".
 
     ``tutorial_completed_at`` semantics:
 

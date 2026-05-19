@@ -160,6 +160,25 @@ describe("DefaultModeChangedBanner", () => {
     consoleError.mockRestore();
   });
 
+  it("disables the dismiss button while a write is in flight (P0.8 offensive guard)", () => {
+    // P0.8: the store's dismissDefaultChangedBanner throws if invoked
+    // while writing=true. The UI must prevent that programmatic
+    // collision by disabling the trigger; otherwise a concurrent
+    // setDefaultMode PATCH would race against the dismiss action.
+    usePreferencesStore.setState({
+      defaultMode: "freeform",
+      loaded: true,
+      bannerDismissedAt: null,
+      writing: true,
+      writeError: null,
+      optedOutAtSessionId: null,
+    });
+    render(<DefaultModeChangedBanner />);
+    expect(
+      screen.getByRole("button", { name: /got it|dismiss/i }),
+    ).toBeDisabled();
+  });
+
   it("on dismiss, moves focus to the chat input (WCAG 2.4.3 — no stranded focus)", async () => {
     // Stage a chat input fixture so the focus-target query succeeds.
     const input = document.createElement("textarea");

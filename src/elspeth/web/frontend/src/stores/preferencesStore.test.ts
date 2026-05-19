@@ -178,7 +178,13 @@ describe("preferencesStore", () => {
     );
   });
 
-  it("dismissDefaultChangedBanner is no-op while another write is in flight", async () => {
+  it("dismissDefaultChangedBanner throws if invoked while another write is in flight (P0.8 offensive guard)", async () => {
+    // P0.8: the prior silent `if (writing) return;` short-circuit
+    // hid a UI-guard bypass behind a no-op. Now the store throws a
+    // named error so any caller that fails to disable its trigger
+    // (the DefaultModeChangedBanner dismiss button) gets a loud
+    // failure surface. In normal flow the disabled button prevents
+    // this path entirely; reaching the throw means a regression.
     usePreferencesStore.setState({
       loaded: true,
       defaultMode: "freeform",
@@ -186,8 +192,11 @@ describe("preferencesStore", () => {
       writing: true,
     });
 
-    await usePreferencesStore.getState().dismissDefaultChangedBanner();
-
+    await expect(
+      usePreferencesStore.getState().dismissDefaultChangedBanner(),
+    ).rejects.toThrow(
+      /called while a write was in flight — UI must disable the trigger/,
+    );
     expect(mockUpdate).not.toHaveBeenCalled();
     expect(usePreferencesStore.getState().bannerDismissedAt).toBeNull();
   });
@@ -299,6 +308,28 @@ describe("preferencesStore", () => {
     expect(state.writeError).not.toBeNull();
     expect(state.writeError).toMatch(/corrupt/i);
     expect(state.writeError).toMatch(/administrator|operator|contact/i);
+  });
+
+  it("resolveDefaultMode throws immediately without re-bootstrapping when loaded=true and defaultMode=null", async () => {
+    // P0.9: the prior implementation guarded as
+    // `if (current.loaded && current.defaultMode !== null) return …`,
+    // then fell through to a second `bootstrap()` call when that guard
+    // failed because of `defaultMode === null`. A bootstrap that already
+    // produced `loaded:true, defaultMode:null` is in a known-broken
+    // state (writeError is set); re-running it just re-fails. Throw
+    // immediately so sessionStore.createSession surfaces the honest
+    // secondary-failure message to the user without an extra round-trip.
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: null,
+      writeError: "Saved preferences are corrupt; using defaults.",
+    });
+
+    await expect(
+      usePreferencesStore.getState().resolveDefaultMode(),
+    ).rejects.toThrow(/loaded=true but defaultMode is null/);
+
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("resolveDefaultMode still throws after a failed bootstrap (preserves sessionStore secondary-failure attribution)", async () => {

@@ -144,7 +144,18 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
 
   resolveDefaultMode: async () => {
     const current = get();
-    if (current.loaded && current.defaultMode !== null) {
+    if (current.loaded) {
+      // bootstrap has already run. If defaultMode is null at this point,
+      // bootstrap failed (writeError is set) and a second bootstrap pass
+      // would just re-fail against the same broken backend. Throw
+      // immediately so sessionStore.createSession surfaces the honest
+      // secondary-failure attribution to the user without an extra
+      // round-trip.
+      if (current.defaultMode === null) {
+        throw new Error(
+          "preferencesStore: loaded=true but defaultMode is null — bootstrap failed or backend returned a null default_mode (contract violation)",
+        );
+      }
       return current.defaultMode;
     }
     await get().bootstrap();
@@ -282,7 +293,17 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   },
 
   dismissDefaultChangedBanner: async () => {
-    if (get().writing) return;
+    if (get().writing) {
+      // Offensive guard (CLAUDE.md): the dismiss button is disabled
+      // while `writing` is true, so reaching this branch means a UI
+      // guard was bypassed (programmatic call, keyboard race, or
+      // future caller that doesn't read the writing flag). Throw a
+      // named error so the regression surfaces loudly instead of
+      // silently failing to dismiss.
+      throw new Error(
+        "preferencesStore: dismissDefaultChangedBanner called while a write was in flight — UI must disable the trigger before invoking this action",
+      );
+    }
     const stamp = new Date().toISOString();
     const previous = get().bannerDismissedAt;
     set({ bannerDismissedAt: stamp, writing: true, writeError: null });

@@ -323,6 +323,70 @@ describe("ExplainDialog", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("renders the backdrop and the dialog as siblings, not as parent/child (P0.5)", async () => {
+    // P0.5: the prior version nested .explain-dialog-backdrop inside
+    // the role="dialog" div. That confused the modal's a11y tree —
+    // some screen readers infer the dialog boundary from the
+    // containing element, not from role. The new pattern matches
+    // SecretsPanel: backdrop and dialog are siblings inside a
+    // fragment. A regression that re-nests them would silently
+    // re-introduce the a11y drift; this test pins the structure.
+    vi.mocked(api.fetchAuditReadinessExplain).mockResolvedValueOnce({
+      session_id: SESSION_ID,
+      composition_version: 1,
+      narrative: "x",
+    });
+    render(
+      <ExplainDialog
+        sessionId={SESSION_ID}
+        compositionVersion={1}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText("x");
+    const backdrop = document.querySelector(
+      ".explain-dialog-backdrop",
+    ) as HTMLElement;
+    const dialog = screen.getByRole("dialog");
+    expect(backdrop).not.toBeNull();
+    // Sibling check: backdrop's parent must NOT be the dialog div
+    // (the old, broken structure). Both backdrop and dialog must
+    // share the same parent — RTL renders the fragment's children
+    // directly into the test container.
+    expect(backdrop.parentElement).not.toBe(dialog);
+    expect(backdrop.parentElement).toBe(dialog.parentElement);
+  });
+
+  it("closes when Escape is pressed even if focus is not inside the dialog (P0.5 — document-level listener)", async () => {
+    // P0.5: the prior Escape handler was bound via onKeyDown on the
+    // dialog div, which only fires if focus is inside the dialog
+    // tree. After the restructure Escape is registered on document,
+    // so an Escape press while focus has drifted to <body> still
+    // closes the dialog. This guards against focus-trap escape bugs
+    // in nested content.
+    vi.mocked(api.fetchAuditReadinessExplain).mockResolvedValueOnce({
+      session_id: SESSION_ID,
+      composition_version: 1,
+      narrative: "x",
+    });
+    const onClose = vi.fn();
+    render(
+      <ExplainDialog
+        sessionId={SESSION_ID}
+        compositionVersion={1}
+        onClose={onClose}
+      />,
+    );
+    await screen.findByText("x");
+    // Force focus OUTSIDE the dialog to simulate a focus-trap break.
+    document.body.focus();
+    // Use a raw KeyboardEvent on document — userEvent.keyboard
+    // dispatches via the active element, which the prior onKeyDown
+    // implementation would have caught only inside the dialog.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("renders a fallback error message when the ApiError has no detail", async () => {
     // Fallback text: auditReadinessStore.ts → apiErr.detail ?? "Failed to load the explain narrative."
     vi.mocked(api.fetchAuditReadinessExplain).mockRejectedValueOnce({ status: 500 });

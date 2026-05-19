@@ -139,20 +139,63 @@ describe("ReadinessRowDetail", () => {
     expect(screen.queryByRole("button", { name: /Jump to api_key/ })).not.toBeInTheDocument();
   });
 
-  it("fires onClose when Escape is pressed", async () => {
-    // Drawer keyboard-dismiss contract: pressing Escape while the drawer
-    // has focus should fire onClose, matching the conventional drawer
-    // affordance. The implementation must add an onKeyDown Escape handler
-    // to the root div — see ReadinessRowDetail.tsx.
+  it("fires onClose when Escape is pressed (post-P0.4: relies on mount-time focus)", async () => {
+    // Drawer keyboard-dismiss contract: pressing Escape while the
+    // drawer has focus should fire onClose. The earlier version of
+    // this test manually `.focus()`'d the Close button to ensure
+    // Escape dispatched to the dialog's onKeyDown handler — that
+    // pre-focus masked P0.4(b) (no mount-time focus). The
+    // implementation now auto-focuses the Close button on mount, so
+    // this test asserts the contract WITHOUT pre-focusing: Escape
+    // must work straight out of render.
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={onClose} />);
-    // Move focus inside the drawer so Escape dispatches to the dialog's
-    // onKeyDown handler. Without this, userEvent.keyboard dispatches
-    // to document.body which may not bubble to the React handler.
-    screen.getByRole("button", { name: /Close/i }).focus();
     await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  // P0.4(b) — mount-time focus moves to Close.
+  it("focuses the Close button on mount so Escape and keyboard navigation work without a click first", () => {
+    render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /Close/i }),
+    );
+  });
+
+  // P0.4(a) — tabIndex={-1} on the dialog root.
+  it("the dialog root carries tabIndex=-1 so keyboard focus can land on it programmatically", () => {
+    render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />);
+    expect(screen.getByRole("dialog")).toHaveAttribute("tabindex", "-1");
+  });
+
+  // P0.4(c) — detail prose is announced as paragraph, not preformatted/code.
+  it("renders the detail body as a <p> with whiteSpace: pre-line, not <pre>", () => {
+    const { container } = render(
+      <ReadinessRowDetail row={ROW_WITH_NODE} onClose={() => {}} />,
+    );
+    // No <pre> element anywhere in the drawer.
+    expect(container.querySelector("pre")).toBeNull();
+    const body = container.querySelector("p.readiness-row-detail-body");
+    expect(body).not.toBeNull();
+    expect(body).toHaveStyle({ whiteSpace: "pre-line" });
+    // Linebreak preservation contract is verified by the first test
+    // ("renders the row label and detail with preserved linebreaks"),
+    // which still passes against pre-line styling.
+  });
+
+  // P0.2 — Jump must NOT close the drawer (user needs to see the
+  // highlighted component in context).
+  it("Jump leaves the drawer open so the user can confirm the highlighted target", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ReadinessRowDetail row={ROW_WITH_NODE} onClose={onClose} />);
+    await user.click(
+      screen.getByRole("button", { name: /Jump to select_columns/ }),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    // Drawer still present.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   // Test 5.C SKIPPED — documented skip.

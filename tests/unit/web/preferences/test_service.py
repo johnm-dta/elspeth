@@ -340,6 +340,60 @@ def test_tutorial_completed_counter_does_not_fire_for_mode_only_patch(
     assert tutorial_completed_counter.calls == []
 
 
+def test_explicit_null_clears_banner_dismissed_at(service):
+    """PATCH ``{"banner_dismissed_at": null}`` clears a prior dismissal so
+    the banner re-shows on the next session. Symmetric with the tutorial
+    field; uses ``model_fields_set`` to distinguish absent vs explicit null."""
+    stamp = datetime(2026, 5, 15, 16, 0, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-banner-reshow",
+            UpdateComposerPreferencesRequest(banner_dismissed_at=stamp),
+        )
+    )
+
+    result = asyncio.run(
+        service.update_composer_preferences(
+            "alice-banner-reshow",
+            UpdateComposerPreferencesRequest(banner_dismissed_at=None),
+        )
+    )
+
+    assert result.current.banner_dismissed_at is None
+    prefs = asyncio.run(service.get_composer_preferences("alice-banner-reshow"))
+    assert prefs.banner_dismissed_at is None
+
+
+def test_absent_banner_field_preserves_but_explicit_null_clears(service):
+    """Absent ``banner_dismissed_at`` preserves the existing value; explicit
+    JSON ``null`` clears it. The discriminator is ``model_fields_set``."""
+    stamp = datetime(2026, 5, 15, 16, 5, tzinfo=UTC)
+    user = "alice-banner-discriminate"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(banner_dismissed_at=stamp),
+        )
+    )
+
+    absent_payload = UpdateComposerPreferencesRequest(default_mode="freeform")
+    assert "banner_dismissed_at" not in absent_payload.model_fields_set
+    asyncio.run(service.update_composer_preferences(user, absent_payload))
+    after_absent = asyncio.run(service.get_composer_preferences(user))
+    # Same UTC-tzinfo round-trip pattern as test_partial_update_only_touches_provided_fields.
+    assert after_absent.banner_dismissed_at is not None
+    got = after_absent.banner_dismissed_at
+    if got.tzinfo is None:
+        got = got.replace(tzinfo=UTC)
+    assert got == stamp
+
+    null_payload = UpdateComposerPreferencesRequest(banner_dismissed_at=None)
+    assert "banner_dismissed_at" in null_payload.model_fields_set
+    asyncio.run(service.update_composer_preferences(user, null_payload))
+    after_null = asyncio.run(service.get_composer_preferences(user))
+    assert after_null.banner_dismissed_at is None
+
+
 def test_partial_update_only_touches_provided_fields(service):
     asyncio.run(
         service.update_composer_preferences(

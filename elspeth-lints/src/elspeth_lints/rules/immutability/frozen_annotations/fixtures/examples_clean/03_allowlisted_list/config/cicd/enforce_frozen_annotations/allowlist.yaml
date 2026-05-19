@@ -1,0 +1,2 @@
+allow:
+  - key: "good.py:Example:items"

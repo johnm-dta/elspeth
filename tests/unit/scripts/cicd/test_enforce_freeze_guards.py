@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
+import subprocess
+import sys
 import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +29,29 @@ from scripts.cicd.enforce_freeze_guards import (
     run_check,
     scan_file,
 )
+
+
+def test_enforce_freeze_guards_json_mode_succeeds_on_current_codebase() -> None:
+    """Legacy freeze-guards script emits JSON findings for shadow-mode parity."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/enforce_freeze_guards.py",
+            "check",
+            "--root",
+            "src/elspeth",
+            "--allowlist",
+            "config/cicd/enforce_freeze_guards",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[4],
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
 
 
 def _scan(source: str, file_path: str = "test.py") -> list[Finding]:

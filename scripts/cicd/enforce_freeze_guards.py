@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -419,6 +420,24 @@ def format_finding(finding: Finding) -> str:
     return "\n".join(lines)
 
 
+def json_findings(findings: list[Finding]) -> str:
+    """Render findings in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": finding.rule_id,
+            "file_path": finding.file_path,
+            "line": finding.line,
+            "column": finding.col,
+            "message": finding.message,
+            "fingerprint": finding.fingerprint,
+            "severity": "error",
+            "suggestion": RULES[finding.rule_id]["remediation"].replace(" — ", " -- "),
+        }
+        for finding in findings
+    ]
+    return json.dumps(payload, sort_keys=True) + "\n"
+
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -437,6 +456,12 @@ def main() -> int:
         type=Path,
         default=None,
         help="Path to allowlist YAML file or directory",
+    )
+    check_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format",
     )
     check_parser.add_argument(
         "files",
@@ -499,6 +524,10 @@ def run_check(args: argparse.Namespace) -> int:
         exceeded_rules = allowlist.get_exceeded_rules()
 
     has_errors = bool(violations or unused_rules or expired_rules or exceeded_rules)
+
+    if getattr(args, "format", "text") == "json":
+        sys.stdout.write(json_findings(violations))
+        return 1 if has_errors else 0
 
     # Report
     if violations:

@@ -1,0 +1,12 @@
+[
+  {
+    "column": 41,
+    "file_path": "bad.py",
+    "fingerprint": "374b56166228ff5a",
+    "line": 6,
+    "message": "Bare MappingProxyType wrap in __post_init__: object.__setattr__(self, \"data\", MappingProxyType(dict(self.data)))",
+    "rule_id": "FG1",
+    "severity": "error",
+    "suggestion": "Use deep_freeze() instead of MappingProxyType(dict(self.x)) for recursive immutability"
+  }
+]

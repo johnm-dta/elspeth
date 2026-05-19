@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 import textwrap
+from pathlib import Path
 
 from scripts.cicd.enforce_frozen_annotations import find_violations
+
+
+def test_enforce_frozen_annotations_json_mode_succeeds_on_current_codebase() -> None:
+    """Legacy frozen-annotations script emits JSON findings for shadow-mode parity."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/enforce_frozen_annotations.py",
+            "check",
+            "--root",
+            "src/elspeth",
+            "--allowlist",
+            "config/cicd/enforce_frozen_annotations",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[4],
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
 
 
 def _parse(source: str) -> list[dict[str, str]]:

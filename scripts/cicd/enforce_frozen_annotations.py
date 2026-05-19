@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ def find_violations(source: str, filename: str = "<unknown>") -> list[dict[str, 
         filename: Filename for error messages
 
     Returns:
-        List of violation dicts with keys: file, line, class, field, annotation
+        List of violation dicts with keys: file, line, column, class, field, annotation
     """
     try:
         tree = ast.parse(source)
@@ -61,6 +62,7 @@ def find_violations(source: str, filename: str = "<unknown>") -> list[dict[str, 
                     {
                         "file": filename,
                         "line": str(item.lineno),
+                        "column": str(item.col_offset),
                         "class": node.name,
                         "field": item.target.id,
                         "annotation": annotation_str,
@@ -103,6 +105,28 @@ def _violation_key(v: dict[str, str]) -> str:
     return f"{v['file']}:{v['class']}:{v['field']}"
 
 
+def json_violations(violations: list[dict[str, str]]) -> str:
+    """Render violations in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": "immutability.frozen_annotations",
+            "file_path": violation["file"],
+            "line": int(violation["line"]),
+            "column": int(violation["column"]),
+            "message": (
+                f"Frozen dataclass field {violation['class']}.{violation['field']} "
+                f"uses mutable annotation {violation['annotation']}. "
+                "Use Sequence/Mapping/tuple/frozenset instead of list/dict/set."
+            ),
+            "fingerprint": _violation_key(violation),
+            "severity": "error",
+            "suggestion": "Use Sequence/Mapping/tuple/frozenset instead of list/dict/set",
+        }
+        for violation in violations
+    ]
+    return json.dumps(payload, sort_keys=True) + "\n"
+
+
 def check_directory(root: Path, allowlist_dir: Path | None = None) -> list[dict[str, str]]:
     """Check all Python files under root for violations."""
     allowed = _load_allowlist(allowlist_dir) if allowlist_dir else set()
@@ -128,6 +152,7 @@ def main() -> None:
     check = sub.add_parser("check", help="Check for violations")
     check.add_argument("--root", type=Path, required=True, help="Root directory to scan")
     check.add_argument("--allowlist", type=Path, default=None, help="Directory containing allowlist YAML files")
+    check.add_argument("--format", choices=("text", "json"), default="text", help="Output format")
 
     args = parser.parse_args()
 
@@ -136,6 +161,10 @@ def main() -> None:
         sys.exit(1)
 
     violations = check_directory(args.root, args.allowlist)
+
+    if args.format == "json":
+        sys.stdout.write(json_violations(violations))
+        sys.exit(1 if violations else 0)
 
     if violations:
         print(f"\n{'=' * 60}")

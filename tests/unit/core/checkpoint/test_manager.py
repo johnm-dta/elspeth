@@ -144,6 +144,18 @@ def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, check
     assert [cp.sequence_number for cp in checkpoints] == [1, 3, 5]
 
 
+def test_create_checkpoint_rejects_duplicate_sequence_for_run(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+    """Duplicate per-run checkpoint sequence numbers would make resume order ambiguous."""
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn)
+
+    graph = make_graph_linear("node-001")
+    checkpoint_manager.create_checkpoint("run-001", "tok-001", "node-001", 1, graph)
+
+    with pytest.raises(OrchestrationInvariantError, match="Duplicate checkpoint sequence_number"):
+        checkpoint_manager.create_checkpoint("run-001", "tok-001", "node-001", 1, graph)
+
+
 def test_create_checkpoint_round_trips_coalesce_state(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)

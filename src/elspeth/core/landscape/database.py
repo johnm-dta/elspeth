@@ -141,6 +141,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("calls", "ix_calls_state_call_index_unique"),
     ("calls", "ix_calls_operation_call_index_unique"),
     ("calls", "ix_calls_resolved_prompt_template_hash"),
+    ("checkpoints", "ix_checkpoints_run_sequence_unique"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
     ("validation_errors", "ix_validation_errors_run_row"),
 )

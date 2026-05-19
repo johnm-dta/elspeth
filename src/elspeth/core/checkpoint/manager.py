@@ -143,6 +143,16 @@ class CheckpointManager:
                     f"'{token_row.run_id}' but checkpoint targets run '{run_id}'. "
                     f"Cross-run checkpoint contamination is audit corruption."
                 )
+            existing_sequence = conn.execute(
+                select(checkpoints_table.c.checkpoint_id)
+                .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
+                .limit(1)
+            ).fetchone()
+            if existing_sequence is not None:
+                raise OrchestrationInvariantError(
+                    f"Duplicate checkpoint sequence_number={sequence_number} for run '{run_id}' "
+                    f"would make resume ordering ambiguous; existing checkpoint={existing_sequence.checkpoint_id}"
+                )
 
             # Generate IDs and timestamps within transaction boundary
             checkpoint_id = f"cp-{uuid.uuid4().hex}"

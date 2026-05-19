@@ -621,6 +621,12 @@ Index(
     checkpoints_table.c.run_id,
     checkpoints_table.c.sequence_number,
 )
+Index(
+    "ix_checkpoints_run_sequence_unique",
+    checkpoints_table.c.run_id,
+    checkpoints_table.c.sequence_number,
+    unique=True,
+)
 
 # === Secret Resolutions (P2-10: Key Vault Secret Audit Trail) ===
 # Records which secrets were loaded from where during pipeline startup.

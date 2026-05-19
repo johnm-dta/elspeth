@@ -99,6 +99,10 @@ class TestSchemaCompatibilityGuards:
         assert ("calls", "resolved_prompt_template_hash") in database_module._REQUIRED_COLUMNS
         assert ("calls", "ix_calls_resolved_prompt_template_hash") in database_module._REQUIRED_INDEXES
 
+    def test_checkpoint_sequence_uniqueness_is_required_schema_contract(self) -> None:
+        """Per-run checkpoint ordering must be mechanically unique in fresh and stale DBs."""
+        assert ("checkpoints", "ix_checkpoints_run_sequence_unique") in database_module._REQUIRED_INDEXES
+
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:
         """Stamped SQLite schema epochs provide an explicit future migration seam."""
         db_path = tmp_path / "wrong_epoch.db"

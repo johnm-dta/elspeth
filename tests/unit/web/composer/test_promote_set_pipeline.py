@@ -23,7 +23,7 @@ Tests pin:
     summarizers, and passes structurally-typed fields
     (``nodes[*].routes``: ``dict[str, str]``; ``nodes[*].trigger``: typed
     sub-model) through verbatim (F3 — see
-    ``notes/composer-phase-2-followup-prompt-F1-F6.md``).
+    ``docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md``).
 """
 
 from __future__ import annotations

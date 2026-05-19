@@ -430,12 +430,8 @@ Every row in the spec's §4 must appear as a sub-decision in the ADR body. Missi
 
 - [ ] **Step 4: Update the ADR index**
 
-```bash
-# Update the index file in the architecture pack
-ls docs/arch-pack-2026-04-29-1500/reference/adr-index.md
-```
-
-If the index file exists, append `019` with one-line summary. If not, leave it — index maintenance is owned by a different epic.
+Update the active ADR index only. Frozen architecture-pack indexes are
+historical snapshots and should not be replayed as part of current ADR work.
 
 - [ ] **Step 5: Commit**
 

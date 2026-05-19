@@ -3,7 +3,7 @@
 When the composer LLM retries the same tool with the same canonical arguments
 three times in a row, it has stopped reading new evidence — a context-anchored
 loop. Empirically observed in the Tier 1 final cohort's residual RED session
-(`53bc3cf2-…`, see `notes/composer-tier1.5-step-c-diagnosis-2026-05-06.md`):
+(`53bc3cf2-…`, see `docs/composer/evidence/composer-tier1.5-step-c-diagnosis-2026-05-06.md`):
 the model called `set_pipeline` three times with byte-identical arguments and
 identical errors, then surrendered to a text-only "I'm stuck" reply.
 

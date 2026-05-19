@@ -11,7 +11,7 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 
 ## How to read this report
 
-1. **Framing.** This is a cumulative *outputs* view, not a feature roadmap and not a release record. The authoritative line-by-line release records are `CHANGELOG-RC1.md`, `CHANGELOG-RC2.md`, and `CHANGELOG.md` (RC-3 onwards). This report aggregates and narrates those records by Period.
+1. **Framing.** This is a cumulative *outputs* view, not a feature roadmap and not a release record. The authoritative line-by-line release records are the archived `CHANGELOG-RC1.md` and `CHANGELOG-RC2.md` (now under `docs-archive/2026-05-19-docs-cleanout/`) plus the active `/CHANGELOG.md` (RC-3 onwards). This report aggregates and narrates those records by Period.
 2. **Periods, not releases.** The report's grouping unit is the "Period" — a chunk of work bounded by phase change, not always by RC tag. Period boundaries are documented in each Period's header. Where a Period spans multiple RC tags, the RC tags appear as sub-headings inside the Period.
 3. **Commit counts.** Counts are deduplicated across the three RC-snapshot branches (`full-history-pre-rc1`, `pre-RC2`, `HEAD`). Small gaps in the cumulative-commit column of the executive timeline reflect that dedup, not missing work.
 4. **Date qualification.** Where the `CHANGELOG.md` does not stamp explicit release commits (notably RC-4.0 and RC-4.1), date ranges are inferred from the dominant feature-commit cluster. Inferred dates carry an in-period date callout.
@@ -480,10 +480,10 @@ This is the project-level outputs view. For depth on the topics it summarises:
 
 ## Sources
 
-- `CHANGELOG-RC1.md` — Pre-RC1 and RC-1 Hardening (Jan 12 – Feb 2, 2026)
-- `CHANGELOG-RC2.md` — RC-2.0 through RC-2.5 (Feb 2–12, 2026)
-- `CHANGELOG.md` — RC-3.2 through RC-5.2 + Unreleased (Feb 13, 2026 – present)
-- `docs/release/archive/feature-inventory.md` — RC-3.3 feature reconciliation (1 March 2026) — archived snapshot
-- `docs/release/archive/rc4-planning-brief.md` — RC-4 work-package summary (3 March 2026) — archived planning brief
+- `../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC1.md` — Pre-RC1 and RC-1 Hardening (Jan 12 – Feb 2, 2026) — archived snapshot
+- `../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC2.md` — RC-2.0 through RC-2.5 (Feb 2–12, 2026) — archived snapshot
+- `/CHANGELOG.md` — active release changelog from RC-3.2 through RC-5.2 + Unreleased (Feb 13, 2026 – present)
+- `../../docs-archive/2026-05-19-docs-cleanout/docs/release/feature-inventory.md` — RC-3.3 feature reconciliation (1 March 2026) — archived snapshot
+- `../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc4-executive-brief.md` — RC-4 work-package summary (3 March 2026) — archived planning brief
 - Git remotes: `origin/full-history-pre-rc1`, `origin/pre-RC2`, `origin/RC5.2`, `origin/main`
 - Filigree session-context snapshot (19 May 2026)

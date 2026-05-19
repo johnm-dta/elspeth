@@ -1327,8 +1327,9 @@ plugin system, and CLI.
 
 ## Historical Changelogs
 
-- [RC-1 Changelog](CHANGELOG-RC1.md) — Initial framework build and hardening (Jan 12 – Feb 2, 2026)
-- [RC-2 Changelog](CHANGELOG-RC2.md) — Sub-releases RC2 through RC2.5 (Feb 2 – Feb 12, 2026)
+The root changelog is the visible release-history document. Earlier RC-1 and
+RC-2 fragment files were removed during the repository cleanout because their
+useful history is represented here and in git history.
 
 <!-- Comparison links — tags created at release time -->
 [0.5.1]: https://github.com/tachyon-beep/elspeth/compare/v0.5.0-rc5.0...v0.5.1-rc5.1

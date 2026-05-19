@@ -855,7 +855,7 @@ The deletion of `RunsView.test.tsx` (579 lines, commit `66748edb9`) removed test
 - Test rehoming for the preserved capabilities is owed: the deleted `RunsView.test.tsx` covered behaviour that the new surfaces implement but do not yet test at the same granularity. Filing as a follow-up rather than amending 3A retroactively.
 - The default for "deleted on purpose" is that it stays deleted unless an explicit product need re-emerges. The two genuine retirements (polling, fan-out accounting) follow this rule.
 
-**Override path:** If polling-while-active or fan-out accounting is intended to return, the plan for that phase must (1) include the capability explicitly in scope and (2) add the corresponding tests. The six preserved capabilities are already live; their test coverage is the rehoming target, tracked separately. The synthesis file at `.review/synthesis.md` (Agent D Finding 5) is retained as the historical inventory.
+**Override path:** If polling-while-active or fan-out accounting is intended to return, the plan for that phase must (1) include the capability explicitly in scope and (2) add the corresponding tests. The six preserved capabilities are already live; their test coverage is the rehoming target, tracked separately. This section is now the visible historical inventory; the hidden reviewer packet was removed during the repository cleanout.
 
 ### 2026-05-17 — P3A-003 — Migration shim policy decision (operator override)
 

@@ -3,9 +3,11 @@
 Index of the documentation shipped in this repository.
 
 **Framework status:** `0.5.2` (RC-5.2 line)
-**Tracking note:** active delivery work lives in Filigree; many docs under `release/`,
-`plans/`, `analysis/`, `audits/`, and `arch-analysis-*` are intentionally
-point-in-time snapshots.
+**Tracking note:** active delivery work lives in Filigree. Current release,
+architecture, contract, runbook, and composer evidence docs remain visible here;
+point-in-time audit, architecture-pack, generated-review, and handover snapshots
+from earlier workstreams were moved to
+[`docs-archive/2026-05-19-docs-cleanout/`](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md).
 
 ---
 
@@ -18,6 +20,7 @@ point-in-time snapshots.
 | Investigating audit data | [Landscape MCP Analysis](guides/landscape-mcp-analysis.md) and [Architecture Overview](../ARCHITECTURE.md) |
 | Developing plugins | [Data Trust and Error Handling](guides/data-trust-and-error-handling.md), [Plugin Development Guide](../PLUGIN.md), then [Plugin Protocol](contracts/plugin-protocol.md) |
 | Contributing to the codebase | [Contributing](../CONTRIBUTING.md) and [CLAUDE.md](../CLAUDE.md) |
+| Evaluating ELSPETH | [Executive Summary](release/executive-summary.md), [Progress Report](release/elspeth-progress-rc1-to-rc5.md), and [Velocity Report](release/elspeth-velocity-rc1-to-rc5.md) |
 
 ---
 
@@ -37,7 +40,10 @@ Current architecture and design references.
 
 ## Contracts
 
-Formal protocol definitions and token outcome guarantees.
+Formal protocol definitions and token outcome guarantees. The narrative
+assurance surface is [`release/guarantees.md`](release/guarantees.md); the
+documents in this section formalise specific contracts that the engine, plugin
+authors, and integrators must uphold.
 
 - [Plugin Protocol](contracts/plugin-protocol.md)
 - [System Operations](contracts/system-operations.md)
@@ -58,6 +64,13 @@ Tutorials and operator/developer how-to material.
 - [Troubleshooting](guides/troubleshooting.md)
 - [Docker](guides/docker.md)
 
+## Composer Evidence
+
+Evaluation reports and investigation notes that still support current composer
+development or product explanation.
+
+- [Composer Evidence Index](composer/evidence/README.md)
+
 ## Reference
 
 Lookup material for configuration, tools, and plugin-specific behavior.
@@ -68,6 +81,14 @@ Lookup material for configuration, tools, and plugin-specific behavior.
 - [ChaosLLM](reference/chaosllm.md)
 - [ChaosLLM MCP Server](reference/chaosllm-mcp.md)
 - [Web Scrape Transform](reference/web-scrape-transform.md)
+
+## Current Audit Work
+
+Active audit syntheses and ticket-filing packets that still drive current work.
+
+- [CI/CD Allowlist Audit](audit/2026-05-19-cicd-allowlist-audit.md) — live gate inventory and burn-down findings for `elspeth-297b8f5c5d`
+- [CI/CD Allowlist Findings](audit/findings/) — SME reports and draft subticket list retained until filing is complete
+- [Test Suite Audit](audit/test-suite/README.md) — incomplete but still actionable test-quality audit waves and filed issue map
 
 ## Operations
 
@@ -84,20 +105,22 @@ Runbooks and production procedures.
 
 ## Release History
 
-Cross-release progress, velocity, and assurance documents. See the [release docs README](release/README.md) for an index.
+Audience-facing release, progress, velocity, and evaluation documents. See the
+[release docs README](release/README.md) for the full index.
 
+- [Executive Summary](release/executive-summary.md) — draft public-sector evaluation brief for RC-5.2
 - [Progress Report: RC-1 to RC-5](release/elspeth-progress-rc1-to-rc5.md) — current cumulative-output view (RC-5.2, May 2026): what shipped, period by period
 - [Velocity Report: RC-1 to RC-5](release/elspeth-velocity-rc1-to-rc5.md) — current per-day commit volume (RC-5.2, May 2026): tempo and peak-day attribution
-- [Audit and Lineage Guarantees](release/guarantees.md) — long-lived assurance narrative; refreshed per release
+- [Audit and Lineage Guarantees](release/guarantees.md) — long-lived assurance narrative; refreshed per release (current contract surface; §1–§10 RC-3 base, §11–§14 RC-5.2 additions)
 - [Executive Summary (RC-5.2)](release/executive-summary.md) — capability and assurance brief for Australian public-sector evaluators *(DRAFT — awaiting operator sign-off)*
-- [Archived RC snapshots](release/archive/) — `feature-inventory.md` (RC-3.3), `rc4-planning-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix-postmortem.md` — historical context only
+- [Archived RC snapshots](../docs-archive/2026-05-19-docs-cleanout/docs/release/) — `feature-inventory.md` (RC-3.3), `rc4-executive-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix-postmortem.md` — historical context only; see the [2026-05-19 cleanout MANIFEST](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) for full relocation map
 
 ## Historical Snapshots
 
 Intentional point-in-time documents retained for reference.
 
+- [RC-3 Release Notes](../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-3-release-notes.md) — RC-3 release-history snapshot, relocated into the 2026-05-19 dated docs archive
 - [Plans index](plans/README.md) — curated in-tree design and implementation plans
-- [Audits](audits/) — audit reports and verification sweeps
-- [Analysis](analysis/) — analysis and posture briefs
-- [Architecture analysis workspace](arch-analysis-2026-02-22-0446/) — pre-remediation snapshot cited by later ADRs and plans
-- [Superpowers specs and plans](superpowers/) — internal assistant-driven planning/spec artifacts
+- [Composer UX Redesign](composer/ux-redesign-2026-05/) — current RC5.2 composer planning and implementation phase documents
+- [Superpowers specs and active plans](superpowers/) — internal assistant-driven planning/spec artifacts retained while still load-bearing
+- [Archived docs cleanout manifest](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) — relocation map for archived release docs, audits, frozen architecture packs, generated review sidecars, and completed handovers

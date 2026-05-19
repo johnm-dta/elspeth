@@ -300,12 +300,13 @@ git log origin/full-history-pre-rc1 origin/pre-RC2 HEAD --format='%h' \
 
 Output: 123 active-commit days, 4,521 unique commits.
 
-Peak-day attribution is taken from the dominant `feat(...)` / `add(...)` / `implement(...)` commit cluster on each day, validated against the CHANGELOG family (`CHANGELOG-RC1.md`, `CHANGELOG-RC2.md`, `CHANGELOG.md`) for cross-reference.
+Peak-day attribution is taken from the dominant `feat(...)` / `add(...)` / `implement(...)` commit cluster on each day, validated against `CHANGELOG.md`, archived release snapshots, and Git history for cross-reference.
 
 ---
 
 ## Sources
 
-- `CHANGELOG-RC1.md`, `CHANGELOG-RC2.md`, `CHANGELOG.md`
+- `CHANGELOG.md`
+- Git history for deleted RC-1 and RC-2 changelog snapshots
 - Git remotes: `origin/full-history-pre-rc1`, `origin/pre-RC2`, `origin/RC5.2`, `origin/main`
 - `docs/release/elspeth-progress-rc1-to-rc5.md` — companion cumulative-output document

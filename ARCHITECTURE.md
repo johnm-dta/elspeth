@@ -17,7 +17,7 @@ C4 model documentation for the ELSPETH auditable pipeline framework.
 | **Data flow?** | Source → Transforms/Gates → Sinks (all recorded) |
 | **Audit storage?** | SQLite/SQLCipher (dev) / PostgreSQL (prod) |
 | **Extension model?** | pluggy-based plugin system |
-| **Production LOC** | ~121,400 Python lines across 359 files in `src/elspeth/` (RC-5 baseline; not refreshed for RC-5.1; frontend TSX/CSS counts not refreshed; see `docs/arch-analysis-2026-04-29-1500/01-discovery-findings.md`) |
+| **Production LOC** | ~121,400 Python lines across 359 files in `src/elspeth/` (RC-5 baseline; not refreshed for RC-5.1; frontend TSX/CSS counts not refreshed) |
 | **Test LOC** | ~274,900 Python lines (731 files, 2.6:1 ratio; RC-5 baseline) |
 
 ---
@@ -383,7 +383,7 @@ C4Component
 | **Sinks** | 4 plugins (csv, json, database, azure_blob) |
 | **Clients** | 4 audited clients (HTTP, LLM, Replayer, Verifier) |
 
-**Total Plugin Ecosystem:** 29 plugins across the Source/Transform/Sink categories (6 sources + 17 transforms + 6 sinks, verified against the `discover_all_plugins()` registry; the per-category breakdown above is from an earlier RC and has drifted — see `docs/arch-analysis-2026-04-29-1500/01-discovery-findings.md`). Sub-package layout: `infrastructure/`, `sources/`, `transforms/`, `sinks/`.
+**Total Plugin Ecosystem:** 29 plugins across the Source/Transform/Sink categories (6 sources + 17 transforms + 6 sinks, verified against the `discover_all_plugins()` registry). The per-category table above is retained as a reader-friendly summary; refresh it from the registry before treating the exact counts as release evidence. Sub-package layout: `infrastructure/`, `sources/`, `transforms/`, `sinks/`.
 
 #### Plugin Context Protocols
 

@@ -67,7 +67,7 @@ from tests.integration.web.conftest import _make_session
 pytestmark = pytest.mark.composer_llm_eval
 
 
-SOURCE_REPORT = "notes/composer-llm-eval-2026-04-28.md"
+SOURCE_REPORT = "docs/composer/evidence/composer-llm-eval-2026-04-28.md"
 EVAL_MODEL = "openrouter/openai/gpt-5.5"
 EVAL_USER_ID = "dta_user"
 

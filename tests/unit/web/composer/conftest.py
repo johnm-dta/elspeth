@@ -60,7 +60,7 @@ Scope and discipline notes:
 
 Plan task: Phase 2 / Task 19 (Hypothesis property test infrastructure).
 Spec section: §4.2.6.
-F6 follow-up: drift guard added per ``notes/composer-phase-2-followup-prompt-F1-F6.md``.
+F6 follow-up: drift guard added per ``docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md``.
 """
 
 from __future__ import annotations
@@ -373,7 +373,7 @@ def _assert_default_factory_dict_models_have_overrides(
             "`st.register_type_strategy(<Model>, ...)` in "
             "`tests/unit/web/composer/conftest.py`. See the existing 4 overrides "
             "as templates. F6 hardening — see "
-            "`notes/composer-phase-2-followup-prompt-F1-F6.md`.",
+            "`docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md`.",
         ]
     )
     raise RuntimeError("\n".join(lines))

@@ -7,9 +7,10 @@ decisions (notably the Catalog button) instead of relitigating them, and was
 grounded in the README's two-audience model and the four documented composer
 personas in `evals/`.
 
-These documents are the result of that review. They are **plans**, not commits
-— nothing in this directory has been implemented yet. Read them as a target
-state to adjudicate, not as a description of the live UI.
+The early numbered documents are the result of that review. They are target
+state, not a description of the live UI. Later phase documents in this same
+directory record the RC5.2 implementation plan and follow-up work; treat the
+current phase documents and Filigree as the source of execution truth.
 
 ## How to read this set
 
@@ -60,6 +61,10 @@ dynamic-source-from-chat) and remain open for adjudication on the rest.
 
 See [11-open-questions.md](11-open-questions.md) for the explicit decisions
 still pending.
+
+Generated review sidecars for these plans were removed from active docs during
+the 2026-05-19 cleanout. Findings that still matter are folded into the paired
+plan files.
 
 ## Memory persistence
 

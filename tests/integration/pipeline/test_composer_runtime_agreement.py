@@ -1407,7 +1407,7 @@ class TestComposerRuntimeAgreement:
     ) -> None:
         """Regression for elspeth-f5f798f797.
 
-        S2 v2 from notes/composer-llm-eval-2026-05-01.md: a ``batch_stats``
+        S2 v2 from docs/composer/evidence/composer-llm-eval-2026-05-01.md: a ``batch_stats``
         aggregation with ``schema: {mode: flexible, fields: [...],
         required_fields: [...]}`` was accepted by composer ``/validate`` but
         rejected at runtime with ``SchemaConfigModeViolation`` because
@@ -1663,7 +1663,7 @@ class TestComposerRuntimeRouteTargetAgreement:
         return out_dir / name
 
     def test_both_reject_aggregation_on_error_dangling_sink(self, tmp_path: Path) -> None:
-        """Original reproducer (S2 v1 from notes/composer-llm-eval-2026-05-01.md):
+        """Original reproducer (S2 v1 from docs/composer/evidence/composer-llm-eval-2026-05-01.md):
         aggregation ``on_error: aggregation_errors`` with no sink of that name."""
         csv_path = self._csv_input(tmp_path)
         output_path = self._csv_output(tmp_path)
@@ -2895,10 +2895,10 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
     ``composer_plugin_error``. Closes ``elspeth-209b7e3a2b`` (Phase 0.b).
 
     Eval session S3 (``98573481-e8bc-4a03-8467-d3a86effcd56``, eval notes
-    ``notes/composer-llm-eval-2026-05-01.md``) reported this as a "gate
+    ``docs/composer/evidence/composer-llm-eval-2026-05-01.md``) reported this as a "gate
     primitive crash" because the failures clustered around gate-routing
     prompts. Phase 0.b investigation
-    (``notes/composer-phase-0b-staging-capture-2026-05-02.md``)
+    (``docs/composer/evidence/composer-phase-0b-staging-capture-2026-05-02.md``)
     re-attributed it: gate routing requires sinks, the LLM defaults sinks
     to ``collision_policy="fail_if_exists"``, and stale eval artifacts in
     ``data/outputs/`` collide. The actual defect was

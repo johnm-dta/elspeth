@@ -17,7 +17,7 @@ These tests exercise the guard's contract directly:
 * **Field-discovery path**: ``_models_needing_override`` reports the
   default-factory-dict fields of the synthetic model exactly.
 
-F6 follow-up: see ``notes/composer-phase-2-followup-prompt-F1-F6.md``.
+F6 follow-up: see ``docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md``.
 Spec section: §4.2.6.
 """
 

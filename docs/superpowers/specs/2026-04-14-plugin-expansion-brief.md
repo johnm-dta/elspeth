@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-14
 **Scope**: Phased expansion of ELSPETH's plugin ecosystem across search, analytical, and reporting capabilities
-**Present-state evidence**: For the evaluation evidence underpinning the audit-discipline claim this case-for-work rests on, see `notes/composer-briefing-2026-05-03.md` (the SES briefing on the composer hard-mode evaluation, including past-extension evidence that the audit discipline holds when the platform is extended).
+**Present-state evidence**: For the evaluation evidence underpinning the audit-discipline claim this case-for-work rests on, see `docs/composer/evidence/composer-briefing-2026-05-03.md` (the SES briefing on the composer hard-mode evaluation, including past-extension evidence that the audit discipline holds when the platform is extended).
 
 ---
 

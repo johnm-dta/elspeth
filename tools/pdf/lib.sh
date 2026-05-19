@@ -126,9 +126,10 @@ els_stamp_date() {
 # ─────────────────────────────────────────────────────────────
 # Discover the latest arch-pack source directory.
 #
-# Glob under "$PROJECT_ROOT/docs/" for arch-pack-* directories;
-# pick the lexicographically last (date-stamp prefix gives
-# chronological order).  Honours $ELSPETH_ARCH_PACK_DIR if set.
+# Glob under "$PROJECT_ROOT/docs/" and archived cleanout folders for
+# arch-pack-* directories; pick the lexicographically last
+# (date-stamp prefix gives chronological order).  Honours
+# $ELSPETH_ARCH_PACK_DIR if set.
 #
 # Echoes the absolute path; exits non-zero with a diagnostic
 # if no candidate exists.
@@ -144,10 +145,18 @@ els_discover_arch_pack() {
     fi
 
     local docs="$PROJECT_ROOT/docs"
+    local archive="$PROJECT_ROOT/docs-archive"
     local latest
-    latest="$(find "$docs" -maxdepth 1 -type d -name 'arch-pack-*' | sort | tail -1)"
+    latest="$(
+        {
+            find "$docs" -maxdepth 1 -type d -name 'arch-pack-*'
+            if [[ -d "$archive" ]]; then
+                find "$archive" -type d -name 'arch-pack-*'
+            fi
+        } | sort | tail -1
+    )"
     if [[ -z "$latest" ]]; then
-        echo "[error] no docs/arch-pack-* directory found in $docs" >&2
+        echo "[error] no arch-pack-* directory found in $docs or $archive" >&2
         echo "        set ELSPETH_ARCH_PACK_DIR to override" >&2
         exit 1
     fi

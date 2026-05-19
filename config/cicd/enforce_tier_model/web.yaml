@@ -829,11 +829,12 @@ allow_hits:
   safety: Falls through to best-effort failed-status update on absorbed exceptions; ValueError surfaces Tier-1 audit corruption as required; programmer bugs (TypeError/AttributeError/RuntimeError)
     propagate
   expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=e61d4ed5e592b346
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=80110f33271577a7
   owner: web-execution
   reason: Canonical narrow-catch pattern (commits b8ba2214 / 127417cb) for the status update inside the BaseException recovery handler. Fingerprint shifted from 7edaa7aa890d4d12
-    by the I-4 audit-primacy fix that removed the post-terminal-exception slog block above this handler; current rotation 4ca07d4fcd4cc2a6 \u2192 e61d4ed5e592b346
-    by the F-17/F-21 pre-execute placeholder gate ImportFroms.
+    by the I-4 audit-primacy fix that removed the post-terminal-exception slog block above this handler; rotation 4ca07d4fcd4cc2a6 \u2192 e61d4ed5e592b346 by the
+    F-17/F-21 pre-execute placeholder gate ImportFroms; current rotation e61d4ed5e592b346 \u2192 80110f33271577a7 by the elspeth-879f6de6bd branch-3 IRTE catch
+    inserted above this clause to close the probe-failure-with-legal-transitions gap (post_exception_recovery_aborted_run_terminal slog site).
   safety: Catches (SQLAlchemyError, OSError) from update_run_status so transient DB or filesystem failures do not mask the original pipeline exception; programmer
     bugs (TypeError, AttributeError, RuntimeError) propagate
   expires: null

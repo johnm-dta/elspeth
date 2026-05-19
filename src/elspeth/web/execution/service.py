@@ -1253,10 +1253,29 @@ class ExecutionServiceImpl:
             # terminal status outgoing-empty.  The pre-fix recovery let that
             # ValueError escape, losing the original ``exc`` into __context__.
             #
-            # Probe current run state first; if the audit row is already
-            # terminal, skip both the illegal status update AND the
-            # ``"failed"`` SSE broadcast (which would otherwise contradict
-            # the audit row's true terminal status — audit primacy).
+            # Recovery has three branches keyed on what we can learn about the
+            # audit row's current status:
+            #
+            #   1. Probe succeeds, row is terminal → skip the illegal status
+            #      update AND the ``"failed"`` SSE broadcast (which would
+            #      otherwise contradict the audit row's true terminal status —
+            #      audit primacy).
+            #
+            #   2. Probe succeeds, row is non-terminal → fall through to the
+            #      normal ``update_run_status("failed", ...)`` recovery
+            #      (e.g. a crash mid-orchestration with the row still in
+            #      ``running``).
+            #
+            #   3. Probe fails (SQLAlchemyError / OSError) AND the row is
+            #      actually terminal → fall-through update_run_status raises
+            #      IllegalRunTransitionError, caught narrowly below.  IRTE
+            #      carries ``current_status``, which is the validator's read
+            #      of ground truth immediately before it rejected the
+            #      transition — so IRTE is in-band proof of terminality and
+            #      promotes us into branch 1's audit-primacy stance (suppress
+            #      the failed-SSE broadcast).  This is the resolution of the
+            #      ambiguity that ``post_exception_run_state_probe_failed``
+            #      logged above.
             #
             # Probe is non-signal-only: signals (KeyboardInterrupt, SystemExit)
             # mean the event loop is shutting down — async calls including
@@ -1333,6 +1352,57 @@ class ExecutionServiceImpl:
                 else:
                     try:
                         self._call_async(self._session_service.update_run_status(run_uuid, status="failed", error=client_msg))
+                    except IllegalRunTransitionError as irte:
+                        # elspeth-879f6de6bd recovery branch 3 (probe-failed
+                        # AND row-actually-terminal — see the comment block
+                        # at the top of this BaseException handler).
+                        #
+                        # IRTE here is the mechanical artefact of attempting
+                        # ``failed`` against a row whose true status is
+                        # terminal; ``irte.current_status`` is the validator's
+                        # authoritative read of that row, taken inside
+                        # SessionService.update_run_status immediately before
+                        # it rejected the transition.  That gives us the
+                        # ground truth the probe couldn't establish, so we
+                        # promote into the audit-primacy stance (suppress the
+                        # ``failed`` SSE that would otherwise contradict the
+                        # audit row).
+                        #
+                        # This is a distinct semantic from the established
+                        # IllegalRunTransitionError catches at the
+                        # ``"running"`` and terminal transitions earlier in
+                        # this method (see those sites' ``Cancelled-race
+                        # recovery`` comments and the IRTE class docstring):
+                        # those handle the cancelled-race artefact; this one
+                        # handles the post-completion + probe-failure
+                        # artefact.  The IRTE docstring's narrow-subclass
+                        # sanction ("never bare ValueError — Tier-1 invariant
+                        # breaches must propagate") applies the same way to
+                        # both: the other four ValueErrors update_run_status
+                        # can raise (run-not-found, landscape_run_id
+                        # overwrite, completed-without-landscape,
+                        # failed-without-error) are not subclasses of IRTE
+                        # and remain uncaught here.
+                        #
+                        # Offensive Tier-1 assert: if IRTE fires for a
+                        # non-terminal current_status, the SessionService
+                        # validator has a bug (it shouldn't reject a
+                        # non-terminal → failed transition).  Reraise so the
+                        # validator regression surfaces rather than being
+                        # silently absorbed; the original ``exc`` remains on
+                        # ``__context__`` via Python's implicit chaining and
+                        # the SRE-discoverable surface is identical to the
+                        # pre-fix bug — the right tradeoff for a validator
+                        # regression.
+                        if irte.current_status not in SESSION_TERMINAL_RUN_STATUS_VALUES:
+                            raise
+                        run_already_terminal = True
+                        slog.error(
+                            "post_exception_recovery_aborted_run_terminal",
+                            run_id=run_id,
+                            original_exc_class=type(exc).__name__,
+                            irte_current_status=irte.current_status,
+                        )
                     except (SQLAlchemyError, OSError) as status_err:
                         # Narrow catch (canonical pattern, commits b8ba2214/127417cb):
                         # SQLAlchemyError family + OSError only. Programmer bugs in

@@ -1,0 +1,21 @@
+[project]
+name = "elspeth-lints"
+version = "0.1.0"
+description = "Workspace-only static analyzer for ELSPETH-specific CI invariants"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["pyyaml>=6.0,<7"]
+
+[project.scripts]
+elspeth-lints = "elspeth_lints.core.cli:main"
+
+[project.entry-points."elspeth_lints.rules"]
+meta-no-new-bespoke-cicd-enforcer = "elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer:RULE"
+# Rule entry points are added by migration tasks.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/elspeth_lints"]

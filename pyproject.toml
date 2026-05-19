@@ -249,7 +249,7 @@ packages = ["src/elspeth"]
 [tool.ruff]
 target-version = "py313"
 line-length = 140
-src = ["src", "tests"]
+src = ["src", "tests", "elspeth-lints/src"]
 
 [tool.ruff.lint]
 select = [
@@ -275,7 +275,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["elspeth"]
+known-first-party = ["elspeth", "elspeth_lints"]
 
 [tool.ruff.lint.flake8-bugbear]
 # typer.Option/Argument are immutable and safe in function defaults
@@ -368,7 +368,7 @@ disallow_incomplete_defs = false
 # === Pytest Configuration ===
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "elspeth-lints/src"]
 addopts = [
     "-ra",
     "--strict-markers",

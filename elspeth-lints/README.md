@@ -1,13 +1,24 @@
 # elspeth-lints
 
-`elspeth-lints` is the planned workspace-only static analyzer for
-ELSPETH-specific CI/CD invariants. The package scaffold is tracked separately
-by Filigree issue `elspeth-8e71b27ba0`; this README exists now so reviewers have
-a stable landing point for the tooling decision before the implementation
-package is bootstrapped.
+`elspeth-lints` is the workspace-only static analyzer for ELSPETH-specific
+CI/CD invariants. It is an internal monorepo package, not a PyPI distribution.
+
+The initial package skeleton provides the shared CLI shell, registry, AST
+walker, protocol/finding models, and allowlist loader. Rule migrations land
+separately under Filigree issue `elspeth-8843308cfe`.
 
 For the toolchain decision, see
 [ADR-023: Custom Python Static Analyzer for ELSPETH-Specific CI Invariants](../docs/architecture/adr/023-custom-python-ci-analyzer.md).
 
 For the implementation order, see
 [the elspeth-lints master implementation order](../docs/plans/2026-05-19-elspeth-lints-master-implementation-order.md).
+
+For rule authorship and protocol details, see
+[the rule author guide](../docs/elspeth-lints/rule-author-guide.md) and
+[the protocol reference](../docs/elspeth-lints/protocols.md).
+
+During the skeleton phase, the expected empty invocation is:
+
+```bash
+elspeth-lints check --rules nothing --root /tmp
+```

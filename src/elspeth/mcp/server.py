@@ -693,10 +693,10 @@ Examples:
     elspeth-mcp --database sqlite:///./state/audit.db
 
     # Run with PostgreSQL
-    elspeth-mcp --database postgresql://user:pass@host/dbname
+    elspeth-mcp --database postgresql://user@host/dbname
 
     # Run with SQLCipher-encrypted database
-    export ELSPETH_AUDIT_KEY="my-passphrase"
+    export ELSPETH_AUDIT_KEY="<set-out-of-band>"
     elspeth-mcp --database sqlite:///./state/audit.db --passphrase-env ELSPETH_AUDIT_KEY
 
     # Interactive mode - finds and prompts for databases
@@ -773,7 +773,7 @@ Environment Variables:
         if passphrase is None or not passphrase.strip():
             sys.stderr.write(
                 f"Error: environment variable {args.passphrase_env} is not set or is empty.\n"
-                f'Set it with: export {args.passphrase_env}="your-passphrase"\n'
+                "Set the SQLCipher passphrase in that environment variable before retrying.\n"
             )
             sys.exit(1)
 

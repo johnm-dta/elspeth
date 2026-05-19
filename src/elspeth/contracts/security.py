@@ -22,7 +22,6 @@ via the secrets configuration in your pipeline YAML.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import os
 
@@ -94,10 +93,6 @@ def secret_fingerprint(secret: str, *, key: bytes | None = None) -> str:
     if len(key) == 0:
         raise ValueError("Fingerprint key must not be empty — an empty HMAC key produces meaningless fingerprints")
 
-    digest = hmac.new(
-        key=key,
-        msg=secret.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).hexdigest()
+    digest = hmac.digest(key, secret.encode("utf-8"), "sha256").hex()
 
     return digest

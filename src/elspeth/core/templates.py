@@ -47,6 +47,10 @@ __all__ = [
 ]
 
 
+def _create_field_extraction_environment() -> Environment:
+    return Environment(autoescape=True)
+
+
 def extract_jinja2_fields(
     template_string: str,
     namespace: str = "row",
@@ -83,7 +87,7 @@ def extract_jinja2_fields(
         >>> extract_jinja2_fields("{{ lookup.data }}")  # Different namespace
         frozenset()
     """
-    env = Environment()
+    env = _create_field_extraction_environment()
     ast = env.parse(template_string)
     fields: set[str] = set()
     _walk_ast(ast, namespace, fields)
@@ -173,7 +177,7 @@ def extract_jinja2_fields_with_details(
         >>> extract_jinja2_fields_with_details('{{ row.a }} {{ row["a"] }}')
         {'a': ['attr', 'item']}
     """
-    env = Environment()
+    env = _create_field_extraction_environment()
     ast = env.parse(template_string)
     fields: dict[str, list[str]] = {}
 

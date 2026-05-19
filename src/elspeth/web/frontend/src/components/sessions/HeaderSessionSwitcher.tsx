@@ -250,7 +250,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
               return !v;
             });
           }}
-          className="header-session-switcher-trigger"
+          className="btn-compact header-session-switcher-trigger"
         >
           <span aria-hidden="true">Session:</span>{" "}
           <strong>{triggerLabel}</strong>

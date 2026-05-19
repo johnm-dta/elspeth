@@ -1,4 +1,9 @@
 # CodeQL analysis for Python source.
+#
+# ADR-023 explains why CodeQL remains a complementary generic vulnerability
+# analyzer while ELSPETH-specific invariants live in the custom
+# workspace-only elspeth-lints analyzer:
+# docs/architecture/adr/023-custom-python-ci-analyzer.md
 
 name: CodeQL
 

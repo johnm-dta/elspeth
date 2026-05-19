@@ -5,6 +5,10 @@ Tier Model Enforcement Tool
 AST-based static analysis that detects defensive programming patterns that
 violate the three-tier trust model and fails CI unless explicitly allowlisted.
 
+ADR-023 documents why ELSPETH-specific invariants like this remain custom
+Python analyzer rules instead of CodeQL/Semgrep/ast-grep queries:
+docs/architecture/adr/023-custom-python-ci-analyzer.md
+
 Enforces ELSPETH's data manifesto (see CLAUDE.md):
 - Tier 1 (Audit Database): Full trust - crash on any anomaly
 - Tier 2 (Pipeline Data): Elevated trust - expect types, wrap operations on values

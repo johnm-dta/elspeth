@@ -16,7 +16,7 @@ This avoids the anti-pattern of testing mocks instead of behavior.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -4623,109 +4623,12 @@ class TestGateJumpPastCoalesceInvariant:
                 coalesce_name=CoalesceName("merge"),
             )
 
-        # Token should have been held at coalesce
-        assert result is None or (hasattr(result, "outcome") and result is not None)
-
-
-# ---------------------------------------------------------------------------
-# T18: Processor outcome type tests
-# ---------------------------------------------------------------------------
-
-
-class TestProcessorOutcomeTypes:
-    """Test the private discriminated union types for _process_single_token extraction."""
-
-    def test_transform_continue(self) -> None:
-        from elspeth.engine.processor import _TransformContinue
-
-        outcome = _TransformContinue(
-            updated_token=Mock(),
-            updated_sink="output",
-        )
-        assert outcome.updated_sink == "output"
-        assert outcome.updated_token is not None
-
-    def test_transform_terminal_single(self) -> None:
-        from elspeth.engine.processor import _TransformTerminal
-
-        mock_result = Mock()
-        outcome = _TransformTerminal(result=mock_result)
-        assert outcome.result is mock_result
-
-    def test_transform_terminal_list(self) -> None:
-        from elspeth.engine.processor import _TransformTerminal
-
-        mock_results = cast("list[RowResult]", [Mock(spec=RowResult), Mock(spec=RowResult)])
-        outcome = _TransformTerminal(result=mock_results)  # type: ignore[arg-type]  # intentionally passing list to test runtime behavior
-        assert isinstance(outcome.result, list)  # type: ignore[unreachable]
-        assert len(outcome.result) == 2  # type: ignore[unreachable]
-
-    def test_transform_outcome_isinstance_dispatch(self) -> None:
-        """Verify isinstance works for discriminated union dispatch."""
-        from elspeth.engine.processor import _TransformContinue, _TransformTerminal
-
-        continue_outcome = _TransformContinue(updated_token=Mock(), updated_sink="out")
-        terminal_outcome = _TransformTerminal(result=Mock())
-
-        assert isinstance(continue_outcome, _TransformContinue)
-        assert not isinstance(continue_outcome, _TransformTerminal)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-        assert isinstance(terminal_outcome, _TransformTerminal)
-        assert not isinstance(terminal_outcome, _TransformContinue)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-
-    def test_gate_continue_default_next_node(self) -> None:
-        from elspeth.engine.processor import _GateContinue
-
-        outcome = _GateContinue(updated_token=Mock(), updated_sink="output")
-        assert outcome.next_node_id is None
-
-    def test_gate_continue_explicit_next_node(self) -> None:
-        from elspeth.engine.processor import _GateContinue
-
-        outcome = _GateContinue(updated_token=Mock(), updated_sink="output", next_node_id=NodeID("jump_target"))
-        assert outcome.next_node_id == NodeID("jump_target")
-
-    def test_gate_terminal(self) -> None:
-        from elspeth.engine.processor import _GateTerminal
-
-        mock_result = Mock()
-        outcome = _GateTerminal(result=mock_result)
-        assert outcome.result is mock_result
-
-    def test_gate_outcome_isinstance_dispatch(self) -> None:
-        from elspeth.engine.processor import _GateContinue, _GateTerminal
-
-        continue_outcome = _GateContinue(updated_token=Mock(), updated_sink="out")
-        terminal_outcome = _GateTerminal(result=Mock())
-
-        assert isinstance(continue_outcome, _GateContinue)
-        assert not isinstance(continue_outcome, _GateTerminal)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-        assert isinstance(terminal_outcome, _GateTerminal)
-        assert not isinstance(terminal_outcome, _GateContinue)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-
-    def test_all_outcome_types_are_frozen(self) -> None:
-        from elspeth.engine.processor import (
-            _GateContinue,
-            _GateTerminal,
-            _TransformContinue,
-            _TransformTerminal,
-        )
-
-        # Verify frozen by attempting to mutate each type's own field
-        tc = _TransformContinue(updated_token=Mock(), updated_sink="out")
-        with pytest.raises(AttributeError):
-            tc.updated_sink = "other"  # type: ignore[misc]
-
-        tt = _TransformTerminal(result=Mock())
-        with pytest.raises(AttributeError):
-            tt.result = Mock()  # type: ignore[misc]
-
-        gc = _GateContinue(updated_token=Mock(), updated_sink="out")
-        with pytest.raises(AttributeError):
-            gc.updated_sink = "other"  # type: ignore[misc]
-
-        gt = _GateTerminal(result=Mock())
-        with pytest.raises(AttributeError):
-            gt.result = Mock()  # type: ignore[misc]
+        # Token should be held at the coalesce node without emitting a terminal result.
+        assert result is None
+        assert _child_items == []
+        coalesce_exec.accept.assert_called_once()
+        assert coalesce_exec.accept.call_args.kwargs["token"].token_id == "tok-1"
+        assert coalesce_exec.accept.call_args.kwargs["coalesce_name"] == CoalesceName("merge")
 
 
 class TestFlushContextImmutability:

@@ -95,6 +95,13 @@ Filed:
 
 - `elspeth-e4281a36d8`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-e4281a36d8` resolved. The weak coalesce assertion now
+  verifies that the token is held at the coalesce node without emitting a
+  terminal result, and the private outcome dataclass roll-call block was
+  deleted.
+
 ### UENG-3 — Merge-failure test accepts the wrong exception boundary
 
 Evidence:

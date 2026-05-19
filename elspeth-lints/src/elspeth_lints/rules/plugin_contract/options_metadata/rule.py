@@ -32,6 +32,12 @@ class PluginCatalog(Protocol):
 PluginManagerFactory = Callable[[], PluginCatalog]
 
 
+def _default_plugin_manager() -> PluginCatalog:
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+    return cast(PluginCatalog, get_shared_plugin_manager())
+
+
 @dataclass(frozen=True, slots=True)
 class FieldLocation:
     """Best-effort source location for one Pydantic model field."""
@@ -45,7 +51,7 @@ class FieldLocation:
 class OptionsMetadataRule:
     """Fail when plugin configuration fields lack title or description metadata."""
 
-    plugin_manager_factory: PluginManagerFactory = lambda: _default_plugin_manager()
+    plugin_manager_factory: PluginManagerFactory = _default_plugin_manager
     allowlist_path: Path = ALLOWLIST_PATH
     id: str = RULE_ID
     scope: RuleScope = RuleScope.WHOLE_REPO
@@ -209,12 +215,6 @@ def _required_non_empty_string(entry: Mapping[str, object], key: str, *, path: P
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{path}: entries[{index}] must include non-empty {key!r}")
     return value
-
-
-def _default_plugin_manager() -> PluginCatalog:
-    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-
-    return cast(PluginCatalog, get_shared_plugin_manager())
 
 
 RULE = OptionsMetadataRule()

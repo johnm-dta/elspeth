@@ -1,0 +1,4 @@
+name: ELSPETH CodeQL config
+
+paths-ignore:
+  - elspeth-lints/src/**/fixtures/**

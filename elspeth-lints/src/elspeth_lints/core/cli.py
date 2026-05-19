@@ -27,7 +27,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_check(args, registry=DEFAULT_REGISTRY)
     if args.command == "dump-edges":
         return _run_dump_edges(args)
-    parser.error(f"unknown command {args.command!r}")
+    sys.stderr.write(f"Unknown command {args.command!r}\n")
+    return 2
 
 
 def _build_parser() -> argparse.ArgumentParser:

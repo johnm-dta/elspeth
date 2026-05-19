@@ -36,6 +36,23 @@ export interface ChatTurn {
    * message in the turn. For user/system turns this is the sole message.
    */
   primaryMessage: ChatMessage;
+  /**
+   * Atomic-reveal contract: true once the turn is safe to render in the chat.
+   *
+   * - `user` / `system` turns are standalone audit rows and always complete.
+   * - `agent` turns become complete the moment any assistant row in the turn
+   *   carries non-empty content (i.e. the LLM's text reply has landed). While
+   *   the turn contains only tool-call rows, it stays incomplete and the
+   *   rendering layer hides the bubble (a placeholder "thinking" affordance
+   *   occupies the slot instead, painted by ChatPanel based on isComposing).
+   *
+   * The contract is purely client-side and derived from already-present audit
+   * rows — no backend "turn_end" signal is required. This intentionally
+   * reverses the prior "stream tool calls live" behaviour: the assistant turn
+   * is presented atomically once assembled, rather than progressively as
+   * audit rows trickle in.
+   */
+  isComplete: boolean;
 }
 
 /**
@@ -87,6 +104,7 @@ interface MutableTurn {
   aggregatedToolCalls: ToolCall[];
   finalContent: string;
   primaryMessage: ChatMessage;
+  isComplete: boolean;
 }
 
 function makeStandaloneTurn(kind: ChatTurnKind, message: ChatMessage): MutableTurn {
@@ -97,6 +115,8 @@ function makeStandaloneTurn(kind: ChatTurnKind, message: ChatMessage): MutableTu
     aggregatedToolCalls: [],
     finalContent: message.content ?? "",
     primaryMessage: message,
+    // user / system turns are standalone audit rows: always complete.
+    isComplete: true,
   };
 }
 
@@ -108,6 +128,9 @@ function makeAgentTurn(message: ChatMessage): MutableTurn {
     aggregatedToolCalls: [],
     finalContent: "",
     primaryMessage: message,
+    // Provisional — flipped to true by absorb() the moment any assistant row
+    // in the turn carries non-empty content. See ChatTurn.isComplete docs.
+    isComplete: false,
   };
   absorb(turn, message);
   return turn;
@@ -127,6 +150,11 @@ function absorb(turn: MutableTurn, message: ChatMessage): void {
   turn.primaryMessage = message;
   if (message.content && message.content.length > 0) {
     turn.finalContent = message.content;
+    // Atomic-reveal contract: an agent turn is complete the moment any
+    // assistant row carries non-empty content. Standalone (user/system) turns
+    // are initialised complete by makeStandaloneTurn — this branch is a no-op
+    // for them, but it preserves the invariant uniformly.
+    turn.isComplete = true;
   }
 }
 

@@ -5,7 +5,9 @@ import {
   COMPOSE_CLIENT_GRACE_MS,
   COMPOSE_SERVER_TRANSPORT_HEADROOM_MS,
   COMPOSE_TIMEOUT_MS,
+  COMPOSE_TIMEOUT_ABORT_REASON,
   COMPOSE_TRANSPORT_IDLE_CEILING_MS,
+  COMPOSE_USER_CANCEL_ABORT_REASON,
 } from "@/config/composer";
 
 describe("COMPOSE_TIMEOUT_MS", () => {
@@ -26,5 +28,9 @@ describe("COMPOSE_TIMEOUT_MS", () => {
       COMPOSE_BACKEND_TIMEOUT_MS + minimumClientGraceMs,
     );
     expect(COMPOSE_TIMEOUT_MS).toBeLessThan(COMPOSE_TRANSPORT_IDLE_CEILING_MS);
+  });
+
+  it("uses distinct abort reasons for timeout and user cancel paths", () => {
+    expect(COMPOSE_TIMEOUT_ABORT_REASON).not.toBe(COMPOSE_USER_CANCEL_ABORT_REASON);
   });
 });

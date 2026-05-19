@@ -241,6 +241,75 @@ describe("base interaction tokens", () => {
   });
 });
 
+describe("role-family surface contrast", () => {
+  // The DTA/AGDS three-family role palette (navy chrome, teal workspace, warm
+  // inspection paper) introduced --color-surface-nav, --color-surface-paper,
+  // and re-bound --color-surface-inspector to a warm neutral. These assertions
+  // gate that the new surfaces still host body text at WCAG AA (4.5:1) and
+  // muted text at AA in both themes — the muted-on-warm pair is the tightest
+  // and was the constraint that set the warm-neutral hex.
+
+  it("keeps body text at AA on the navy navigation surface in both themes", () => {
+    const darkText = extractRootToken("--color-text");
+    const darkNav = extractRootToken("--color-surface-nav");
+    const lightText = extractLightThemeToken("--color-text");
+    const lightNav = extractLightThemeToken("--color-surface-nav");
+
+    expect(contrastRatio(darkText, darkNav)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightText, lightNav)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps body text at AA on the warm inspector surface in both themes", () => {
+    const darkText = extractRootToken("--color-text");
+    const darkInspector = extractRootToken("--color-surface-inspector");
+    const lightText = extractLightThemeToken("--color-text");
+    const lightInspector = extractLightThemeToken("--color-surface-inspector");
+
+    expect(contrastRatio(darkText, darkInspector)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightText, lightInspector)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps body text at AA on the paper modal surface in both themes", () => {
+    const darkText = extractRootToken("--color-text");
+    const darkPaper = extractRootToken("--color-surface-paper");
+    const lightText = extractLightThemeToken("--color-text");
+    const lightPaper = extractLightThemeToken("--color-surface-paper");
+
+    expect(contrastRatio(darkText, darkPaper)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightText, lightPaper)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps muted text at AA on the warm inspector surface in both themes", () => {
+    // This is the tightest pair in the role palette — muted text on the warm
+    // neutral inspector. The warm-neutral hex (#2a2826 dark, #faf7f3 light)
+    // was chosen at the bright end of "warm dark" / dark end of "warm light"
+    // so muted text still passes 4.5:1. Tightening the warm-neutral toward
+    // pure black/white would silently regress this; this assertion is the
+    // gate.
+    const darkMuted = extractRootToken("--color-text-muted");
+    const darkInspector = extractRootToken("--color-surface-inspector");
+    const lightMuted = extractLightThemeToken("--color-text-muted");
+    const lightInspector = extractLightThemeToken("--color-surface-inspector");
+
+    expect(contrastRatio(darkMuted, darkInspector)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightMuted, lightInspector)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps the coalesce badge hue distinct from --color-success in both themes", () => {
+    // The original palette had --color-success and --color-badge-coalesce both
+    // set to #14b0ae (byte-identical) — a "completed" badge next to a coalesce
+    // node was indistinguishable. The remediation shifted coalesce cyan-ward.
+    // Asserting strict inequality keeps the two tokens from re-converging in a
+    // future palette rebalance.
+    expect(extractRootToken("--color-badge-coalesce")).not.toBe(
+      extractRootToken("--color-success"),
+    );
+    expect(extractLightThemeToken("--color-badge-coalesce")).not.toBe(
+      extractLightThemeToken("--color-success"),
+    );
+  });
+});
+
 describe("forced-colors accessibility fallbacks", () => {
   it("defines system-color fallbacks for stateful high-contrast surfaces", () => {
     const forcedColorsBlock = extractForcedColorsBlock();

@@ -50,6 +50,7 @@ from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow,
 from elspeth.web.sessions.models import (
     audit_access_log_table,
     chat_messages_table,
+    composer_completion_events_table,
     composition_proposals_table,
     composition_states_table,
     interpretation_events_table,
@@ -1385,6 +1386,7 @@ class SessionServiceImpl:
             title=title,
             created_at=now,
             updated_at=now,
+            archived_at=None,
             forked_from_session_id=forked_from_session_id,
             forked_from_message_id=forked_from_message_id,
         )
@@ -1408,6 +1410,7 @@ class SessionServiceImpl:
             title=row.title,
             created_at=self._ensure_utc(row.created_at),
             updated_at=self._ensure_utc(row.updated_at),
+            archived_at=self._ensure_utc(row.archived_at) if row.archived_at else None,
             forked_from_session_id=UUID(row.forked_from_session_id) if row.forked_from_session_id else None,
             forked_from_message_id=UUID(row.forked_from_message_id) if row.forked_from_message_id else None,
         )
@@ -1432,6 +1435,7 @@ class SessionServiceImpl:
             title=row.title,
             created_at=self._ensure_utc(row.created_at),
             updated_at=self._ensure_utc(row.updated_at),
+            archived_at=self._ensure_utc(row.archived_at) if row.archived_at else None,
             forked_from_session_id=UUID(row.forked_from_session_id) if row.forked_from_session_id else None,
             forked_from_message_id=UUID(row.forked_from_message_id) if row.forked_from_message_id else None,
         )
@@ -1442,20 +1446,20 @@ class SessionServiceImpl:
         auth_provider_type: AuthProviderType,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> list[SessionRecord]:
         """List sessions for a user, ordered by updated_at descending."""
 
         def _sync() -> Any:
             with self._engine.begin() as conn:
+                conditions: list[ColumnElement[bool]] = [
+                    sessions_table.c.user_id == user_id,
+                    sessions_table.c.auth_provider_type == auth_provider_type,
+                ]
+                if not include_archived:
+                    conditions.append(sessions_table.c.archived_at.is_(None))
                 return conn.execute(
-                    select(sessions_table)
-                    .where(
-                        sessions_table.c.user_id == user_id,
-                        sessions_table.c.auth_provider_type == auth_provider_type,
-                    )
-                    .order_by(desc(sessions_table.c.updated_at))
-                    .limit(limit)
-                    .offset(offset)
+                    select(sessions_table).where(*conditions).order_by(desc(sessions_table.c.updated_at)).limit(limit).offset(offset)
                 ).fetchall()
 
         rows = await self._run_sync(_sync)
@@ -1468,6 +1472,7 @@ class SessionServiceImpl:
                 title=row.title,
                 created_at=self._ensure_utc(row.created_at),
                 updated_at=self._ensure_utc(row.updated_at),
+                archived_at=self._ensure_utc(row.archived_at) if row.archived_at else None,
                 forked_from_session_id=UUID(row.forked_from_session_id) if row.forked_from_session_id else None,
                 forked_from_message_id=UUID(row.forked_from_message_id) if row.forked_from_message_id else None,
             )
@@ -1501,6 +1506,26 @@ class SessionServiceImpl:
 
             try:
                 with self._engine.begin() as conn:
+                    durable_history_exists = (
+                        conn.execute(select(runs_table.c.id).where(runs_table.c.session_id == sid).limit(1)).first() is not None
+                        or conn.execute(
+                            select(composer_completion_events_table.c.id)
+                            .where(composer_completion_events_table.c.session_id == sid)
+                            .limit(1)
+                        ).first()
+                        is not None
+                    )
+                    if durable_history_exists:
+                        now = self._now()
+                        result = conn.execute(
+                            update(sessions_table).where(sessions_table.c.id == sid).values(archived_at=now, updated_at=now)
+                        )
+                        if result.rowcount == 0:
+                            raise SessionNotFoundError(session_id)
+                        if staged_blob_dir is not None and blob_dir is not None and staged_blob_dir.exists():
+                            blob_dir.parent.mkdir(parents=True, exist_ok=True)
+                            staged_blob_dir.rename(blob_dir)
+                        return
                     # Session archival is the only supported transcript purge:
                     # delete the parent row and let the schema-owned cascades
                     # remove session-scoped children. Direct chat-message

@@ -364,24 +364,28 @@ describe("PluginCard — Phase 7B reshape", () => {
     expect(screen.getByText(/quarantines/i)).toBeInTheDocument();
   });
 
-  it("renders the 'When you'd use this' prose", () => {
+  it("renders the 'Use when' prose in the details disclosure", async () => {
     render(<PluginCard plugin={makePlugin({ usage_when_to_use: "When you have a CSV file already." })} schema={null} onExpand={() => {}} />);
-    expect(screen.getByText(/when you'd use this/i)).toBeInTheDocument();
+    expect(screen.queryByText(/use when/i)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
+    expect(screen.getByText(/use when/i)).toBeInTheDocument();
     expect(screen.getByText(/when you have a csv file/i)).toBeInTheDocument();
   });
 
-  it("renders the 'When you wouldn't' prose", () => {
+  it("renders the 'Avoid when' prose in the details disclosure", async () => {
     render(<PluginCard plugin={makePlugin({ usage_when_not_to_use: "When the data is inline." })} schema={null} onExpand={() => {}} />);
-    expect(screen.getByText(/when you wouldn't/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
+    expect(screen.getByText(/avoid when/i)).toBeInTheDocument();
   });
 
-  it("renders the example use as a code block preserving whitespace", () => {
+  it("renders the example use as a code block preserving whitespace in details", async () => {
     render(<PluginCard plugin={makePlugin({ example_use: "source:\n  plugin: csv" })} schema={null} onExpand={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
     const codeBlock = screen.getByText(/plugin: csv/);
     expect(codeBlock.tagName.toLowerCase()).toBe("pre");
   });
 
-  it("falls back to a generic message when prose fields are null", () => {
+  it("falls back to a generic message when prose fields are null in details", async () => {
     render(
       <PluginCard
         plugin={makePlugin({ usage_when_to_use: null, usage_when_not_to_use: null, example_use: null })}
@@ -389,6 +393,7 @@ describe("PluginCard — Phase 7B reshape", () => {
         onExpand={() => {}}
       />,
     );
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
     // Per design doc 08-§Risks: "Empty entries fall back to a generic
     // 'see the technical description' message rather than blocking display."
     expect(screen.getByText(/see the technical description/i)).toBeInTheDocument();

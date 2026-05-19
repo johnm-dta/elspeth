@@ -18,7 +18,7 @@ describe("InlineChatSourceEntry", () => {
   it("renders the entry title and description", () => {
     render(<InlineChatSourceEntry onCloseDrawer={() => {}} />);
     expect(screen.getByText(/inline data from chat/i)).toBeInTheDocument();
-    expect(screen.getByText(/type your data directly/i)).toBeInTheDocument();
+    expect(screen.getByText(/for a URL, sentence, or single record/i)).toBeInTheDocument();
   });
 
   it("renders a distinct visual style (not a regular plugin-card)", () => {

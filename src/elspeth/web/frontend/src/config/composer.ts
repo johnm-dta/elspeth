@@ -15,3 +15,9 @@ export const COMPOSE_TRANSPORT_IDLE_CEILING_MS = 300_000;
 export const COMPOSE_SERVER_TRANSPORT_HEADROOM_MS = 30_000;
 export const COMPOSE_CLIENT_GRACE_MS = 25_000;
 export const COMPOSE_TIMEOUT_MS = COMPOSE_BACKEND_TIMEOUT_MS + COMPOSE_CLIENT_GRACE_MS;
+
+// Abort reasons are internal frontend control-plane values. They let
+// sessionStore distinguish a user-requested stop from the timeout guard while
+// still using the browser's native AbortController path.
+export const COMPOSE_TIMEOUT_ABORT_REASON = "compose_timeout";
+export const COMPOSE_USER_CANCEL_ABORT_REASON = "compose_user_cancel";

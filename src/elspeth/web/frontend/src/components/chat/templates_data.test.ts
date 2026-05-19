@@ -11,8 +11,8 @@ import { describe, expect, it } from "vitest";
 import { TEMPLATES, type ExampleUseCase } from "./templates_data";
 
 describe("templates_data — README Example Use Cases mapping", () => {
-  it("contains exactly six audit-domain exemplars", () => {
-    expect(TEMPLATES).toHaveLength(6);
+  it("contains twelve audit-domain exemplars", () => {
+    expect(TEMPLATES).toHaveLength(12);
   });
 
   it("every template has the four READMEs-table columns", () => {
@@ -51,6 +51,12 @@ describe("templates_data — README Example Use Cases mapping", () => {
       "satellite-operations",
       "financial-compliance",
       "content-moderation",
+      "clinical-triage",
+      "insurance-claims",
+      "supply-chain-risk",
+      "security-incident-triage",
+      "research-review",
+      "support-quality",
     ]);
   });
 

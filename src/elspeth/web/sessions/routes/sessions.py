@@ -57,6 +57,7 @@ def register_session_routes(router: APIRouter) -> None:
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
+        include_archived: bool = Query(False),
     ) -> list[SessionResponse]:
         """List sessions for the authenticated user."""
         service = request.app.state.session_service
@@ -66,6 +67,7 @@ def register_session_routes(router: APIRouter) -> None:
             settings.auth_provider,
             limit=limit,
             offset=offset,
+            include_archived=include_archived,
         )
         return [_session_response(s) for s in sessions]
 

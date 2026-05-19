@@ -191,25 +191,13 @@ export function RunOutputsPanel({ runId }: RunOutputsPanelProps) {
   return (
     <section
       aria-label="Run outputs"
-      style={{
-        marginTop: 10,
-        paddingTop: 10,
-        borderTop: "1px solid var(--color-border)",
-        fontSize: 12,
-      }}
+      className="run-outputs-panel"
     >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 8,
-        }}
-      >
-        <span style={{ fontWeight: 600 }}>Outputs</span>
+      <div className="run-outputs-panel-header">
+        <span className="run-outputs-panel-title">Outputs</span>
         <button
           type="button"
-          className="btn btn-small"
+          className="btn-compact"
           onClick={() => void loadManifest()}
           disabled={isLoading}
         >
@@ -218,23 +206,23 @@ export function RunOutputsPanel({ runId }: RunOutputsPanelProps) {
       </div>
 
       {error && (
-        <div role="alert" style={{ color: "var(--color-error)", marginBottom: 8 }}>
+        <div role="alert" className="run-outputs-panel-error">
           {error}
         </div>
       )}
 
       {!manifest && !error && isLoading && (
-        <div style={{ color: "var(--color-text-muted)" }}>Loading outputs…</div>
+        <div className="run-outputs-panel-muted">Loading outputs…</div>
       )}
 
       {manifest && manifest.artifacts.length === 0 && !isLoading && (
-        <div style={{ color: "var(--color-text-muted)" }}>
+        <div className="run-outputs-panel-muted">
           This run produced no outputs.
         </div>
       )}
 
       {manifest && manifest.artifacts.length > 0 && (
-        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>
+        <ul className="run-output-artifact-list">
           {manifest.artifacts.map((artifact) => {
             const expanded = expandedArtifactIds.has(artifact.artifact_id);
             const previewState = previewByArtifactId[artifact.artifact_id];
@@ -242,11 +230,7 @@ export function RunOutputsPanel({ runId }: RunOutputsPanelProps) {
             return (
               <li
                 key={artifact.artifact_id}
-                style={{
-                  border: "1px solid var(--color-border)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: "6px 8px",
-                }}
+                className="run-output-artifact-item"
               >
                 <ArtifactRow
                   artifact={artifact}
@@ -284,48 +268,31 @@ function ArtifactRow({ artifact, expanded, onTogglePreview, onDownload }: Artifa
   const shortHash = artifact.content_hash.slice(0, HASH_DISPLAY_LENGTH);
 
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-      <span
-        style={{
-          fontSize: 10,
-          padding: "2px 6px",
-          borderRadius: "var(--radius-sm)",
-          backgroundColor: "var(--color-surface-hover)",
-          textTransform: "uppercase",
-        }}
-      >
+    <div className="run-output-artifact-row">
+      <span className="run-output-artifact-kind">
         {artifact.artifact_type}
       </span>
       <span
-        style={{ overflowWrap: "anywhere", flex: "1 1 auto", fontFamily: "monospace" }}
+        className="run-output-artifact-name"
         title={artifact.path_or_uri}
       >
         {displayName}
       </span>
-      <span style={{ color: "var(--color-text-muted)", whiteSpace: "nowrap" }}>
+      <span className="run-output-artifact-meta">
         {formatBytes(artifact.size_bytes)}
       </span>
-      {/* Run timestamp — same font size as file size (both inherit the
-          parent section's fontSize: 12) so the two pieces of inline
-          per-artifact metadata read as siblings. Tooltip carries the
+      {/* Run timestamp — same class family as file size so the two pieces
+          of inline per-artifact metadata read as siblings. Tooltip carries the
           unmodified wire-format timestamp (with timezone marker) for
           anyone diffing against the audit DB directly. */}
       <span
-        style={{
-          color: "var(--color-text-muted)",
-          whiteSpace: "nowrap",
-          fontVariantNumeric: "tabular-nums",
-        }}
+        className="run-output-artifact-meta run-output-artifact-time"
         title={artifact.created_at}
       >
         {absoluteTime(artifact.created_at)}
       </span>
       <span
-        style={{
-          color: "var(--color-text-muted)",
-          fontFamily: "monospace",
-          fontSize: 10,
-        }}
+        className="run-output-artifact-hash"
         title={`SHA-256 ${artifact.content_hash}`}
       >
         {shortHash}…
@@ -353,7 +320,7 @@ function ArtifactActions({ artifact, expanded, onTogglePreview, onDownload }: Ar
   if (!artifact.exists_now) {
     return (
       <span
-        style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}
+        className="run-output-artifact-unavailable"
         title={`Recorded path: ${artifact.path_or_uri}`}
       >
         no longer available on disk
@@ -366,7 +333,7 @@ function ArtifactActions({ artifact, expanded, onTogglePreview, onDownload }: Ar
     // the download is refused for defence-in-depth.
     return (
       <span
-        style={{ color: "var(--color-text-muted)", fontStyle: "italic" }}
+        className="run-output-artifact-unavailable"
         title="The recorded path is outside the sink output allowlist; the server refuses to serve its bytes."
       >
         outside allowed sink directories
@@ -374,10 +341,10 @@ function ArtifactActions({ artifact, expanded, onTogglePreview, onDownload }: Ar
     );
   }
   return (
-    <span style={{ display: "flex", gap: 6 }}>
+    <span className="run-output-artifact-actions">
       <button
         type="button"
-        className="btn btn-small"
+        className="btn-compact"
         onClick={onTogglePreview}
         aria-expanded={expanded}
       >
@@ -385,7 +352,7 @@ function ArtifactActions({ artifact, expanded, onTogglePreview, onDownload }: Ar
       </button>
       <button
         type="button"
-        className="btn btn-small"
+        className="btn-compact"
         onClick={onDownload}
       >
         Download

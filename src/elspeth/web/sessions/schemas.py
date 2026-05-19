@@ -93,6 +93,7 @@ class SessionResponse(_StrictResponse):
     title: str
     created_at: datetime
     updated_at: datetime
+    archived: bool = False
     forked_from_session_id: str | None = None
     forked_from_message_id: str | None = None
 

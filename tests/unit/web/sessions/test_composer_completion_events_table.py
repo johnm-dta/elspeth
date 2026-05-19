@@ -339,11 +339,9 @@ def test_delete_trigger_blocks_removal(engine) -> None:
 def test_session_fk_cascade_is_blocked_by_append_only_trigger(engine) -> None:
     """FK cascade from sessions → composer_completion_events is blocked by the trigger.
 
-    When a parent sessions row is deleted with FK cascades enabled, SQLite attempts to
-    cascade-delete the dependent composer_completion_events rows. The BEFORE DELETE
-    trigger fires before the cascade can complete and raises ABORT, which rolls back
-    the parent DELETE as well. This confirms completion events are permanently
-    retained: a session cannot be deleted while it has completion-event children.
+    User-facing archive must soft-hide sessions with durable completion
+    history. Raw parent-row deletion remains blocked because it would purge
+    audit facts along with the session row.
     """
 
     with engine.connect() as conn:

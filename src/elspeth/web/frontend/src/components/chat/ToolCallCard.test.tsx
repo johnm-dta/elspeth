@@ -93,10 +93,17 @@ describe("ToolCallCard", () => {
         name: `Accept proposal: ${proposal.summary}`,
       }),
     );
+    // S3.5 (button-audit): Reject now opens a ConfirmDialog. Click the
+    // dialog's primary action ("Reject proposal", exactly — distinct from
+    // the original card button whose accessible name is "Reject proposal:
+    // {summary}") to actually invoke onReject.
     await user.click(
       screen.getByRole("button", {
         name: `Reject proposal: ${proposal.summary}`,
       }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /^reject proposal$/i }),
     );
 
     expect(onAccept).toHaveBeenCalledWith("proposal-1");

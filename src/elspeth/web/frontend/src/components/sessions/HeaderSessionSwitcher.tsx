@@ -351,6 +351,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
                       />
                       <button
                         type="submit"
+                        className="btn-compact"
                         aria-label="Save session name"
                         disabled={renamePending || !trimmedRename}
                       >
@@ -358,6 +359,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
                       </button>
                       <button
                         type="button"
+                        className="btn-compact"
                         aria-label="Cancel session rename"
                         onClick={cancelRename}
                         disabled={renamePending}

@@ -191,6 +191,7 @@ class SessionRecord:
     title: str
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
     forked_from_session_id: UUID | None = None
     forked_from_message_id: UUID | None = None
 
@@ -680,6 +681,7 @@ class SessionServiceProtocol(Protocol):
         auth_provider_type: AuthProviderType,
         limit: int = 50,
         offset: int = 0,
+        include_archived: bool = False,
     ) -> list[SessionRecord]: ...
 
     async def archive_session(self, session_id: UUID) -> None: ...

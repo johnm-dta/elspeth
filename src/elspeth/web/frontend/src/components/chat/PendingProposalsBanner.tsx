@@ -1,4 +1,7 @@
+import { useState } from "react";
+
 import type { CompositionProposal } from "@/types/api";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 
 interface PendingProposalsBannerProps {
   proposals: CompositionProposal[];
@@ -31,12 +34,17 @@ export function PendingProposalsBanner({
   onAccept,
   onReject,
 }: PendingProposalsBannerProps) {
+  const [rejectConfirmId, setRejectConfirmId] = useState<string | null>(null);
   const actionable = proposals.filter(
     (p) => p.status === "pending" && !staleProposalIds.includes(p.id),
   );
   if (actionable.length === 0) {
     return null;
   }
+  const rejectTarget =
+    rejectConfirmId !== null
+      ? actionable.find((p) => p.id === rejectConfirmId)
+      : undefined;
 
   return (
     <section
@@ -83,7 +91,7 @@ export function PendingProposalsBanner({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onReject(proposal.id)}
+                  onClick={() => setRejectConfirmId(proposal.id)}
                   aria-label={`Reject proposal: ${proposal.summary}`}
                   disabled={isBusy}
                   className="btn btn-danger"
@@ -95,6 +103,20 @@ export function PendingProposalsBanner({
           );
         })}
       </ul>
+      {rejectTarget && (
+        <ConfirmDialog
+          title="Reject this proposal?"
+          message="The composer's proposed change will be discarded. You can ask the composer to revise the proposal afterwards."
+          confirmLabel="Reject proposal"
+          cancelLabel="Keep open"
+          variant="danger"
+          onConfirm={() => {
+            onReject(rejectTarget.id);
+            setRejectConfirmId(null);
+          }}
+          onCancel={() => setRejectConfirmId(null)}
+        />
+      )}
     </section>
   );
 }

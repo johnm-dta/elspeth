@@ -108,10 +108,10 @@ test.describe("catalog-reshape — Phase 7 demo path", () => {
     const composer = new ComposerPage(page);
     await composer.goto();
     await page.keyboard.press("Control+Shift+P");
-    // Click the CSV source card to expand it.
-    await page.getByText("csv").first().click();
-    // "When you'd use this" prose section must be visible.
-    await expect(page.getByText(/when you.d use this/i)).toBeVisible();
+    await page.getByRole("button", { name: /reference details for csv/i }).click();
+    // Reference prose is available on demand, but no longer floods the
+    // top-level catalog list.
+    await expect(page.getByText(/use when/i)).toBeVisible();
     // "Use in pipeline" button must NOT be present.
     await expect(page.getByRole("button", { name: /use in pipeline/i })).not.toBeVisible();
   });

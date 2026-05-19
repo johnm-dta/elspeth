@@ -20,6 +20,12 @@ interface WorkingView {
   likelyNext: string;
 }
 
+function isTerminalPhase(
+  phase: ComposerProgressSnapshot["phase"] | undefined,
+): boolean {
+  return phase === "complete" || phase === "failed" || phase === "cancelled";
+}
+
 function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
   return count === 1 ? `1 ${singular}` : `${count} ${pluralLabel}`;
 }
@@ -136,20 +142,33 @@ export function ComposingIndicator({
   const workingView =
     backendWorkingView(composerProgress) ??
     heuristicWorkingView(latestRequest, compositionState);
+  const isTerminal = isTerminalPhase(composerProgress?.phase);
 
   return (
     <div
-      className="composing-indicator composing-row"
+      className={`composing-indicator composing-row${isTerminal ? " composing-indicator--terminal" : ""}`}
       role="status"
     >
       <div className="composing-bubble">
-        <div className="composing-pulse" aria-hidden="true">
-          <span className="composing-dot" />
-          <span className="composing-dot" />
-          <span className="composing-dot" />
-        </div>
+        {isTerminal ? (
+          <div className="composing-terminal-mark" aria-hidden="true">
+            {composerProgress?.phase === "failed"
+              ? "!"
+              : composerProgress?.phase === "cancelled"
+                ? "x"
+                : "ok"}
+          </div>
+        ) : (
+          <div className="composing-pulse" aria-hidden="true">
+            <span className="composing-dot" />
+            <span className="composing-dot" />
+            <span className="composing-dot" />
+          </div>
+        )}
         <div className="composing-working-view">
-          <div className="composing-label">Working on...</div>
+          <div className="composing-label">
+            {isTerminal ? "Last composer update" : "Working on..."}
+          </div>
           <div className="composing-title">{workingView.headline}</div>
           <div className="composing-section">
             <div className="composing-label">What ELSPETH can see</div>

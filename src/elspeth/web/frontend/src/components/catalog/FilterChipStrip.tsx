@@ -110,7 +110,7 @@ function ChipGroup({ label, children }: { label: string; children: React.ReactNo
   return (
     <div className="filter-chip-group">
       <span className="filter-chip-group-label">{label}:</span>
-      {children}
+      <div className="filter-chip-row">{children}</div>
     </div>
   );
 }

@@ -264,6 +264,33 @@ describe("ChatInput empty-state placeholder", () => {
   });
 });
 
+describe("ChatInput composing cancel", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  it("shows a stop button while composing and calls onCancel", async () => {
+    const user = userEvent.setup();
+    const inputRef = { current: null } as RefObject<HTMLTextAreaElement>;
+    const onCancel = vi.fn();
+
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        disabled={true}
+        onCancel={onCancel}
+        inputRef={inputRef}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Stop composing" }));
+
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+});
+
 // ============================================================================
 // ChatInput — pending-interpretation placeholder cue (Phase 5b Task 8).
 //

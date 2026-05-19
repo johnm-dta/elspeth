@@ -128,7 +128,12 @@ export function SaveForReviewDialog(): JSX.Element | null {
         {!inFlight && error !== null && (
           <div role="alert" className="save-for-review-error" data-testid="save-for-review-error">
             <p>{error}</p>
-            <button type="button" onClick={_onRetry} data-testid="save-for-review-retry">
+            <button
+              type="button"
+              className="btn btn-compact"
+              onClick={_onRetry}
+              data-testid="save-for-review-retry"
+            >
               Try again
             </button>
           </div>
@@ -155,6 +160,7 @@ export function SaveForReviewDialog(): JSX.Element | null {
               />
               <button
                 type="button"
+                className="btn btn-compact"
                 onClick={() => void _onCopy()}
                 data-testid="save-for-review-copy"
                 aria-label="Copy share URL to clipboard"
@@ -181,7 +187,12 @@ export function SaveForReviewDialog(): JSX.Element | null {
         )}
 
         <footer>
-          <button type="button" onClick={close} data-testid="save-for-review-close">
+          <button
+            type="button"
+            className="btn"
+            onClick={close}
+            data-testid="save-for-review-close"
+          >
             Close
           </button>
         </footer>

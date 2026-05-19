@@ -72,7 +72,10 @@ from sqlalchemy.types import JSON
 #        constraint in place, so the operator deletes the staging
 #        session DB and the schema is recreated. Pre-release policy
 #        remains delete-and-recreate for stale session DBs.
-SESSION_SCHEMA_EPOCH = 8
+#   9 → ``sessions.archived_at`` added so user-side archive can hide
+#        sessions with durable run/completion history rather than deleting
+#        audit-bearing rows. Unrun sessions may still be physically deleted.
+SESSION_SCHEMA_EPOCH = 9
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -165,6 +168,7 @@ sessions_table = Table(
         nullable=False,
         server_default=text("false"),
     ),
+    Column("archived_at", DateTime(timezone=True), nullable=True),
     CheckConstraint(
         "trust_mode IN ('explicit_approve', 'auto_commit')",
         name="ck_sessions_trust_mode",

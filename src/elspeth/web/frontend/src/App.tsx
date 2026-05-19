@@ -304,6 +304,7 @@ function App() {
             <span>{redirectToast.message}</span>
             <button
               type="button"
+              className="alert-banner-action"
               onClick={redirectToast.dismiss}
               aria-label="Dismiss"
             >

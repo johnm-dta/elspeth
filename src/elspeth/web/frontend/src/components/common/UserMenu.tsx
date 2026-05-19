@@ -82,7 +82,7 @@ export function UserMenu({
   }, [toggleTheme]);
 
   return (
-    <div ref={wrapperRef} className="user-menu" style={{ position: "relative" }}>
+    <div ref={wrapperRef} className="user-menu">
       <button
         ref={triggerRef}
         type="button"
@@ -90,43 +90,19 @@ export function UserMenu({
         aria-haspopup="true"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
+        className="user-menu-trigger"
       >
         Account
       </button>
       {open && (
-        <ul
-          style={{
-            position: "absolute",
-            top: "100%",
-            right: 0,
-            margin: 0,
-            padding: "4px 0",
-            listStyle: "none",
-            backgroundColor: "var(--color-surface, #fff)",
-            border: "1px solid var(--color-border)",
-            borderRadius: 4,
-            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-            minWidth: 180,
-            zIndex: 50,
-          }}
-        >
-          <li style={{ margin: 0 }}>
+        <ul className="user-menu-list">
+          <li className="user-menu-item">
             <button
               type="button"
               onClick={onThemeToggle}
               aria-label={themeLabel}
               title={themeLabel}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "6px 12px",
-                textAlign: "left",
-                background: "transparent",
-                border: 0,
-                cursor: "pointer",
-                font: "inherit",
-                minHeight: 24,
-              }}
+              className="user-menu-action"
             >
               <span aria-hidden="true">
                 {resolvedTheme === "dark" ? "\u2600" : "\u263E"}
@@ -134,40 +110,20 @@ export function UserMenu({
               {themeLabel}
             </button>
           </li>
-          <li style={{ margin: 0 }}>
+          <li className="user-menu-item">
             <button
               type="button"
               onClick={onSettings}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "6px 12px",
-                textAlign: "left",
-                background: "transparent",
-                border: 0,
-                cursor: "pointer",
-                font: "inherit",
-                minHeight: 24,
-              }}
+              className="user-menu-action"
             >
               Composer preferences
             </button>
           </li>
-          <li style={{ margin: 0 }}>
+          <li className="user-menu-item">
             <button
               type="button"
               onClick={onSignOutClick}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "6px 12px",
-                textAlign: "left",
-                background: "transparent",
-                border: 0,
-                cursor: "pointer",
-                font: "inherit",
-                minHeight: 24,
-              }}
+              className="user-menu-action user-menu-action--danger"
             >
               Sign out
             </button>

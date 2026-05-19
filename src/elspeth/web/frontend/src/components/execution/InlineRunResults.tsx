@@ -65,20 +65,21 @@ export function InlineRunResults(): JSX.Element | null {
 
   return (
     <section className="inline-run-results" aria-label="Pipeline run results">
-      {showProgress && <ProgressView />}
-      {outputRunId && <NarrativeResultsBranch runId={outputRunId} />}
-
-      {hasHistory && (
-        <div className="inline-run-results-history-cta">
+      <div className="inline-run-results-toolbar">
+        <span className="inline-run-results-title">Run results</span>
+        {hasHistory && (
           <button
             type="button"
             onClick={() => setShowHistory(true)}
-            className="btn"
+            className="btn-compact inline-run-results-history-btn"
           >
             Past runs ({visibleRuns.length})
           </button>
-        </div>
-      )}
+        )}
+      </div>
+
+      {showProgress && <ProgressView />}
+      {outputRunId && <NarrativeResultsBranch runId={outputRunId} />}
 
       {showHistory && (
         <RunsHistoryDrawer onClose={() => setShowHistory(false)} />

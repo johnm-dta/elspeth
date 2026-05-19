@@ -1,4 +1,7 @@
+import { useState } from "react";
+
 import type { CompositionProposal, ToolCall } from "@/types/api";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 
 interface ToolCallCardProps {
   toolCall: ToolCall;
@@ -17,6 +20,7 @@ export function ToolCallCard({
   onAccept,
   onReject,
 }: ToolCallCardProps) {
+  const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
   if (!proposal) {
     return (
       <div className="tool-call-ribbon">
@@ -77,7 +81,7 @@ export function ToolCallCard({
           </button>
           <button
             type="button"
-            onClick={() => onReject(proposal.id)}
+            onClick={() => setRejectConfirmOpen(true)}
             aria-label={`Reject proposal: ${proposal.summary}`}
             disabled={isBusy}
             className="btn btn-danger btn-small"
@@ -85,6 +89,20 @@ export function ToolCallCard({
             Reject
           </button>
         </div>
+      )}
+      {rejectConfirmOpen && proposal && (
+        <ConfirmDialog
+          title="Reject this proposal?"
+          message="The composer's proposed change will be discarded. You can ask the composer to revise the proposal afterwards."
+          confirmLabel="Reject proposal"
+          cancelLabel="Keep open"
+          variant="danger"
+          onConfirm={() => {
+            onReject(proposal.id);
+            setRejectConfirmOpen(false);
+          }}
+          onCancel={() => setRejectConfirmOpen(false)}
+        />
       )}
     </article>
   );

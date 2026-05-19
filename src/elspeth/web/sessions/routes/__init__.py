@@ -25,11 +25,14 @@ from ._helpers import (
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
     _litellm_error_detail,
+    _persist_tool_invocations,
     _record_composer_authoring_validation_telemetry,
     _record_composer_runtime_preflight_telemetry,
     _reject_hidden_field_submissions,
     _RuntimePreflightFailed,
     _summarize_guided_response,
+    slog,
+    step_advance,
 )
 from .composer import register_composer_routes
 from .interpretation import register_interpretation_routes
@@ -71,6 +74,7 @@ __all__ = [
     "_handle_runtime_preflight_failure",
     "_initial_composition_state_with_guided_session",
     "_litellm_error_detail",
+    "_persist_tool_invocations",
     "_record_composer_authoring_validation_telemetry",
     "_record_composer_runtime_preflight_telemetry",
     "_reject_hidden_field_submissions",
@@ -79,5 +83,7 @@ __all__ = [
     "_summarize_guided_response",
     "create_session_router",
     "load_run_accounting_for_settings",
+    "slog",
     "solve_step_chat_with_auto_drop",
+    "step_advance",
 ]

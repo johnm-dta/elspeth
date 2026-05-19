@@ -235,12 +235,20 @@ describe("ProposeChainTurn — remediation submit paths", () => {
     });
   });
 
-  it("clicking Reject submits control_signal='reject'", async () => {
+  it("clicking Reject opens a confirm dialog before submitting control_signal='reject'", async () => {
+    // S3.5 (button-audit): Reject is destructive — discards a multi-step plan —
+    // so it now opens a ConfirmDialog instead of submitting immediately. Clicking
+    // the dialog's primary action ("Reject plan") submits the reject signal.
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     renderWidget(TWO_STEP_PAYLOAD, onSubmit);
 
     await user.click(screen.getByRole("button", { name: /^reject$/i }));
+
+    // Submit must not be called by the dialog-opening click alone.
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /reject plan/i }));
 
     expect(onSubmit).toHaveBeenCalledWith({
       ...nullResponse(),

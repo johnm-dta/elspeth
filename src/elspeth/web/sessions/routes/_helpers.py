@@ -89,7 +89,9 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalState,
     TurnRecord,
     mark_solver_exhausted,
-    step_advance,
+)
+from elspeth.web.composer.guided.state_machine import (
+    step_advance as _step_advance_impl,
 )
 from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
@@ -323,6 +325,7 @@ def _session_response(session: SessionRecord) -> SessionResponse:
         title=session.title,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        archived=session.archived_at is not None,
         forked_from_session_id=str(session.forked_from_session_id) if session.forked_from_session_id else None,
         forked_from_message_id=str(session.forked_from_message_id) if session.forked_from_message_id else None,
     )
@@ -1181,7 +1184,44 @@ async def _runtime_preflight_for_state(
     )
 
 
+def step_advance(*args: Any, **kwargs: Any) -> Any:
+    patched = _patched_routes_attr("step_advance", step_advance)
+    if patched is not None:
+        return patched(*args, **kwargs)
+    return _step_advance_impl(*args, **kwargs)
+
+
 async def _persist_tool_invocations(
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    tool_invocations: tuple[ComposerToolInvocation, ...],
+    composition_state_id: UUID | None,
+    *,
+    parent_assistant_id: UUID | None = None,
+    plugin_crash_pending: bool,
+) -> None:
+    patched = _patched_routes_attr("_persist_tool_invocations", _persist_tool_invocations)
+    if patched is not None:
+        await patched(
+            service,
+            session_id,
+            tool_invocations,
+            composition_state_id,
+            parent_assistant_id=parent_assistant_id,
+            plugin_crash_pending=plugin_crash_pending,
+        )
+        return
+    await _persist_tool_invocations_impl(
+        service,
+        session_id,
+        tool_invocations,
+        composition_state_id,
+        parent_assistant_id=parent_assistant_id,
+        plugin_crash_pending=plugin_crash_pending,
+    )
+
+
+async def _persist_tool_invocations_impl(
     service: SessionServiceProtocol,
     session_id: UUID,
     tool_invocations: tuple[ComposerToolInvocation, ...],
@@ -2523,6 +2563,59 @@ def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, 
 
 
 async def _dispatch_guided_respond(
+    *,
+    state: CompositionState,
+    guided: GuidedSession,
+    current_step: GuidedStep,
+    current_turn_type: TurnType,
+    turn_response: Mapping[str, Any],
+    catalog: CatalogServiceProtocol,
+    recorder: BufferingRecorder,
+    user_id: str,
+    data_dir: str | None,
+    session_engine: Any,
+    session_id: str,
+    blob_service: BlobServiceProtocol,
+    model: str,
+) -> tuple[CompositionState, GuidedSession, Any | None]:
+    patched = _patched_routes_attr("_dispatch_guided_respond", _dispatch_guided_respond)
+    if patched is not None:
+        return cast(
+            tuple[CompositionState, GuidedSession, Any | None],
+            await patched(
+                state=state,
+                guided=guided,
+                current_step=current_step,
+                current_turn_type=current_turn_type,
+                turn_response=turn_response,
+                catalog=catalog,
+                recorder=recorder,
+                user_id=user_id,
+                data_dir=data_dir,
+                session_engine=session_engine,
+                session_id=session_id,
+                blob_service=blob_service,
+                model=model,
+            ),
+        )
+    return await _dispatch_guided_respond_impl(
+        state=state,
+        guided=guided,
+        current_step=current_step,
+        current_turn_type=current_turn_type,
+        turn_response=turn_response,
+        catalog=catalog,
+        recorder=recorder,
+        user_id=user_id,
+        data_dir=data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+        blob_service=blob_service,
+        model=model,
+    )
+
+
+async def _dispatch_guided_respond_impl(
     *,
     state: CompositionState,
     guided: GuidedSession,

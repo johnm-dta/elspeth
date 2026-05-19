@@ -40,7 +40,17 @@ import type {
   InlineSourceSummary,
 } from "@/types/api";
 import type { GuidedStep } from "@/types/guided";
-import type { ExampleUseCase } from "./templates_data";
+import type { ExampleUseCase, RecommendedStartingPoint } from "./templates_data";
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled template starting point: ${value}`);
+}
+
+function isTerminalComposerPhase(
+  phase: string | null | undefined,
+): boolean {
+  return phase === "complete" || phase === "failed" || phase === "cancelled";
+}
 
 /**
  * Best-effort row-count from CSV-like text content.
@@ -361,7 +371,14 @@ export function ChatPanel({
   const enterGuided = useSessionStore((s) => s.enterGuided);
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
-  const { sendMessage, retryMessage, isComposing, error, errorDetails } = useComposer();
+  const {
+    sendMessage,
+    retryMessage,
+    cancelComposition,
+    isComposing,
+    error,
+    errorDetails,
+  } = useComposer();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -398,16 +415,29 @@ export function ChatPanel({
     setShowScrollButton(!atBottom);
   }
 
-  // Auto-scroll to bottom when new messages arrive (unless user scrolled up)
+  const shouldShowComposerProgress =
+    isComposing || isTerminalComposerPhase(composerProgress?.phase);
+
+  // Auto-scroll to bottom when new messages arrive (unless user scrolled up).
+  // Empty sessions render template cards above the sentinel; scrolling to the
+  // bottom on first paint clips the top row of cards under the header.
   useEffect(() => {
+    if (messages.length === 0 && !isComposing) return;
     if (!showScrollButton) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages, isComposing, showScrollButton]);
 
-  // Return focus to input when composing ends (assistant response arrived)
+  // Return focus to input when composing ends only if focus stayed in the
+  // composer. Do not steal focus from proposal buttons, recovery actions, or
+  // side-rail controls the user reached for while the request was running.
   useEffect(() => {
-    if (!isComposing) {
+    const active = document.activeElement;
+    const safeToRestore =
+      active === null ||
+      active === document.body ||
+      active === inputRef.current;
+    if (!isComposing && safeToRestore) {
       inputRef.current?.focus();
     }
   }, [isComposing]);
@@ -972,17 +1002,32 @@ export function ChatPanel({
   const handleSelectTemplate = useCallback(
     (
       seedPrompt: string,
-      // recommendedStartingPoint is accepted but not yet dispatched: Phase 5a's
-      // dynamic-source-from-chat wiring for template clicks is absent at the
-      // 2026-05-19 gate. See docs/composer/ux-redesign-2026-05/21-phase-9-followups.md
-      // "Template card dynamic-source dispatch" for the closure path.
-      _recommendedStartingPoint: ExampleUseCase["recommended_starting_point"],
+      recommendedStartingPoint: ExampleUseCase["recommended_starting_point"],
     ) => {
-      setInputText(seedPrompt);
-      // Focus the input so user can edit or press Enter to send
-      inputRef.current?.focus();
+      const applyStartingPoint = (startingPoint: RecommendedStartingPoint) => {
+        switch (startingPoint) {
+          case "dynamic_source_from_chat":
+            setInputText("");
+            sendMessage(seedPrompt);
+            return;
+          case "csv_upload":
+            setInputText(seedPrompt);
+            setShowBlobManager(true);
+            inputRef.current?.focus();
+            return;
+          case "api_source":
+            setInputText(seedPrompt);
+            onOpenSecrets?.();
+            inputRef.current?.focus();
+            return;
+          default:
+            assertNever(startingPoint);
+        }
+      };
+
+      applyStartingPoint(recommendedStartingPoint);
     },
-    [],
+    [onOpenSecrets, sendMessage],
   );
 
   // No active session: show prompt to select or create one
@@ -1406,7 +1451,7 @@ export function ChatPanel({
             onNotSourceData={handleDisambiguationNotSourceData}
           />
         ))}
-        {isComposing && (
+        {shouldShowComposerProgress && (
           <ComposingIndicator
             latestRequest={activeComposerMessage?.content ?? null}
             compositionState={compositionState}
@@ -1471,6 +1516,7 @@ export function ChatPanel({
       <ChatInput
         onSend={handleSend}
         disabled={isComposing}
+        onCancel={isComposing ? cancelComposition : undefined}
         inputRef={inputRef}
         onToggleBlobManager={() => setShowBlobManager((v) => !v)}
         showBlobManager={showBlobManager}

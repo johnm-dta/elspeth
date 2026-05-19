@@ -35,10 +35,13 @@
 //   (collapsible JSON tree etc.) is deferred to a future task.
 //
 // STATE:
-//   Zero widget-side state.  Each button click immediately constructs and emits
-//   the body literal -- no intermediate state is accumulated.  No view
-//   transitions, so the firstRunRef focus-skip pattern from InspectAndConfirmTurn
-//   and SchemaFormTurn is not needed.
+//   Near-zero widget-side state.  Accept / Edit / Ask-advisor each construct and
+//   emit the body literal immediately on click.  The single exception is Reject,
+//   which gates the emit on a ConfirmDialog (rejecting a multi-step plan is a
+//   destructive operation that deserves an explicit confirm step per the
+//   button-audit S3.5 finding).  No view transitions, so the firstRunRef
+//   focus-skip pattern from InspectAndConfirmTurn and SchemaFormTurn is not
+//   needed.
 //
 // FOCUS MANAGEMENT:
 //   No programmatic focus on mount or on interaction.  All four prior widgets
@@ -47,8 +50,9 @@
 //   an element (MultiSelectWithCustomTurn).  ProposeChainTurn renders statically;
 //   no equivalent trigger exists.
 
-import { useId } from "react";
+import { useId, useState } from "react";
 import type { GuidedRespondRequest, ProposeChainPayload } from "@/types/guided";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 
 interface ProposeChainTurnProps {
   payload: ProposeChainPayload;
@@ -83,6 +87,7 @@ export function ProposeChainTurn({
   const reactId = useId();
   const cardId = (index: number) => `${reactId}-step-${index}`;
   const optionsId = (index: number) => `${reactId}-opts-${index}`;
+  const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
 
   function handleAccept() {
     onSubmit({
@@ -211,7 +216,7 @@ export function ProposeChainTurn({
         <button
           type="button"
           className="guided-propose-secondary-btn"
-          onClick={handleReject}
+          onClick={() => setRejectConfirmOpen(true)}
           disabled={disabled}
         >
           Reject
@@ -233,6 +238,20 @@ export function ProposeChainTurn({
           Accept all steps
         </button>
       </div>
+      {rejectConfirmOpen && (
+        <ConfirmDialog
+          title="Reject this plan?"
+          message="The composer's multi-step plan will be discarded. You can ask the composer to revise the plan or propose a different approach afterwards."
+          confirmLabel="Reject plan"
+          cancelLabel="Keep open"
+          variant="danger"
+          onConfirm={() => {
+            setRejectConfirmOpen(false);
+            handleReject();
+          }}
+          onCancel={() => setRejectConfirmOpen(false)}
+        />
+      )}
     </div>
   );
 }

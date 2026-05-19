@@ -107,6 +107,7 @@ export function PluginCard({
   initialExpanded = false,
 }: PluginCardProps) {
   const [expanded, setExpanded] = useState(initialExpanded);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   function handleDisclosureClick(e: MouseEvent<HTMLButtonElement>) {
     e.preventDefault();
@@ -128,55 +129,62 @@ export function PluginCard({
 
   return (
     <div className="plugin-card">
-      {/* Header row: plugin name */}
       <div className="plugin-card-header-row">
         <span className="plugin-card-name">{plugin.name}</span>
+        <span className="plugin-card-kind">{plugin.plugin_type}</span>
       </div>
 
-      {/* Short technical description */}
       <div className="plugin-card-desc" title={plugin.description}>
         {plugin.description}
       </div>
 
-      {/* Audit-characteristic strip */}
       {plugin.audit_characteristics.length > 0 && (
         <div className="plugin-card-audit-strip" aria-label="Audit characteristics">
-          <span className="plugin-card-audit-label">Audit:</span>
-          {/* Stable display order: sort lexically so the same plugin
-              always shows the same icon order regardless of frozenset
-              serialization order from the backend. */}
           {[...plugin.audit_characteristics].sort().map((flag) => (
             <AuditCharacteristicIcon key={flag} flag={flag} />
           ))}
         </div>
       )}
 
-      {/* Reference prose */}
-      {allFallback ? (
-        <div className="plugin-card-prose-fallback">{PROSE_FALLBACK}</div>
-      ) : (
-        <>
-          <ProseSection label="When you'd use this" body={plugin.usage_when_to_use} />
-          <ProseSection label="When you wouldn't" body={plugin.usage_when_not_to_use} />
-          {plugin.example_use !== null && (
-            <div className="plugin-card-example">
-              <div className="plugin-card-example-label">Example use:</div>
-              <pre className="plugin-card-example-code">{plugin.example_use}</pre>
-            </div>
-          )}
-        </>
-      )}
+      <div className="plugin-card-actions">
+        <button
+          type="button"
+          className="btn btn-small plugin-card-detail-toggle"
+          onClick={() => setDetailsOpen((open) => !open)}
+          aria-expanded={detailsOpen}
+          aria-label={`Reference details for ${plugin.name}`}
+        >
+          Details
+        </button>
+        <button
+          type="button"
+          className="btn btn-small plugin-card-disclosure"
+          onClick={handleDisclosureClick}
+          aria-expanded={expanded}
+          aria-label={`Schema for ${plugin.name}`}
+        >
+          Schema
+        </button>
+      </div>
 
-      {/* Schema disclosure */}
-      <button
-        type="button"
-        className="btn btn-small plugin-card-disclosure"
-        onClick={handleDisclosureClick}
-        aria-expanded={expanded}
-        aria-label={`Schema for ${plugin.name}`}
-      >
-        Schema {expanded ? "▾" : "→"}
-      </button>
+      {detailsOpen && (
+        <div className="plugin-card-details">
+          {allFallback ? (
+            <div className="plugin-card-prose-fallback">{PROSE_FALLBACK}</div>
+          ) : (
+            <>
+              <ProseSection label="Use when" body={plugin.usage_when_to_use} />
+              <ProseSection label="Avoid when" body={plugin.usage_when_not_to_use} />
+              {plugin.example_use !== null && (
+                <div className="plugin-card-example">
+                  <div className="plugin-card-example-label">Example</div>
+                  <pre className="plugin-card-example-code">{plugin.example_use}</pre>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {expanded && (
         <div className="plugin-card-expanded">

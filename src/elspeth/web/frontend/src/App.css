@@ -9,12 +9,22 @@
    Colour Palette
    --------------------------------------------------------------------------- */
 :root {
-  /* ── Backgrounds — DTA deep teal family ──────────────────────────────────── */
+  /* ── Backgrounds — DTA/AGDS three-family role palette ────────────────────── */
+  /* Workspace family — DTA Pacific teal (active editing surfaces) */
   --color-bg:                #0f2d35;
   --color-surface:           #122f37;
-  --color-surface-inspector: #112e36;
   --color-surface-elevated:  #1a3d47;
   --color-surface-hover:     rgba(255, 255, 255, 0.04);
+
+  /* Navigation family — AGDS Foundation navy (header chrome) */
+  --color-surface-nav:        #0a1d2e;
+  --color-surface-nav-raised: #13283a;
+
+  /* Inspection family — desaturated warm neutral (right-rail, paper modals).
+     Used by .layout-siderail and modal panels so they read as paper-on-desk
+     against the navy/teal columns instead of a third teal slab. */
+  --color-surface-inspector: #2a2826;
+  --color-surface-paper:     #332f2c;
 
   /* ── Text ────────────────────────────────────────────────────────────────── */
   --color-text:              #dff0ee;
@@ -39,7 +49,11 @@
   --color-badge-gate:        #c390f9;
   --color-badge-sink:        #e07040;
   --color-badge-aggregation: #61daff;
-  --color-badge-coalesce:    #14b0ae;
+  /* Coalesce shifted from #14b0ae to break the byte-identical collision with
+     --color-success — previously a "completed" badge next to a coalesce node
+     was indistinguishable. The cyan-leaning teal sits clearly off the success
+     hue while staying in the same chromatic family. */
+  --color-badge-coalesce:    #18c2c0;
 
   /* ── Component type badge backgrounds — for inline styles (React Flow) ──── */
   --color-badge-source-bg:   rgba(77, 184, 154, 0.15);
@@ -47,7 +61,7 @@
   --color-badge-gate-bg:     rgba(195, 144, 249, 0.15);
   --color-badge-sink-bg:     rgba(224, 112, 64, 0.15);
   --color-badge-aggregation-bg: rgba(97, 218, 255, 0.15);
-  --color-badge-coalesce-bg: rgba(20, 176, 174, 0.15);
+  --color-badge-coalesce-bg: rgba(24, 194, 192, 0.15);
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(77, 184, 154, 0.3);
@@ -55,7 +69,7 @@
   --color-badge-gate-border:        rgba(195, 144, 249, 0.3);
   --color-badge-sink-border:        rgba(224, 112, 64, 0.3);
   --color-badge-aggregation-border: rgba(97, 218, 255, 0.3);
-  --color-badge-coalesce-border:    rgba(20, 176, 174, 0.3);
+  --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
 
   /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
   --color-success:           #14b0ae;
@@ -116,6 +130,15 @@
   --color-scrollbar-track:       var(--color-bg);
   --color-scrollbar-thumb:       rgba(143, 200, 200, 0.15);
   --color-scrollbar-thumb-hover: rgba(143, 200, 200, 0.28);
+
+  /* ── React Flow canvas grid ──────────────────────────────────────────────── */
+  /* Used by GraphView's <Background> dot grid. Previously the grid painted
+     with --color-border (12% alpha) which fell to ~1.34:1 against the
+     workspace and read as flat. This token raises grid visibility to ~2.2:1
+     — clearly perceptible as a grid without competing with node content.
+     Note: orientation grids sit below WCAG 1.4.11's 3:1 UI-component bar by
+     design; pushing higher would visually fight with nodes. */
+  --color-canvas-grid:           rgba(170, 220, 220, 0.28);
 
   /* ── Sizing ──────────────────────────────────────────────────────────────── */
   --inspector-default-width: 320px;
@@ -790,6 +813,20 @@ summary:focus-visible {
 /* Action buttons on message bubbles — hidden until hover, always visible on touch */
 .bubble-copy-btn,
 .bubble-edit-btn {
+  /* Base sizing: previously only opacity was declared and intrinsic content
+     height drove the hit-target — risked falling below the WCAG 2.5.8 AA
+     floor (24×24). Compact control floor (36×36) gives an AA-safe target. */
+  min-width: var(--size-control-compact);
+  min-height: var(--size-control-compact);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xs);
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
   opacity: 0;
   transition: opacity 0.15s ease;
 }
@@ -815,6 +852,7 @@ summary:focus-visible {
   z-index: var(--z-panel-controls);
   border-radius: var(--radius-pill);
   padding: 6px var(--space-lg);
+  min-height: var(--size-control-compact);
   font-size: var(--font-size-sm);
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
@@ -824,6 +862,10 @@ summary:focus-visible {
 }
 .scroll-to-bottom-btn:hover {
   background-color: var(--color-surface-hover);
+}
+
+.chat-panel:has(.inline-run-results) .scroll-to-bottom-btn {
+  bottom: calc(120px + min(260px, 32vh));
 }
 
 /* Blob manager action buttons */
@@ -954,7 +996,7 @@ summary:focus-visible {
   margin: 0 auto;
   padding: var(--space-xl);
   overflow: hidden;
-  background-color: var(--color-surface);
+  background-color: var(--color-surface-paper);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
@@ -1103,7 +1145,8 @@ summary:focus-visible {
   cursor: pointer;
   color: var(--color-error);
   font-size: var(--font-size-xs);
-  padding: 2px 8px;
+  padding: var(--space-xs) var(--space-sm);
+  min-height: var(--size-control-compact);
   margin-left: var(--space-md);
   flex-shrink: 0;
 }
@@ -1132,7 +1175,7 @@ summary:focus-visible {
   height: 40px;
   padding: 0 12px;
   border-bottom: 1px solid var(--color-border);
-  background: var(--color-bg);
+  background: var(--color-surface-nav);
   flex-shrink: 0;
 }
 
@@ -1170,7 +1213,7 @@ summary:focus-visible {
   margin: 0;
   padding: 4px 0;
   list-style: none;
-  background: var(--color-bg);
+  background: var(--color-surface-nav-raised);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   min-width: 240px;
@@ -1183,6 +1226,7 @@ summary:focus-visible {
   display: block;
   width: 100%;
   padding: 6px 12px;
+  min-height: var(--size-control-compact);
   border: 0;
   background: transparent;
   color: inherit;
@@ -1224,6 +1268,90 @@ summary:focus-visible {
   padding: var(--space-xs) var(--space-sm);
   min-height: var(--size-control-compact);
   cursor: pointer;
+}
+
+.user-menu {
+  position: relative;
+}
+
+.user-menu-trigger {
+  min-height: var(--size-control-compact);
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.user-menu-trigger:hover,
+.user-menu-trigger:focus-visible {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+
+.user-menu-trigger:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.user-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 200px;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.user-menu-item {
+  margin: 0;
+}
+
+.user-menu-action {
+  display: block;
+  width: 100%;
+  min-height: var(--size-control);
+  padding: var(--space-sm) var(--space-md);
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.user-menu-action:hover,
+.user-menu-action:focus-visible {
+  background: var(--color-surface-hover);
+}
+
+.user-menu-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* Destructive variant — applied to actions like Sign out that end a session
+   or otherwise have a meaningful "you'll lose state" consequence. The error
+   colour keeps the action visually subordinate to neutral items above it
+   while signalling the consequence; full --color-error background would
+   over-emphasise it as a primary CTA, which it isn't. */
+.user-menu-action--danger {
+  color: var(--color-error);
+}
+
+.user-menu-action--danger:hover,
+.user-menu-action--danger:focus-visible {
+  background: var(--color-error-bg);
+  color: var(--color-error);
 }
 
 .header-session-switcher-rename-form {
@@ -1330,6 +1458,48 @@ summary:focus-visible {
   background-color: var(--color-surface-inspector);
 }
 
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+
+.banner p {
+  margin: 0;
+}
+
+.banner-info {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+}
+
+.banner-dismiss-btn {
+  min-height: var(--size-control-compact);
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  flex: 0 0 auto;
+}
+
+.banner-dismiss-btn:hover,
+.banner-dismiss-btn:focus-visible {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+}
+
+.banner-dismiss-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 .side-rail {
   display: flex;
   flex-direction: column;
@@ -1428,15 +1598,63 @@ summary:focus-visible {
   cursor: not-allowed;
 }
 
-/* Three side-rail slot-fill buttons share identical layout. Equivalent to
+/* Primary side-rail slot-fill buttons share identical layout. Equivalent to
    composing .side-rail-slot-fill on each; kept as a comma-grouped selector so
    the class names remain stable for existing call sites. */
 .side-rail-execute-btn,
-.side-rail-export-yaml-btn,
-.side-rail-catalog-btn {
+.side-rail-export-yaml-btn {
   width: calc(100% - (2 * var(--space-sm)));
   margin: var(--space-sm);
   justify-content: center;
+}
+
+.side-rail-catalog-btn {
+  width: calc(100% - (2 * var(--space-sm)));
+  min-height: var(--size-control);
+  margin: var(--space-sm);
+  padding: var(--space-sm);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.side-rail-catalog-btn:hover {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+}
+
+.side-rail-catalog-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.catalog-reference-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-reference-meta {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface-elevated);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
 /* CompletionBar (TSX: src/components/CompletionBar.tsx) mounts Save-for-review
@@ -1459,8 +1677,7 @@ summary:focus-visible {
 
 .completion-bar > *,
 .completion-bar .side-rail-execute-btn,
-.completion-bar .side-rail-export-yaml-btn,
-.completion-bar .side-rail-catalog-btn {
+.completion-bar .side-rail-export-yaml-btn {
   width: 100%;
   margin: 0;
 }
@@ -1504,7 +1721,7 @@ summary:focus-visible {
   z-index: var(--z-dialog);
   display: flex;
   flex-direction: column;
-  background-color: var(--color-surface);
+  background-color: var(--color-surface-paper);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
@@ -1553,7 +1770,7 @@ summary:focus-visible {
   z-index: var(--z-dialog);
   display: flex;
   flex-direction: column;
-  background-color: var(--color-surface);
+  background-color: var(--color-surface-paper);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
@@ -1584,6 +1801,20 @@ summary:focus-visible {
   cursor: pointer;
 }
 
+/* Mirror of .yaml-modal-close / .graph-modal-close for the ExplainDialog.
+   The dialog markup uses these classes (see components/audit/ExplainDialog.tsx)
+   but no rule was previously defined — the button rendered with browser
+   defaults, falling below the WCAG 2.5.8 AA hit-target floor (24×24). */
+.explain-dialog-close {
+  min-width: 36px;
+  min-height: var(--size-control-compact);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
 .yaml-modal-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -1593,6 +1824,177 @@ summary:focus-visible {
 /* ---------------------------------------------------------------------------
    Chat Input
    --------------------------------------------------------------------------- */
+.inline-run-results {
+  flex: 0 0 auto;
+  margin: 0 var(--space-lg) var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent),
+    rgba(0, 0, 0, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  max-height: min(260px, 32vh);
+  overflow: auto;
+}
+
+.inline-run-results-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.inline-run-results-title {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: var(--line-height-tight);
+}
+
+.inline-run-results-history-btn {
+  flex: 0 0 auto;
+}
+
+.run-outputs-panel {
+  min-width: 0;
+  font-size: var(--font-size-xs);
+}
+
+.run-outputs-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+}
+
+.run-outputs-panel-title {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+}
+
+.run-outputs-panel-error {
+  color: var(--color-error);
+  margin-bottom: var(--space-sm);
+}
+
+.run-outputs-panel-muted {
+  color: var(--color-text-muted);
+}
+
+.run-output-artifact-list {
+  display: grid;
+  gap: var(--space-xs);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.run-output-artifact-item {
+  min-width: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+.run-output-artifact-row {
+  display: grid;
+  grid-template-columns: auto minmax(10rem, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.run-output-artifact-kind {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.run-output-artifact-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-output-artifact-meta {
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.run-output-artifact-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.run-output-artifact-hash {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-3xs);
+  white-space: nowrap;
+}
+
+.run-output-artifact-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  justify-self: end;
+}
+
+.run-output-artifact-actions .btn-compact,
+.run-outputs-panel-header .btn-compact {
+  min-height: 32px;
+}
+
+.run-output-artifact-unavailable {
+  color: var(--color-text-muted);
+  font-style: italic;
+  justify-self: end;
+}
+
+@media (max-width: 760px) {
+  .chat-panel:has(.inline-run-results) .scroll-to-bottom-btn {
+    bottom: calc(128px + min(300px, 36vh));
+  }
+
+  .inline-run-results {
+    margin-inline: var(--space-sm);
+    max-height: min(300px, 36vh);
+  }
+
+  .run-output-artifact-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .run-output-artifact-meta,
+  .run-output-artifact-hash,
+  .run-output-artifact-actions,
+  .run-output-artifact-unavailable {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .run-output-artifact-actions {
+    flex-wrap: wrap;
+  }
+}
+
 .chat-input {
   padding: var(--space-sm) var(--space-lg);
   border-top: 1px solid var(--color-border);
@@ -1642,12 +2044,46 @@ summary:focus-visible {
   min-height: var(--size-control);
 }
 
+.chat-input-icon {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .chat-input-icon-btn:disabled {
   cursor: not-allowed;
 }
 
 .chat-input-icon-btn--active {
   background-color: var(--color-surface-hover);
+}
+
+.chat-input-cancel-btn {
+  padding: var(--space-sm) var(--space-md);
+  min-width: 56px;
+  min-height: var(--size-control);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.chat-input-cancel-btn:hover,
+.chat-input-cancel-btn:focus-visible {
+  border-color: var(--color-warning);
+}
+
+.chat-input-cancel-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
 }
 
 .chat-input-send-btn {
@@ -1673,6 +2109,18 @@ summary:focus-visible {
   color: var(--color-text-muted);
   padding: 2px 0 var(--space-xs);
   text-align: right;
+}
+
+@media (max-width: 760px) {
+  .chat-input-row {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .chat-input-textarea {
+    flex: 1 0 100%;
+    min-height: 68px;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -2268,12 +2716,20 @@ summary:focus-visible {
 
 /* Light theme — applied via data-theme="light" attribute (set by useTheme hook) */
 [data-theme="light"] {
-  /* ── Backgrounds — light teal family ──────────────────────────────────── */
+  /* ── Backgrounds — DTA/AGDS three-family role palette (light) ──────────── */
+  /* Workspace family — light teal (active editing surfaces) */
   --color-bg:                #f4f8f9;
   --color-surface:           #ffffff;
-  --color-surface-inspector: #f0f6f7;
   --color-surface-elevated:  #ffffff;
   --color-surface-hover:     rgba(0, 45, 53, 0.04);
+
+  /* Navigation family — pale navy chrome */
+  --color-surface-nav:        #e8edf3;
+  --color-surface-nav-raised: #dbe3ec;
+
+  /* Inspection family — warm cream (right-rail, paper modals) */
+  --color-surface-inspector: #faf7f3;
+  --color-surface-paper:     #f0eae3;
 
   /* ── Surface variants ──────────────────────────────────────────────────── */
   --color-surface-raised:    #eaf2f3;
@@ -2325,7 +2781,9 @@ summary:focus-visible {
   --color-badge-gate:        #8356b6;
   --color-badge-sink:        #ad502d;
   --color-badge-aggregation: #207595;
-  --color-badge-coalesce:    #0b7876;
+  /* Coalesce shifted cyan-ward to break the proximity to --color-success
+     (#0d8a88) on light mode; sits between aggregation and success. */
+  --color-badge-coalesce:    #0e8090;
 
   /* ── Component type badge backgrounds — for inline styles (React Flow) ──── */
   --color-badge-source-bg:   rgba(42, 138, 112, 0.12);
@@ -2333,7 +2791,7 @@ summary:focus-visible {
   --color-badge-gate-bg:     rgba(138, 90, 192, 0.12);
   --color-badge-sink-bg:     rgba(184, 85, 48, 0.12);
   --color-badge-aggregation-bg: rgba(40, 144, 184, 0.12);
-  --color-badge-coalesce-bg: rgba(13, 138, 136, 0.12);
+  --color-badge-coalesce-bg: rgba(14, 128, 144, 0.12);
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(42, 138, 112, 0.35);
@@ -2341,7 +2799,7 @@ summary:focus-visible {
   --color-badge-gate-border:        rgba(138, 90, 192, 0.35);
   --color-badge-sink-border:        rgba(184, 85, 48, 0.35);
   --color-badge-aggregation-border: rgba(40, 144, 184, 0.35);
-  --color-badge-coalesce-border:    rgba(13, 138, 136, 0.35);
+  --color-badge-coalesce-border:    rgba(14, 128, 144, 0.35);
 
   /* Per-node validation indicator borders */
   --color-node-valid: #0d8a88;
@@ -2372,6 +2830,9 @@ summary:focus-visible {
   --color-scrollbar-track:       var(--color-bg);
   --color-scrollbar-thumb:       rgba(15, 45, 53, 0.18);
   --color-scrollbar-thumb-hover: rgba(15, 45, 53, 0.30);
+
+  /* ── React Flow canvas grid (light) ──────────────────────────────────── */
+  --color-canvas-grid:           rgba(15, 45, 53, 0.20);
 }
 
 /* ---------------------------------------------------------------------------
@@ -2661,15 +3122,6 @@ summary:focus-visible {
 /* ---------------------------------------------------------------------------
    Template Cards (onboarding quick-start)
    --------------------------------------------------------------------------- */
-.template-card:hover {
-  background-color: var(--color-surface-hover);
-  border-color: var(--color-border-strong);
-}
-
-.template-card:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
 
 /* ---------------------------------------------------------------------------
    Command Palette (Ctrl+K)
@@ -2922,7 +3374,10 @@ summary:focus-visible {
 }
 
 .version-selector-revert-btn {
-  padding: 2px var(--space-sm);
+  /* Drop the padding override that previously squeezed the .btn's intrinsic
+     content area to ~22px. The 44px hit-target floor was honoured via
+     min-height but the visual button read as undersized chrome. Letting the
+     base .btn padding stand restores the perceived control size. */
   font-size: var(--font-size-xs);
 }
 
@@ -3319,6 +3774,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-xs);
   padding: var(--space-xs) var(--space-md);
+  min-height: var(--size-control-compact);
 }
 
 .message-edit-fork {
@@ -3329,6 +3785,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-xs);
   padding: var(--space-xs) var(--space-md);
+  min-height: var(--size-control-compact);
 }
 
 .message-edit-fork:disabled {
@@ -3356,6 +3813,7 @@ summary:focus-visible {
   cursor: pointer;
   font-size: var(--font-size-xs);
   padding: var(--space-xs) var(--space-sm);
+  min-height: var(--size-control-compact);
 }
 
 .message-pending {
@@ -3682,6 +4140,26 @@ summary:focus-visible {
   padding-top: 5px;
 }
 
+.composing-indicator--terminal .composing-bubble {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-border-strong);
+}
+
+.composing-terminal-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 24px;
+  margin-top: 1px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .composing-working-view {
   display: grid;
   gap: 6px;
@@ -3986,34 +4464,149 @@ summary:focus-visible {
    PluginCard
    --------------------------------------------------------------------------- */
 .plugin-card {
-  padding: var(--space-sm) var(--space-md);
+  padding: var(--space-md);
   border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface);
 }
 
-.plugin-card-header {
+.plugin-card-header-row {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  cursor: pointer;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
 }
 
 .plugin-card-name {
   font-weight: 700;
   font-size: var(--font-size-sm);
   color: var(--color-text);
+  line-height: 1.25;
+}
+
+.plugin-card-kind {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
 .plugin-card-desc {
   display: -webkit-box;
-  font-size: var(--font-size-2xs);
+  margin-top: 2px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
+  line-height: 1.35;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
+.plugin-card-audit-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: var(--space-xs);
+}
+
+.audit-icon {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.audit-icon-glyph {
+  display: none;
+}
+
+.audit-icon-positive {
+  color: var(--color-success);
+  border-color: var(--color-success-border);
+  background-color: var(--color-success-bg);
+}
+
+.audit-icon-attention {
+  color: var(--color-warning);
+  border-color: var(--color-warning-border);
+  background-color: var(--color-warning-bg);
+}
+
+.audit-icon-informational {
+  color: var(--color-info);
+  border-color: var(--color-info-border);
+  background-color: var(--color-info-bg);
+}
+
+.plugin-card-actions {
+  display: flex;
+  gap: var(--space-xs);
+  margin-top: var(--space-sm);
+}
+
+.plugin-card-detail-toggle,
+.plugin-card-disclosure {
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+}
+
+.plugin-card-details {
+  display: grid;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.plugin-card-prose-section {
+  display: grid;
+  gap: 2px;
+}
+
+.plugin-card-prose-label,
+.plugin-card-example-label {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.plugin-card-prose-body,
+.plugin-card-prose-fallback {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.plugin-card-example-code {
+  max-height: 140px;
+  margin: 4px 0 0;
+  padding: var(--space-sm);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-2xs);
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
 .plugin-card-expanded {
   margin-top: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
 }
 
 .plugin-card-schema-error {
@@ -4091,7 +4684,8 @@ summary:focus-visible {
    --------------------------------------------------------------------------- */
 .template-cards-container {
   padding: var(--space-xl) var(--space-2xl);
-  max-width: 800px;
+  width: min(100%, 1120px);
+  max-width: 1120px;
   margin: 0 auto;
 }
 
@@ -4115,7 +4709,9 @@ summary:focus-visible {
 
 .template-cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  /* The empty-state gallery is deliberately a 4 x 3 desktop field: these
+     are static exemplars, not a responsive picker of clickable actions. */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-md);
 }
 
@@ -4123,52 +4719,95 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  justify-content: flex-start;
   gap: 6px;
-  padding: 14px var(--space-lg);
-  background-color: var(--color-surface-elevated);
-  border: 1px solid var(--color-border);
+  aspect-ratio: 1 / 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+  /* Passive exemplar tiles: keep the gallery visible, but fade the chrome so
+     these do not compete with real controls or imply clickability. */
+  background-color: color-mix(
+    in srgb,
+    var(--color-surface-elevated) 72%,
+    var(--color-bg)
+  );
+  border: 1px solid
+    color-mix(in srgb, var(--color-border) 68%, transparent);
   border-radius: var(--radius-lg);
-  cursor: pointer;
   text-align: left;
-  transition: border-color var(--transition-normal),
-    background-color var(--transition-normal);
 }
 
 .template-card-header {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
+  gap: 6px;
 }
 
 .template-card-icon {
-  font-size: var(--font-size-xl);
+  font-size: var(--font-size-lg);
+  opacity: 0.76;
 }
 
 .template-card-title {
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-sm);
   font-weight: 600;
   color: var(--color-text);
+  line-height: 1.15;
+  opacity: 0.9;
 }
 
 .template-card-description {
+  display: -webkit-box;
+  overflow: hidden;
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  line-height: 1.4;
+  line-height: 1.3;
+  opacity: 0.82;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .template-card-sda {
-  margin-top: 0.5rem;
+  margin-top: auto;
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.25rem 0.75rem;
-  font-size: 0.75rem;
+  grid-template-columns: 1fr;
+  gap: 5px;
+  font-size: var(--font-size-2xs);
   color: var(--color-text-muted);
+  line-height: 1.2;
+  opacity: 0.76;
 }
+
+.template-card-sda div {
+  min-width: 0;
+}
+
 .template-card-sda dt {
   font-weight: 600;
+  color: var(--color-text-secondary);
 }
+
 .template-card-sda dd {
+  display: -webkit-box;
   margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+@media (max-width: 760px) {
+  .template-cards-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .template-cards-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -4278,7 +4917,7 @@ summary:focus-visible {
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(320px, calc(100% - 40px));
+  width: min(440px, calc(100% - 24px));
   z-index: var(--z-catalog);
   background-color: var(--color-surface);
   border-left: 1px solid var(--color-border);
@@ -4288,16 +4927,39 @@ summary:focus-visible {
 
 .catalog-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  padding: 10px var(--space-md);
+  gap: var(--space-sm);
+  padding: var(--space-md);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
+}
+
+.catalog-header-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.catalog-header-eyebrow {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
 .catalog-header-title {
   font-weight: 700;
   font-size: var(--font-size-base);
+  line-height: 1.25;
+}
+
+.catalog-header-subtitle {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.35;
 }
 
 .catalog-close-btn {
@@ -4333,13 +4995,28 @@ summary:focus-visible {
   right: 6px;
   top: 50%;
   transform: translateY(-50%);
+  /* Hit-target floor: previously the 2px padding + 16px glyph left a ~20×20
+     button (below WCAG 2.5.8 AA's 24×24 floor). 28×28 clears the floor with
+     room to spare while staying small enough to sit inside the search input. */
+  min-width: 28px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   cursor: pointer;
   font-size: var(--font-size-base);
   padding: 2px;
   line-height: 1;
+}
+
+.catalog-search-clear:hover,
+.catalog-search-clear:focus-visible {
+  color: var(--color-text);
+  background-color: var(--color-surface-hover);
 }
 
 .catalog-tab-strip {
@@ -4380,6 +5057,85 @@ summary:focus-visible {
   overflow-y: auto;
 }
 
+.filter-chip-strip {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+  flex-shrink: 0;
+}
+
+.filter-chip-group {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-xs);
+}
+
+.filter-chip-group-label {
+  padding-top: 3px;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.filter-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.filter-chip {
+  /* Raised from the WCAG 2.5.8 AA floor (24px exactly) to 28px so the chip
+     comfortably clears the floor and tolerates browser font-size variation. */
+  min-height: 28px;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-3xs);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.filter-chip:hover,
+.filter-chip:focus-visible {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.filter-chip:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.filter-chip-active {
+  border-color: var(--color-accent);
+  background-color: var(--color-info-bg);
+  color: var(--color-text);
+}
+
+.filter-chip-clear {
+  justify-self: start;
+  min-height: var(--size-control-compact);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-xs);
+}
+
 .catalog-status-message {
   padding: var(--space-lg);
   font-size: var(--font-size-xs);
@@ -4395,6 +5151,54 @@ summary:focus-visible {
 
 .catalog-status-message--center {
   text-align: center;
+}
+
+.inline-chat-source-entry {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-surface-elevated);
+}
+
+.inline-chat-source-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.inline-chat-source-entry-title {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.inline-chat-source-entry-badge {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.inline-chat-source-entry-desc {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.inline-chat-source-entry-try {
+  justify-self: start;
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
 }
 
 /* ---------------------------------------------------------------------------

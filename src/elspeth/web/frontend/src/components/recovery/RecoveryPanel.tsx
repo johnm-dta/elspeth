@@ -128,7 +128,7 @@ export function RecoveryPanel({
                 Cancel
               </button>
               <button
-                className="btn btn-primary"
+                className="btn btn-danger"
                 type="button"
                 onClick={confirmApply}
               >
@@ -168,7 +168,7 @@ export function RecoveryPanel({
 
         <footer className="recovery-panel-actions">
           <button
-            className="btn btn-secondary recovery-panel-discard"
+            className="btn btn-danger recovery-panel-discard"
             type="button"
             onClick={onDiscard}
           >

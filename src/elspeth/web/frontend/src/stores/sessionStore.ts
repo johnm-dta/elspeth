@@ -20,7 +20,11 @@ import type {
   GuidedRespondRequest,
 } from "@/types/guided";
 import * as api from "@/api/client";
-import { COMPOSE_TIMEOUT_MS } from "@/config/composer";
+import {
+  COMPOSE_TIMEOUT_ABORT_REASON,
+  COMPOSE_TIMEOUT_MS,
+  COMPOSE_USER_CANCEL_ABORT_REASON,
+} from "@/config/composer";
 import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
 import { useInterpretationEventsStore } from "./interpretationEventsStore";
@@ -41,6 +45,8 @@ const LLM_AUTH_ERROR_MESSAGE =
 // the browser gave up before the server reached its own deadline.
 const COMPOSE_TIMEOUT_MESSAGE =
   "ELSPETH took too long to compose a response. Try a smaller request or split it into multiple steps.";
+const COMPOSE_CANCELLED_MESSAGE =
+  "Composition stopped. You can revise your request and send it again.";
 
 function isAbortError(err: unknown): boolean {
   // DOMException ('AbortError'/'TimeoutError') is not always an Error
@@ -51,6 +57,16 @@ function isAbortError(err: unknown): boolean {
   }
   const name = (err as { name?: unknown }).name;
   return name === "AbortError" || name === "TimeoutError";
+}
+
+function abortReason(signal?: AbortSignal): unknown {
+  return signal?.aborted === true ? signal.reason : undefined;
+}
+
+function composeAbortMessage(signal?: AbortSignal): string {
+  return abortReason(signal) === COMPOSE_USER_CANCEL_ABORT_REASON
+    ? COMPOSE_CANCELLED_MESSAGE
+    : COMPOSE_TIMEOUT_MESSAGE;
 }
 
 function isHttpConflict(err: unknown): boolean {
@@ -71,13 +87,11 @@ function clearComposerProgressPollTimer(): void {
   composerProgressPollSessionId = null;
 }
 
-// Live-message polling — runs while a send is inflight so the chat panel
-// reflects each LLM round-trip's assistant row as the backend persists it,
-// instead of waiting for the POST to return with the final message. The
-// turn-coalescing logic in components/chat/turns.ts groups the freshly-
-// arrived rows under the user message's turn, so visually the tool calls
-// "appear in the same bubble as they come in" rather than as a row of
-// silent waiting then a single completed bubble.
+// Live-message polling — runs while a send is inflight so the store can sync
+// against assistant rows as the backend persists them. ChatPanel intentionally
+// keeps incomplete agent turns hidden (see components/chat/turns.ts) and uses
+// composerProgress as the live visible affordance until the final assistant
+// text lands.
 const INFLIGHT_MESSAGES_POLL_INTERVAL_MS = 1500;
 let inflightMessagesPollTimer: ReturnType<typeof setInterval> | null = null;
 let inflightMessagesPollSessionId: string | null = null;
@@ -591,7 +605,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // not a structured ApiError — the apiErr.detail fallback below would
       // otherwise mask it as a generic send failure.
       if (isAbortError(err)) {
-        errorMessage = COMPOSE_TIMEOUT_MESSAGE;
+        errorMessage = composeAbortMessage(signal);
       } else {
         const apiErr = err as ApiError;
         // Error dispatch based on HTTP status + error_type field
@@ -631,8 +645,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ...recoveryPatch,
       }));
     } finally {
-      get().stopComposerProgressPolling(activeSessionId);
       get().stopInflightMessagesPolling(activeSessionId);
+      get().stopComposerProgressPolling(activeSessionId);
+      await get().loadComposerProgress(activeSessionId);
     }
   },
 
@@ -799,10 +814,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     try {
       const progress = await api.fetchComposerProgress(targetSessionId);
       const current = get();
-      if (
-        current.activeSessionId !== targetSessionId ||
-        !current.isComposing
-      ) {
+      if (current.activeSessionId !== targetSessionId) {
         return;
       }
       set({ composerProgress: progress.phase === "idle" ? null : progress });
@@ -831,9 +843,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return;
     }
     clearComposerProgressPollTimer();
-    if (sessionId === undefined || get().activeSessionId === sessionId) {
-      set({ composerProgress: null });
-    }
   },
 
   async loadInflightMessages(sessionId: string) {
@@ -909,7 +918,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     // Use sendMessage with the same timeout as manual sends.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), COMPOSE_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
+      COMPOSE_TIMEOUT_MS,
+    );
     try {
       await get().sendMessage(content, controller.signal);
     } finally {
@@ -996,7 +1008,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch (err) {
       let errorMessage: string;
       if (isAbortError(err)) {
-        errorMessage = COMPOSE_TIMEOUT_MESSAGE;
+        errorMessage = composeAbortMessage(signal);
       } else {
         const apiErr = err as ApiError;
         errorMessage =
@@ -1027,8 +1039,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ...recoveryPatch,
       }));
     } finally {
-      get().stopComposerProgressPolling(activeSessionId);
       get().stopInflightMessagesPolling(activeSessionId);
+      get().stopComposerProgressPolling(activeSessionId);
+      await get().loadComposerProgress(activeSessionId);
     }
   },
 

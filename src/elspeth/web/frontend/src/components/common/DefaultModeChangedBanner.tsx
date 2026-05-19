@@ -104,7 +104,7 @@ export function DefaultModeChangedBanner(): JSX.Element | null {
         type="button"
         onClick={onDismiss}
         disabled={writing}
-        style={{ minHeight: 24 }}
+        className="banner-dismiss-btn"
       >
         Got it
       </button>

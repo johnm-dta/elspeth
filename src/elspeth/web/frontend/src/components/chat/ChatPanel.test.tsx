@@ -102,7 +102,18 @@ vi.mock("./ChatInput", () => ({
 }));
 
 vi.mock("./TemplateCards", () => ({
-  TemplateCards: () => <div data-testid="template-cards" />,
+  TemplateCards: ({
+    onSelectTemplate: _onSelectTemplate,
+  }: {
+    onSelectTemplate: (
+      seedPrompt: string,
+      recommendedStartingPoint: "dynamic_source_from_chat" | "csv_upload" | "api_source",
+    ) => void;
+  }) => (
+    <div data-testid="template-cards">
+      Template cards
+    </div>
+  ),
 }));
 
 vi.mock("@/components/blobs/BlobManager", () => ({
@@ -166,6 +177,75 @@ describe("ChatPanel", () => {
     expect(screen.getByText("The model requested plugin schemas.")).toBeInTheDocument();
     expect(screen.getByText("Checking available source, transform, and sink tools.")).toBeInTheDocument();
     expect(screen.queryByText("Working on: convert HTML into JSON")).not.toBeInTheDocument();
+  });
+
+  it("keeps terminal composer progress visible after composing ends", () => {
+    const session: Session = {
+      id: "session-1",
+      title: "Composer session",
+      created_at: "2026-04-26T10:00:00Z",
+      updated_at: "2026-04-26T10:00:00Z",
+    };
+    const progress: ComposerProgressSnapshot = {
+      session_id: "session-1",
+      request_id: "message-1",
+      phase: "cancelled",
+      headline: "Composition stopped before saving.",
+      evidence: ["The request ended before a valid pipeline was saved."],
+      likely_next: "Revise the request and send it again.",
+      reason: "client_cancelled",
+      updated_at: "2026-04-26T10:00:02Z",
+    };
+
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      cancelComposition: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: null,
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      sessions: [session],
+      messages: [],
+      composerProgress: progress,
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByText("Last composer update")).toBeInTheDocument();
+    expect(screen.getByText("Composition stopped before saving.")).toBeInTheDocument();
+    expect(screen.getByText("Revise the request and send it again.")).toBeInTheDocument();
+  });
+
+  it("renders template cards as a static gallery without sending a template prompt", () => {
+    const sendMessage = vi.fn();
+    const session: Session = {
+      id: "session-templates",
+      title: "Template session",
+      created_at: "2026-04-26T10:00:00Z",
+      updated_at: "2026-04-26T10:00:00Z",
+    };
+
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage,
+      retryMessage: vi.fn(),
+      cancelComposition: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: null,
+    });
+    useSessionStore.setState({
+      activeSessionId: session.id,
+      sessions: [session],
+      messages: [],
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("template-cards")).toBeInTheDocument();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("coalesces consecutive assistant rows into one agent turn bubble", () => {

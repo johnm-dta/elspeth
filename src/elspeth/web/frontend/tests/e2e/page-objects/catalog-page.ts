@@ -11,7 +11,7 @@ export class CatalogPage {
   }
 
   toggleButton(): Locator {
-    return this.page.getByRole("button", { name: "Catalog" });
+    return this.page.getByRole("button", { name: /catalog \(reference\)/i });
   }
 
   drawer(): Locator {

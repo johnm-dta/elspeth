@@ -356,9 +356,16 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
       >
         {/* Header */}
         <div className="catalog-header">
-          <span id="catalog-drawer-title" className="catalog-header-title">
-            Plugin Catalog
-          </span>
+          <div className="catalog-header-copy">
+            <span className="catalog-header-eyebrow">Reference</span>
+            <span id="catalog-drawer-title" className="catalog-header-title">
+              Plugin Catalog
+            </span>
+            <span className="catalog-header-subtitle">
+              Browse available sources, transforms, and sinks before asking the
+              composer to apply them.
+            </span>
+          </div>
           <button
             onClick={onClose}
             aria-label="Close plugin catalog"

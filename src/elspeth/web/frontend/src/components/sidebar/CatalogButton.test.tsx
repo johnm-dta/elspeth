@@ -10,6 +10,8 @@ describe("CatalogButton", () => {
     expect(
       screen.getByRole("button", { name: /catalog \(reference\)/i }),
     ).toBeInTheDocument();
+    expect(screen.getByText("Plugin catalog")).toBeInTheDocument();
+    expect(screen.getByText("Reference")).toBeInTheDocument();
   });
 
   it("dispatches OPEN_CATALOG_EVENT on click", () => {

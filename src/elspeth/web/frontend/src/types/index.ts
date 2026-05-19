@@ -45,11 +45,8 @@ export interface Session {
   forked_from_session_id?: string;
   forked_from_message_id?: string;
   /**
-   * Present only when the backend exposes archived sessions in list results.
-   * The current backend physically deletes on archive, so this field is absent
-   * at runtime. It is declared here so the frontend filter/toggle works
-   * correctly if the backend is extended to soft-delete. Phase 9 follow-up:
-   * expose archived sessions via GET /api/sessions?include_archived=true.
+   * True for run-bearing sessions that the user has archived. Unrun sessions
+   * are physically deleted; sessions with durable history are hidden instead.
    */
   archived?: boolean;
 }

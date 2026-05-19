@@ -51,10 +51,13 @@ const composerSettingsEnv: Record<string, string> = {
 export default defineConfig({
   testDir: "./tests/e2e",
   testIgnore: ["**/setup/**", "**/page-objects/**", "**/helpers/**"],
-  fullyParallel: true,
+  // The suite uses one authenticated account and verifies account-scoped
+  // composer preferences. Running specs in parallel lets tests race through the
+  // same preference row and makes first-session mode assertions nondeterministic.
+  fullyParallel: false,
   forbidOnly: isCI,
   retries: isCI ? 2 : 0,
-  workers: isCI ? 2 : undefined,
+  workers: 1,
   reporter: isCI ? [["github"], ["html", { open: "never" }]] : [["list"], ["html", { open: "never" }]],
   expect: {
     timeout: 5_000,

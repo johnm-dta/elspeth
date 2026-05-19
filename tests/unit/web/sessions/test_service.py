@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 import structlog
+from sqlalchemy import insert, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.execution.schemas import (
@@ -18,6 +19,7 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
 )
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import composer_completion_events_table
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
     CompositionStateData,
@@ -120,7 +122,7 @@ class TestSessionCRUD:
         assert sessions[0].id == s1.id
 
     @pytest.mark.asyncio
-    async def test_archive_session(self, service) -> None:
+    async def test_archive_session_deletes_unrun_session(self, service) -> None:
         session = await service.create_session("alice", "To Archive", "local")
         await service.add_message(session.id, "user", "hello", writer_principal="route_user_message")
         await service.archive_session(session.id)
@@ -130,6 +132,42 @@ class TestSessionCRUD:
 
         messages = await service.get_messages(session.id)
         assert len(messages) == 0
+
+    @pytest.mark.asyncio
+    async def test_archive_session_hides_session_with_durable_completion_history(self, engine, service) -> None:
+        session = await service.create_session("alice", "To Archive", "local")
+        await service.add_message(session.id, "user", "hello", writer_principal="route_user_message")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        with engine.begin() as conn:
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id=str(uuid.uuid4()),
+                    session_id=str(session.id),
+                    composition_state_id=str(state.id),
+                    event_type="export_yaml",
+                    actor="user:alice",
+                    created_at=datetime.now(UTC),
+                )
+            )
+
+        await service.archive_session(session.id)
+
+        archived = await service.get_session(session.id)
+        assert archived.archived_at is not None
+
+        visible_sessions = await service.list_sessions("alice", "local")
+        assert [s.id for s in visible_sessions] == []
+
+        archived_sessions = await service.list_sessions("alice", "local", include_archived=True)
+        assert [s.id for s in archived_sessions] == [session.id]
+
+        messages = await service.get_messages(session.id)
+        assert len(messages) == 1
+        with engine.begin() as conn:
+            remaining_completion_events = conn.execute(
+                select(composer_completion_events_table).where(composer_completion_events_table.c.session_id == str(session.id))
+            ).all()
+        assert len(remaining_completion_events) == 1
 
     @pytest.mark.asyncio
     async def test_archive_session_deletes_blob_directory(self, engine, tmp_path) -> None:

@@ -25,6 +25,11 @@ export function ComposerPreferencesForm(): JSX.Element | null {
   const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
   const resetTutorial = usePreferencesStore((s) => s.resetTutorial);
 
+  // TODO(hidden-jobs-settings): Add a user-settings view for hidden jobs
+  // (run-bearing sessions archived from the switcher). The session switcher
+  // can hide/show archived rows locally, but settings should become the
+  // durable management surface for review/restore/delete policy.
+
   // useCallback must be unconditional (React rules of hooks); the early-return
   // for !loaded sits after the hook calls.
   const onChange = useCallback(
@@ -93,7 +98,7 @@ export function ComposerPreferencesForm(): JSX.Element | null {
       {tutorialCompleted && (
         <button
           type="button"
-          className="tutorial-link-button"
+          className="btn btn-compact"
           disabled={writing}
           onClick={() => void onResetTutorial()}
           style={{ marginTop: 16 }}

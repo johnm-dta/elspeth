@@ -303,8 +303,13 @@ export async function fetchSystemStatus(): Promise<SystemStatus> {
 // ── Sessions ────────────────────────────────────────────────────────────────
 
 /** List all sessions for the current user. */
-export async function fetchSessions(): Promise<Session[]> {
-  const response = await fetch("/api/sessions", {
+export async function fetchSessions(includeArchived = true): Promise<Session[]> {
+  const params = new URLSearchParams();
+  if (includeArchived) {
+    params.set("include_archived", "true");
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  const response = await fetch(`/api/sessions${query}`, {
     headers: authHeaders(),
   });
   return parseResponse<Session[]>(response);

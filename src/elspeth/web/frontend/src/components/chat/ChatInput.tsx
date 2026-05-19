@@ -16,6 +16,7 @@ import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
 interface ChatInputProps {
   onSend: (content: string) => void;
   disabled: boolean;
+  onCancel?: () => void;
   inputRef: React.RefObject<HTMLTextAreaElement>;
   onToggleBlobManager?: () => void;
   showBlobManager?: boolean;
@@ -32,9 +33,31 @@ interface ChatInputProps {
   placeholder?: string;
 }
 
+type ChatInputIconName = "folder" | "upload" | "key";
+
+function ChatInputIcon({ name }: { name: ChatInputIconName }): JSX.Element {
+  const path =
+    name === "folder"
+      ? "M3 6.5h6l1.5 2H21v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6.5Zm0 3h18"
+      : name === "upload"
+        ? "M12 16V4m0 0 4 4m-4-4-4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"
+        : "M14.5 9.5a4 4 0 1 0-3.2 3.9L9 15.7V18H6.7L5 19.7 3.3 18l6.3-6.3a4 4 0 0 0 4.9-2.2Zm.5-2h.01";
+  return (
+    <svg
+      aria-hidden="true"
+      className="chat-input-icon"
+      viewBox="0 0 24 24"
+      focusable="false"
+    >
+      <path d={path} />
+    </svg>
+  );
+}
+
 export function ChatInput({
   onSend,
   disabled,
+  onCancel,
   inputRef,
   onToggleBlobManager,
   showBlobManager,
@@ -229,16 +252,17 @@ export function ChatInput({
         />
 
         {/* File manager toggle */}
-        {onToggleBlobManager && (
-          <button
-            onClick={onToggleBlobManager}
-            title={showBlobManager ? "Hide file manager" : "Show file manager"}
-            aria-label={showBlobManager ? "Hide file manager" : "Show file manager"}
-            className={`chat-input-icon-btn${showBlobManager ? " chat-input-icon-btn--active" : ""}`}
-          >
-            <span aria-hidden="true">{"\uD83D\uDCC1"}</span>
-          </button>
-        )}
+          {onToggleBlobManager && (
+            <button
+              type="button"
+              onClick={onToggleBlobManager}
+              title={showBlobManager ? "Hide file manager" : "Show file manager"}
+              aria-label={showBlobManager ? "Hide file manager" : "Show file manager"}
+              className={`chat-input-icon-btn${showBlobManager ? " chat-input-icon-btn--active" : ""}`}
+            >
+              <ChatInputIcon name="folder" />
+            </button>
+          )}
 
         {/* File upload button — using a visible button that clicks a hidden input */}
         <button
@@ -249,7 +273,7 @@ export function ChatInput({
           title="Upload file"
           aria-label="Upload file"
         >
-          <span aria-hidden="true">{"\uD83D\uDCCE"}</span>
+          <ChatInputIcon name="upload" />
         </button>
         <input
           ref={fileInputRef}
@@ -270,12 +294,24 @@ export function ChatInput({
             title="API Keys & Secrets"
             aria-label="Open secrets settings"
           >
-            <span aria-hidden="true">{"\uD83D\uDD11"}</span>
+            <ChatInputIcon name="key" />
+          </button>
+        )}
+
+        {disabled && onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            aria-label="Stop composing"
+            className="chat-input-cancel-btn"
+          >
+            Stop
           </button>
         )}
 
         {/* Send button */}
         <button
+          type="button"
           onClick={handleSend}
           disabled={!canSend}
           aria-label="Send message"

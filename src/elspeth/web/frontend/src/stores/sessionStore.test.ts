@@ -359,9 +359,19 @@ describe("sessionStore", () => {
         (mockSendMessage as ReturnType<typeof vi.fn>).mockReturnValueOnce(
           sendDeferred.promise,
         );
-        (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue(
-          progress,
-        );
+        const completeProgress: ComposerProgressSnapshot = {
+          ...progress,
+          phase: "complete",
+          headline: "Composition saved.",
+          evidence: ["The pipeline state was updated."],
+          likely_next: "Review the pipeline or run it.",
+          updated_at: "2026-04-26T10:00:03Z",
+        };
+
+        (fetchComposerProgress as ReturnType<typeof vi.fn>)
+          .mockResolvedValueOnce(progress)
+          .mockResolvedValueOnce(progress)
+          .mockResolvedValueOnce(completeProgress);
 
         useSessionStore.setState({ activeSessionId: "session-1" });
         const sendPromise = useSessionStore.getState().sendMessage("hello");
@@ -378,10 +388,12 @@ describe("sessionStore", () => {
         await sendPromise;
 
         expect(useSessionStore.getState().isComposing).toBe(false);
-        expect(useSessionStore.getState().composerProgress).toBeNull();
+        expect(useSessionStore.getState().composerProgress).toEqual(
+          completeProgress,
+        );
 
         await vi.advanceTimersByTimeAsync(3000);
-        expect(fetchComposerProgress).toHaveBeenCalledTimes(2);
+        expect(fetchComposerProgress).toHaveBeenCalledTimes(3);
       } finally {
         vi.useRealTimers();
       }

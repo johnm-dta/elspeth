@@ -35,17 +35,10 @@ export function InlineChatSourceEntry({ onCloseDrawer }: InlineChatSourceEntryPr
     <div className="inline-chat-source-entry" role="region" aria-label="Inline data from chat">
       <div className="inline-chat-source-entry-header">
         <span className="inline-chat-source-entry-title">Inline data from chat</span>
-        <span className="inline-chat-source-entry-badge">no plugin needed</span>
+        <span className="inline-chat-source-entry-badge">chat input</span>
       </div>
       <div className="inline-chat-source-entry-desc">
-        Type your data directly into chat for small inputs — a URL, a sentence, one record.
-        The composer creates a one-row dynamic source from your message. Best for ad-hoc
-        runs, demos, and exploring; switch to a real source plugin when you have a
-        recurring batch.
-      </div>
-      <div className="inline-chat-source-entry-example">
-        <div className="inline-chat-source-entry-example-label">Suggested prompt:</div>
-        <pre className="inline-chat-source-entry-example-code">{SUGGESTED_PROMPT}</pre>
+        For a URL, sentence, or single record. Use a real source for recurring batches.
       </div>
       <button
         type="button"

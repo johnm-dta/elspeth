@@ -600,7 +600,7 @@ export function GraphView() {
         fitViewOptions={{ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 }}
         proOptions={{ hideAttribution: true }}
       >
-        <Background gap={16} size={1} color="var(--color-border)" />
+        <Background gap={16} size={1} color="var(--color-canvas-grid)" />
         <Controls showInteractive={false} />
         {nodes.length > 5 && (
           <MiniMap

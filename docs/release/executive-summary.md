@@ -1,11 +1,11 @@
 # ELSPETH — Executive Summary (RC-5.2)
 
-> **DRAFT — awaiting operator review (19 May 2026).** Once approved for release, this banner is replaced by the provenance footer at the foot of the document; until then, claims about assurance status, compliance posture, and residual risk remain subject to revision.
+> **DRAFT — awaiting review (20 May 2026).** Once approved for release, this banner is replaced by the provenance footer at the foot of the document; until then, claims about assurance status, compliance posture, and residual risk remain subject to revision.
 
-**Document date:** 19 May 2026
-**Release covered:** RC-5.2 (version 0.5.2)
+**Document date:** 20 May 2026
+**Release covered:** RC-5.2
 **Audience:** Public-service executives, programme sponsors, assurance and risk staff
-**Register:** Australian public-service / institutional
+**Register:** Australian Public Service / institutional
 **Prepared by:** John Morrissey, Digital Transformation Agency
 
 ---

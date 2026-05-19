@@ -82,6 +82,12 @@ describe("CatalogDrawer", () => {
 
     const dialog = screen.getByRole("dialog", { name: "Plugin Catalog" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByText("Reference")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Browse available sources, transforms, and sinks before asking the composer to apply them.",
+      ),
+    ).toBeInTheDocument();
     await screen.findByText("CSV file source");
   });
 

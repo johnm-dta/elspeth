@@ -290,7 +290,7 @@ describe("GraphView", () => {
     render(<GraphView />);
 
     expect(screen.getByTestId("react-flow")).toHaveAttribute("data-color-mode", "light");
-    expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-color", "var(--color-border)");
+    expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-color", "var(--color-canvas-grid)");
     expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-gap", "16");
     expect(screen.getByTestId("react-flow-background")).toHaveAttribute("data-size", "1");
 

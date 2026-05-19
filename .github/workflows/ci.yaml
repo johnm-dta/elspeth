@@ -25,24 +25,27 @@ env:
   PYTHON_VERSION: "3.13"
   UV_VERSION: "0.5"
 
+permissions:
+  contents: read
+
 jobs:
   # ===========================================================================
   # Stage 1: Lint (Fast feedback - ~30 seconds)
   # ===========================================================================
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -71,13 +74,13 @@ jobs:
   # ===========================================================================
   enforce-tier-model:
     name: Enforce Tier Model
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -92,6 +95,23 @@ jobs:
             --exclude "**/__pycache__/*" \
             --format text
 
+      - name: Write tier model JSON report on failure
+        if: failure()
+        run: |
+          python scripts/cicd/enforce_tier_model.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_tier_model \
+            --exclude "**/__pycache__/*" \
+            --format json > enforce-tier-model-report.json || true
+
+      - name: Upload tier model JSON report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: enforce-tier-model-report
+          path: enforce-tier-model-report.json
+          retention-days: 7
+
   # ===========================================================================
   # Stage 2a: Frozen-Dataclass Freeze-Guard Enforcement (closes
   # elspeth-obs-c025f9fc15 — CLAUDE.md asserted "Enforced by CI" but no
@@ -104,13 +124,13 @@ jobs:
   # ===========================================================================
   enforce-freeze-guards:
     name: Enforce Freeze Guards
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -128,13 +148,13 @@ jobs:
   # ===========================================================================
   enforce-audit-evidence-nominal:
     name: Enforce Audit Evidence Nominal
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -152,13 +172,13 @@ jobs:
   # ===========================================================================
   enforce-tier-1-decoration:
     name: Enforce Tier-1 Decoration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -172,22 +192,141 @@ jobs:
             --allowlist config/cicd/enforce_tier_1_decoration
 
   # ===========================================================================
+  # Stage 2a: Component Type Enforcement
+  # ===========================================================================
+  enforce-component-type:
+    name: Enforce Component Type
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run component type enforcement
+        run: |
+          python scripts/cicd/enforce_component_type.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_component_type
+
+  # ===========================================================================
+  # Stage 2a: Guard Symmetry Enforcement
+  # ===========================================================================
+  enforce-guard-symmetry:
+    name: Enforce Guard Symmetry
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run guard symmetry enforcement
+        run: |
+          python scripts/cicd/enforce_guard_symmetry.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_guard_symmetry
+
+  # ===========================================================================
+  # Stage 2a: Composer Exception-Channel Enforcement
+  # ===========================================================================
+  enforce-composer-exception-channel:
+    name: Enforce Composer Exception Channel
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run composer exception-channel enforcement
+        run: |
+          python scripts/cicd/enforce_composer_exception_channel.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_composer_exception_channel
+
+  # ===========================================================================
+  # Stage 2a: Composer Catch-Order Enforcement
+  # ===========================================================================
+  enforce-composer-catch-order:
+    name: Enforce Composer Catch Order
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run composer catch-order enforcement
+        run: |
+          python scripts/cicd/enforce_composer_catch_order.py check \
+            --root src/elspeth \
+            --allowlist config/cicd/enforce_composer_catch_order
+
+  # ===========================================================================
+  # Stage 2a: Contract Manifest Enforcement
+  # ===========================================================================
+  enforce-contract-manifest:
+    name: Enforce Contract Manifest
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run contract manifest enforcement
+        run: |
+          python scripts/cicd/enforce_contract_manifest.py check \
+            --allowlist config/cicd/enforce_contract_manifest
+
+  # ===========================================================================
   # Stage 2a: SlotType / guided.ts cross-language mirror check
   # ===========================================================================
   check-slot-type-cross-language:
     name: SlotType cross-language mirror check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -207,18 +346,18 @@ jobs:
   # ===========================================================================
   contract-enforcement:
     name: Contract Enforcement
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -238,29 +377,41 @@ jobs:
   # ===========================================================================
   test:
     name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, check-slot-type-cross-language]
+    runs-on: ubuntu-24.04
+    needs:
+      - lint
+      - enforce-tier-model
+      - enforce-freeze-guards
+      - enforce-audit-evidence-nominal
+      - enforce-tier-1-decoration
+      - enforce-component-type
+      - enforce-guard-symmetry
+      - enforce-composer-exception-channel
+      - enforce-composer-catch-order
+      - enforce-contract-manifest
+      - contract-enforcement
+      - check-slot-type-cross-language
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
         include:
           - python-version: "3.12"
-            coverage: true
-          - python-version: "3.13"
             coverage: false
+          - python-version: "3.13"
+            coverage: true
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -279,9 +430,19 @@ jobs:
             --cov=src/elspeth \
             --cov-report=xml \
             --cov-report=term-missing \
-            --cov-fail-under=80 \
+            --cov-fail-under=85 \
             -v \
             -m "not slow and not stress and not performance and not testcontainer"
+
+      - name: Enforce audit-critical coverage floors
+        if: matrix.coverage
+        run: |
+          # Ratchet the verified 2026-05-19 baseline while the test-debt
+          # uplift to 95% is planned. Do not lower without fresh evidence.
+          uv run coverage report --include="src/elspeth/core/landscape/*" --fail-under=93
+          uv run coverage report --include="src/elspeth/core/canonical.py" --fail-under=99
+          uv run coverage report --include="src/elspeth/engine/orchestrator/*" --fail-under=91
+          uv run coverage report --include="src/elspeth/contracts/*" --fail-under=62
 
       - name: Run tests without coverage
         if: ${{ !matrix.coverage }}
@@ -292,7 +453,7 @@ jobs:
 
       - name: Upload coverage report
         if: matrix.coverage && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: coverage-report
           path: coverage.xml
@@ -303,20 +464,20 @@ jobs:
   # ===========================================================================
   integration:
     name: Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -345,7 +506,7 @@ jobs:
   # execution path for CL-PP-11 (composer-progress-persistence Phase 1
   # spec §8.2).
   #
-  # Docker-on-Docker: GitHub Actions ubuntu-latest runners have Docker
+  # Docker-on-Docker: GitHub Actions Ubuntu runners have Docker
   # available with no extra setup. testcontainers-python pulls postgres
   # images on first use; image pull adds ~30s to first run, cached after.
   #
@@ -355,19 +516,30 @@ jobs:
   # (the Phase 1C plan calls this out at line 127-131).
   test-postgres-testcontainer:
     name: Test (Postgres testcontainer)
-    runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement]
+    runs-on: ubuntu-24.04
+    needs:
+      - lint
+      - enforce-tier-model
+      - enforce-freeze-guards
+      - enforce-audit-evidence-nominal
+      - enforce-tier-1-decoration
+      - enforce-component-type
+      - enforce-guard-symmetry
+      - enforce-composer-exception-channel
+      - enforce-composer-catch-order
+      - enforce-contract-manifest
+      - contract-enforcement
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -402,33 +574,92 @@ jobs:
             -m testcontainer
 
   # ===========================================================================
+  # Stage 3c: Dependency and License Audit
+  # ===========================================================================
+  supply-chain-audit:
+    name: Dependency and License Audit
+    runs-on: ubuntu-24.04
+    needs: [lint]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libsqlcipher-dev
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Audit Python dependencies
+        run: |
+          uv export \
+            --quiet \
+            --frozen \
+            --all-extras \
+            --no-emit-project \
+            --format requirements.txt \
+            --output-file requirements-audit.txt
+          uv run --with "pip-audit>=2.9,<3" pip-audit \
+            --strict \
+            --requirement requirements-audit.txt \
+            --no-deps \
+            --disable-pip \
+            --progress-spinner=off
+
+      - name: Check Python dependency licenses
+        run: |
+          uv run --with "pip-licenses>=5,<6" pip-licenses \
+            --fail-on "GPL;AGPL" \
+            --format=markdown \
+            --output-file=python-license-report.md
+
+      - name: Upload Python license report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-license-report
+          path: python-license-report.md
+          retention-days: 30
+
+  # ===========================================================================
   # Stage 4: Frontend E2E (Playwright) — INFORMATIONAL until baseline lands
   # ===========================================================================
   # Boots the FastAPI backend + Vite dev server, runs Playwright tests
-  # against a real Chromium. Currently runs in informational mode
-  # (continue-on-error: true) for the first 2 weeks while a flake baseline
-  # is established. Once pass-rate is ≥99% across N runs, flip the flag and
-  # add this job to ci-success.needs to make it gating. Track via the
-  # follow-up filigree task created during the Playwright rollout.
+  # against a real Chromium. This remains informational until the
+  # no-earlier-than 2026-05-20 baseline review in elspeth-cba983b073.
+  # Once pass-rate is >=99% across the reviewed run history, flip the flag
+  # and add this job to ci-success.needs to make it gating.
   #
   # The job is NOT in ci-success.needs by design — that's what keeps it
   # informational. continue-on-error makes failed runs render as ✓ in the
   # PR check list while still uploading artefacts for diagnosis.
   e2e-frontend:
     name: Frontend E2E (Playwright, informational)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -441,7 +672,7 @@ jobs:
         run: uv sync --frozen --all-extras
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
           cache: "npm"
@@ -463,7 +694,7 @@ jobs:
 
       - name: Upload Playwright HTML report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: playwright-report
           path: src/elspeth/web/frontend/playwright-report/
@@ -471,19 +702,74 @@ jobs:
 
       - name: Upload Playwright traces
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: playwright-traces
           path: src/elspeth/web/frontend/test-results/
           retention-days: 7
 
   # ===========================================================================
+  # Frontend unit tests + type check (vitest, gating)
+  # ===========================================================================
+  # Phase 8 post-merge fix: before this job existed, the entire vitest
+  # suite under ``src/elspeth/web/frontend/src/**/*.test.{ts,tsx}`` ran
+  # only locally — no workflow invoked ``npm test`` or ``npm run
+  # typecheck``.  That meant the ~525-case HeaderSessionSwitcher /
+  # ComposerPreferencesPanel / TemplateCards / a11y-harness etc. test
+  # corpus was advisory documentation rather than regression protection.
+  # This lane is in ``ci-success.needs`` below so a red vitest run
+  # blocks merge.
+  frontend-unit:
+    name: Frontend unit (vitest + typecheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: src/elspeth/web/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: src/elspeth/web/frontend
+        run: npm ci
+
+      - name: Type check
+        working-directory: src/elspeth/web/frontend
+        run: npm run typecheck
+
+      - name: Run vitest
+        working-directory: src/elspeth/web/frontend
+        env:
+          CI: "true"
+        run: npm test -- --run
+
+  # ===========================================================================
   # Summary Job - Required for branch protection
   # ===========================================================================
   ci-success:
     name: CI Success
-    runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, enforce-freeze-guards, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test, test-postgres-testcontainer]
+    runs-on: ubuntu-24.04
+    needs:
+      - lint
+      - enforce-tier-model
+      - enforce-freeze-guards
+      - enforce-audit-evidence-nominal
+      - enforce-tier-1-decoration
+      - enforce-component-type
+      - enforce-guard-symmetry
+      - enforce-composer-exception-channel
+      - enforce-composer-catch-order
+      - enforce-contract-manifest
+      - contract-enforcement
+      - check-slot-type-cross-language
+      - test
+      - test-postgres-testcontainer
+      - supply-chain-audit
+      - frontend-unit
     if: always()
     steps:
       - name: Check all jobs passed
@@ -508,8 +794,32 @@ jobs:
             echo "Tier-1 decoration enforcement job failed"
             exit 1
           fi
+          if [[ "${{ needs.enforce-component-type.result }}" != "success" ]]; then
+            echo "Component type enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-guard-symmetry.result }}" != "success" ]]; then
+            echo "Guard symmetry enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-composer-exception-channel.result }}" != "success" ]]; then
+            echo "Composer exception-channel enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-composer-catch-order.result }}" != "success" ]]; then
+            echo "Composer catch-order enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.enforce-contract-manifest.result }}" != "success" ]]; then
+            echo "Contract manifest enforcement job failed"
+            exit 1
+          fi
           if [[ "${{ needs.contract-enforcement.result }}" != "success" ]]; then
             echo "Contract enforcement job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.check-slot-type-cross-language.result }}" != "success" ]]; then
+            echo "SlotType cross-language mirror check failed"
             exit 1
           fi
           if [[ "${{ needs.test.result }}" != "success" ]]; then
@@ -518,6 +828,14 @@ jobs:
           fi
           if [[ "${{ needs.test-postgres-testcontainer.result }}" != "success" ]]; then
             echo "Postgres testcontainer test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.supply-chain-audit.result }}" != "success" ]]; then
+            echo "Dependency/license audit job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.frontend-unit.result }}" != "success" ]]; then
+            echo "Frontend unit (vitest + typecheck) job failed"
             exit 1
           fi
           echo "All CI checks passed!"

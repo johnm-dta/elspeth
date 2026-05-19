@@ -6,7 +6,6 @@
 #
 # Usage:
 #   ./smoke-test.sh [image]
-#   ./smoke-test.sh                           # Uses elspeth:latest
 #   ./smoke-test.sh ghcr.io/org/elspeth:v0.1.0
 #   ./smoke-test.sh myacr.azurecr.io/elspeth:sha-abc123
 #
@@ -25,7 +24,7 @@ set -euo pipefail
 # Configuration
 # =============================================================================
 
-IMAGE="${1:-elspeth:latest}"
+IMAGE="${1:-}"
 CONFIG_DIR="${CONFIG_DIR:-./config}"
 DATA_DIR="${DATA_DIR:-./data}"
 DATABASE_URL="${DATABASE_URL:-}"
@@ -59,23 +58,43 @@ log_test() {
 
 log_pass() {
     echo -e "${GREEN}[PASS]${NC} $1"
-    ((TESTS_PASSED++))
+    ((TESTS_PASSED += 1))
 }
 
 log_fail() {
     echo -e "${RED}[FAIL]${NC} $1" >&2
-    ((TESTS_FAILED++))
+    ((TESTS_FAILED += 1))
 }
 
 log_skip() {
     echo -e "${YELLOW}[SKIP]${NC} $1"
 }
 
+show_usage() {
+    echo "Usage: $0 <immutable-image-ref>"
+    echo ""
+    echo "Examples:"
+    echo "  $0 ghcr.io/org/elspeth:sha-abc123"
+    echo "  $0 ghcr.io/org/elspeth:v0.1.0"
+}
+
+if [[ -z "$IMAGE" ]]; then
+    log_fail "Missing required image reference"
+    show_usage
+    exit 1
+fi
+
+if [[ "$IMAGE" == *":latest" ]]; then
+    log_fail "Mutable image tag ':latest' is not allowed for smoke verification"
+    show_usage
+    exit 1
+fi
+
 run_test() {
     local name="$1"
     local cmd="$2"
 
-    ((TESTS_RUN++))
+    ((TESTS_RUN += 1))
     log_test "$name"
 
     if eval "$cmd" > /dev/null 2>&1; then
@@ -186,25 +205,24 @@ fi
 log_header "5. Container HEALTHCHECK"
 
 # Run container and check health status
-CONTAINER_ID=$(docker run -d --rm $IMAGE sleep 30 2>/dev/null || echo "")
+CONTAINER_ID=$(docker run -d --rm --entrypoint /bin/sleep "$IMAGE" 30 2>/dev/null || echo "")
 if [[ -n "$CONTAINER_ID" ]]; then
     sleep 5  # Wait for health check to run
 
-    HEALTH_STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER_ID" 2>/dev/null || echo "none")
+    HEALTH_STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_ID" 2>/dev/null || echo "none")
     docker stop "$CONTAINER_ID" > /dev/null 2>&1 || true
 
     if [[ "$HEALTH_STATUS" == "healthy" ]]; then
-        ((TESTS_RUN++))
+        ((TESTS_RUN += 1))
         log_pass "Container health check: $HEALTH_STATUS"
-        ((TESTS_PASSED++))
     elif [[ "$HEALTH_STATUS" == "starting" ]]; then
-        ((TESTS_RUN++))
+        ((TESTS_RUN += 1))
         log_pass "Container health check: $HEALTH_STATUS (still starting)"
-        ((TESTS_PASSED++))
+    elif [[ "$HEALTH_STATUS" == "none" ]]; then
+        log_skip "No image-level HEALTHCHECK configured"
     else
-        ((TESTS_RUN++))
+        ((TESTS_RUN += 1))
         log_fail "Container health check: $HEALTH_STATUS"
-        ((TESTS_FAILED++))
     fi
 else
     log_skip "Could not start container for health check"

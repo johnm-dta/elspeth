@@ -205,6 +205,18 @@ audit-row absence — see commit body for the superset-rule rationale).
 ### 3. Decision 2 — `composer.tutorial.replayed_total` counter boundary question
 
 - **Class:** Decision deferral.
+- **Note (2026-05-19, CR-1):** This decision concerns
+  `composer.tutorial.replayed_total` specifically — the
+  replay-button counter. It is **NOT** affected by Phase 4's
+  `composer.tutorial.completed_total` emit; that counter slot was
+  already declared in Phase 8 (`sessions/telemetry.py:317-323`)
+  and Phase 4 (`21a2-phase-4-backend-part-2.md` Task 8, when Phase 4
+  ships) provides the emit site. Phase 4 attaches a
+  `completion_path` attribute (values
+  `first_time | skip | retake | repeat`) to discriminate the four
+  PATCH gestures server-side. Phase 4's emit does NOT resolve the
+  `replayed_total` boundary question below — `replayed_total`
+  remains Phase-9-deferred per Option C.
 - **Status in code (load-bearing absence markers):** The counter
   `composer.tutorial.replayed_total` has no runtime emit site,
   which is correct per the Phase 9 deferral. The string appears in

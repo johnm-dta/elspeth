@@ -868,7 +868,22 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # into this endpoint automatically via the global REGISTRY.
     @app.get("/metrics", include_in_schema=False)
     def _prometheus_metrics() -> Response:
-        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        # ``generate_latest()`` walks the global REGISTRY; a corrupted
+        # collector would raise here and Starlette's default 500 handler
+        # leaks the traceback into the response body. /metrics is a
+        # scrape endpoint — return a safe 503 with no internal detail so
+        # scrapers retry gracefully and the traceback stays in the
+        # process log.  Audit-primacy: this endpoint reads in-memory
+        # counter state only; failure is operational, not legal.
+        try:
+            body = generate_latest()
+        except Exception:
+            return Response(
+                content=b"# scrape failed\n",
+                status_code=503,
+                media_type=CONTENT_TYPE_LATEST,
+            )
+        return Response(content=body, media_type=CONTENT_TYPE_LATEST)
 
     # --- Static file serving for the React SPA (production) ---
     # Mount frontend/dist/ AFTER all API and WS routes so /api/* takes precedence.

@@ -9,6 +9,21 @@ export type RecommendedStartingPoint =
   | "csv_upload"
   | "api_source";
 
+/**
+ * Exhaustive list of starting points the templates know about.  Consumers
+ * can iterate this constant in a `switch (sp)` and add a final default
+ * `assertNever(sp)` arm so adding a new starting-point literal becomes
+ * a compile error at every consumption site rather than a silent miss.
+ * Update discipline: when extending `RecommendedStartingPoint`, extend
+ * this array in the same edit — TypeScript's `satisfies` check below
+ * fails if any union member is omitted.
+ */
+export const RECOMMENDED_STARTING_POINTS = [
+  "dynamic_source_from_chat",
+  "csv_upload",
+  "api_source",
+] as const satisfies ReadonlyArray<RecommendedStartingPoint>;
+
 export interface ExampleUseCase {
   id: string;
   domain: string;

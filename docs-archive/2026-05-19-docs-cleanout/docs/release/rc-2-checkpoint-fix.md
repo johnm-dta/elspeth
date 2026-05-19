@@ -1,5 +1,10 @@
 # RC-2 Release Note: Aggregation Checkpoint Fix
 
+> **ARCHIVED RELEASE NOTE — RC-2 hot-fix (January–February 2026).**
+> This single-issue release note documents a checkpoint-restoration bug closed in RC-2. The system has progressed through RC-3, RC-4, and RC-5 since.
+>
+> **For the current state, see** [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md).
+
 ## Summary
 
 Fixed critical bug (P1-2026-01-21) where aggregation executors would crash with `IndexError` when flushing after checkpoint restoration.

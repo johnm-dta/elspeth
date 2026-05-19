@@ -2,9 +2,10 @@
 
 Index of the documentation shipped in this repository.
 
-**Framework status:** RC-5.2 workstream (pre-release)
-**Tracking note:** active delivery work lives in Filigree. Point-in-time
-release, audit, architecture-pack, generated-review, and handover snapshots
+**Framework status:** `0.5.2` (RC-5.2 line)
+**Tracking note:** active delivery work lives in Filigree. Current release,
+architecture, contract, runbook, and composer evidence docs remain visible here;
+point-in-time audit, architecture-pack, generated-review, and handover snapshots
 from earlier workstreams were moved to
 [`docs-archive/2026-05-19-docs-cleanout/`](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md).
 
@@ -19,6 +20,7 @@ from earlier workstreams were moved to
 | Investigating audit data | [Landscape MCP Analysis](guides/landscape-mcp-analysis.md) and [Architecture Overview](../ARCHITECTURE.md) |
 | Developing plugins | [Data Trust and Error Handling](guides/data-trust-and-error-handling.md), [Plugin Development Guide](../PLUGIN.md), then [Plugin Protocol](contracts/plugin-protocol.md) |
 | Contributing to the codebase | [Contributing](../CONTRIBUTING.md) and [CLAUDE.md](../CLAUDE.md) |
+| Evaluating ELSPETH | [Executive Summary](release/executive-summary.md), [Progress Report](release/elspeth-progress-rc1-to-rc5.md), and [Velocity Report](release/elspeth-velocity-rc1-to-rc5.md) |
 
 ---
 
@@ -98,6 +100,17 @@ Runbooks and production procedures.
 - [Backup and Recovery](runbooks/backup-and-recovery.md)
 - [Configure Key Vault Secrets](runbooks/configure-keyvault-secrets.md)
 - [Ansible Ubuntu Deployment](runbooks/ansible-ubuntu-deployment.md)
+
+## Release History
+
+Audience-facing release, progress, velocity, and evaluation documents. See the
+[release docs README](release/README.md) for the full index.
+
+- [Executive Summary](release/executive-summary.md) — draft public-sector evaluation brief for RC-5.2
+- [Progress Report: RC-1 to RC-5](release/elspeth-progress-rc1-to-rc5.md) — current cumulative-output view (RC-5.2, May 2026): what shipped, period by period
+- [Velocity Report: RC-1 to RC-5](release/elspeth-velocity-rc1-to-rc5.md) — current per-day commit volume (RC-5.2, May 2026): tempo and peak-day attribution
+- [Assurance Contract](contracts/assurance-contract.md) — visible audit, lineage, and trust-boundary contract replacing the stale hidden `release/guarantees.md`
+- [RC-3 Release Notes](release/rc-3-release-notes.md) — visible historical release snapshot retained for direct citation
 
 ## Historical Snapshots
 

@@ -267,11 +267,18 @@ describe("HeaderSessionSwitcher", () => {
   });
 
   // Q9: backend archive failure must surface an error region AND preserve the
-  // row in the active list. Without this test an optimistic-UI implementation
+  // row in the active list. Without these tests an optimistic-UI implementation
   // that removes the row before awaiting the network response would ship
   // undetected — the row would disappear even though the backend state is
   // unchanged.
-  it("surfaces a backend archive failure via the error region and preserves the row", async () => {
+  //
+  // The error-region assertion is split into two cases (Error vs non-Error
+  // rejection) because the regex used to share one test passed against both
+  // the preserved-message branch ("Could not archive session: backend
+  // unavailable") AND the generic fallback ("Could not archive session.
+  // Please try again."). A regression dropping ``err.message`` would not have
+  // been caught.
+  it("preserves err.message in the inline alert when archive rejects with an Error", async () => {
     const archiveSession = vi.fn().mockRejectedValue(new Error("backend unavailable"));
     useSessionStore.setState({
       sessions: [
@@ -284,21 +291,111 @@ describe("HeaderSessionSwitcher", () => {
     const user = userEvent.setup();
     render(<HeaderSessionSwitcher />);
     await user.click(screen.getByRole("button", { name: /tender review/i }));
-
-    // Click the Archive menuitem to open the confirmation dialog.
     await user.click(screen.getByRole("menuitem", { name: /^archive tender review$/i }));
-    // Confirm the archive in the dialog — this closes the menu and triggers the
-    // async archive call.
     await user.click(screen.getByRole("button", { name: /^archive$/i }));
 
-    // Error region must appear (menu is now closed; error renders outside menu).
     const alert = await screen.findByRole("alert");
     expect(alert).toBeInTheDocument();
-    expect(alert.textContent).toMatch(/could not archive|backend unavailable|unable to archive/i);
+    // The backend message must be verbatim in the alert — the test fails if
+    // confirmArchive falls back to the generic message when it had an
+    // Error.message available.
+    expect(alert.textContent).toContain("backend unavailable");
 
-    // Reopen the menu to verify the row is still present — the session must
-    // not have been removed from the store (no optimistic removal on failure).
+    // Row is still present (no optimistic removal on failure).
     await user.click(screen.getByRole("button", { name: /tender review/i }));
     expect(screen.getByRole("menuitem", { name: /^tender review$/i })).toBeInTheDocument();
+  });
+
+  it("uses the generic fallback when archive rejects with a non-Error value", async () => {
+    // Stringly-typed rejection from an upstream layer — the inline alert
+    // must NOT leak the raw value into the UI (it has no useful operator
+    // semantics) and must NOT match the preserved-message phrasing.
+    const archiveSession = vi.fn().mockRejectedValue("not-an-error-instance");
+    useSessionStore.setState({
+      sessions: [
+        { id: "s1", title: "Tender review", updated_at: "2026-05-15T00:00:00Z" } as never,
+      ],
+      activeSessionId: "s1",
+      archiveSession,
+    } as never);
+
+    const user = userEvent.setup();
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /tender review/i }));
+    await user.click(screen.getByRole("menuitem", { name: /^archive tender review$/i }));
+    await user.click(screen.getByRole("button", { name: /^archive$/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/please try again/i);
+    expect(alert.textContent).not.toContain("not-an-error-instance");
+  });
+
+  // S1: reopening the menu clears stale inline alerts so the user doesn't
+  // see a previous failure persisting next to a fresh interaction.  Pins
+  // HeaderSessionSwitcher.tsx onClick reset of archiveError + renameError.
+  it("clears a stale archive error when the menu is reopened", async () => {
+    const archiveSession = vi.fn().mockRejectedValue(new Error("backend unavailable"));
+    useSessionStore.setState({
+      sessions: [
+        { id: "s1", title: "Tender review", updated_at: "2026-05-15T00:00:00Z" } as never,
+      ],
+      activeSessionId: "s1",
+      archiveSession,
+    } as never);
+
+    const user = userEvent.setup();
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /tender review/i }));
+    await user.click(screen.getByRole("menuitem", { name: /^archive tender review$/i }));
+    await user.click(screen.getByRole("button", { name: /^archive$/i }));
+
+    // Confirm the alert is present after the failure.
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+
+    // First trigger click closes the (already-closed-after-confirm) menu
+    // state, second click reopens — that's the path the reset hook fires on.
+    await user.click(screen.getByRole("button", { name: /tender review/i }));
+    await user.click(screen.getByRole("button", { name: /tender review/i }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // I3: rename failure must surface an inline alert co-located with the
+  // rename form rather than relying on the global composer error region.
+  // Mirror of the archive path.
+  it("preserves err.message in the rename-form alert when rename rejects with an Error", async () => {
+    const renameSession = vi
+      .fn()
+      .mockRejectedValue(new Error("title contains forbidden character"));
+    useSessionStore.setState({ renameSession } as never);
+    const user = userEvent.setup();
+
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /first/i }));
+    await user.click(screen.getByRole("menuitem", { name: /^rename first$/i }));
+    const input = screen.getByRole("textbox", { name: /^rename session$/i });
+    await user.clear(input);
+    await user.type(input, "Updated title");
+    await user.click(screen.getByRole("button", { name: /save session name/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("title contains forbidden character");
+  });
+
+  it("uses the generic fallback when rename rejects with a non-Error value", async () => {
+    const renameSession = vi.fn().mockRejectedValue("not-an-error-instance");
+    useSessionStore.setState({ renameSession } as never);
+    const user = userEvent.setup();
+
+    render(<HeaderSessionSwitcher />);
+    await user.click(screen.getByRole("button", { name: /first/i }));
+    await user.click(screen.getByRole("menuitem", { name: /^rename first$/i }));
+    const input = screen.getByRole("textbox", { name: /^rename session$/i });
+    await user.clear(input);
+    await user.type(input, "Updated title");
+    await user.click(screen.getByRole("button", { name: /save session name/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/please try again/i);
+    expect(alert.textContent).not.toContain("not-an-error-instance");
   });
 });

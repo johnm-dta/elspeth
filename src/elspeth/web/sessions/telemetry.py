@@ -30,11 +30,16 @@ Both composer code AND sessions code may import this container, and
 sessions code may import composer-owned helpers (e.g. the
 ``record_*`` emit helpers in ``web/composer/telemetry_phase8.py``).
 An earlier draft of this docstring said "sessions code must not
-import composer-owned modules"; that prohibition was a forward-
-looking aspiration that never matched codebase reality (there are
-31+ pre-existing ``from elspeth.web.composer.*`` imports across
-``src/elspeth/web/sessions/``). The Phase 8b-1b cohort emits made
-the dead-letter rule visibly inconsistent, so it has been retired.
+import composer-owned modules"; that prohibition lived only as
+docstring text (no CI gate, no enforcement script — verified via
+``config/cicd/`` and ``scripts/cicd/`` for the retirement) and was
+contradicted by 31+ pre-existing ``from elspeth.web.composer.*``
+imports across ``src/elspeth/web/sessions/`` from the day the rule
+was first written. The Phase 8b-1b cohort emits made the dead-
+letter rule visibly inconsistent, so it has been retired. The
+retirement is recorded in the cohort's docstring-corrections
+commit (search ``git log -S 'must not import composer'`` to walk
+the history).
 The practical constraint is the tier-model layer rule
 (``contracts/`` → ``core/`` → ``engine/`` → ``plugins/`` + L3
 application). Inside L3, composer / sessions / audit_readiness /
@@ -145,6 +150,14 @@ class _SessionsTelemetry:
     """Container for the named counters introduced by composer progress
     persistence. All counters default to fakes so tests can assert without
     wiring the real OTel SDK; production wiring replaces them at startup.
+
+    Note: no ``__post_init__`` deep-freeze guard is required even though
+    this is ``frozen=True``.  Every field is a ``_Counter`` Protocol
+    reference whose internal state (call list / aggregated value) is
+    mutable by design — that's what makes a counter useful.  ``frozen``
+    blocks slot reassignment, which is the only invariant we want.  The
+    CLAUDE.md ``deep_freeze`` contract applies to ``Mapping/Sequence/Set``
+    container fields; ``_Counter`` is neither.
     """
 
     tool_row_tier1_violation_total: _Counter

@@ -13,9 +13,12 @@ import pytest
 
 from elspeth.contracts import NodeType
 from elspeth.core.canonical import stable_hash
+from elspeth.web.composer import tutorial_telemetry as tutorial_telemetry_module
 from elspeth.web.composer.skills import load_skill_with_hash
+from elspeth.web.composer.tutorial_models import TutorialRunOutput
 from elspeth.web.composer.tutorial_service import (
     TutorialRunIntegrityError,
+    _cache_seed_skip_reason,
     _coalesce_run_source_hashes,
     _normalise_bare_required_field_templates,
     _normalise_current_tutorial_state_for_execution,
@@ -24,10 +27,12 @@ from elspeth.web.composer.tutorial_service import (
     _plugin_nodes_from_pipeline_dict,
     _rows_from_artifacts,
     _state_matches_cached_topology,
+    _store_successful_live_projection,
     tutorial_model_id,
 )
 from elspeth.web.config import WebSettings
-from elspeth.web.sessions.protocol import CompositionStateRecord
+from elspeth.web.preferences.tutorial_cache import TutorialCache
+from elspeth.web.sessions.protocol import CompositionStateRecord, RunRecord
 
 
 def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
@@ -141,6 +146,161 @@ def test_coalesce_run_source_hashes_aggregates_row_hashes() -> None:
     hashes = ("a" * 64, "b" * 64)
 
     assert _coalesce_run_source_hashes(hashes, run_id="run-1") == stable_hash({"source_data_hashes": list(hashes)})
+
+
+# I6 — silent-failure-hunter remediation. The cache-store early-return
+# is the silent-failure surface; this helper returns the closed-list
+# reason for it so the caller can emit a counter attribute. Each
+# branch is tested separately so the conditional ordering (which
+# resolves overlapping subset relationships — quarantined ⊂ failed,
+# routed_failure ⊂ failed, routed_success ⊂ succeeded) is locked in.
+
+
+def _run_record(
+    *,
+    status: str = "completed",
+    rows_processed: int = 5,
+    rows_succeeded: int = 5,
+    rows_failed: int = 0,
+    rows_routed_success: int = 0,
+    rows_routed_failure: int = 0,
+    rows_quarantined: int = 0,
+) -> RunRecord:
+    return RunRecord(
+        id=uuid4(),
+        session_id=uuid4(),
+        state_id=uuid4(),
+        status=status,  # type: ignore[arg-type]
+        started_at=datetime(2026, 5, 19, tzinfo=UTC),
+        finished_at=datetime(2026, 5, 19, tzinfo=UTC) if status != "pending" and status != "running" else None,
+        rows_processed=rows_processed,
+        rows_succeeded=rows_succeeded,
+        rows_failed=rows_failed,
+        rows_routed_success=rows_routed_success,
+        rows_routed_failure=rows_routed_failure,
+        rows_quarantined=rows_quarantined,
+        error=None,
+        landscape_run_id="landscape-run-1",
+        pipeline_yaml="source:\n  plugin: 'null'\nsinks:\n  out:\n    plugin: json\n",
+    )
+
+
+def test_cache_seed_skip_reason_returns_none_for_clean_completed_run() -> None:
+    assert _cache_seed_skip_reason(_run_record()) is None
+
+
+def test_cache_seed_skip_reason_status_not_completed_takes_precedence() -> None:
+    # Even with healthy counters, a non-completed status disqualifies.
+    # Use ``cancelled`` rather than ``failed`` — RunRecord's Tier-1
+    # validator requires a ``failed`` row to carry a non-empty error
+    # message; cancelled has no such constraint and exercises the same
+    # branch of _cache_seed_skip_reason.
+    rr = _run_record(status="cancelled", rows_succeeded=5)
+    assert _cache_seed_skip_reason(rr) == "status_not_completed"
+
+
+def test_cache_seed_skip_reason_zero_rows_processed() -> None:
+    rr = _run_record(rows_processed=0, rows_succeeded=0)
+    assert _cache_seed_skip_reason(rr) == "zero_rows_processed"
+
+
+def test_cache_seed_skip_reason_quarantined_resolves_before_failed() -> None:
+    # Quarantined ⊂ failed (Tier-1 constraint). The skip_reason must
+    # report the MORE SPECIFIC value so operator dashboards can
+    # distinguish "row was malformed" from "row raised in transform".
+    rr = _run_record(rows_succeeded=4, rows_failed=1, rows_quarantined=1)
+    assert _cache_seed_skip_reason(rr) == "rows_quarantined"
+
+
+def test_cache_seed_skip_reason_routed_failure_resolves_before_failed() -> None:
+    # Routed-failure ⊂ failed. Specificity ordering, same reason.
+    rr = _run_record(rows_succeeded=4, rows_failed=1, rows_routed_failure=1)
+    assert _cache_seed_skip_reason(rr) == "rows_routed_failure"
+
+
+def test_cache_seed_skip_reason_rows_failed_when_not_subclassified() -> None:
+    # A failed row that's neither quarantined nor routed — catch-all.
+    rr = _run_record(rows_succeeded=4, rows_failed=1)
+    assert _cache_seed_skip_reason(rr) == "rows_failed"
+
+
+def test_cache_seed_skip_reason_routed_success_indicates_topology_mismatch() -> None:
+    # Routed-success rows are still "successful" but their presence
+    # means the run had routing — the linear tutorial pipeline
+    # shouldn't. Cache cannot seed because the executed topology
+    # doesn't match the cached pipeline_yaml.
+    rr = _run_record(rows_routed_success=2)
+    assert _cache_seed_skip_reason(rr) == "rows_routed_success"
+
+
+def test_cache_seed_skip_reason_partial_success_catch_all() -> None:
+    # rows_succeeded < rows_processed with no failures, no routing —
+    # rows in non-terminal states like BUFFERED or other gaps.
+    rr = _run_record(rows_processed=5, rows_succeeded=3)
+    assert _cache_seed_skip_reason(rr) == "rows_partial_success"
+
+
+class _RecordingCounter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, dict[str, object]]] = []
+
+    def add(self, amount: int, *, attributes: dict[str, object]) -> None:
+        self.calls.append((amount, dict(attributes)))
+
+
+@pytest.mark.asyncio
+async def test_store_successful_live_projection_emits_skip_counter_when_quarantined(tmp_path: Path, monkeypatch) -> None:
+    # End-to-end: a quarantined-row RunRecord should NOT seed the cache
+    # AND should emit the counter. The pin guards against a future
+    # refactor that drops the record_tutorial_cache_skipped call from
+    # the early-return branch (the silent-failure regression I6
+    # closes).
+    counter = _RecordingCounter()
+    monkeypatch.setattr(tutorial_telemetry_module, "_TUTORIAL_CACHE_SKIPPED_COUNTER", counter)
+    cache_dir = tmp_path / "tutorial-cache"
+    cache_dir.mkdir()
+    cache = TutorialCache(cache_dir=cache_dir)
+    rr = _run_record(rows_succeeded=4, rows_failed=1, rows_quarantined=1)
+
+    await _store_successful_live_projection(
+        cache=cache,
+        model_id="test-model-id",
+        run_record=rr,
+        output=TutorialRunOutput(rows=(), source_data_hash="0" * 64),
+        llm_call_count=3,
+    )
+
+    assert counter.calls == [(1, {"skip_reason": "rows_quarantined"})]
+    # Cache was not seeded — no entries written.
+    assert list(cache_dir.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_store_successful_live_projection_seeds_cache_and_does_not_emit_counter_on_clean_run(tmp_path: Path, monkeypatch) -> None:
+    # Inverse pin: a clean run MUST seed the cache and NOT emit the
+    # skip counter. Together with the quarantined test this locks in
+    # the two-branch contract of the helper.
+    counter = _RecordingCounter()
+    monkeypatch.setattr(tutorial_telemetry_module, "_TUTORIAL_CACHE_SKIPPED_COUNTER", counter)
+    cache_dir = tmp_path / "tutorial-cache-clean"
+    cache_dir.mkdir()
+    cache = TutorialCache(cache_dir=cache_dir)
+    rr = _run_record()
+
+    await _store_successful_live_projection(
+        cache=cache,
+        model_id="test-model-id",
+        run_record=rr,
+        output=TutorialRunOutput(
+            rows=({"url": "ato.gov.au", "score": 5, "rationale": "clear"},),
+            source_data_hash="0" * 64,
+        ),
+        llm_call_count=3,
+    )
+
+    assert counter.calls == []
+    # Cache was seeded — at least one entry written.
+    assert list(cache_dir.iterdir())
 
 
 def test_tutorial_model_id_includes_composer_model_core_skill_and_deployment_skill(tmp_path: Path) -> None:

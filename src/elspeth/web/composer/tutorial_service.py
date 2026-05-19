@@ -37,7 +37,7 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialOrphanCleanupResponse, TutorialRunOutput, TutorialRunResponse
-from elspeth.web.composer.tutorial_telemetry import record_tutorial_runtime_normalization
+from elspeth.web.composer.tutorial_telemetry import _CacheSkipReason, record_tutorial_cache_skipped, record_tutorial_runtime_normalization
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.outputs import path_or_uri_to_filesystem_path
 from elspeth.web.execution.protocol import ExecutionService
@@ -571,7 +571,16 @@ async def _store_successful_live_projection(
     output: TutorialRunOutput,
     llm_call_count: int,
 ) -> None:
-    if not _all_rows_succeeded(run_record):
+    skip_reason = _cache_seed_skip_reason(run_record)
+    if skip_reason is not None:
+        # I6: instrument the silent-skip path. Before this counter, a
+        # persistent tutorial degradation (e.g. every live run produces
+        # one quarantined row) would leave the cache un-seeded forever
+        # and every billed live run would discard its cache-seed value
+        # — LLM-billing surge before anyone noticed. Operators can now
+        # alert on a non-trivial floor of ``composer.tutorial.cache_skipped_total``
+        # broken down by ``skip_reason``.
+        record_tutorial_cache_skipped(skip_reason)
         return
     if run_record.pipeline_yaml is None:
         raise TutorialRunIntegrityError(f"Tutorial run {run_record.id} completed without stored pipeline YAML")
@@ -591,16 +600,36 @@ async def _store_successful_live_projection(
     )
 
 
-def _all_rows_succeeded(run_record: RunRecord) -> bool:
-    return (
-        run_record.status == "completed"
-        and run_record.rows_processed > 0
-        and run_record.rows_succeeded == run_record.rows_processed
-        and run_record.rows_failed == 0
-        and run_record.rows_routed_success == 0
-        and run_record.rows_routed_failure == 0
-        and run_record.rows_quarantined == 0
-    )
+def _cache_seed_skip_reason(run_record: RunRecord) -> _CacheSkipReason | None:
+    """Classify why the tutorial cache cannot be seeded from this run.
+
+    Returns ``None`` when all rows succeeded; otherwise the most-specific
+    closed-list reason. Conditional ordering matters: quarantined and
+    routed_failure rows are subsets of rows_failed (Tier-1 constraints in
+    ``RunRecord._validate_counters``); routed_success rows are a subset
+    of rows_succeeded. Checking the specific subsets first ensures the
+    emitted ``skip_reason`` is actionable on the operator dashboard
+    rather than collapsing every classification into the catch-all
+    ``rows_failed``.
+
+    Status is the outermost gate because a non-completed status implies
+    nothing about the counters' correctness.
+    """
+    if run_record.status != "completed":
+        return "status_not_completed"
+    if run_record.rows_processed == 0:
+        return "zero_rows_processed"
+    if run_record.rows_quarantined > 0:
+        return "rows_quarantined"
+    if run_record.rows_routed_failure > 0:
+        return "rows_routed_failure"
+    if run_record.rows_failed > 0:
+        return "rows_failed"
+    if run_record.rows_routed_success > 0:
+        return "rows_routed_success"
+    if run_record.rows_succeeded != run_record.rows_processed:
+        return "rows_partial_success"
+    return None
 
 
 def _node_specs_from_pipeline_yaml(pipeline_yaml: str) -> tuple[SynthesisedNodeSpec, ...]:

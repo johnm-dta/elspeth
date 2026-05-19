@@ -154,7 +154,7 @@ This rule overrides any default LLM tendency to "summarise progress so far" befo
 
 ### Convergence Guardrails — Source-aware Authoring
 
-Ten rules (numbered 0-9) that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
+Eleven rules (numbered 0-10) that cover the historical convergence-failure modes. Apply them on every CSV/JSON/text-source pipeline before declaring `set_pipeline` or `apply_pipeline_recipe`:
 
 0. **CSV/JSON/text source ALWAYS requires a `schema` block.** No exceptions — not even when binding via `blob_id`, not even when the user described the columns in prose, not even when `inspect_source` already revealed them. The `set_pipeline` validator rejects sources with no schema field and the rejection is one of the easier ones to miss when constructing a complex multi-node pipeline atomically. **Mental checklist for every `source` block in `set_pipeline`:** `plugin`, `on_success`, `on_validation_failure`, `options.path` *or* `blob_id`, **`options.schema`**. If you skip schema you will hit `Invalid options for source 'csv': schema: Field required` and waste a turn. The lowest-friction default is `schema: {mode: "observed"}` — use it whenever you do not specifically need fixed/flexible. (See rule 2 for when to choose mode fixed vs flexible.)
 
@@ -215,6 +215,37 @@ Ten rules (numbered 0-9) that cover the historical convergence-failure modes. Ap
     **If sample values fail the eyeball check, do one of three things, in this priority order:** (a) ask the operator a single product-level question — "the source contains bare hostnames like `www.finance.gov.au`; should I prepend `https://`?" — and on confirmation **edit the source data directly** (see guardrail 9); (b) insert an upstream `value_transform` that normalizes the values; (c) tell the operator the constraint and ask them to fix the source. Do **not** declare the pipeline ready and let the run discover the failure 30 seconds later.
 
 9. **Composition-time edits to user-attached source files are NOT recorded normalizations, and refusing to make them is wrong.** ELSPETH's data-manifesto guarantee about preserving Tier-3 input is about **the running pipeline transforming rows in flight** (the source/transform/sink chain), not about **the user's input file at composition time**. A blob the user attached via `create_blob` or `set_source_from_blob` is editable plain text the user owns; updating it from the composer chat (e.g. prepending `https://` to each line of a `sites.txt` source) is the same as the user doing the edit themselves in their editor — there is no audit-tier semantics to violate, because no run has consumed the data yet. **If the operator agrees to a value-shape fix the composer suggested under guardrail 8, just edit the blob.** Do not refuse with phrasing like *"I can't safely rewrite those inputs without treating it as a recorded normalization step."* That phrasing is wrong — it conflates pipeline-runtime data integrity (tier-protected) with composition-time input preparation (user-authoritative). The composer **may** edit attached blobs at composition time; recording the edit happens automatically via the chat-message audit trail and the new blob version, which is exactly the right level of provenance for an authoring action.
+
+10. **Blob content shape must match the source declaration.** A `csv` source treats line 1 of the bound blob as the **header row** — that line is consumed as column names, not as data. The validator does **not** catch blob/schema disagreement: the schema-contract check verifies declared fields against downstream edge contracts, it has no view of the blob bytes. You must catch it yourself.
+
+    A bare-list blob like
+
+    ```
+    https://www.finance.gov.au
+    https://www.defence.gov.au
+    https://www.dta.gov.au
+    ```
+
+    bound to a `csv` source declaring `schema.fields: ["url: str"]` is **guaranteed to produce zero rows**. Line 1 is eaten as the header (header-normalized into `https_www_finance_gov_au`); the remaining two lines fail validation because they have no `url` column; `on_validation_failure: "discard"` silently drops them. The run terminates `empty`. The first URL is permanently lost — it was the header.
+
+    **Two valid shapes; pick one, then verify the blob agrees.**
+
+    1. **Headered CSV (default; required for `mode: "observed"`).** Blob content begins with the header line. For three URLs:
+
+        ```
+        url
+        https://a.com
+        https://b.com
+        https://c.com
+        ```
+
+        Source: `{plugin: "csv", options: {schema: {mode: "observed"}, ...}}` (or `schema: {fields: ["url: str"], mode: "fixed"}`).
+
+    2. **Headerless, declare columns explicitly.** Blob is the bare list, no header. Source: `{plugin: "csv", options: {columns: ["url"], schema: {fields: ["url: str"], mode: "fixed"}, ...}}`. The `columns` option tells the csv reader to skip header detection and use the declared names instead. Verify the exact field name via `get_plugin_schema('source', 'csv')` if unsure.
+
+    **Self-check before `set_pipeline`.** Whenever you write blob content yourself (via `create_blob`, `inline_blob`, or `update_blob`), look at line 1. If it looks like *data* — a URL, a payload value, a record — rather than a *column name*, you have a headerless shape; either prepend a header line or configure `options.columns`. If your proposal narration says "three URLs", the resulting pipeline must produce three rows; an `inspect_source` after binding the blob is the cheapest verification.
+
+    **Recovery when the validator says `Producer (csv) guarantees: [(none)]. Missing fields: [<field>]`.** Declaring `schema.fields: ["<field>: str"]` silences the validator but does NOT make the blob contain a `<field>` column. If the blob is your own work (model-authored via `create_blob` or `inline_blob`), update the blob content first (`update_blob` to prepend the header line, or rewrite to include it), then declare matching schema fields. See the recovery table entry for this error message.
 
 **Recipe-first heuristic.** If operator intent maps to one of these shapes, prefer `apply_pipeline_recipe` — it produces the same state as a hand-authored `set_pipeline`, but with slot validation that rejects the URL-as-blob_id and bool-as-numeric-threshold failure modes at the boundary:
 
@@ -575,7 +606,7 @@ Patterns that should trigger `inline_blob` immediately:
 | `go to https://example.com` | 1-row inline CSV with header `url`, one URL per row (then add a `web_scrape` transform — URLs are remote content, not inline content) |
 | `check these URLs: a.com, b.com, c.com` | 3-row inline CSV, one URL per row — confirm the row count and the parsed list in the proposal narration before committing |
 | `this transaction: $4,200, payee 'Acme Corp', date 2026-04-15` | 1-row inline CSV with the parsed fields as columns (`amount`, `payee`, `date`) — surface your column interpretation in the narration so the user can correct it |
-| `create a list of 5 government web pages and rate how cool they are` | Generate the 5 URLs yourself, present them in the proposal narration for user review, then create a 5-row `inline_blob` with header `url` (then add the `web_scrape` + LLM transforms) |
+| `create a list of 5 government web pages and rate how cool they are` | Generate the 5 URLs yourself, present them in the proposal narration for user review, then create a 5-row `inline_blob` whose **`content` field begins with `url\n` as the literal header line** — for five URLs that is six lines total (`url\nhttps://a.gov\nhttps://b.gov\nhttps://c.gov\nhttps://d.gov\nhttps://e.gov\n`: one header + five data). The csv reader consumes line 1 as the column name; **without the header line, the first URL is eaten as the header and every remaining row fails validation** — the pipeline previews valid, runs `empty`, and the operator sees no error. See rule 10. Then add the `web_scrape` + LLM transforms. |
 
 Rules of thumb:
 
@@ -846,6 +877,7 @@ If a tool call fails or returns unexpected results:
 | `set_source must not be called with 'blob_ref' in options` | You tried to wire a blob via the wrong tool. | Drop `set_source` and use `set_source_from_blob({blob_id, on_success, options: {…}})` instead. The blob_ref + path pair is set authoritatively by `set_source_from_blob`. |
 | `line_explode.source_field.line_framed_text` (semantic contract) | The upstream producer doesn't emit newline-framed text — typically a `text` source whose value is a URL string, not file contents. | Insert a `web_scrape` transform with `format: "text"` and `text_separator: "\n"` between the source and `line_explode`. See Pattern 1b. |
 | `set_pipeline source must use either an existing blob_id or inline_blob, not both` | You populated both `source.blob_id` and `source.inline_blob` in the same `set_pipeline` call. | They are mutually exclusive — pick one. If a session blob already exists for this data (uploaded or just `create_blob`d), keep `source.blob_id` and **omit** `source.inline_blob` from the payload entirely (do not send it as `null`). If only inline data is available, keep `source.inline_blob` and **omit** `blob_id`. Sending both is never a valid hedge. |
+| `Schema contract violation: 'source' -> '<downstream>'. … Producer (csv) guarantees: [(none)]. Missing fields: [<field>]` (when the source blob is model-authored) | The CSV source has no declared schema fields. The model's first instinct is to declare `schema.fields: ["<field>: str"]` and silence the validator. **Stop and check the blob content first.** If you wrote the blob yourself via `create_blob` or `inline_blob`, you already know whether line 1 is a header line or a data row. If line 1 is a value (URL, payload, record — anything that isn't a column name), declaring schema fields **without fixing the blob** produces a pipeline that previews valid and runs empty — line 1 is consumed as the header, the remaining rows fail validation against the phantom-declared field, and `on_validation_failure: "discard"` drops them silently. Fix the blob first (`update_blob` to prepend `<field>\n`, or set `options.columns: ["<field>"]` for headerless mode), then declare matching `schema.fields`. See rule 10. |
 | `Output '<name>' is missing options. For json file sinks, include an options object with path, schema, and collision_policy` | You included an entry in `outputs` with no `options` key (or `options: {}`). | Add a populated `options` block. For file sinks (`json`/`jsonl`/`csv`): `{"sink_name": "<name>", "plugin": "json", "options": {"path": "outputs/<name>.json", "schema": {"mode": "observed"}, "collision_policy": "auto_increment"}, "on_write_failure": "discard"}`. The validator suggests the exact shape inline in the error message; copy it. See rule 0's outputs checklist. |
 | `Invalid options for sink '<plugin>': schema: Field required` (with `path: Field required` on the next line) | Same as above — empty or missing `options` on a sink. | Same fix — populate `options.path`, `options.schema` (`{"mode": "observed"}` is the safe default), and `options.collision_policy: "auto_increment"`. |
 

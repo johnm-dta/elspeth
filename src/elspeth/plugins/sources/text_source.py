@@ -20,6 +20,7 @@ from pydantic import Field, ValidationError, field_validator
 from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
@@ -197,6 +198,23 @@ class TextSource(BaseSource):
 
         if not self._first_valid_row_processed and self._contract_builder is not None:
             self.set_schema_contract(self._contract_builder.contract.with_locked())
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Reads a plain-text file and emits one row per line into the configured column.",
+                composer_hints=(
+                    "Use text for line-oriented files; it does not parse CSV headers, delimiters, or JSON structures.",
+                    "Set column to the exact downstream field name; every emitted row has that one field.",
+                    "With skip_blank_lines=True, blank lines are discarded and audited instead of emitted as rows.",
+                    "Use strip_whitespace=False when leading or trailing whitespace is meaningful data.",
+                    "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
+                ),
+            )
+        return None
 
     def _validate_and_yield(self, row: dict[str, Any], ctx: SourceContext) -> Iterator[SourceRow]:
         """Validate a line row and quarantine schema failures."""

@@ -11,6 +11,7 @@ from typing import Any
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
@@ -46,6 +47,21 @@ class PassThrough(BaseTransform):
     # ADR-007: PassThrough emits a deep copy of the input row unchanged, so every
     # input field is present on every emitted row. Canonical pass-through exemplar.
     passes_through_input = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Deep-copies each row unchanged for wiring or debugging stages.",
+                composer_hints=(
+                    "Use passthrough only when you need a named stage that preserves every input field.",
+                    "It does not rename, drop, coerce, filter, or add fields; choose another transform for data changes.",
+                    "Use schema.mode=observed for flexible wiring, or an explicit schema to enforce upstream shape.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

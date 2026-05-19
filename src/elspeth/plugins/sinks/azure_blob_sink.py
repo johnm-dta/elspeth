@@ -30,6 +30,7 @@ from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig, validate_headers_value
@@ -309,6 +310,23 @@ class AzureBlobSink(BaseSink):
 
     # Resume capability: Azure Blobs are immutable - cannot append
     supports_resume: bool = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Writes pipeline rows to Azure Blob Storage as CSV, JSON, or JSONL.",
+                composer_hints=(
+                    "Configure exactly one auth path: connection_string, sas_token+account_url, managed identity+account_url, or service principal+account_url.",
+                    "blob_path is a Jinja2 template; use stable run metadata such as run_id or timestamp instead of row values.",
+                    "For CSV output, csv_options.include_header controls whether a header row is written.",
+                    "Set headers to normalized, original, or an explicit mapping when downstream consumers need display names.",
+                    "Azure Blob sink cannot resume append writes; choose unique blob paths for reruns or resumable workflows.",
+                ),
+            )
+        return None
 
     def configure_for_resume(self) -> None:
         """Azure Blob sink does not support resume.

@@ -68,6 +68,7 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     permissions:
+      actions: read
       contents: read
       packages: write
       id-token: write
@@ -82,6 +83,32 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ env.IMAGE_SHA }}
+
+      - name: Verify CI success for image commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "Workflow run trigger already supplied successful CI conclusion for ${IMAGE_SHA}."
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${IMAGE_SHA}/check-runs?check_name=CI%20Success" > ci-success-check-runs.json
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open("ci-success-check-runs.json", encoding="utf-8") as handle:
+              payload = json.load(handle)
+
+          runs = payload.get("check_runs", [])
+          successes = [run for run in runs if run.get("conclusion") == "success"]
+          if not successes:
+              print("No successful CI Success check run found for IMAGE_SHA; refusing to publish image.", file=sys.stderr)
+              sys.exit(1)
+          print(f"Found successful CI Success check for IMAGE_SHA ({successes[0].get('html_url', 'no URL')}).")
+          PY
 
       - name: Set up QEMU (for multi-platform builds)
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
@@ -379,7 +406,6 @@ jobs:
           done
 
       - name: Test summary
-        if: always()
         run: |
           {
             echo "## Container Smoke Test Results"

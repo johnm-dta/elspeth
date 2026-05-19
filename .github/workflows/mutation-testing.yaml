@@ -1,13 +1,11 @@
 # Mutation Testing Workflow
-# Runs weekly to validate test effectiveness - mutation testing is slow so not run on every PR
+# Runs weekly as advisory quality telemetry - mutation testing is slow so not run on every PR
 #
 # Mutation testing introduces artificial bugs (mutants) into the code and checks if tests catch them.
 # A high mutation score means tests actually verify behavior, not just execute code.
 #
-# Target mutation scores:
-#   - canonical.py: 95%+ (hash integrity is foundational)
-#   - landscape/: 90%+ (audit trail is the legal record)
-#   - engine/: 85%+ (orchestration correctness)
+# This workflow is non-gating. Do not treat mutation score targets as enforced
+# until the workflow parses mutmut output and fails on explicit thresholds.
 
 name: Mutation Testing
 
@@ -70,7 +68,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Check canonical.py mutation score
+      - name: Summarize advisory canonical.py mutation run
         run: |
           source .venv/bin/activate
           # Count killed vs total
@@ -82,9 +80,7 @@ jobs:
             TOTAL=0
           fi
 
-          # Basic threshold check (95% target for canonical)
-          # Note: Actual scoring would require parsing mutmut output
-          echo "Mutation testing completed for canonical.py"
+          echo "Advisory mutation testing completed for canonical.py"
           echo "Cache markers: ${KILLED} killed, ${TOTAL} total"
 
       - name: Upload mutation results

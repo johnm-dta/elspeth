@@ -43,6 +43,7 @@ We use a modified version of Michael Nygard's ADR template. See `000-template.md
 | [021](021-sources-and-sinks-uniformly-boundary.md) | Sources and Sinks Are Uniformly Boundary by Architecture | 2026-05-18 | **Accepted** |
 | [022](022-shareable-reviews.md) | Shareable Reviews — Completion Gestures, Signed Tokens, and the Composer Completion Events Table | 2026-05-19 | **Accepted** |
 | [023](023-custom-python-ci-analyzer.md) | Custom Python Static Analyzer for ELSPETH-Specific CI Invariants (the `elspeth-lints` Package) | 2026-05-19 | **Accepted** |
+| [024](024-delivery-governance-for-single-maintainer-mode.md) | Delivery Governance for Single-Maintainer Mode | 2026-05-19 | **Accepted** |
 
 ## Status Definitions
 

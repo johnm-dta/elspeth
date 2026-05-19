@@ -11,6 +11,13 @@ For the toolchain decision, read
 answers the next question: what does the analyzer enforce, how did those rule
 families arise, and how should contributors evolve them?
 
+For the repository governance posture that makes these analyzer results part of
+single-maintainer delivery evidence, read
+[ADR-024](../architecture/adr/024-delivery-governance-for-single-maintainer-mode.md).
+That ADR records why ELSPETH currently uses automated gates instead of
+non-meaningful self-approval, and how the project steps up to two-person review
+when a second maintainer is assigned.
+
 ## Rule Taxonomy
 
 ### Trust Tier

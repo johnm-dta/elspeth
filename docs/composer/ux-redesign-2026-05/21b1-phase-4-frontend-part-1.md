@@ -50,8 +50,9 @@ Testing Library, Playwright.
   `markTutorialCompleted(defaultMode)` action. (Session-rename is a separate
   call from Turn 6, not bundled into `markTutorialCompleted` — keeps the
   preference-PATCH a single-responsibility atomic op.)
-- Extend the API client typing to include the new field on
-  `ComposerPreferences`.
+- Extend the wire typing in `src/types/api.ts` to include the new field
+  on `UserComposerPreferencesPayload` (the account-scoped payload — NOT
+  the per-session `ComposerPreferences`).
 - Bootstrap-time detection: when the user logs in and preferences load, if
   `tutorialCompleted === false`, App renders `HelloWorldTutorial` instead of
   the normal composer surface.
@@ -169,10 +170,18 @@ cat src/elspeth/web/frontend/src/stores/preferencesStore.ts
 ```
 
 Note:
-- The exact shape Phase 1B exposes (likely `defaultMode`, `bannerDismissedAt`,
-  `loadPreferences()`, `setDefaultMode()`, `setBannerDismissed()`).
-- Whether Phase 1B added a companion test file.
-- The API call mechanism (the patched function path).
+- The exact shape Phase 1B ships: `defaultMode`, `bannerDismissedAt`,
+  `loaded`, `writing`, `writeError`, `optedOutAtSessionId`; actions
+  `bootstrap()`, `resolveDefaultMode()`, `setDefaultMode()`,
+  `dismissDefaultChangedBanner()`, `clearError()`, `reset()`.
+- Phase 1B ships `preferencesStore.test.ts` (companion test file present).
+- The API call mechanism: `fetchUserComposerPreferences()` /
+  `updateUserComposerPreferences()` from `@/api/client` (the
+  user-account flavour; the per-session `getComposerPreferences` /
+  `updateComposerPreferences` pair is a different surface and not what
+  this store uses).
+- Bootstrap is gated by a single `writing` flag that serialises concurrent
+  PATCH calls — `markTutorialCompleted` MUST honour the same gate.
 
 - [ ] **Step 2: Write failing test extensions.**
 
@@ -180,11 +189,12 @@ Add to (or create) `preferencesStore.test.ts`:
 
 ```typescript
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { usePreferencesStore } from './preferencesStore';
-import * as api from '../api/client';
+import { usePreferencesStore, selectTutorialCompleted } from './preferencesStore';
+import * as api from '@/api/client';
 
 describe('preferencesStore — tutorial fields', () => {
   beforeEach(() => {
+    usePreferencesStore.getState().reset();
     usePreferencesStore.setState({
       defaultMode: 'guided',
       bannerDismissedAt: null,
@@ -194,34 +204,34 @@ describe('preferencesStore — tutorial fields', () => {
     vi.restoreAllMocks();
   });
 
-  it('exposes tutorialCompleted=false when tutorialCompletedAt is null', () => {
+  it('selectTutorialCompleted derives false when tutorialCompletedAt is null', () => {
     const s = usePreferencesStore.getState();
     expect(s.tutorialCompletedAt).toBeNull();
-    expect(s.tutorialCompleted).toBe(false);
+    expect(selectTutorialCompleted(s)).toBe(false);
   });
 
-  it('exposes tutorialCompleted=true when tutorialCompletedAt is set', () => {
+  it('selectTutorialCompleted derives true when tutorialCompletedAt is set', () => {
     usePreferencesStore.setState({ tutorialCompletedAt: '2026-05-15T12:00:00Z' });
-    expect(usePreferencesStore.getState().tutorialCompleted).toBe(true);
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
   });
 
-  it('loadPreferences populates tutorialCompletedAt from the API', async () => {
-    vi.spyOn(api, 'getComposerPreferences').mockResolvedValue({
+  it('bootstrap populates tutorialCompletedAt from the API', async () => {
+    vi.spyOn(api, 'fetchUserComposerPreferences').mockResolvedValue({
       default_mode: 'guided',
       banner_dismissed_at: null,
       tutorial_completed_at: '2026-05-15T12:00:00Z',
       updated_at: '2026-05-15T12:00:00Z',
     });
-    await usePreferencesStore.getState().loadPreferences();
+    await usePreferencesStore.getState().bootstrap();
     expect(usePreferencesStore.getState().tutorialCompletedAt).toBe(
       '2026-05-15T12:00:00Z',
     );
-    expect(usePreferencesStore.getState().tutorialCompleted).toBe(true);
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
   });
 
   it('markTutorialCompleted PATCHes both fields atomically', async () => {
     const patchSpy = vi
-      .spyOn(api, 'updateComposerPreferences')
+      .spyOn(api, 'updateUserComposerPreferences')
       .mockResolvedValue({
         default_mode: 'freeform',
         banner_dismissed_at: null,
@@ -235,7 +245,17 @@ describe('preferencesStore — tutorial fields', () => {
     expect(typeof arg.tutorial_completed_at).toBe('string');
     // Resulting state reflects the response.
     expect(usePreferencesStore.getState().defaultMode).toBe('freeform');
-    expect(usePreferencesStore.getState().tutorialCompleted).toBe(true);
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
+  });
+
+  it('markTutorialCompleted respects the writing guard (no concurrent PATCH)', async () => {
+    // Mirrors the Phase 1B serialisation contract: a second call while
+    // `writing === true` is a no-op (no double-PATCH, no optimistic
+    // overwrite). The first call's settle releases the gate.
+    usePreferencesStore.setState({ writing: true });
+    const patchSpy = vi.spyOn(api, 'updateUserComposerPreferences');
+    await usePreferencesStore.getState().markTutorialCompleted('guided');
+    expect(patchSpy).not.toHaveBeenCalled();
   });
 });
 ```
@@ -246,103 +266,138 @@ describe('preferencesStore — tutorial fields', () => {
 cd src/elspeth/web/frontend && npx vitest run src/stores/preferencesStore.test.ts
 ```
 
-Expected: FAIL — `tutorialCompletedAt` not a state key, `markTutorialCompleted` undefined.
+Expected: FAIL — `tutorialCompletedAt` not a state key, `markTutorialCompleted` undefined, `selectTutorialCompleted` not exported.
 
 - [ ] **Step 4: Extend the store.**
 
-Add to `preferencesStore.ts` (preserving Phase 1B's existing shape):
+This is an **additive diff** against the live Phase 1B store, not a
+rewrite. Preserve Phase 1B's existing fields, actions, `writing` gate,
+cross-tab banner sync, and watermark logic verbatim. Only the new
+`tutorialCompletedAt` state field, the new `markTutorialCompleted`
+action, and the `selectTutorialCompleted` selector are added; the
+existing `bootstrap` action gains one extra `set` field
+(`tutorialCompletedAt: payload.tutorial_completed_at`).
+
+Apply these targeted edits inside `preferencesStore.ts`:
 
 ```typescript
-interface PreferencesState {
-  defaultMode: 'guided' | 'freeform';
-  bannerDismissedAt: string | null;
-  // Phase 4: null = tutorial not yet complete (the App routes to the
-  // HelloWorldTutorial container); string (ISO timestamp) = complete.
-  tutorialCompletedAt: string | null;
-  loaded: boolean;
-  // Phase 4: derived helper. Frontend code prefers this to importing the
-  // null-check pattern everywhere.
-  tutorialCompleted: boolean;
-  loadPreferences: () => Promise<void>;
-  setDefaultMode: (mode: 'guided' | 'freeform') => Promise<void>;
-  setBannerDismissed: () => Promise<void>;
-  // Phase 4: atomic finalisation — PATCHes default_mode +
-  // tutorial_completed_at in one call. Used by TutorialTurn6ModeChoice.
-  markTutorialCompleted: (mode: 'guided' | 'freeform') => Promise<void>;
-}
+// 1. Add to PreferencesState interface (alongside existing fields):
+//
+//   bannerDismissedAt: string | null;
+//   loaded: boolean;
+//   writing: boolean;
+//   writeError: string | null;
+//   optedOutAtSessionId: string | null;
+//   // NEW (Phase 4):
+//   tutorialCompletedAt: string | null;
+//
+//   bootstrap: () => Promise<void>;
+//   resolveDefaultMode: () => Promise<ComposerMode>;
+//   setDefaultMode: (mode: ComposerMode, activeSessionId?: string | null) => Promise<void>;
+//   dismissDefaultChangedBanner: () => Promise<void>;
+//   clearError: () => void;
+//   reset: () => void;
+//   // NEW (Phase 4): atomic finalisation — PATCHes default_mode AND
+//   // tutorial_completed_at in one call. Honours the `writing` gate to
+//   // serialise against concurrent setDefaultMode / dismiss calls (Panel
+//   // C2 contract).
+//   markTutorialCompleted: (mode: ComposerMode) => Promise<void>;
 
-export const usePreferencesStore = create<PreferencesState>((set, get) => ({
-  defaultMode: 'guided',
-  bannerDismissedAt: null,
-  tutorialCompletedAt: null,
-  loaded: false,
-  get tutorialCompleted() {
-    return get().tutorialCompletedAt !== null;
-  },
+// 2. Add to INITIAL_STATE (alongside the existing five entries):
+//   tutorialCompletedAt: null as string | null,
 
-  loadPreferences: async () => {
-    const response = await getComposerPreferences();
-    set({
-      defaultMode: response.default_mode,
-      bannerDismissedAt: response.banner_dismissed_at,
-      tutorialCompletedAt: response.tutorial_completed_at,
-      loaded: true,
-    });
-  },
+// 3. In bootstrap(), extend the existing set({...}) call:
+//   set({
+//     defaultMode: payload.default_mode,
+//     bannerDismissedAt: payload.banner_dismissed_at,
+//     tutorialCompletedAt: payload.tutorial_completed_at,  // NEW
+//     loaded: true,
+//   });
 
-  setDefaultMode: async (mode) => {
-    const response = await updateComposerPreferences({ default_mode: mode });
-    set({
-      defaultMode: response.default_mode,
-      tutorialCompletedAt: response.tutorial_completed_at,
-    });
-  },
-
-  setBannerDismissed: async () => {
-    const stamp = new Date().toISOString();
-    const response = await updateComposerPreferences({
-      banner_dismissed_at: stamp,
-    });
-    set({ bannerDismissedAt: response.banner_dismissed_at });
-  },
-
-  markTutorialCompleted: async (mode) => {
-    const stamp = new Date().toISOString();
-    const response = await updateComposerPreferences({
+// 4. Add the new action alongside existing actions:
+markTutorialCompleted: async (mode) => {
+  if (get().writing) return;
+  const previousMode = get().defaultMode;
+  const previousTutorial = get().tutorialCompletedAt;
+  const stamp = new Date().toISOString();
+  // Optimistic set (mirrors setDefaultMode's pattern).
+  set({
+    defaultMode: mode,
+    tutorialCompletedAt: stamp,
+    writing: true,
+    writeError: null,
+  });
+  try {
+    const payload = await updateUserComposerPreferences({
       default_mode: mode,
       tutorial_completed_at: stamp,
     });
     set({
-      defaultMode: response.default_mode,
-      tutorialCompletedAt: response.tutorial_completed_at,
+      defaultMode: payload.default_mode,
+      tutorialCompletedAt: payload.tutorial_completed_at,
+      writing: false,
     });
-  },
-}));
+  } catch (err) {
+    set({
+      defaultMode: previousMode,
+      tutorialCompletedAt: previousTutorial,
+      writing: false,
+      writeError:
+        err instanceof Error
+          ? `Couldn't finalise the tutorial: ${err.message}`
+          : "Couldn't finalise the tutorial.",
+    });
+    throw err;
+  }
+},
+
+// 5. Export a named selector function (Zustand convention used elsewhere
+//    in this codebase — selectors live at call sites or as exported
+//    functions; class-style getters inside the create() factory are not
+//    used). Components call `usePreferencesStore(selectTutorialCompleted)`.
+export const selectTutorialCompleted = (
+  state: PreferencesState,
+): boolean => state.tutorialCompletedAt !== null;
 ```
 
 Notes:
-- Zustand's "computed" properties via getters are valid; this is consistent
-  with other stores in the codebase (confirm during recon — adapt if Phase
-  1B uses a different convention).
-- If Phase 1B uses a different syntactic pattern (e.g., a separate
-  `useTutorialCompleted` hook), follow that pattern instead. The semantic
-  contract is: `tutorialCompleted` is true when `tutorialCompletedAt !==
-  null`.
+- The store does NOT expose a `tutorialCompleted` state field. Derivation
+  happens at the call site via the exported selector
+  `selectTutorialCompleted`, or inline `usePreferencesStore((s) => s.tutorialCompletedAt !== null)`.
+  This matches the project's Zustand convention (see e.g. `App.tsx`'s
+  existing `usePreferencesStore((s) => s.bootstrap)` slices).
+- `markTutorialCompleted` honours the same `writing` gate as
+  `setDefaultMode` and `dismissDefaultChangedBanner` (Phase 1B Panel C2
+  serialisation contract). A concurrent call while `writing === true` is
+  a no-op.
+- Revert-on-error mirrors `setDefaultMode`: both `defaultMode` AND
+  `tutorialCompletedAt` are restored to their pre-PATCH values so the
+  optimistic update doesn't survive a failed write.
 
-Extend `src/elspeth/web/frontend/src/api/client.ts` typing:
+Extend `src/elspeth/web/frontend/src/types/api.ts` typing (the wire
+types live there, not in `api/client.ts`; `client.ts` re-exports the
+two preference types from `./interpretation`-style barrel imports for
+historical reasons, but the source-of-truth shape is in `types/api.ts`):
 
 ```typescript
-export interface ComposerPreferences {
-  default_mode: 'guided' | 'freeform';
+// Modify the existing UserComposerPreferencesPayload interface. The
+// per-session `ComposerPreferences` interface (in src/types/index.ts —
+// trust_mode / density_default) is a DIFFERENT type and does NOT gain
+// this field. See plan 13 Task 1 review history for the user-vs-session
+// disambiguator rationale.
+export interface UserComposerPreferencesPayload {
+  default_mode: ComposerMode;
   banner_dismissed_at: string | null;
   // Phase 4: ISO timestamp string (UTC) or null.
   tutorial_completed_at: string | null;
-  updated_at: string;
+  // Nullable per Phase 1B Panel U1 contract (no-row users get null until
+  // the first write).
+  updated_at: string | null;
 }
 
-export interface UpdateComposerPreferencesRequest {
-  default_mode?: 'guided' | 'freeform';
-  banner_dismissed_at?: string;
+export interface UpdateUserComposerPreferencesPayload {
+  default_mode?: ComposerMode;
+  banner_dismissed_at?: string | null;
   // Phase 4: caller sends an ISO timestamp string to mark tutorial complete,
   // or explicit `null` to clear it (Phase 8 retake path). Optional `?` =
   // absent (no-op); explicit `null` = write NULL to the column.
@@ -350,6 +405,14 @@ export interface UpdateComposerPreferencesRequest {
   tutorial_completed_at?: string | null;
 }
 ```
+
+No `client.ts` edits are required for Task 1 (the API functions
+`fetchUserComposerPreferences` and `updateUserComposerPreferences`
+already exist; they consume `UserComposerPreferencesPayload` /
+`UpdateUserComposerPreferencesPayload` directly so the type-only edit
+above is enough). The Phase 5a / Turn-2 compose API and the Phase 4A
+tutorial-run / audit-story endpoints DO require new client.ts
+functions; those are added in Tasks 5, 8, and 9.
 
 - [ ] **Step 5: Run test to verify it passes.**
 
@@ -364,7 +427,7 @@ Expected: PASS.
 ```bash
 git add src/elspeth/web/frontend/src/stores/preferencesStore.ts \
   src/elspeth/web/frontend/src/stores/preferencesStore.test.ts \
-  src/elspeth/web/frontend/src/api/client.ts
+  src/elspeth/web/frontend/src/types/api.ts
 git commit -m "feat(frontend): extend preferencesStore with tutorial fields (Phase 4B.1)"
 ```
 
@@ -1119,23 +1182,45 @@ component awaits acceptance (or amendment) and dispatches
 
 ```bash
 grep -rn "InterpretationReviewTurn\b" src/elspeth/web/frontend/src/ | head -10
+cat src/elspeth/web/frontend/src/components/chat/guided/InterpretationReviewTurn.tsx | head -90
+cat src/elspeth/web/frontend/src/stores/interpretationEventsStore.ts | head -170
 ```
 
-Read the component to understand:
-- Its props (likely `sessionId`, `interpretationEventId`, `onResolved`).
-- Its imports (which interpretation-events API client functions).
-- Where it lives (`components/interpretation/` or similar).
+Live shape (RC5.2, confirmed):
+- File path: `src/components/chat/guided/InterpretationReviewTurn.tsx`.
+- Props: `{ event: InterpretationEvent; sessionId: string; onResolved?: (newState: CompositionState | null) => void }`.
+  The component takes the **full event object**, not just an ID.
+- Pending events are surfaced via `useInterpretationEventsStore` actions:
+  `refreshPending(sessionId)` populates `pendingBySession[sessionId]`;
+  the consumer reads the event map and picks the pending event(s) of
+  interest. There is no `api/interpretationEvents.ts` module — wiring
+  goes through the store.
+- Resolution flows through the store's `resolveEvent` action (called
+  internally by the `useInterpretationResolver` hook the component uses).
 
-If `InterpretationReviewTurn` is not available, halt — Phase 5b not shipped.
+If the component is missing in the live tree, halt — Phase 5b not shipped.
 
 - [ ] **Step 2: Write the failing test.**
 
 ```typescript
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { TutorialTurn2bShowBuilt } from './TutorialTurn2bShowBuilt';
 import { TURN_2B_INTRO } from './copy';
-import * as interpretationApi from '../../api/interpretationEvents';
+import { useInterpretationEventsStore } from '@/stores/interpretationEventsStore';
+import type { InterpretationEvent } from '@/types/interpretation';
+
+const PENDING_EVENT: InterpretationEvent = {
+  id: 'evt-1',
+  session_id: 'sess-1',
+  user_term: 'cool',
+  llm_draft: 'modern design + clear purpose + interactivity',
+  choice: 'pending',
+  created_at: '2026-05-15T12:00:00Z',
+  resolved_at: null,
+  amendment: null,
+  interpretation_source: null,
+};
 
 describe('TutorialTurn2bShowBuilt', () => {
   const snapshot = {
@@ -1151,9 +1236,15 @@ describe('TutorialTurn2bShowBuilt', () => {
   };
 
   beforeEach(() => {
-    vi.spyOn(interpretationApi, 'listPendingInterpretationEvents').mockResolvedValue([
-      { id: 'evt-1', tool_call_id: 'tc-1', draft_value: 'modern design + clear purpose' },
-    ]);
+    // Seed the live interpretationEventsStore with the pending event so
+    // the component's refreshPending() resolves immediately without a
+    // wire spy. (The store action is itself spied on for the call-shape
+    // assertion below.)
+    useInterpretationEventsStore.setState({
+      pendingBySession: { 'sess-1': { 'evt-1': PENDING_EVENT } },
+    });
+    vi.spyOn(useInterpretationEventsStore.getState(), 'refreshPending')
+      .mockResolvedValue();
   });
 
   it('renders the intro', () => {
@@ -1215,13 +1306,13 @@ describe('TutorialTurn2bShowBuilt', () => {
     );
   });
 
-  it('forwards onInterpretationAccepted with the event id', async () => {
+  it('forwards onInterpretationAccepted with the event id after resolution', async () => {
     const onAccepted = vi.fn();
-    vi.spyOn(interpretationApi, 'resolveInterpretationEvent').mockResolvedValue({
-      id: 'evt-1',
-      status: 'accepted',
-      accepted_value: 'modern design + clear purpose',
-    });
+    // The live InterpretationReviewTurn calls its onResolved? prop after a
+    // successful resolveEvent. We exercise that contract via the store's
+    // resolveEvent action; the component reads the resulting state.
+    vi.spyOn(useInterpretationEventsStore.getState(), 'resolveEvent')
+      .mockResolvedValue({ new_state: null as never });
     render(
       <TutorialTurn2bShowBuilt
         sessionId="sess-1"
@@ -1249,10 +1340,11 @@ Expected: FAIL.
 - [ ] **Step 4: Implement.**
 
 ```typescript
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { TURN_2B_INTRO, TURN_2B_INTERPRETATION_PROMPT } from './copy';
-import { InterpretationReviewTurn } from '../interpretation/InterpretationReviewTurn'; // Phase 5b
-import { listPendingInterpretationEvents } from '../../api/interpretationEvents';
+// Live RC5.2 path (Phase 5b ships the component under chat/guided/).
+import { InterpretationReviewTurn } from '../chat/guided/InterpretationReviewTurn';
+import { useInterpretationEventsStore } from '@/stores/interpretationEventsStore';
 import type { PipelineSnapshot } from './tutorialMachine';
 
 interface Props {
@@ -1266,17 +1358,30 @@ export function TutorialTurn2bShowBuilt({
   pipelineSnapshot,
   onInterpretationAccepted,
 }: Props) {
-  const [eventId, setEventId] = useState<string | null>(null);
+  // Read the pending event projection directly from the live store. The
+  // compose-loop response (Turn 2) addPendingEvent()'s the new event into
+  // pendingBySession before this turn mounts; refreshPending() here is a
+  // belt-and-braces rehydration for navigation-resume cases (sessionStorage
+  // restore mid-flow).
+  const refreshPending = useInterpretationEventsStore((s) => s.refreshPending);
+  const pendingMap = useInterpretationEventsStore(
+    (s) => s.pendingBySession[sessionId],
+  );
+  // First pending event for this session — Phase 4's contract is one
+  // "cool" interpretation per tutorial run.
+  const firstEvent = pendingMap
+    ? Object.values(pendingMap)[0]
+    : undefined;
 
   useEffect(() => {
-    listPendingInterpretationEvents(sessionId).then((events) => {
-      if (events.length > 0) setEventId(events[0].id);
-    });
-  }, [sessionId]);
+    void refreshPending(sessionId);
+  }, [sessionId, refreshPending]);
 
-  // Pipeline-snapshot reads. Shape is the inline_blob source contract from
-  // Phase 5a — we trust it (Tier 2: post-source).
-  const urls = ((pipelineSnapshot.source as { urls?: string[] }).urls) ?? [];
+  // Pipeline-snapshot reads. Shape is the inline_blob source contract
+  // from Phase 5a — Tier-2 post-source, direct access (CLAUDE.md no
+  // defensive programming on Tier-2 fields).
+  const source = pipelineSnapshot.source as { urls: string[] };
+  const urls = source.urls;
   const transforms = pipelineSnapshot.transforms as Array<{ type: string }>;
   const sinks = pipelineSnapshot.sinks as Array<{ type: string }>;
 
@@ -1296,23 +1401,23 @@ export function TutorialTurn2bShowBuilt({
         </div>
 
         <div>
-          <strong>TRANSFORM</strong> — fetch each page ({transforms[0]?.type}),
-          then call an LLM to rate each one for "coolness" ({transforms[1]?.type})
+          <strong>TRANSFORM</strong> — fetch each page ({transforms[0].type}),
+          then call an LLM to rate each one for "coolness" ({transforms[1].type})
         </div>
 
         <div>
-          <strong>SINK</strong> — write the ratings to a {sinks[0]?.type.toUpperCase()} file in your session
+          <strong>SINK</strong> — write the ratings to a {sinks[0].type.toUpperCase()} file in your session
         </div>
       </section>
 
-      {eventId && (
+      {firstEvent && (
         <section className="tutorial-interpretation">
           <p>{TURN_2B_INTERPRETATION_PROMPT}</p>
           <InterpretationReviewTurn
+            event={firstEvent}
             sessionId={sessionId}
-            interpretationEventId={eventId}
             onResolved={() =>
-              onInterpretationAccepted({ interpretationEventId: eventId })
+              onInterpretationAccepted({ interpretationEventId: firstEvent.id })
             }
           />
         </section>
@@ -1322,10 +1427,18 @@ export function TutorialTurn2bShowBuilt({
 }
 ```
 
-If Phase 5b's `InterpretationReviewTurn` component takes different props,
-adapt the wrapper — but do **not** wrap it in defensive try/catch (CLAUDE.md
-"no defensive programming"): if Phase 5b's contract changed, fix the call
-site, don't paper over it.
+Notes on live integration:
+- `InterpretationReviewTurn`'s live props are `{ event, sessionId,
+  onResolved? }` — the component takes the FULL event object, not just
+  an ID. `onResolved` is optional; we pass it to advance the tutorial.
+- The component internally consumes `useInterpretationResolver(...)`
+  which calls `useInterpretationEventsStore.resolveEvent(...)` — there
+  is no `api/interpretationEvents.ts` module; wiring goes through the
+  store.
+- Pipeline-snapshot fields are accessed directly (no `?.` / `?? []`):
+  Phase 5a's `set_pipeline` contract guarantees the shape (Tier-2
+  post-source). If the shape drifts, fix Phase 5a, don't paper over it
+  here (CLAUDE.md offensive programming).
 
 - [ ] **Step 5: Run test to verify it passes.**
 
@@ -1414,7 +1527,11 @@ interface Props {
 }
 
 export function TutorialTurn3Graph({ pipelineSnapshot, onContinue }: Props) {
-  const urls = ((pipelineSnapshot.source as { urls?: string[] }).urls) ?? [];
+  // Tier-2 post-source: Phase 5a's set_pipeline contract guarantees the
+  // inline_blob source shape and the two-transform / one-sink layout for
+  // the canonical seed. Direct access — no defensive fallbacks (CLAUDE.md).
+  const source = pipelineSnapshot.source as { urls: string[] };
+  const urls = source.urls;
   const transforms = pipelineSnapshot.transforms as Array<{ type: string }>;
   const sinks = pipelineSnapshot.sinks as Array<{ type: string }>;
 
@@ -1427,11 +1544,11 @@ export function TutorialTurn3Graph({ pipelineSnapshot, onContinue }: Props) {
       <div className="tutorial-graph">
         <Node label="url_source" subtitle={`${urls.length} rows`} />
         <Arrow />
-        <Node label={transforms[0]?.type ?? 'web_scrape'} subtitle="fetch" />
+        <Node label={transforms[0].type} subtitle="fetch" />
         <Arrow />
-        <Node label={transforms[1]?.type ?? 'llm_rate'} subtitle="rate" />
+        <Node label={transforms[1].type} subtitle="rate" />
         <Arrow />
-        <Node label={`${sinks[0]?.type ?? 'jsonl'}_sink`} subtitle="write" />
+        <Node label={`${sinks[0].type}_sink`} subtitle="write" />
       </div>
 
       <p>{TURN_3_FOOTER}</p>

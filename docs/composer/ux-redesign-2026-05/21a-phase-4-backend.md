@@ -77,6 +77,37 @@ This is the **second** of three schema additions before Phase 9: (1) Phase 1A, (
 
 **Sequencing note:** If Phase 4A and Phase 5b deploy in the same operator-action window, batch both schema additions into one commit and perform a single DB-delete.
 
+### Phase 4 lifecycle: two DB-delete events on two distinct databases
+
+Phase 4A as currently scoped lands **two** schema additions on **two
+different SQLite databases**, each carrying its own SCHEMA_EPOCH constant
+and its own `_assert_schema_version()` startup guard. Both require a
+DB-delete on staging; the operator must perform each delete on the
+correct file. Treating them as one event will leave the other DB in a
+silently-broken state.
+
+| # | Commit | Database file | Schema-epoch constant | Schema change | Operator action |
+|---|---|---|---|---|---|
+| 1 | Task 1 (this plan, `feat(web): add tutorial_completed_at…`) | **Sessions DB** (`src/elspeth/web/sessions/models.py` schema; configured `composer.sessions_db_path`, default `./sessions.db`) | `SESSION_SCHEMA_EPOCH` in `src/elspeth/web/sessions/models.py` (bumped by this commit) | `user_preferences_table` gains `tutorial_completed_at: datetime | None`. | Delete the sessions DB file before the new code serves traffic. All users' `tutorial_completed_at` reset to NULL — every user retakes the tutorial on next login. |
+| 2 | Task 7.0 (this plan, `feat(landscape): extend runs_table with audit-story columns…`) | **Landscape DB** (`src/elspeth/core/landscape/schema.py`; configured `audit_database_path`) | `SQLITE_SCHEMA_EPOCH` in `src/elspeth/core/landscape/schema.py` (bumped by Task 7.0 — separate scope) | `runs_table` gains six audit-story columns. | Delete the Landscape audit DB file. All historical run audit data is lost on staging; production deferred until Phase 9 migration runner. |
+
+The two events are independent because the two DBs are independent — the
+Landscape audit DB and the sessions DB have separate files, separate
+lifecycles, and separate epoch constants (see the comment block above
+`SESSION_SCHEMA_EPOCH` in `src/elspeth/web/sessions/models.py`, which
+calls this out explicitly). Deleting one does not affect the other; both
+must be performed when both commits ship.
+
+**Why both deletes are mandatory even if the column-add looks additive:**
+without the epoch bump, an existing DB silently fails on first access to
+the new column. PRAGMA `user_version` still matches `SCHEMA_EPOCH` (no
+mismatch is raised at startup), but the column itself is absent — the
+operator sees a confusing runtime `OperationalError: no such column` on
+the first request that touches it, with no startup signal pointing at
+schema drift. The epoch bump is what converts that silent runtime
+failure into an explicit "delete your DB and restart" startup abort,
+which is the canonical operator-visible signal in this project.
+
 ## Cross-plan contract — `tutorial_completed_at` PATCH semantics
 
 Phase 4 ships `tutorial_completed_at: datetime | None` to
@@ -106,11 +137,11 @@ The frontend exposes a derived boolean `tutorialCompleted = (tutorialCompletedAt
 
 ## New endpoints (Phase 4A additions)
 
-Consumed by Phase 4B Part 2. Defined here so 21b2 can reference them.
+Consumed by Phase 4B Part 2. Defined here so 21b2 can reference them. Implementation tasks: **Task 7.1** (POST /api/tutorial/run), **Task 7.2** (GET …/audit-story), **Task 7.3** (frontend `client.ts` functions consuming both). Tasks 7.1–7.3 follow Task 7 in this document.
 
-**`POST /api/tutorial/run`** — body: `{"session_id": "<uuid>"}`. Response: `{"run_id": "<uuid>", "source_data_hash": "<hex>", "rows": [{"url":..., "score":..., "rationale":...}]}`. Cache-hit: the backend **synthesises a real Landscape entry under the current user's session**, populated from the cached content (rows, source_data_hash, llm_call_count=0, pipeline_yaml) plus a `seeded_from_cache: true` marker carrying the cache key. The returned `run_id` is **owned by the current session** — there is no foreign-run reference in the response. Cache-miss: live run (~30s), populates cache on success. Non-tutorial-mode user → 400.
+**`POST /api/tutorial/run`** — body: `{"session_id": "<uuid>", "prompt": "<canonical-or-edited-seed>"}`. Response: `{"run_id": "<uuid>", "output": {"rows": [...], "source_data_hash": "<hex>"}, "seeded_from_cache": <bool>, "cache_key": "<hex>" | null}`. Cache-hit: the backend **synthesises a real Landscape entry under the current user's session** via `_replay_cached_content_to_landscape` (defined in Task 7), populated from the cached content (rows, source_data_hash, llm_call_count=0, pipeline_yaml) plus a `seeded_from_cache: true` marker carrying the cache key. The returned `run_id` is **owned by the current session** — there is no foreign-run reference in the response. Cache-miss: live run (~30s), populates cache on success. Cache is bypassed (live run, no consult, no write) when the user's `tutorial_completed_at IS NOT NULL` (post-completion) **or** when their `default_mode == 'freeform'` (freeform users skip tutorial caching entirely). Unknown session → 404. Tier-1 corruption on the caller's preferences row → 500 (`CorruptPreferencesError` propagates to the global handler). Defined by Task 7.1.
 
-**`GET /api/sessions/{session_id}/runs/{run_id}/audit-story`** — response: `{"llm_call_count": N, "output_file_hash": "<hex>", "run_started_at": "<iso8601>", "plugin_versions": {...}, "seeded_from_cache": <bool>, "cache_key": "<hex>" | null}`. Reads from the Landscape — server-generated content (operational Tier-1 behaviour: corruption crashes, absence is 404). When the run was a cache hit, `seeded_from_cache` is `true`, `llm_call_count` is `0`, and `cache_key` is the SHA-256 that points at the original cache-seeding run for cross-run lineage joins. Not-found → 404. Landscape failure propagates — no fallback (design doc 04: "Otherwise the demonstration is theatre.").
+**`GET /api/sessions/{session_id}/runs/{run_id}/audit-story`** — response: `{"run_id": "<uuid>", "session_id": "<uuid>", "llm_call_count": N, "output_file_hash": "<hex>", "run_started_at": "<iso8601>", "plugin_versions": {...}, "seeded_from_cache": <bool>, "cache_key": "<hex>" | null}`. Reads **entirely from real Landscape audit rows** — **no field is ever synthesised or defaulted**. When the run was a cache hit, `seeded_from_cache` is `true`, `llm_call_count` is `0`, and `cache_key` is the SHA-256 that points at the original cache-seeding run for cross-run lineage joins. Run not in session → 404. Session not owned by caller → 404 (IDOR contract: never 403, to avoid leaking session existence — see `src/elspeth/web/sessions/ownership.py:33`). Tier-1 corruption (audit row missing a required field such as `llm_call_count`) → 500 (named exception). Landscape failure propagates — no fallback (design doc 04: "Otherwise the demonstration is theatre."). Defined by Task 7.2.
 
 ## Trust tier check (per CLAUDE.md)
 
@@ -130,6 +161,12 @@ Consumed by Phase 4B Part 2. Defined here so 21b2 can reference them.
 - `src/elspeth/web/preferences/tutorial_cache.py` — cache module.
 - `tests/unit/web/preferences/test_tutorial_cache.py` — cache unit tests.
 - `tests/integration/web/test_tutorial_cache_run_integration.py` — cache wiring.
+- `src/elspeth/web/composer/tutorial_run_routes.py` — POST /api/tutorial/run (Task 7.1).
+- `src/elspeth/web/composer/tutorial_service.py` — tutorial-run service (Task 7.1).
+- `tests/integration/web/test_tutorial_routes.py` — tutorial-route integration tests (Task 7.1).
+- `src/elspeth/web/sessions/audit_story_service.py` — audit-story service (Task 7.2).
+- `tests/integration/web/test_audit_story_routes.py` — audit-story integration tests (Task 7.2).
+- `src/elspeth/web/frontend/src/api/client.tutorial.test.ts` — frontend client tests (Task 7.3).
 
 **Modified:**
 
@@ -140,7 +177,12 @@ Consumed by Phase 4B Part 2. Defined here so 21b2 can reference them.
 - `tests/unit/web/preferences/test_models.py` — extend Pydantic tests.
 - `tests/unit/web/preferences/test_service.py` — extend service tests.
 - `tests/integration/web/test_preferences_routes.py` — extend route tests.
-- The composer run-path file (identified during Task 7) — wire cache consult.
+- The composer run-path file (identified during Task 7) — wire cache consult; Task 7.1 extends `_is_canonical_seed_pipeline` with a force-live escape.
+- `src/elspeth/web/sessions/routes.py` — add `GET …/audit-story` handler (Task 7.2).
+- `src/elspeth/web/sessions/schemas.py` — add `RunAuditStoryResponse` (Task 7.2).
+- `src/elspeth/web/frontend/src/api/client.ts` — add `runTutorialPipeline`, `getRunAuditSummary`; rename `updateSessionTitle` → `renameSession` (Task 7.3).
+- Frontend call sites of the renamed function (discovered during Task 7.3 Step 1).
+- The FastAPI app-composition site — `include_router(create_tutorial_run_router())` (Task 7.1).
 
 **Not modified:**
 
@@ -149,12 +191,21 @@ Consumed by Phase 4B Part 2. Defined here so 21b2 can reference them.
 
 ## Database migration note (operator action)
 
-Task 1 requires a DB-delete before new code serves traffic. Phase 4B's smoke task performs it. If Phase 4A ships independently, operator must delete first. All users' `tutorial_completed_at` resets to NULL — every user retakes the tutorial on next login. See §"DB-delete cadence" for the full sequence context.
+Task 1 and Task 7.0 each require a DB-delete before new code serves
+traffic — Task 1 on the **sessions DB** (because `SESSION_SCHEMA_EPOCH`
+bumps and `user_preferences_table` gains a column), Task 7.0 on the
+**Landscape audit DB** (because `runs_table` gains six columns).
+Phase 4B's smoke task performs both. If Phase 4A ships independently,
+operator must perform both deletes first; they are independent
+operations on independent files. All users' `tutorial_completed_at`
+resets to NULL — every user retakes the tutorial on next login. See
+§"DB-delete cadence" for the full sequence context, including the
+table enumerating both events.
 
 ## Verification approach
 
 Each task is TDD-shaped (failing test, run-to-fail, implement, run-to-pass,
-commit). After Tasks 1–7 land, the Phase 4B integration tests and Playwright
+commit). After Tasks 1–7.3 land, the Phase 4B integration tests and Playwright
 smoke exercise the routes and the cache wiring end-to-end. The Phase 4B
 smoke task performs the operator DB-delete and re-runs the full test suite.
 
@@ -244,8 +295,93 @@ the design doc 04 promise "recorded as a prompt template" cannot be met.
 ## Task 1: Schema — add `tutorial_completed_at` to `user_preferences_table`
 
 **Files:**
-- Modify: `src/elspeth/web/sessions/models.py`.
+- Modify: `src/elspeth/web/sessions/models.py` (epoch bump + epoch-history comment + column add).
 - Modify: `tests/unit/web/preferences/test_schema.py`.
+
+> **OPERATOR ACTION required at commit time.** This commit is the first
+> of the two Phase 4 DB-delete events (see §"DB-delete cadence: Phase 4
+> lifecycle: two DB-delete events on two distinct databases"). After
+> merging this commit and before any downstream Phase 4 task runs on
+> staging, the operator must delete the **sessions DB file** on staging
+> (`composer.sessions_db_path`, default `./sessions.db`). The
+> `SESSION_SCHEMA_EPOCH` bump in Step 0a below will trigger an
+> explicit startup abort with a "Session database schema does not
+> match SESSION_SCHEMA_EPOCH=…" message on existing DBs — that abort
+> is the canonical operator-visible signal, by design. Do not attempt
+> to skip the abort by reverting the bump; the bump is what makes the
+> drift detectable. Surface this in the commit message and announce
+> it before staging deploy. Cross-link: project memory
+> `feedback_operator_gate_destructive_actions`.
+
+The first three sub-steps (Step 0a, 0b, 0c) handle the
+`SESSION_SCHEMA_EPOCH` bump and epoch-history comment extension; they
+land in the **same commit** as the column-add so production can never
+observe a state where the column was added without the epoch having
+been bumped (which would defeat the startup-abort signal). Sub-steps
+ordered before Step 1 deliberately — the implementer must update the
+epoch *first*, so the schema-drift signal lands together with the
+column it announces.
+
+- [ ] **Step 0a: Bump `SESSION_SCHEMA_EPOCH` from 5 to 6.**
+
+Open `src/elspeth/web/sessions/models.py`. The constant currently reads
+(verify the exact value before editing — bump from whatever is live):
+
+```python
+SESSION_SCHEMA_EPOCH = 5
+```
+
+Change to:
+
+```python
+SESSION_SCHEMA_EPOCH = 6
+```
+
+This is atomic — no "support both 5 and 6" branches (No Legacy Code
+policy, CLAUDE.md). The bump must land in the **same commit** as the
+column-add in Step 3 below; a commit that adds the column without
+bumping the epoch leaves a window where existing sessions DBs are
+silently broken (the column is absent on disk but PRAGMA
+`user_version` still equals the constant, so
+`_assert_schema_version()` raises no mismatch and the operator gets a
+confusing `OperationalError: no such column: tutorial_completed_at` at
+first column access instead of the canonical startup abort).
+
+- [ ] **Step 0b: Extend the epoch-history comment.**
+
+Immediately above `SESSION_SCHEMA_EPOCH = …` there is a comment block
+documenting each epoch bump (see the live file: the block starts
+`# Epoch history (pre-1.0 policy — bumps require DB recreation):` and
+already enumerates epochs 1 through 5). Append a new entry for
+epoch 6, preserving the existing indentation, prose style, and "→"
+arrow convention used by earlier entries:
+
+```python
+#   6 → user_preferences_table gains tutorial_completed_at: datetime | None
+#        (Phase 4A, 2026-05-19). Column is nullable with no server
+#        default; non-NULL means the user completed the hello-world
+#        tutorial. Phase 8 Task 6's retake button PATCHes the field
+#        back to NULL — the column is load-bearing for that contract
+#        (see plan §"Cross-plan contract — `tutorial_completed_at`
+#        PATCH semantics" in `21a-phase-4-backend.md`). Operators
+#        upgrading across this boundary MUST delete their session DB.
+```
+
+Do not modify the existing entries for epochs 1–5; this is an
+append-only history. The format above mirrors epoch-2's "operators
+upgrading across this boundary MUST delete" phrasing intentionally —
+that prose is the canonical operator-action signal in this file.
+
+- [ ] **Step 0c: Verify the existing schema-validator branch is unchanged.**
+
+Open `src/elspeth/web/sessions/schema.py`. Confirm
+`_assert_schema_version()` exists and reads PRAGMA `user_version`,
+comparing against the imported `SESSION_SCHEMA_EPOCH`. No code change
+is required here — the validator picks up the new constant value
+automatically. This sub-step exists so the implementer affirms the
+mechanism is in place before relying on it. If the validator is
+missing or its semantics have changed since this plan was written,
+stop and surface to the operator before proceeding to Step 1.
 
 - [ ] **Step 1: Write the failing test extension.**
 
@@ -334,8 +470,28 @@ Expected: PASS — all schema tests green.
 
 ```bash
 git add tests/unit/web/preferences/test_schema.py src/elspeth/web/sessions/models.py
-git commit -m "feat(web): add tutorial_completed_at to user_preferences (Phase 4A.1)"
+git commit -m "$(cat <<'EOF'
+feat(web): add tutorial_completed_at to user_preferences (Phase 4A.1)
+
+Bumps SESSION_SCHEMA_EPOCH 5 → 6 and adds tutorial_completed_at to
+user_preferences_table. The epoch bump and the column add land in the
+same commit so the operator-visible startup-abort signal
+(_assert_schema_version) fires correctly on existing DBs — adding the
+column without bumping the epoch would leave existing sessions DBs
+silently broken until first column access.
+
+OPERATOR ACTION: delete the sessions DB on staging before deploying
+this commit. See `21a-phase-4-backend.md` §"DB-delete cadence:
+Phase 4 lifecycle: two DB-delete events on two distinct databases".
+EOF
+)"
 ```
+
+The commit message must surface the OPERATOR ACTION explicitly so the
+deploy-time reader (human or automation reviewing the merge) sees the
+DB-delete requirement without having to read the plan doc. This is
+the first of two Phase 4 DB-delete events; Task 7.0's commit must
+carry an analogous notice for the Landscape audit DB.
 
 ## Task 2: Pydantic models — add `tutorial_completed_at` field
 
@@ -460,6 +616,132 @@ git commit -m "feat(web): extend ComposerPreferences with tutorial_completed_at 
 
 - [ ] **Step 1: Write the failing test extensions.**
 
+> **Step 1 prerequisite — counter-emit test plumbing. Before implementing
+> the new tests, you must:** introduce an OTel `InMemoryMetricReader`
+> fixture for the preferences-service test module AND define the
+> `_last_patch_counter_attributes()` helper that the two new
+> counter-emit tests below depend on. The two counter-emit tests
+> (`test_patch_tutorial_emits_counter_with_tutorial_changed_label`,
+> `test_patch_without_tutorial_emits_counter_with_tutorial_changed_false`)
+> reference this fixture and helper by name; without them the tests
+> cannot be written, and a placeholder helper that returns a hand-built
+> dict would pass trivially while defeating the purpose of testing
+> guard #3 (`_PREFERENCES_PATCH_COUNTER` emit).
+>
+> **Reference pattern in the live codebase:** the canonical
+> `InMemoryMetricReader` rebind pattern is at
+> `tests/unit/engine/test_executors.py:6034-6043`. An existing
+> in-memory metric reader fixture also lives at
+> `tests/unit/telemetry/conftest.py:27` (`in_memory_metric_reader`) —
+> the preferences-service variant below is the same idea scoped to the
+> preferences module's meter and its module-import-time counter handle.
+>
+> **Why this is load-bearing for guard #3.** `_PREFERENCES_PATCH_COUNTER`
+> is created at module-import time against `service._meter`. A test that
+> only patches `service._meter` will not retroactively rebind the already-
+> created counter handle; the counter will keep emitting to the old
+> meter and the in-memory reader will see nothing. The fixture below
+> rebinds BOTH `service._meter` AND `service._PREFERENCES_PATCH_COUNTER`
+> so the counter `add(...)` calls land where the in-memory reader can
+> see them, and restores both on teardown so other tests are not
+> polluted.
+>
+> Extend `tests/unit/web/preferences/conftest.py` (create if absent):
+>
+> ```python
+> # tests/unit/web/preferences/conftest.py
+> from opentelemetry.sdk.metrics import MeterProvider
+> from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+> import pytest
+>
+> from elspeth.web.preferences import service as _service_module
+>
+>
+> @pytest.fixture
+> def preferences_metric_reader(monkeypatch):
+>     """Rebind service._meter + _PREFERENCES_PATCH_COUNTER to a fresh
+>     MeterProvider with an InMemoryMetricReader attached.
+>
+>     Load-bearing for Task 3 guard #3 — the
+>     ``_PREFERENCES_PATCH_COUNTER`` emit tests need to read counter
+>     attributes without polluting global meter state. ``monkeypatch``
+>     restores ``_meter`` and ``_PREFERENCES_PATCH_COUNTER`` on
+>     teardown.
+>
+>     Reference pattern:
+>     - ``tests/unit/engine/test_executors.py:6034-6043`` (canonical
+>       MeterProvider + InMemoryMetricReader rebind).
+>     - ``tests/unit/telemetry/conftest.py:27`` (existing
+>       ``in_memory_metric_reader`` fixture for the telemetry module).
+>     """
+>     reader = InMemoryMetricReader()
+>     provider = MeterProvider(metric_readers=[reader])
+>     new_meter = provider.get_meter("preferences")
+>     monkeypatch.setattr(_service_module, "_meter", new_meter)
+>     # The counter handle was created at module-import time against the
+>     # original meter. Rebind it against the new meter so emits land in
+>     # the InMemoryMetricReader. Match the live description verbatim
+>     # when you copy this into the test tree.
+>     monkeypatch.setattr(
+>         _service_module,
+>         "_PREFERENCES_PATCH_COUNTER",
+>         new_meter.create_counter(
+>             name="composer.preferences.patch_total",
+>             description=_service_module._PREFERENCES_PATCH_COUNTER.description,
+>         ),
+>     )
+>     yield reader
+> ```
+>
+> Define the helper alongside the new tests at the top of
+> `tests/unit/web/preferences/test_service.py` (after imports, before
+> the new test functions):
+>
+> ```python
+> # tests/unit/web/preferences/test_service.py — module-level helper.
+> from typing import Any
+>
+> from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+>
+>
+> def _last_patch_counter_attributes(
+>     reader: InMemoryMetricReader,
+> ) -> dict[str, Any]:
+>     """Read ``composer.preferences.patch_total``'s latest data-point
+>     attributes from the in-memory metric reader.
+>
+>     Load-bearing for Task 3 guard #3 (counter emit). Walks the
+>     ``resource_metrics → scope_metrics → metrics`` structure produced
+>     by ``InMemoryMetricReader.get_metrics_data()`` to locate the
+>     preferences-patch counter, then returns the attributes dict from
+>     the most-recently-recorded data point. Raises ``AssertionError``
+>     if the counter has no data points — that condition indicates a
+>     guard #3 regression (emit did not fire), and the named error
+>     surfaces it cleanly rather than failing on a ``KeyError`` deeper
+>     in the test.
+>     """
+>     data = reader.get_metrics_data()
+>     for resource_metric in data.resource_metrics:
+>         for scope_metric in resource_metric.scope_metrics:
+>             for metric in scope_metric.metrics:
+>                 if metric.name == "composer.preferences.patch_total":
+>                     points = list(metric.data.data_points)
+>                     if points:
+>                         return dict(points[-1].attributes)
+>     raise AssertionError(
+>         "composer.preferences.patch_total had no data points — "
+>         "counter emit did not fire (guard #3 regression).",
+>     )
+> ```
+>
+> The two new tests
+> (`test_patch_tutorial_emits_counter_with_tutorial_changed_label`,
+> `test_patch_without_tutorial_emits_counter_with_tutorial_changed_false`)
+> below MUST take `preferences_metric_reader` as a fixture argument and
+> call `_last_patch_counter_attributes(preferences_metric_reader)` —
+> not the no-argument form. (The no-argument call sites in the original
+> test sketch below are corrected to take the reader fixture.)
+
 Add to `tests/unit/web/preferences/test_service.py`:
 
 ```python
@@ -582,8 +864,16 @@ def test_absent_field_and_explicit_null_are_distinguished(service):
     assert after_null.tutorial_completed_at is None
 
 
-def test_corrupt_tutorial_completed_at_crashes_loudly(service, engine):
-    """Tier-1 guard: a stored value that's neither NULL nor a datetime crashes."""
+def test_corrupt_tutorial_completed_at_crashes_with_named_error(service, engine):
+    """Tier-1 guard: a stored value that's neither NULL nor a datetime crashes
+    with the *named* ``CorruptPreferencesError``, not bare ``RuntimeError``.
+
+    Assertion is tightened to the named class so a future regression that
+    substitutes bare ``RuntimeError`` is caught — ``CorruptPreferencesError``
+    subclasses ``RuntimeError`` for forward-fit transition headroom, so
+    ``pytest.raises(RuntimeError, …)`` would silently accept either form
+    and let the regression land.
+    """
     # Manually inject a value that SQLAlchemy's DateTime binding would normally
     # reject; we have to bypass SQLAlchemy to simulate corruption.
     with engine.begin() as conn:
@@ -602,163 +892,343 @@ def test_corrupt_tutorial_completed_at_crashes_loudly(service, engine):
             "UPDATE user_preferences SET tutorial_completed_at = 'not-a-timestamp' "
             "WHERE user_id = 'alice-tutorial-corrupt'"
         )
-    with pytest.raises(RuntimeError, match="tutorial_completed_at"):
+    with pytest.raises(CorruptPreferencesError) as excinfo:
         asyncio.run(service.get_composer_preferences("alice-tutorial-corrupt"))
+    # The named exception carries structured debug context.
+    assert excinfo.value.user_id == "alice-tutorial-corrupt"
+    assert excinfo.value.bad_value == {"tutorial_completed_at": "not-a-timestamp"}
+
+
+def test_empty_patch_for_no_row_user_does_not_insert(service, engine):
+    """Panel C2 preservation: empty PATCH against a no-row user is a no-op.
+
+    Phase 1A's `update_composer_preferences` short-circuits before the
+    INSERT...ON CONFLICT when (a) no row exists for the user AND (b) the
+    payload sets no fields. The Phase 4 additive diff must NOT collapse
+    this guard. If the regression returns, this test fails because a row
+    will appear in `user_preferences_table` post-PATCH.
+    """
+    result = asyncio.run(
+        service.update_composer_preferences(
+            "alice-empty-patch", UpdateComposerPreferencesRequest()
+        )
+    )
+    # Response is the lazy-default shape — no fabricated updated_at.
+    assert result.default_mode == "guided"
+    assert result.updated_at is None
+    # And critically: no row was written.
+    with engine.connect() as conn:
+        count = conn.execute(
+            select(user_preferences_table).where(
+                user_preferences_table.c.user_id == "alice-empty-patch"
+            )
+        ).all()
+    assert count == [], "Panel C2 guard regressed: empty PATCH inserted a row"
+
+
+def test_patch_tutorial_emits_counter_with_tutorial_changed_label(
+    service, preferences_metric_reader
+):
+    """Panel S1 preservation: `_PREFERENCES_PATCH_COUNTER` emits with the
+    full label set including the new `tutorial_changed` label.
+
+    Verifies both that the existing `wrote_row` label survived the additive
+    diff AND that the new `tutorial_changed` label was added. Uses the
+    ``preferences_metric_reader`` fixture (see conftest.py — Step 1
+    prerequisite above) and the module-level
+    ``_last_patch_counter_attributes`` helper.
+    """
+    stamp = datetime(2026, 5, 19, 12, 0, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-counter-tut",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp),
+        )
+    )
+    attrs = _last_patch_counter_attributes(preferences_metric_reader)
+    assert attrs["mode_changed"] is False
+    assert attrs["banner_dismissed"] is False
+    assert attrs["wrote_row"] is True  # Phase 1A label preserved.
+    assert attrs["tutorial_changed"] is True  # Phase 4 label extension.
+
+
+def test_patch_without_tutorial_emits_counter_with_tutorial_changed_false(
+    service, preferences_metric_reader
+):
+    """Counter-label disaggregation: a non-tutorial PATCH still emits the
+    counter but with `tutorial_changed=False`."""
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-counter-mode",
+            UpdateComposerPreferencesRequest(default_mode="freeform"),
+        )
+    )
+    attrs = _last_patch_counter_attributes(preferences_metric_reader)
+    assert attrs["mode_changed"] is True
+    assert attrs["wrote_row"] is True
+    assert attrs["tutorial_changed"] is False  # absent from payload.
 ```
 
 - [ ] **Step 2: Run to fail.** `.venv/bin/python -m pytest tests/unit/web/preferences/test_service.py -v` → FAIL (service does not yet read or write `tutorial_completed_at`).
 
-- [ ] **Step 3: Extend the service.**
+- [ ] **Step 3: Extend the service — ADDITIVE DIFF, NOT REWRITE.**
 
-In `src/elspeth/web/preferences/service.py`, update `_row_to_prefs` to read
-and Tier-1-guard the new field:
+Extend `_row_to_prefs()` and `update_composer_preferences()` in
+`src/elspeth/web/preferences/service.py` to handle the new
+`tutorial_completed_at` column. **This is an additive diff** — every
+existing Phase 1A guard MUST be preserved. The full surrounding function
+bodies are omitted here intentionally; consult the live file
+(`src/elspeth/web/preferences/service.py`) before editing. The blocks below
+show only the new logic for the new column plus the call-site for the
+counter-label extension.
+
+A first-pass plan review (2026-05-19, five reviewers converging:
+reality:B-02, architecture:A3+A4, quality:Q2+Q3) flagged that a verbatim
+full replacement of these functions silently dropped six Phase 1A
+correctness mechanisms. **Do not regress them.** Before opening the file,
+read this checklist and verify each item is still present in the live
+file when you finish:
+
+| # | Guard | Live `service.py` location | Failure mode if regressed |
+|---|---|---|---|
+| 1 | Panel C2 empty-PATCH-on-no-row guard | lines ~186, ~226-231 (`payload_is_empty` + the `if exists is None: return … False` short-circuit) | An empty PATCH against a never-seen user inserts a default row, contradicting the lazy-write contract on the GET side. |
+| 2 | `wrote_row` bool tracking | `_sync` returns a 3-tuple ending in `wrote: bool`; consumed by the counter and the response `updated_at` | Counter cannot disaggregate "real write" from "no-op PATCH"; response carries fabricated `updated_at`. |
+| 3 | `_PREFERENCES_PATCH_COUNTER` emit | lines ~84-88 (declare), lines ~293-300 (emit with `{mode_changed, banner_dismissed, wrote_row}` attributes) | Loss of operational-telemetry signal (Panel S1). |
+| 4 | `CorruptPreferencesError(user_id, bad_value)` named raise | declared at lines ~47-69; raised at line ~151 (`_row_to_prefs`) and line ~259 (PATCH-side read of `existing_raw`) | Bare `RuntimeError` loses structured `user_id` + `bad_value` debug context; breaks Tier-1 read-guard parity between GET and PATCH paths. |
+| 5 | Panel S3 `typing.cast()` pattern in `_row_to_prefs` | line ~252 (`insert_mode = cast(ComposerMode, existing_raw)` after the `existing_raw in _VALID_MODES` runtime check) | mypy stops catching `Any → ComposerMode` slips; the type contract becomes implicit/cargo-cult instead of visible. |
+| 6 | Panel U1 lazy-default `updated_at=None` and Panel U1 corollary `updated_at=now if wrote else None` | lazy-default branch at lines ~128-132 (`updated_at=None`); response builder at line ~308 (`updated_at=now if wrote else None`) | Fabricates an `updated_at` timestamp for a row that was never written — fills an audit-visible field with a value the system never wrote. |
+
+**Convention split (P1 contract, retained for the implementer's eyes
+where the code lives):**
+
+- `default_mode` and `banner_dismissed_at` keep the Phase 1A
+  "**absent = preserve, None = collapse to no-op**" convention (one-way
+  fields; no client need to NULL either via PATCH).
+- `tutorial_completed_at` uses the **three-state discrimination via
+  `model_fields_set`** (absent = preserve, datetime = set, null = clear) —
+  required by Phase 8 Task 6's retake contract. See §"Cross-plan
+  contract — `tutorial_completed_at` PATCH semantics" for the table.
+
+Now the deltas.
+
+**Delta A — extend `_row_to_prefs` with a Tier-1 read guard for the new
+column.** Add after the existing mode-validation block; extend the
+existing `return ComposerPreferences(...)` to include the new keyword
+argument as shown below.
 
 ```python
-def _row_to_prefs(self, row: object, user_id: str) -> ComposerPreferences:
-    """Convert a DB row to the response model with Tier-1 read guards."""
-    mode = row.default_composer_mode  # type: ignore[union-attr]
-    if mode not in _VALID_MODES:
-        raise RuntimeError(
-            f"user_preferences row for {user_id!r} has invalid "
-            f"default_composer_mode={mode!r}"
-        )
-    tutorial_completed_at = row.tutorial_completed_at  # type: ignore[union-attr]
-    # Tier-1 guard: must be None or a datetime. SQLite's tolerance for
-    # type-violating values means a corrupt row may surface here as a string
-    # or other type. Crash loudly with the offending value named so the
-    # operator can diagnose.
-    if tutorial_completed_at is not None and not isinstance(
-        tutorial_completed_at, datetime
-    ):
-        raise RuntimeError(
-            f"user_preferences row for {user_id!r} has invalid "
-            f"tutorial_completed_at={tutorial_completed_at!r} "
-            f"(expected datetime or None)"
-        )
-    return ComposerPreferences(
-        default_mode=mode,
-        banner_dismissed_at=row.banner_dismissed_at,  # type: ignore[union-attr]
-        tutorial_completed_at=tutorial_completed_at,
-        updated_at=row.updated_at,  # type: ignore[union-attr]
+# === Phase 4 additive delta in _row_to_prefs ===
+# DO NOT modify the surrounding function structure.
+# Preserved Phase 1A invariants (verify in live service.py before editing):
+#   - Panel S3 cast() pattern on `existing_raw` mode-narrowing — NOT touched here
+#     (that branch lives in update_composer_preferences, not _row_to_prefs).
+#   - The existing `mode not in _VALID_MODES` raise of CorruptPreferencesError
+#     stays as-is. We are appending a second, structurally parallel guard.
+# Tier-1 guard: must be None or a datetime. SQLite's permissive type-affinity
+# tolerates strings in a DateTime-typed column, so a corrupt row may surface
+# here as a string or other type. Raise the NAMED exception with the offending
+# value packed as a dict-keyed-by-column so an auditor reading the error can
+# tell which column was corrupt without inspecting message text.
+raw_tutorial = row.tutorial_completed_at
+if raw_tutorial is None:
+    tutorial_completed_at: datetime | None = None
+elif isinstance(raw_tutorial, datetime):
+    tutorial_completed_at = raw_tutorial
+else:
+    raise CorruptPreferencesError(
+        user_id=user_id,
+        bad_value={"tutorial_completed_at": raw_tutorial},
     )
-```
 
-Update the lazy-default branch of `get_composer_preferences` to include the
-new field:
-
-```python
 return ComposerPreferences(
-    default_mode=_DEFAULT_MODE,
-    banner_dismissed_at=None,
-    tutorial_completed_at=None,
-    updated_at=self._now(),
+    default_mode=mode,
+    banner_dismissed_at=row.banner_dismissed_at,
+    tutorial_completed_at=tutorial_completed_at,  # NEW field on response model.
+    updated_at=row.updated_at,
 )
 ```
 
-Update `update_composer_preferences` to support the new partial-update field.
-Mirror the existing pattern (read-resolve-preserve for fields not in the
-payload):
+Note that `CorruptPreferencesError`'s `__init__` is the Phase 1A signature
+`(user_id: str, bad_value: object)`. The Phase 4 use packs the bad value as
+`{"tutorial_completed_at": raw_tutorial}` so the column-name is structurally
+attached to the offending value rather than living only in the message
+string. The existing `_row_to_prefs` mode-guard call site (line ~151) is
+unchanged; do not retrofit a dict wrapper there.
+
+**Delta B — lazy-default branch of `get_composer_preferences`.** Find the
+`return ComposerPreferences(...)` in the no-row branch (live lines
+~128-132). Add the new field with `tutorial_completed_at=None`. **Leave
+`updated_at=None` exactly as-is** — Panel U1: no write event exists to
+associate a timestamp with, so we do not fabricate one. The plan's
+original verbatim rewrite incorrectly substituted `updated_at=self._now()`;
+that would have written a synthetic timestamp into an audit-visible field.
+Do not propagate that mistake into the live code.
 
 ```python
-async def update_composer_preferences(
-    self, user_id: str, payload: UpdateComposerPreferencesRequest
-) -> ComposerPreferences:
-    """Upsert the preferences row, touching only fields in payload.
-
-    See Phase 1A.3 for the corrupt-mode PATCH lockout reasoning; the same
-    pattern is extended here for tutorial_completed_at.
-
-    # telemetry: deferred to Phase 8 polish — preference-change event.
-    """
-    now = self._now()
-
-    def _sync() -> tuple[str, datetime | None, datetime | None]:
-        """Returns (mode, banner_dismissed_at, tutorial_completed_at) after write."""
-        with self._engine.begin() as conn:
-            # Resolve mode (existing logic).
-            if payload.default_mode is not None:
-                insert_mode = payload.default_mode
-            else:
-                existing_mode = conn.execute(
-                    select(user_preferences_table.c.default_composer_mode).where(
-                        user_preferences_table.c.user_id == user_id
-                    )
-                ).scalar_one_or_none()
-                insert_mode = existing_mode if existing_mode is not None else _DEFAULT_MODE
-
-            # Resolve banner_dismissed_at (existing logic).
-            if payload.banner_dismissed_at is not None:
-                resolved_banner = payload.banner_dismissed_at
-            else:
-                resolved_banner = conn.execute(
-                    select(user_preferences_table.c.banner_dismissed_at).where(
-                        user_preferences_table.c.user_id == user_id
-                    )
-                ).scalar_one_or_none()
-
-            # Resolve tutorial_completed_at (new — Phase 4).
-            # Three semantic states (see Cross-plan contract):
-            #   (a) field absent from payload         → preserve existing value
-            #   (b) field present, datetime value     → write the timestamp
-            #   (c) field present, value is None      → write NULL (Phase 8 retake)
-            # Pydantic v2 exposes `model_fields_set` containing only the keys
-            # that were explicitly provided by the caller; this is how we
-            # distinguish (a) "key absent" from (c) "key present but null"
-            # without inventing a sentinel.
-            tutorial_was_provided = "tutorial_completed_at" in payload.model_fields_set
-            if tutorial_was_provided:
-                resolved_tutorial = payload.tutorial_completed_at  # may be a datetime or None
-            else:
-                resolved_tutorial = conn.execute(
-                    select(user_preferences_table.c.tutorial_completed_at).where(
-                        user_preferences_table.c.user_id == user_id
-                    )
-                ).scalar_one_or_none()
-
-            values: dict[str, object] = {
-                "user_id": user_id,
-                "default_composer_mode": insert_mode,
-                "banner_dismissed_at": payload.banner_dismissed_at,
-                # Insert-side: use the resolved value so a fresh-row upsert
-                # without `tutorial_completed_at` in the payload writes NULL
-                # (the default for new users) rather than a stale-read value
-                # from an earlier transaction.
-                "tutorial_completed_at": resolved_tutorial,
-                "updated_at": now,
-            }
-            stmt = sqlite_insert(user_preferences_table).values(**values)
-            update_clause: dict[str, object] = {"updated_at": now}
-            # Note: default_mode and banner_dismissed_at retain the Phase 1A
-            # "None = preserve" convention (there is no client need to NULL
-            # either field via PATCH; the banner-dismissed timestamp is
-            # write-once-and-leave-alone). Only `tutorial_completed_at` uses
-            # the three-state `model_fields_set` discrimination because
-            # Phase 8 Task 6's retake requires the explicit-null write path.
-            if payload.default_mode is not None:
-                update_clause["default_composer_mode"] = payload.default_mode
-            if payload.banner_dismissed_at is not None:
-                update_clause["banner_dismissed_at"] = payload.banner_dismissed_at
-            if tutorial_was_provided:
-                # Writes either a datetime (set) or NULL (Phase 8 retake).
-                update_clause["tutorial_completed_at"] = payload.tutorial_completed_at
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["user_id"], set_=update_clause
-            )
-            conn.execute(stmt)
-
-        return insert_mode, resolved_banner, resolved_tutorial
-
-    written_mode, written_banner, written_tutorial = await run_sync_in_worker(_sync)
-    return ComposerPreferences(
-        default_mode=written_mode,
-        banner_dismissed_at=written_banner,
-        tutorial_completed_at=written_tutorial,
-        updated_at=now,
-    )
+# === Phase 4 additive delta in lazy-default branch ===
+# Existing fields unchanged; add `tutorial_completed_at=None`.
+# Panel U1: updated_at stays None — no write event to attach a timestamp to.
+return ComposerPreferences(
+    default_mode=_DEFAULT_MODE,
+    banner_dismissed_at=None,
+    tutorial_completed_at=None,  # NEW.
+    updated_at=None,  # PRESERVED — do NOT change to self._now().
+)
 ```
 
-Add the import for `datetime` at the top if not already present (it is in
-Phase 1A's version).
+**Delta C — extend `update_composer_preferences` to write
+`tutorial_completed_at` using `model_fields_set` discrimination.** The
+existing function body has a `_sync()` closure with three logical blocks:
+(i) Panel C2 empty-PATCH-on-no-row guard, (ii) mode resolution (including
+the `cast(ComposerMode, existing_raw)` Panel S3 line and the
+`CorruptPreferencesError` raise on the PATCH-side read of `existing_raw`),
+(iii) banner resolution. **All three blocks stay.** Add a fourth
+resolution block and extend the `values` dict + `update_clause` dict.
+
+The empty-PATCH predicate `payload_is_empty` (live line ~186) was
+originally defined as `payload.default_mode is None and
+payload.banner_dismissed_at is None`. Extend it to account for the new
+field's three-state semantics — a `tutorial_completed_at` that is *present
+in the payload* (whether as a datetime or as explicit null) is a real
+edit and MUST disable the empty-PATCH short-circuit:
+
+```python
+# === Phase 4 additive delta — payload_is_empty predicate ===
+# Preserve Phase 1A semantic: "default_mode and banner_dismissed_at use
+# absent=preserve, None=collapse." Extend with the three-state field via
+# `model_fields_set` — a key present in the payload (datetime OR explicit
+# null) is a real edit.
+tutorial_in_payload = "tutorial_completed_at" in payload.model_fields_set
+payload_is_empty = (
+    payload.default_mode is None
+    and payload.banner_dismissed_at is None
+    and not tutorial_in_payload
+)
+```
+
+Inside `_sync()`, add the tutorial-resolution block AFTER the existing
+banner-resolution block and BEFORE the `values` dict is built:
+
+```python
+# === Phase 4 additive delta — tutorial_completed_at resolution ===
+# Three semantic states (see §"Cross-plan contract — `tutorial_completed_at`
+# PATCH semantics"):
+#   (a) field absent from payload         → preserve existing value
+#   (b) field present, datetime value     → write the timestamp
+#   (c) field present, value is None      → write NULL (Phase 8 retake)
+# Pydantic v2 `model_fields_set` is the discriminator between (a) and (c);
+# no sentinel needed.
+if tutorial_in_payload:
+    resolved_tutorial = payload.tutorial_completed_at  # datetime OR None.
+else:
+    resolved_tutorial = conn.execute(
+        select(user_preferences_table.c.tutorial_completed_at).where(
+            user_preferences_table.c.user_id == user_id
+        )
+    ).scalar_one_or_none()
+```
+
+Extend the `values` and `update_clause` dicts (live lines ~272-284). The
+`values` dict gets the resolved tutorial value (insert-side); the
+`update_clause` gets a *conditional* entry — only included when the
+caller explicitly addressed the column — so the convention split is
+faithful:
+
+```python
+# === Phase 4 additive delta — INSERT values ===
+# Add tutorial_completed_at on insert-side: use the *resolved* value so a
+# fresh-row upsert without the field in the payload writes NULL rather
+# than the stale-read default. Existing keys unchanged.
+values: dict[str, object] = {
+    "user_id": user_id,
+    "default_composer_mode": insert_mode,
+    "banner_dismissed_at": payload.banner_dismissed_at,
+    "tutorial_completed_at": resolved_tutorial,  # NEW.
+    "updated_at": now,
+}
+
+# === Phase 4 additive delta — ON CONFLICT update_clause ===
+# Only write the column on conflict if the caller explicitly addressed it.
+# This is where the convention split lives: default_mode and
+# banner_dismissed_at keep the Phase 1A `is not None` predicate;
+# tutorial_completed_at uses the `model_fields_set` predicate so an
+# explicit null reaches the write path. Existing two `if … is not None`
+# blocks for default_mode and banner_dismissed_at are PRESERVED.
+if tutorial_in_payload:
+    # Writes either a datetime (set) or NULL (Phase 8 retake).
+    update_clause["tutorial_completed_at"] = payload.tutorial_completed_at
+```
+
+**Delta D — preserve the `_sync` return shape AND add a fourth element
+for the counter label.** Live `_sync` returns
+`tuple[ComposerMode, datetime | None, bool]`. Extend to
+`tuple[ComposerMode, datetime | None, datetime | None, bool, bool]` —
+adding `resolved_tutorial` and the new `tutorial_in_payload` flag. The
+final `bool` is still `wrote_row` (guard #2 — do not remove). The new
+`tutorial_in_payload` flag flows out as a counter label, NOT a response
+field, because the response uses `resolved_tutorial` directly:
+
+```python
+# === Phase 4 additive delta — _sync return tuple ===
+# Existing shape: (insert_mode, resolved_banner, wrote: bool)
+# New shape:     (insert_mode, resolved_banner, resolved_tutorial,
+#                  tutorial_changed: bool, wrote: bool)
+# `tutorial_changed` mirrors the existing mode_changed/banner_dismissed
+# attribute style on the counter, computed as `tutorial_in_payload`
+# (whether the caller explicitly addressed the column).
+return insert_mode, resolved_banner, resolved_tutorial, tutorial_in_payload, True
+
+# The Panel C2 short-circuit branch (no-row + empty PATCH) returns:
+return _DEFAULT_MODE, None, None, False, False
+```
+
+**Delta E — counter-label extension at the post-`_sync` emit (live lines
+~293-300). DO NOT REWRITE the counter declaration or the emit-site
+structure.** Add `tutorial_changed` to the `attributes` dict. The
+declaration's docstring (line ~87) should also gain the new label name
+in the same edit for documentation parity:
+
+```python
+# === Phase 4 additive delta — counter declaration docstring (line ~87) ===
+# Existing: "Attributes: mode_changed (bool), banner_dismissed (bool),
+#            wrote_row (bool)."
+# New:      "Attributes: mode_changed (bool), banner_dismissed (bool),
+#            wrote_row (bool), tutorial_changed (bool)."
+
+# === Phase 4 additive delta — counter emit (lines ~293-300) ===
+# PRESERVE the existing _PREFERENCES_PATCH_COUNTER.add(1, attributes={...})
+# call structure. Add the new `tutorial_changed` label only.
+written_mode, written_banner, written_tutorial, tutorial_changed, wrote = (
+    await run_sync_in_worker(_sync)
+)
+_PREFERENCES_PATCH_COUNTER.add(
+    1,
+    attributes={
+        "mode_changed": payload.default_mode is not None,
+        "banner_dismissed": payload.banner_dismissed_at is not None,
+        "wrote_row": wrote,                  # PRESERVED — guard #2.
+        "tutorial_changed": tutorial_changed,  # NEW — Phase 4 label.
+    },
+)
+return ComposerPreferences(
+    default_mode=written_mode,
+    banner_dismissed_at=written_banner,
+    tutorial_completed_at=written_tutorial,  # NEW response field.
+    # PRESERVED — Panel U1 corollary tied to guard #2:
+    #   wrote=False means the Panel C2 short-circuit fired; no write event
+    #   exists, so do not fabricate `updated_at=now`.
+    updated_at=now if wrote else None,
+)
+```
+
+**Do NOT add `slog.debug(...)` calls anywhere in this code.** The counter
+emit is the operational-telemetry signal; logging would violate the
+audit/telemetry/logging primacy ordering (see CLAUDE.md and memory
+`feedback_no_slog_recommendations.md`).
+
+**Imports.** `datetime` and `cast` are already imported in the live file
+(lines 30-31); no new imports needed. `CorruptPreferencesError` is defined
+locally in the same module (line ~47); referenced by name.
 
 - [ ] **Step 4: Run test to verify it passes.**
 
@@ -1077,7 +1547,7 @@ def test_store_and_lookup_round_trip(cache: TutorialCache, cache_dir: Path) -> N
 
 
 def test_corrupt_file_crashes_lookup(cache: TutorialCache, cache_dir: Path) -> None:
-    """Tier-1 guard: a present-but-unparseable file is a fault, not a miss."""
+    """Corruption guard: a present-but-unparseable file is a fault, not a miss."""
     # Compute the key the way the cache does (this mirrors the internal hash).
     from elspeth.web.preferences.tutorial_cache import _compute_key
     key = _compute_key(CANONICAL_SEED_PROMPT, "claude-opus-4-7")
@@ -1089,7 +1559,7 @@ def test_corrupt_file_crashes_lookup(cache: TutorialCache, cache_dir: Path) -> N
 def test_file_with_mismatched_prompt_crashes_lookup(
     cache: TutorialCache, cache_dir: Path
 ) -> None:
-    """Tier-1 guard: an in-place file whose contents disagree with the key.
+    """Corruption guard: an in-place file whose contents disagree with the key.
 
     Models a misconfigured operator who copied a file to the wrong name.
     """
@@ -1345,6 +1815,197 @@ Expected: PASS — no existing integration tests should break.
 git add <app-file>
 git commit -m "feat(web): wire TutorialCache onto app.state (Phase 4A.6)"
 ```
+
+## Task 7.0: Schema — extend `runs_table` with audit-story columns
+
+**Files:**
+- Modify: `src/elspeth/core/landscape/schema.py` — add six columns to `runs_table`.
+- Modify: the Landscape write path that records a completed run (recon below) — populate the new columns.
+- Create: `tests/unit/core/landscape/test_runs_table_audit_story_columns.py` — column-presence + write-side fixture tests.
+
+**Why this is a separate task (and why it lands before Task 7).** The
+audit-story endpoint added in Task 7.2 reads six fields from a Landscape
+run row: `llm_call_count`, `source_data_hash`, `run_started_at`,
+`plugin_versions`, `seeded_from_cache`, `cache_key`. Verified against the
+live schema (`src/elspeth/core/landscape/schema.py:61-98` as of
+2026-05-19), **none of these columns exist on `runs_table` today**. The
+table has `started_at` (close to but not `run_started_at`), `config_hash`,
+and other run-config metadata, but no per-run output-hash, no LLM-call
+counter, no plugin-version manifest, no cache-replay markers.
+
+Task 7's replay path (`_replay_cached_content_to_landscape`) and Task 7.2's
+read path both assume these columns. Without Task 7.0, Task 7 will write
+metadata that has no column to land in, and Task 7.2's
+`audit_row.llm_call_count` access will raise `AttributeError` at runtime.
+
+**Operator action required.** Per the project's no-Alembic policy (memory:
+`project_db_migration_policy`, `project_phase9_sqlite_only`), schema
+changes are applied by deleting the existing audit DB and letting the
+caretaker re-bootstrap from `schema.py`. **The operator must delete
+`/var/lib/elspeth/landscape/audit.db` (and any per-eval audit DBs) after
+this task lands, before the next pipeline run.** This is the established
+DB-migration pattern, but its scope here is the full Landscape audit DB —
+surface this to the operator and pause for confirmation before merging
+Task 7.0.
+
+**Trust tier.** All six new columns are Tier-1 (Landscape data). Their
+write-side population (in Task 7's modified run path and in the
+existing run-completion path) must be unconditional — there is no
+"populate if available" branch. If the run path cannot supply one of these
+fields, the run is corrupt and must fail at the write site, not silently
+write NULL into a column the audit-story endpoint expects to find populated.
+
+- [ ] **Step 1: Reconnaissance — identify the live Landscape run-completion write site.**
+
+```bash
+grep -rn "runs_table.*insert\|INSERT.*INTO.*runs\|record_run_completion\|persist_run\b" \
+  src/elspeth/core/landscape/ --include="*.py" | grep -v __pycache__ | head -20
+```
+
+Identify the function that inserts a row into `runs_table` at the end of a
+successful pipeline run. Confirm the shape of the data it receives:
+
+1. Where does `llm_call_count` come from? Likely a counter accumulated by
+   the LLM transform's metrics — find the accumulator and the read site.
+2. Where does `source_data_hash` come from? Likely computed by the source
+   loader (the `source_data_hash` already referenced in
+   `_replay_cached_content_to_landscape`). Confirm name match.
+3. `run_started_at` — the run-orchestrator already records this; it may be
+   `started_at` already. If so, this column is a rename, not an add.
+4. `plugin_versions` — the bootstrap path resolves plugin versions; find
+   the in-memory representation and the serialization point.
+5. `seeded_from_cache` / `cache_key` — these are written ONLY by Task 7's
+   `_replay_cached_content_to_landscape`; on a normal live run they are
+   `False` / `None`. Confirm with the operator whether the design treats
+   them as nullable-but-Tier-1 (the live-run row writes `seeded_from_cache
+   = False` and `cache_key = NULL` explicitly) or as cache-only metadata
+   stored in a side table — the simpler design is the former.
+
+Write the findings into the commit body. If any of the above does not
+exist in the live codebase (e.g., LLM call counter is not currently
+accumulated at run scope), surface that to the operator before proceeding;
+Task 7.0 may need to expand to add the accumulation, not just the storage.
+
+- [ ] **Step 2: Write the failing test.**
+
+Create `tests/unit/core/landscape/test_runs_table_audit_story_columns.py`:
+
+```python
+"""Column-presence and write-side smoke tests for Task 7.0 additions."""
+
+from __future__ import annotations
+
+from elspeth.core.landscape.schema import runs_table
+
+
+def test_runs_table_has_audit_story_columns() -> None:
+    """The six Phase 4.7.2 audit-story columns are present on runs_table."""
+    expected = {
+        "llm_call_count",
+        "source_data_hash",
+        "run_started_at",
+        "plugin_versions",
+        "seeded_from_cache",
+        "cache_key",
+    }
+    actual = {col.name for col in runs_table.columns}
+    missing = expected - actual
+    assert not missing, f"Missing columns on runs_table: {missing}"
+
+
+def test_llm_call_count_is_non_nullable_integer() -> None:
+    """Tier-1 invariant: every run has a definite LLM call count (0 is legal)."""
+    col = runs_table.c.llm_call_count
+    assert not col.nullable, "llm_call_count must be NOT NULL (Tier-1)"
+    # Python type: int; SQL type left to the test author's verification.
+```
+
+Expect: FAIL — columns do not exist yet.
+
+- [ ] **Step 3: Add the columns.**
+
+In `src/elspeth/core/landscape/schema.py`, extend `runs_table` (the existing
+`Table("runs", ...)` block at lines 61-98) with the six new columns. Place
+them after `runtime_val_manifest_json` (current last column at line 97) so
+the column-order on existing rows is preserved (relevant for the
+delete-and-recreate migration path):
+
+```python
+# === Phase 4A.7.0 audit-story columns (added 2026-05-19) ===
+# These six columns back the GET /audit-story endpoint (Phase 4A.7.2).
+# All Tier-1: write-side MUST populate every column on every run.
+# `seeded_from_cache` and `cache_key` default to False / NULL for live runs
+# and are populated only by `_replay_cached_content_to_landscape` (Task 7).
+Column("llm_call_count", Integer, nullable=False),
+Column("source_data_hash", String(64), nullable=False),
+# Renamed from / aliased to `started_at` if recon confirms the live column.
+# If recon shows `started_at` is the canonical run-start timestamp, DO NOT
+# add a duplicate column — instead update Task 7.2's service to read
+# `started_at` and rename the response field. Document the decision.
+Column("run_started_at", DateTime(timezone=True), nullable=False),
+Column("plugin_versions", Text, nullable=False),  # canonical-JSON dict[str,str]
+Column("seeded_from_cache", Boolean, nullable=False, default=False),
+Column("cache_key", String(64), nullable=True),
+```
+
+Note: `Integer`, `Boolean`, and `Text` must be imported from `sqlalchemy`
+alongside the existing `Column`, `String`, `DateTime` imports.
+
+- [ ] **Step 4: Extend the run-completion write site.**
+
+In the file Step 1 identified, extend the `runs_table` INSERT to populate
+the six new columns. For live runs:
+
+- `llm_call_count`: read from the run-scope LLM counter (Step 1 recon).
+- `source_data_hash`: read from the source-loader output (Step 1 recon).
+- `run_started_at`: same value the existing `started_at` column receives
+  (if recon confirms `started_at` is the run-start timestamp, see Step 3
+  note).
+- `plugin_versions`: serialise the bootstrap-resolved plugin versions as
+  canonical JSON.
+- `seeded_from_cache`: `False`.
+- `cache_key`: `None`.
+
+For cache-replay runs (the path in Task 7's
+`_replay_cached_content_to_landscape`), the values come from the cached
+entry plus the replay's own cache-key computation. Task 7's
+implementation must be updated to pass these through to the
+run-completion write site (or the replay path may write directly to
+`runs_table` if it bypasses the standard write — confirm during Step 1).
+
+- [ ] **Step 5: Run the column-presence test to verify it passes.**
+
+```bash
+.venv/bin/python -m pytest tests/unit/core/landscape/test_runs_table_audit_story_columns.py -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Operator gate — DB delete.**
+
+```text
+Operator action: Delete the live Landscape audit DBs before the next
+pipeline run.
+
+Paths to remove (verify with the operator — exact paths depend on the
+deployment):
+  /var/lib/elspeth/landscape/audit.db        (production)
+  examples/*/runs/audit.db                   (example pipelines)
+  evals/*/audit.db                           (eval harness)
+
+Confirm with operator. Do NOT proceed to Task 7 until this is acknowledged.
+```
+
+- [ ] **Step 7: Commit.**
+
+```bash
+git add src/elspeth/core/landscape/schema.py \
+        <run-completion-write-site> \
+        tests/unit/core/landscape/test_runs_table_audit_story_columns.py
+git commit -m "feat(landscape): add audit-story columns to runs_table (Phase 4A.7.0)"
+```
+
+---
 
 ## Task 7: Run-path integration — cache consult under tutorial mode
 
@@ -1703,7 +2364,7 @@ def test_edited_prompt_skips_cache(
 def test_corrupt_cache_file_crashes_run_path(
     app_with_cache: FastAPI, cache_dir: Path
 ) -> None:
-    """Tier-1 guarantee: corrupt cache must crash (500), not silently bypass.
+    """Corruption guarantee: corrupt cache must crash (500), not silently bypass.
 
     Guards against a defensive try/except being added around cache.lookup.
     """
@@ -1898,14 +2559,1528 @@ git commit -m "feat(web): consult tutorial cache on canonical-seed runs (Phase 4
 
 ---
 
+## Task 7.1: Route + service — `POST /api/tutorial/run`
+
+**Files:**
+
+- Create: `src/elspeth/web/composer/tutorial_run_routes.py` — FastAPI router.
+- Create: `src/elspeth/web/composer/tutorial_service.py` — service method.
+- Create: `tests/integration/web/test_tutorial_routes.py` — integration tests.
+- Modify: `src/elspeth/web/composer/__init__.py` — export the router.
+- Modify: the FastAPI app-composition site (identified in Task 6 recon) — `include_router(create_tutorial_run_router())`.
+
+Task 7 wires the cache-consult branch into the *generic* run path (so any
+canonical-seed run benefits, including ones initiated from the existing
+`POST /api/sessions/{id}/runs` endpoint). Task 7.1 adds the **tutorial-specific
+entry point** that the frontend's `runTutorialPipeline` (21b2 Task 8) calls.
+The route is a thin façade over the run-path orchestration Task 7 already
+wired: it accepts a `(session_id, prompt)` pair, derives the canonical
+pipeline from the prompt, invokes the run-path, and returns the
+`TutorialRunResponse` shape the frontend consumes.
+
+The route does **not** duplicate Task 7's cache logic — it calls a service
+method (`run_tutorial_pipeline`) which delegates to the same
+`execute_pipeline_run` (or recon-confirmed equivalent) entry point that
+Task 7 modified. The cache-consult branch fires inside that entry point;
+Task 7.1 simply guarantees the frontend has a stable, narrow surface.
+
+**Bypass paths (live run, no cache consult, no cache write):**
+
+1. User's `tutorial_completed_at IS NOT NULL` — post-completion users get
+   live runs (they're past the tutorial; cache hits would be misleading).
+2. User's `default_mode == 'freeform'` — freeform users skipped the tutorial
+   by choice; the cache is a tutorial-only optimisation (per Q11). A
+   freeform user who *does* invoke `POST /api/tutorial/run` (e.g. via the
+   Phase 8 retake button) gets a live run.
+
+Both bypass paths are evaluated **before** any cache lookup. The bypass
+decision is logged to the Landscape entry's metadata as
+`tutorial_cache_bypass_reason: "completed" | "freeform" | None` so an
+auditor can later distinguish a bypass from a miss.
+
+- [ ] **Step 1: Reconnaissance — confirm the run-path service surface.**
+
+```bash
+grep -n "def execute_pipeline_run\|def _execute_pipeline_live\|create_run_router" \
+  src/elspeth/web/sessions/*.py src/elspeth/web/composer/*.py 2>/dev/null
+```
+
+Confirm:
+
+1. The exact name of the function Task 7 modified (its argument shape
+   determines `run_tutorial_pipeline`'s pass-through call).
+2. The auth dep used by sibling composer routes (`get_current_user` or a
+   composer-specific dep) — match it.
+3. The existing FastAPI app-composition site where the new router is
+   `include_router`'d — same file as `create_preferences_router()` is
+   registered.
+4. The Pydantic config base (project convention is `ConfigDict(strict=True,
+   extra='forbid')` — confirm against an existing model such as
+   `UpdateSessionRequest` in `src/elspeth/web/sessions/schemas.py`).
+5. **Session-ownership verification is a shared free function**:
+   `verify_session_ownership(session_id, user, request)` in
+   `src/elspeth/web/sessions/ownership.py`. It raises
+   `HTTPException(404)` on any access-control failure (unknown session,
+   wrong user, wrong auth provider) — **the IDOR contract is 404, not
+   403**, deliberately, to avoid leaking session existence to a UUID
+   enumerator. Do NOT reinvent this check inline; do NOT add a
+   service-method shim such as `session_exists_for_user`. Reuse the
+   free function. Confirm by reading `sessions/ownership.py:26-50`.
+
+Write the findings into the commit message body. Do not guess.
+
+- [ ] **Step 2: Write the failing integration test.**
+
+Create `tests/integration/web/test_tutorial_routes.py`:
+
+```python
+"""Integration tests for POST /api/tutorial/run."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+
+from elspeth.web.auth.middleware import get_current_user
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
+from elspeth.web.preferences.routes import create_preferences_router
+from elspeth.web.preferences.service import PreferencesService
+from elspeth.web.preferences.tutorial_cache import (
+    CANONICAL_SEED_PROMPT,
+    TutorialCache,
+    TutorialCacheEntry,
+)
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.schema import initialize_session_schema
+
+
+@pytest.fixture
+def cache_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "cache"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
+def app(cache_dir: Path) -> FastAPI:
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    initialize_session_schema(engine)
+    app = FastAPI()
+    app.state.session_engine = engine
+    app.state.preferences_service = PreferencesService(engine)
+    app.state.tutorial_cache = TutorialCache(directory=cache_dir)
+
+    identity = UserIdentity(user_id="alice", username="alice")
+
+    async def _mock_user() -> UserIdentity:
+        return identity
+
+    app.dependency_overrides[get_current_user] = _mock_user
+    app.include_router(create_preferences_router())
+    app.include_router(create_tutorial_run_router())
+    return app
+
+
+def _seed_canonical_cache_entry(app: FastAPI) -> None:
+    app.state.tutorial_cache.store(
+        TutorialCacheEntry(
+            canonical_prompt=CANONICAL_SEED_PROMPT,
+            model_id="claude-opus-4-7",
+            cached_at=datetime(2026, 5, 15, tzinfo=UTC),
+            rows=[{"url": "ato.gov.au", "score": 5, "rationale": "clear"}],
+            source_data_hash="a7f3e2cached",
+            llm_call_count=5,
+            pipeline_yaml="<canonical>",
+        )
+    )
+
+
+def _create_session(app: FastAPI, user_id: str = "alice") -> str:
+    """Create a session row and return its id.
+
+    Reuses the project's established integration-test fixture pattern from
+    ``tests/integration/web/conftest.py`` (see ``_make_session``): the
+    fixture inserts directly into ``sessions_table`` via the session
+    engine. There is no ``create_session_for_user`` free function — the
+    public production surface is the ``SessionsServiceImpl.create_session``
+    coroutine, but tests bypass it to set up arbitrary ownership.
+    Implementer: import ``_make_session`` from the existing conftest, or
+    inline the same INSERT pattern here. Confirm during Step 1 recon.
+    """
+    raise NotImplementedError("use _make_session from tests/integration/web/conftest.py")
+
+
+def test_post_run_cache_hit_returns_current_session_run_id(
+    app: FastAPI, cache_dir: Path
+) -> None:
+    """Cache hit: response.run_id is owned by the current session; seeded_from_cache=True."""
+    _seed_canonical_cache_entry(app)
+    session_id = _create_session(app)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tutorial/run",
+        json={"session_id": session_id, "prompt": CANONICAL_SEED_PROMPT},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["seeded_from_cache"] is True
+    assert isinstance(body["cache_key"], str) and len(body["cache_key"]) == 64
+    # The run_id is a fresh identifier owned by the caller's session
+    # (cross-validated by querying the session's runs).
+    assert isinstance(body["run_id"], str) and len(body["run_id"]) > 0
+    # The output's source_data_hash matches the cached entry — content,
+    # not identity, was replayed.
+    assert body["output"]["source_data_hash"] == "a7f3e2cached"
+
+
+def test_post_run_cache_miss_executes_fresh(
+    app: FastAPI, cache_dir: Path
+) -> None:
+    """Cache miss: live run, response.seeded_from_cache=False, cache populated post-run."""
+    session_id = _create_session(app)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tutorial/run",
+        json={"session_id": session_id, "prompt": CANONICAL_SEED_PROMPT},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["seeded_from_cache"] is False
+    assert body["cache_key"] is None
+    # The cache was written post-run (one file in the cache directory).
+    assert len(list(cache_dir.iterdir())) == 1
+
+
+def test_post_run_bypasses_cache_for_freeform_user(
+    app: FastAPI, cache_dir: Path
+) -> None:
+    """default_mode=='freeform' → cache bypassed even if a hit would be available."""
+    _seed_canonical_cache_entry(app)
+    session_id = _create_session(app)
+    client = TestClient(app)
+    # Set the user's mode to freeform.
+    client.patch("/api/composer-preferences", json={"default_mode": "freeform"})
+
+    # Snapshot cache directory before run; after the bypass the directory
+    # must still hold ONLY the pre-seeded canonical entry (no new file).
+    pre_run_files = {p.name for p in cache_dir.iterdir()}
+    with patch(
+        "elspeth.web.composer.tutorial_service.TutorialCache.lookup"
+    ) as mock_lookup:
+        response = client.post(
+            "/api/tutorial/run",
+            json={"session_id": session_id, "prompt": CANONICAL_SEED_PROMPT},
+        )
+        assert response.status_code == 200
+        # The cache lookup was bypassed — never called.
+        mock_lookup.assert_not_called()
+    body = response.json()
+    assert body["seeded_from_cache"] is False
+    # Bypass contract: no cache write either (otherwise a bypass-mode run could
+    # poison the cache for non-bypass users).
+    post_run_files = {p.name for p in cache_dir.iterdir()}
+    assert post_run_files == pre_run_files, (
+        f"Bypass path must not write the cache; "
+        f"new files: {post_run_files - pre_run_files}"
+    )
+
+
+def test_post_run_bypasses_cache_for_completed_user(
+    app: FastAPI, cache_dir: Path
+) -> None:
+    """tutorial_completed_at IS NOT NULL → cache bypassed (post-completion live runs)."""
+    _seed_canonical_cache_entry(app)
+    session_id = _create_session(app)
+    client = TestClient(app)
+    client.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": "2026-05-14T00:00:00Z"},
+    )
+
+    pre_run_files = {p.name for p in cache_dir.iterdir()}
+    with patch(
+        "elspeth.web.composer.tutorial_service.TutorialCache.lookup"
+    ) as mock_lookup:
+        response = client.post(
+            "/api/tutorial/run",
+            json={"session_id": session_id, "prompt": CANONICAL_SEED_PROMPT},
+        )
+        assert response.status_code == 200
+        mock_lookup.assert_not_called()
+    body = response.json()
+    assert body["seeded_from_cache"] is False
+    # Bypass contract: no cache write either (otherwise a bypass-mode run could
+    # poison the cache for non-bypass users).
+    post_run_files = {p.name for p in cache_dir.iterdir()}
+    assert post_run_files == pre_run_files, (
+        f"Bypass path must not write the cache; "
+        f"new files: {post_run_files - pre_run_files}"
+    )
+
+
+def test_post_run_unknown_session_returns_404(
+    app: FastAPI, cache_dir: Path
+) -> None:
+    """Unknown session → 404, raised by the shared ownership helper.
+
+    Per the live IDOR contract (src/elspeth/web/sessions/ownership.py:33),
+    verify_session_ownership raises HTTPException(404) for any
+    access-control failure — unknown session, wrong user, or wrong auth
+    provider. The 404 is deliberate (not 403) to avoid leaking session
+    existence to an attacker enumerating UUIDs.
+    """
+    client = TestClient(app)
+    response = client.post(
+        "/api/tutorial/run",
+        json={
+            "session_id": "00000000-0000-0000-0000-000000000000",
+            "prompt": CANONICAL_SEED_PROMPT,
+        },
+    )
+    assert response.status_code == 404
+
+
+def test_post_run_corrupt_preferences_returns_500(
+    app: FastAPI, cache_dir: Path
+) -> None:
+    """Tier-1: corrupt preferences row → CorruptPreferencesError → 500."""
+    session_id = _create_session(app)
+    # Write a corrupt tutorial_completed_at directly via the engine (bypassing Pydantic).
+    from sqlalchemy import text
+    with app.state.session_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO user_preferences_table (user_id, tutorial_completed_at) "
+                "VALUES ('alice', 'not-a-datetime')"
+            )
+        )
+    client = TestClient(app)
+    response = client.post(
+        "/api/tutorial/run",
+        json={"session_id": session_id, "prompt": CANONICAL_SEED_PROMPT},
+    )
+    assert response.status_code == 500
+
+
+def test_post_run_request_extra_field_rejected(
+    app: FastAPI, cache_dir: Path
+) -> None:
+    """ConfigDict(extra='forbid') invariant: unknown fields in the body → 422."""
+    session_id = _create_session(app)
+    client = TestClient(app)
+    response = client.post(
+        "/api/tutorial/run",
+        json={
+            "session_id": session_id,
+            "prompt": CANONICAL_SEED_PROMPT,
+            "rogue_field": "should-reject",
+        },
+    )
+    assert response.status_code == 422
+```
+
+Placeholders (`_create_session`, the corrupt-row INSERT shape) are filled in
+from Step 1's recon; do not guess. The test file may not be valid Python
+until then — intentional: TDD must fail against real code, not mocks.
+
+- [ ] **Step 3: Run test to verify it fails.**
+
+```bash
+.venv/bin/python -m pytest tests/integration/web/test_tutorial_routes.py -v
+```
+
+Expected: FAIL — module-import error (router not yet created) or
+behavioural failure.
+
+- [ ] **Step 4: Implement the Pydantic models, route, and service.**
+
+Create `src/elspeth/web/composer/tutorial_run_routes.py`:
+
+```python
+"""Tutorial run endpoint — POST /api/tutorial/run.
+
+Phase 4A.7.1. The frontend's runTutorialPipeline (21b2 Task 8) calls this
+route. Logic is delegated to TutorialRunService; the route is a thin
+FastAPI shell that handles request parsing, auth, and response shaping.
+
+Per CLAUDE.md no-defensive-programming: no try/except wrapping. Errors
+from the service propagate to FastAPI's exception handlers (CorruptPreferencesError
+maps to 500 via the global handler installed in app composition; HTTPException
+short-circuits FastAPI; everything else surfaces as the framework default 500).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, ConfigDict
+
+from elspeth.web.auth.middleware import get_current_user
+from elspeth.web.auth.models import UserIdentity
+
+
+class TutorialRunRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    session_id: str
+    prompt: str
+
+
+class TutorialRunOutput(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    rows: list[dict[str, Any]]
+    source_data_hash: str
+
+
+class TutorialRunResponse(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    run_id: str
+    output: TutorialRunOutput
+    seeded_from_cache: bool
+    cache_key: str | None
+
+
+def create_tutorial_run_router() -> APIRouter:
+    router = APIRouter(prefix="/api/tutorial", tags=["tutorial"])
+
+    @router.post("/run", response_model=TutorialRunResponse)
+    async def run_tutorial(
+        request: Request,
+        body: TutorialRunRequest,
+        user: UserIdentity = Depends(get_current_user),
+    ) -> TutorialRunResponse:
+        from elspeth.web.composer.tutorial_service import run_tutorial_pipeline
+
+        # No try/except wrapping: the service calls verify_session_ownership
+        # which raises HTTPException(404) directly on any access-control
+        # failure (the IDOR contract; see
+        # src/elspeth/web/sessions/ownership.py:33). HTTPException
+        # short-circuits FastAPI's response pipeline; CorruptPreferencesError
+        # propagates to the global 500 handler installed in app composition.
+        return await run_tutorial_pipeline(
+            request=request,
+            user=user,
+            session_id=body.session_id,
+            prompt=body.prompt,
+        )
+
+    return router
+```
+
+Create `src/elspeth/web/composer/tutorial_service.py`:
+
+```python
+"""Tutorial run service — orchestrates cache consult, bypass, and live run.
+
+Phase 4A.7.1. Layered above Task 7's `execute_pipeline_run` so the
+cache-consult branch lives in exactly one place (Task 7's modified run
+path). This service adds the **bypass** logic (completed-user, freeform-user)
+that is specific to the tutorial entry point.
+
+Tier model:
+- session_id, prompt: Tier 3 (untrusted) — the composer LLM `set_pipeline`
+  path already handles Tier 3 prompts; this service forwards.
+- preferences row: Tier 1 — `CorruptPreferencesError` propagates.
+- cache content: server-generated — corruption crashes (Task 5).
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import Request
+
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.tutorial_run_routes import (
+    TutorialRunOutput,
+    TutorialRunResponse,
+)
+from elspeth.web.sessions.ownership import verify_session_ownership
+
+
+async def run_tutorial_pipeline(
+    *,
+    request: Request,
+    user: UserIdentity,
+    session_id: str,
+    prompt: str,
+) -> TutorialRunResponse:
+    """Execute the tutorial pipeline for ``user`` against ``session_id``.
+
+    Decision order:
+
+    1. Validate session ownership via the shared
+       ``verify_session_ownership`` free function. Per the live IDOR
+       contract (``src/elspeth/web/sessions/ownership.py:33``), any
+       access-control failure — unknown session, wrong user, wrong auth
+       provider — raises ``HTTPException(404)`` directly. The 404 (not
+       403) is deliberate: distinguishing "no such session" from "you
+       can't access this session" would leak session existence to a UUID
+       enumerator. This service does NOT catch and re-raise; the
+       HTTPException propagates to FastAPI's exception handlers.
+    2. Read the user's preferences. Tier-1 corruption → CorruptPreferencesError
+       (propagates to the 500 handler).
+    3. Compute bypass reason:
+       - prefs.tutorial_completed_at IS NOT NULL  → bypass ("completed")
+       - prefs.default_mode == "freeform"         → bypass ("freeform")
+       - otherwise                                → consult cache
+    4. Build the canonical pipeline from ``prompt`` (the composer LLM
+       set_pipeline path handles Tier-3 prompts; result is a pipeline_state
+       dict matching Task 7's `_is_canonical_seed_pipeline` contract).
+    5. Invoke Task 7's `execute_pipeline_run` — that function already
+       contains the cache-consult / cache-store branches gated on
+       prefs.tutorial_completed_at being None. On bypass paths we pass a
+       pre-built pipeline_state whose mode-flag forces the live path.
+
+    Per CLAUDE.md offensive-programming:
+    - No `.get()` / `getattr(default)` against pipeline_state or prefs.
+    - Bypass-reason is computed offensively; an unrecognised mode crashes
+      (the existing `_VALID_MODES` guard in preferences/service.py catches
+      this upstream).
+    """
+    # Reuse the shared IDOR-safe ownership check. Raises HTTPException(404)
+    # on mismatch (no separate SessionNotFoundError indirection needed —
+    # the shared helper already raises the framework-native error).
+    await verify_session_ownership(
+        session_id=UUID(session_id),
+        user=user,
+        request=request,
+    )
+
+    prefs_service = request.app.state.preferences_service
+    prefs = await prefs_service.get_composer_preferences(user.user_id)
+
+    bypass_reason: str | None = None
+    if prefs.tutorial_completed_at is not None:
+        bypass_reason = "completed"
+    elif prefs.default_mode == "freeform":
+        bypass_reason = "freeform"
+
+    pipeline_state = _build_canonical_pipeline_from_prompt(
+        prompt=prompt,
+        force_live=bypass_reason is not None,
+    )
+
+    # Task 7's execute_pipeline_run owns the cache-consult/cache-store
+    # branches. When force_live is set, _is_canonical_seed_pipeline returns
+    # False (the pipeline_state carries a flag the helper checks) and the
+    # cache is bypassed.
+    from elspeth.web.composer.run_path import execute_pipeline_run  # recon-confirmed
+
+    result = await execute_pipeline_run(
+        request=request,
+        user=user,
+        session_id=session_id,
+        pipeline_state=pipeline_state,
+    )
+
+    # Tier-1: every field below is read from a Landscape entry the run-path
+    # just wrote (or replayed). Absence is corruption.
+    return TutorialRunResponse(
+        run_id=result["run_id"],
+        output=TutorialRunOutput(
+            rows=result["rows"],
+            source_data_hash=result["source_data_hash"],
+        ),
+        seeded_from_cache=result["seeded_from_cache"],
+        cache_key=result["cache_key"],
+    )
+
+
+def _build_canonical_pipeline_from_prompt(
+    *, prompt: str, force_live: bool
+) -> dict[str, object]:
+    """Build a pipeline_state dict from the (possibly edited) seed prompt.
+
+    Exact construction depends on Step 1 recon — likely a thin wrapper
+    around the existing composer set_pipeline path. The `force_live` flag
+    is attached as `pipeline_state["_tutorial_force_live"] = True`; Task 7's
+    `_is_canonical_seed_pipeline` reads this flag and returns False when set
+    (which bypasses both the cache-consult and the cache-store branches).
+    """
+    raise NotImplementedError("filled in from Step 1 recon")
+```
+
+Modify the FastAPI app-composition site (identified in Step 1 recon) to:
+
+```python
+from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
+app.include_router(create_tutorial_run_router())
+```
+
+- [ ] **Step 5: Update Task 7's `_is_canonical_seed_pipeline` to honour the force-live flag.**
+
+In the run-path file Task 7 modified, extend `_is_canonical_seed_pipeline`:
+
+```python
+def _is_canonical_seed_pipeline(pipeline_state: Mapping[str, object]) -> bool:
+    # Force-live escape hatch (Task 7.1): bypass paths short-circuit the canonical
+    # check so cache_consult AND cache_write are both disabled. Use explicit
+    # membership + identity check rather than `.get()` to keep the
+    # optional-key contract visible (per CLAUDE.md offensive-programming —
+    # `.get(...)` is the defensive-default form we avoid in production code).
+    if "_tutorial_force_live" in pipeline_state and pipeline_state["_tutorial_force_live"] is True:
+        return False
+    # ... existing canonical-seed shape checks (recon) ...
+```
+
+This is the *only* call-site change Task 7.1 makes outside the new files.
+
+- [ ] **Step 6: Run test to verify it passes.**
+
+```bash
+.venv/bin/python -m pytest tests/integration/web/test_tutorial_routes.py -v
+```
+
+Expected: PASS — all seven tests green.
+
+- [ ] **Step 7: Run the full integration suite.**
+
+```bash
+.venv/bin/python -m pytest tests/integration/web/ -v
+```
+
+Expected: PASS — Task 7's `test_non_tutorial_user_skips_cache` and
+`test_edited_prompt_skips_cache` still green; the new bypass paths do not
+collide with their gates.
+
+- [ ] **Step 8: Commit.**
+
+```bash
+git add src/elspeth/web/composer/tutorial_run_routes.py \
+        src/elspeth/web/composer/tutorial_service.py \
+        src/elspeth/web/composer/__init__.py \
+        tests/integration/web/test_tutorial_routes.py \
+        <app-composition-site> <run-path-file>
+git commit -m "feat(web): POST /api/tutorial/run with completed/freeform bypass (Phase 4A.7.1)"
+```
+
+---
+
+## Task 7.2: Route + service — `GET /api/sessions/{session_id}/runs/{run_id}/audit-story`
+
+**Files:**
+
+- Create: `src/elspeth/web/sessions/audit_story_service.py` — service method.
+- Modify: `src/elspeth/web/sessions/routes.py` — add the new route handler.
+- Modify: `src/elspeth/web/sessions/schemas.py` — add `RunAuditStoryResponse`.
+- Create: `tests/integration/web/test_audit_story_routes.py` — integration tests.
+
+This endpoint surfaces the **real Landscape audit row** for a specific
+`(session_id, run_id)` pair so the frontend's Turn 5 (21b2 Task 9) can
+render a load-bearing audit narrative against the user's own run. The
+response is derived **entirely from real audit data**. **No field is ever
+synthesised, defaulted, or inferred** — if a field is absent from the
+audit row, that absence is a Tier-1 corruption signal and the service
+raises `CorruptAuditRowError`, which propagates to 500. This is the Q6
+no-synthesis invariant: the audit-story endpoint must not lie about what
+the audit trail recorded, even by omission.
+
+**Authorization order:**
+
+1. Caller authenticated (route dep).
+2. Caller owns `session_id` (session-ownership check, via
+   `verify_session_ownership` in `src/elspeth/web/sessions/ownership.py`).
+   If not → **404**. The IDOR contract (`sessions/ownership.py:33`) is 404
+   on every access-control failure (unknown session, wrong user, wrong
+   auth provider) — deliberately, to avoid leaking session existence to a
+   UUID enumerator. Do **not** return 403 here; that would expose "this
+   session exists, you just can't read it" vs "no such session". 403 is
+   reserved for the unauthenticated case (no session at all), which is
+   handled by the auth middleware before this route runs.
+3. `run_id` belongs to `session_id` (cross-ownership query). If not → 404
+   (an unknown `run_id` and a foreign-but-existing `run_id` are
+   indistinguishable to the caller, by design). Same-user but
+   cross-session also returns 404 (run not found in this session).
+4. Tier-1 Landscape read. Missing required field → CorruptAuditRowError → 500.
+
+- [ ] **Step 1: Reconnaissance — confirm the Landscape read surface.**
+
+```bash
+grep -n "def get_run_audit\|def read_run_audit\|landscape\.read\|run_id.*session_id" \
+  src/elspeth/web/sessions/*.py src/elspeth/core/landscape/*.py 2>/dev/null | head -30
+```
+
+Confirm:
+
+1. **The Landscape data is reached via TWO reads composed.** There is no
+   `app.state.landscape.read_run(session_id, run_id)` shortcut and no
+   `app.state.landscape` attribute on the app state. The composition is:
+   - (a) **Composer-DB read** via the per-request session-service:
+     `record = await session_service.get_run(UUID(run_id))` returns a
+     `RunRecord` (`src/elspeth/web/sessions/protocol.py:430`). Use
+     `record.session_id` to enforce the cross-session check (a run whose
+     `session_id` differs from the path's `session_id` → 404). Use
+     `record.landscape_run_id` as the join key into the Landscape DB.
+     `get_run` raises `ValueError` if the run row does not exist —
+     translate to 404 in the service.
+   - (b) **Landscape read** via `RunLifecycleRepository.get_run(landscape_run_id)`
+     (`src/elspeth/core/landscape/run_lifecycle_repository.py:262`), which
+     is **synchronous** and takes a single `str` argument. It returns
+     `Run | None`; `None` → `CorruptAuditRowError` (the composer
+     `runs_table` row claimed a `landscape_run_id` that does not exist in
+     the Landscape DB — that is a Tier-1 audit-database inconsistency).
+   If the implementer finds the Landscape read surface needs extending
+   (e.g., to expose a new column added by Task 7.0 that
+   `RunLifecycleRepository.get_run` does not yet project), escalate to
+   the operator — this is a meaningful scope addition.
+2. The auth dep used by sibling `/api/sessions/{id}/...` routes —
+   `get_current_user` from `auth/middleware.py`. The ownership-check
+   helper is the shared `verify_session_ownership` free function in
+   `sessions/ownership.py` (raises `HTTPException(404)` — same IDOR
+   contract as Task 7.1).
+3. The exact attribute names of the Landscape row corresponding to:
+   `llm_call_count`, `source_data_hash` (the `output_file_hash` in our
+   response model), `run_started_at`, `plugin_versions`, and the
+   `seeded_from_cache` / `cache_key` metadata written by Task 7's
+   `_replay_cached_content_to_landscape`. The audit-story service's
+   field-presence check must match those exact names. These columns are
+   added in Task 7.0 (see above) — verify they exist before implementing
+   Step 4.
+
+- [ ] **Step 2: Write the failing integration test.**
+
+Create `tests/integration/web/test_audit_story_routes.py`:
+
+```python
+"""Integration tests for GET /api/sessions/{session_id}/runs/{run_id}/audit-story."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy.pool import StaticPool
+
+from elspeth.web.auth.middleware import get_current_user
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.routes import create_session_router
+from elspeth.web.sessions.schema import initialize_session_schema
+
+
+@pytest.fixture
+def app(tmp_path: Path) -> FastAPI:
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    initialize_session_schema(engine)
+    app = FastAPI()
+    app.state.session_engine = engine
+    # app.state.session_service: wired during recon (SessionServiceImpl).
+    # app.state.run_lifecycle_repo: wired during recon (RunLifecycleRepository
+    # against the Landscape DB). The service composes the two reads — there
+    # is no `app.state.landscape` attribute.
+    # app.state.settings: WebSettings(auth_provider="local", ...) — required
+    # by verify_session_ownership.
+
+    identity = UserIdentity(user_id="alice", username="alice")
+
+    async def _mock_user() -> UserIdentity:
+        return identity
+
+    app.dependency_overrides[get_current_user] = _mock_user
+    app.include_router(create_session_router())
+    return app
+
+
+def _stage_run_for_audit_story(
+    app: FastAPI,
+    *,
+    session_id: str,
+    run_id: str,
+    user_id: str = "alice",
+    llm_call_count: int = 5,
+    output_file_hash: str = "cafebabe",
+    run_started_at: datetime | None = None,
+    plugin_versions: dict[str, str] | None = None,
+    seeded_from_cache: bool = False,
+    cache_key: str | None = None,
+    omit_field: str | None = None,
+) -> None:
+    """Stage the THREE rows required to resolve an audit-story request.
+
+    The service composes three reads in sequence (ownership → composer-DB
+    run → Landscape-DB run). A test fixture must seed all three or the
+    request will 404 partway through, masking the behaviour under test:
+
+    1. ``sessions_table`` row (composer DB): keyed by ``session_id``,
+       owned by ``user_id``, matching ``app.state.settings.auth_provider``.
+       Required by ``verify_session_ownership``. Reuse the existing
+       ``_make_session`` helper from
+       ``tests/integration/web/conftest.py``.
+
+    2. ``runs_table`` row (composer DB): keyed by ``run_id``, with
+       ``session_id`` and ``landscape_run_id`` populated. The Tier-1
+       invariant on ``RunRecord`` (``protocol.py:466``) requires
+       ``landscape_run_id`` to be NOT NULL for terminal statuses
+       (``completed`` / ``completed_with_failures`` / ``empty``); use
+       ``status="completed"`` and assign ``landscape_run_id = "ldr-" + run_id``
+       (or similar synthetic key) — fixtures don't need a real Landscape
+       binding, just a consistent one.
+
+    3. ``runs_table`` row (Landscape DB): keyed by the
+       ``landscape_run_id`` from step 2, carrying the six audit-story
+       columns added by Task 7.0. This is the row the
+       ``RunLifecycleRepository.get_run`` lookup resolves.
+
+    ``omit_field`` simulates Tier-1 corruption by writing the Landscape
+    row WITHOUT the named column populated (or by setting the column to
+    None when the schema permits — the service's field-presence check
+    treats both as corruption for the required columns).
+
+    Implementation depends on Step 1 recon for the exact insert patterns
+    against both DBs.
+    """
+    raise NotImplementedError("filled in from Step 1 recon")
+
+
+def test_get_audit_story_returns_real_landscape_data(app: FastAPI) -> None:
+    """Response fields exactly match the Landscape row — no synthesis."""
+    _stage_run_for_audit_story(
+        app,
+        session_id="sess-1",
+        run_id="run-1",
+        llm_call_count=5,
+        output_file_hash="cafebabe1234",
+        run_started_at=datetime(2026, 5, 15, 12, 0, tzinfo=UTC),
+        plugin_versions={"web_scrape": "1.0.0", "llm_rate": "1.0.0"},
+    )
+    client = TestClient(app)
+    response = client.get("/api/sessions/sess-1/runs/run-1/audit-story")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run_id"] == "run-1"
+    assert body["session_id"] == "sess-1"
+    assert body["llm_call_count"] == 5
+    assert body["output_file_hash"] == "cafebabe1234"
+    assert body["run_started_at"] == "2026-05-15T12:00:00+00:00"
+    assert body["plugin_versions"] == {"web_scrape": "1.0.0", "llm_rate": "1.0.0"}
+    assert body["seeded_from_cache"] is False
+    assert body["cache_key"] is None
+
+
+def test_get_audit_story_for_cache_replay_surfaces_seeded_marker(
+    app: FastAPI,
+) -> None:
+    """Cache-replay run → seeded_from_cache=true, cache_key is the SHA-256."""
+    _stage_run_for_audit_story(
+        app,
+        session_id="sess-1",
+        run_id="run-cache-replay",
+        llm_call_count=0,  # cache replay: no live LLM calls
+        seeded_from_cache=True,
+        cache_key="a" * 64,
+    )
+    client = TestClient(app)
+    response = client.get("/api/sessions/sess-1/runs/run-cache-replay/audit-story")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["seeded_from_cache"] is True
+    assert body["cache_key"] == "a" * 64
+    assert body["llm_call_count"] == 0
+
+
+def test_get_audit_story_cross_session_returns_404(app: FastAPI) -> None:
+    """run_id belongs to a different session → 404 (not 200, not 403).
+
+    Same IDOR-safe contract as the cross-user case: an attacker who learns
+    a foreign run_id (e.g. via an unrelated leak) cannot probe its
+    existence by querying it under their own session_id. The service
+    returns 404 whether the run is unknown or simply in a different
+    session — the two cases are deliberately indistinguishable.
+    """
+    _stage_run_for_audit_story(app, session_id="sess-other", run_id="run-1")
+    # Caller (alice) attempts to read sess-1's run-1, but run-1 lives in sess-other.
+    _stage_run_for_audit_story(app, session_id="sess-1", run_id="run-2")  # alice's
+    client = TestClient(app)
+    response = client.get("/api/sessions/sess-1/runs/run-1/audit-story")
+    assert response.status_code == 404
+
+
+def test_get_audit_story_cross_user_returns_404(app: FastAPI) -> None:
+    """Session not owned by current user → 404 (IDOR contract).
+
+    Per the established IDOR contract (src/elspeth/web/sessions/ownership.py:33),
+    cross-user access returns 404 (not 403) to avoid leaking session existence
+    to an attacker enumerating UUIDs. Returning 403 would expose "this session
+    exists, you just can't read it" vs "no such session". This is enforced by
+    the shared `verify_session_ownership` helper, which raises
+    HTTPException(404) on any access-control failure (unknown session, wrong
+    user, wrong auth provider).
+    """
+    # Stage a session owned by bob, with a run.
+    _stage_run_for_audit_story(
+        app, session_id="sess-bob", run_id="run-b", user_id="bob"
+    )
+    client = TestClient(app)  # current user is alice (fixture)
+    response = client.get("/api/sessions/sess-bob/runs/run-b/audit-story")
+    assert response.status_code == 404
+
+
+def test_get_audit_story_synthesis_forbidden(app: FastAPI) -> None:
+    """Tier-1 invariant: missing required field → named exception → 500.
+
+    The audit-story endpoint must NOT fabricate a default value to fill an
+    absent field. Per CLAUDE.md "no inference - if it's not recorded, it
+    didn't happen". A Landscape row missing llm_call_count is corruption,
+    not an invitation to return 0.
+    """
+    _stage_run_for_audit_story(
+        app,
+        session_id="sess-1",
+        run_id="run-broken",
+        omit_field="llm_call_count",
+    )
+    client = TestClient(app)
+    response = client.get("/api/sessions/sess-1/runs/run-broken/audit-story")
+    assert response.status_code == 500
+    # The error body names the missing field so an auditor can identify
+    # the corrupt row without grepping logs.
+    assert "llm_call_count" in response.json().get("detail", "")
+
+
+def test_get_audit_story_unknown_run_returns_404(app: FastAPI) -> None:
+    client = TestClient(app)
+    response = client.get(
+        "/api/sessions/sess-1/runs/nonexistent-run/audit-story"
+    )
+    assert response.status_code == 404
+```
+
+- [ ] **Step 3: Run test to verify it fails.**
+
+```bash
+.venv/bin/python -m pytest tests/integration/web/test_audit_story_routes.py -v
+```
+
+Expected: FAIL.
+
+- [ ] **Step 4: Implement Pydantic model, service, and route.**
+
+Append to `src/elspeth/web/sessions/schemas.py`:
+
+```python
+class RunAuditStoryResponse(BaseModel):
+    """Audit-story response for GET /api/sessions/{id}/runs/{run_id}/audit-story.
+
+    All fields are read from a real Landscape audit row. No field is ever
+    synthesised or defaulted. Absence of any field below in the underlying
+    row is Tier-1 corruption (CorruptAuditRowError → 500).
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    run_id: str
+    session_id: str
+    llm_call_count: int
+    output_file_hash: str  # the row's source_data_hash
+    run_started_at: datetime
+    plugin_versions: dict[str, str]
+    seeded_from_cache: bool
+    cache_key: str | None
+```
+
+Create `src/elspeth/web/sessions/audit_story_service.py`:
+
+```python
+"""Audit-story service — read-only Landscape projection for a single run.
+
+Phase 4A.7.2. The frontend's getRunAuditSummary (21b2 Task 9) calls the
+route that wraps this service.
+
+Tier model:
+- Inputs (session_id, run_id, user): Tier 3 trust — validated via the
+  shared `verify_session_ownership` helper before touching the Landscape.
+  The helper raises HTTPException(404) on any access-control failure
+  (IDOR contract; sessions/ownership.py:33).
+- Landscape rows: Tier 1 — every required field MUST be present. Absence
+  → CorruptAuditRowError → 500.
+
+The Landscape data is fetched via a TWO-read composition:
+  1. composer DB: ``session_service.get_run(UUID(run_id))`` resolves the
+     ``(session_id, landscape_run_id)`` binding.
+  2. Landscape DB: ``run_lifecycle_repo.get_run(landscape_run_id)`` (sync,
+     single arg) returns the row with the audit-story columns.
+
+Per CLAUDE.md no-defensive-programming: NO synthesis, NO `.get(field, default)`,
+NO `getattr(row, field, None)`. Direct attribute access only. Absent fields
+raise the named exception with `from exc` chaining so an auditor sees which
+field was missing.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from fastapi import HTTPException, Request
+
+from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.web.auth.models import UserIdentity
+from elspeth.web.sessions.ownership import verify_session_ownership
+from elspeth.web.sessions.protocol import SessionServiceProtocol
+from elspeth.web.sessions.schemas import RunAuditStoryResponse
+
+
+class CorruptAuditRowError(Exception):
+    """Raised when the Landscape row is missing a required field."""
+
+    def __init__(self, *, run_id: str, missing_field: str) -> None:
+        super().__init__(
+            f"audit row for run {run_id!r} is missing required field "
+            f"{missing_field!r}; this is Tier-1 corruption"
+        )
+        self.run_id = run_id
+        self.missing_field = missing_field
+
+
+async def get_run_audit_story(
+    *,
+    session_id: str,
+    run_id: str,
+    user: UserIdentity,
+    request: Request,
+    session_service: SessionServiceProtocol,
+    run_lifecycle_repo: RunLifecycleRepository,
+) -> RunAuditStoryResponse:
+    """Return the audit-story projection for ``(session_id, run_id)``.
+
+    Authorization order (see Authorization order section above):
+      1. Caller authenticated — enforced upstream by the route dep.
+      2. Caller owns ``session_id`` — ``verify_session_ownership`` raises
+         ``HTTPException(404)`` on mismatch (IDOR contract;
+         ``sessions/ownership.py:33``).
+      3. ``run_id`` belongs to ``session_id`` — composer-DB read.
+      4. Landscape row exists and is complete — Landscape read + Tier-1
+         field-presence check.
+
+    The Landscape data is composed from TWO reads (no
+    ``app.state.landscape`` shortcut exists):
+      (a) composer DB: ``session_service.get_run(UUID(run_id))`` →
+          ``RunRecord`` with ``session_id`` (for the cross-session check)
+          and ``landscape_run_id`` (the join key);
+      (b) Landscape DB: ``run_lifecycle_repo.get_run(landscape_run_id)``
+          → the ``Run`` row carrying the audit-story columns added by
+          Task 7.0.
+
+    Raises:
+        HTTPException(404): session not owned by caller (from
+            ``verify_session_ownership``), run not found in the composer
+            DB, run belongs to a different session, or the Landscape row
+            for the run is missing.
+        CorruptAuditRowError: the Landscape row is missing a Tier-1
+            required field (→ 500).
+    """
+    # 1. Ownership check. Raises HTTPException(404) on mismatch — IDOR-safe.
+    await verify_session_ownership(
+        session_id=UUID(session_id),
+        user=user,
+        request=request,
+    )
+
+    # 2. Composer-DB read: locate the run, verify it belongs to this session.
+    try:
+        record = await session_service.get_run(UUID(run_id))
+    except ValueError:
+        # Composer-DB has no row for this run_id.
+        raise HTTPException(
+            status_code=404, detail=f"Run {run_id!r} not found"
+        ) from None
+    if str(record.session_id) != session_id:
+        # Run exists but in a different session. Return 404 (IDOR-safe):
+        # do not reveal that the run exists elsewhere.
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run {run_id!r} not found in session {session_id!r}",
+        )
+    if record.landscape_run_id is None:
+        # The composer DB has no Landscape join key yet — the run did not
+        # reach the engine-completion path that writes landscape_run_id.
+        # That is not a Tier-1 corruption, it just means there is no
+        # audit story to read.
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run {run_id!r} has no Landscape audit row yet",
+        )
+
+    # 3. Landscape read. Synchronous single-arg API on the repository.
+    landscape_row = run_lifecycle_repo.get_run(record.landscape_run_id)
+    if landscape_row is None:
+        # The composer-DB row claimed a landscape_run_id that does not
+        # exist in the Landscape DB. That is a Tier-1 cross-database
+        # inconsistency: the audit trail is broken.
+        raise CorruptAuditRowError(
+            run_id=run_id, missing_field="<landscape row missing entirely>"
+        )
+
+    # 4. Tier-1 field-presence check. Direct attribute access — no
+    # `getattr(row, field, default)`, no `.get(...)`, no synthesis.
+    for required in (
+        "llm_call_count",
+        "source_data_hash",
+        "run_started_at",
+        "plugin_versions",
+        "seeded_from_cache",
+        "cache_key",
+    ):
+        if not _row_has_field(landscape_row, required):
+            raise CorruptAuditRowError(run_id=run_id, missing_field=required)
+
+    return RunAuditStoryResponse(
+        run_id=run_id,
+        session_id=session_id,
+        llm_call_count=landscape_row.llm_call_count,
+        output_file_hash=landscape_row.source_data_hash,
+        run_started_at=landscape_row.run_started_at,
+        plugin_versions=landscape_row.plugin_versions,
+        seeded_from_cache=landscape_row.seeded_from_cache,
+        cache_key=landscape_row.cache_key,
+    )
+
+
+def _row_has_field(row: object, field: str) -> bool:
+    """Check whether ``row`` carries the named attribute.
+
+    Detects column-missing (corruption), NOT value-is-None (which is legal
+    for ``cache_key`` on a live run). Implementation depends on the exact
+    shape returned by ``RunLifecycleRepository.get_run`` (likely a frozen
+    dataclass — confirm during Step 1 recon).
+
+    NOTE: do NOT use ``hasattr()`` here — per CLAUDE.md it is
+    unconditionally banned (it swallows arbitrary ``@property`` exceptions).
+    Use ``field in vars(row)`` for dataclass rows or
+    ``field in row._fields`` for NamedTuple rows; pick the form that
+    matches the actual return type.
+    """
+    raise NotImplementedError("filled in from Step 1 recon")
+```
+
+Add the route handler to `src/elspeth/web/sessions/routes.py` alongside the
+existing `update_session` PATCH route:
+
+```python
+@router.get(
+    "/{session_id}/runs/{run_id}/audit-story",
+    response_model=RunAuditStoryResponse,
+)
+async def get_run_audit_story_route(
+    session_id: str,
+    run_id: str,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),
+) -> RunAuditStoryResponse:
+    from elspeth.web.sessions.audit_story_service import (
+        CorruptAuditRowError,
+        get_run_audit_story,
+    )
+
+    # The service reads `session_service` and the Landscape repository
+    # from app.state. There is no `app.state.landscape` attribute — the
+    # Landscape read uses `RunLifecycleRepository` registered on app.state
+    # under its own attribute (confirm exact attribute name during recon —
+    # the project convention is `app.state.run_lifecycle_repo`).
+    # Ownership failures (HTTPException(404) from verify_session_ownership)
+    # and "run not found"/"run-in-other-session" cases (HTTPException(404)
+    # raised inside the service) propagate directly to FastAPI's handler.
+    try:
+        return await get_run_audit_story(
+            session_id=session_id,
+            run_id=run_id,
+            user=user,
+            request=request,
+            session_service=request.app.state.session_service,
+            run_lifecycle_repo=request.app.state.run_lifecycle_repo,
+        )
+    except CorruptAuditRowError as exc:
+        # Tier-1 corruption: surface the field name in the 500 body so an
+        # auditor reading the response knows exactly which column is broken.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+```
+
+- [ ] **Step 5: Run test to verify it passes.**
+
+```bash
+.venv/bin/python -m pytest tests/integration/web/test_audit_story_routes.py -v
+```
+
+Expected: PASS — all six tests green, including the no-synthesis test.
+
+- [ ] **Step 6: Run the full integration suite.**
+
+```bash
+.venv/bin/python -m pytest tests/integration/web/ -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Commit.**
+
+```bash
+git add src/elspeth/web/sessions/audit_story_service.py \
+        src/elspeth/web/sessions/routes.py \
+        src/elspeth/web/sessions/schemas.py \
+        tests/integration/web/test_audit_story_routes.py
+git commit -m "feat(web): GET /api/sessions/{id}/runs/{run_id}/audit-story (Phase 4A.7.2)"
+```
+
+---
+
+## Task 7.3: Frontend client functions — `runTutorialPipeline`, `getRunAuditSummary`, `renameSession`
+
+**Files:**
+
+- Modify: `src/elspeth/web/frontend/src/api/client.ts` — three function additions / one rename.
+- Modify: `src/elspeth/web/frontend/src/api/client.test.ts` (or create per existing per-feature test convention — see `client.preferences.test.ts`, `client.recovery.test.ts`).
+- Create: `src/elspeth/web/frontend/src/api/client.tutorial.test.ts` — tests for the three new functions (matches the per-feature test-file convention live in the repo).
+
+The frontend tasks in 21b2 (Tasks 8, 9, 10) spy on three `client.ts`
+symbols that do not yet exist. Task 7.3 lands those symbols against the
+backend endpoints introduced by Tasks 7.1 and 7.2 plus the **already-extant**
+session-update endpoint.
+
+**Pre-existing surface (confirmed by 21a recon, 2026-05-19):**
+
+- The backend already exposes `PATCH /api/sessions/{id}` with body
+  `{title: str}`. The current `client.ts` exports `updateSessionTitle`
+  (line 328 at recon time) which calls this endpoint. 21b2 Task 10 uses
+  the name `renameSession` for the same wire endpoint. **No backend
+  route change is needed.** Per CLAUDE.md no-legacy-code: rename
+  `updateSessionTitle` → `renameSession` (single rename, all call sites
+  updated in the same commit; no shim).
+
+- `runTutorialPipeline` and `getRunAuditSummary` are new functions
+  consuming the newly-defined backend routes (Tasks 7.1 and 7.2).
+
+- [ ] **Step 1: Reconnaissance — confirm current client.ts surface and call sites.**
+
+```bash
+grep -n "updateSessionTitle\|runTutorialPipeline\|getRunAuditSummary\|renameSession" \
+  src/elspeth/web/frontend/src/ -r
+```
+
+Catalogue every call site of `updateSessionTitle` (these are the
+rename-target files Task 7.3 will edit). Confirm that no other consumer
+relies on the name `updateSessionTitle`.
+
+- [ ] **Step 2: Write the failing test.**
+
+Create `src/elspeth/web/frontend/src/api/client.tutorial.test.ts`:
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  runTutorialPipeline,
+  getRunAuditSummary,
+  renameSession,
+} from './client';
+
+describe('client.tutorial — runTutorialPipeline', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('POSTs to /api/tutorial/run with session_id + prompt', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run_id: 'r1',
+          output: {
+            rows: [{ url: 'a', score: 5 }],
+            source_data_hash: 'a7f3e2',
+          },
+          seeded_from_cache: false,
+          cache_key: null,
+        }),
+        { status: 200 },
+      ),
+    );
+    const result = await runTutorialPipeline({
+      session_id: 'sess-1',
+      prompt: 'rate these',
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/tutorial/run',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ session_id: 'sess-1', prompt: 'rate these' }),
+      }),
+    );
+    expect(result.run_id).toBe('r1');
+    expect(result.seeded_from_cache).toBe(false);
+  });
+
+  it('surfaces backend error status as a thrown error', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response('{"detail":"unknown session"}', { status: 404 }),
+    );
+    await expect(
+      runTutorialPipeline({ session_id: 'bad', prompt: 'x' }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('client.tutorial — getRunAuditSummary', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('GETs /api/sessions/{id}/runs/{run_id}/audit-story', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run_id: 'r1',
+          session_id: 'sess-1',
+          llm_call_count: 5,
+          output_file_hash: 'cafe',
+          run_started_at: '2026-05-15T12:00:00Z',
+          plugin_versions: { web_scrape: '1.0.0' },
+          seeded_from_cache: false,
+          cache_key: null,
+        }),
+        { status: 200 },
+      ),
+    );
+    const summary = await getRunAuditSummary('sess-1', 'r1');
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/sessions/sess-1/runs/r1/audit-story',
+      expect.objectContaining({ headers: expect.anything() }),
+    );
+    expect(summary.llm_call_count).toBe(5);
+  });
+
+  it('surfaces 500 (corrupt audit row) as a thrown error', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response('{"detail":"missing llm_call_count"}', { status: 500 }),
+    );
+    await expect(getRunAuditSummary('s', 'r')).rejects.toThrow();
+  });
+});
+
+describe('client.tutorial — renameSession', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('PATCHes /api/sessions/{id} with {title}', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({ id: 'sess-1', title: 'hello-world (cool government pages)' }),
+        { status: 200 },
+      ),
+    );
+    const result = await renameSession(
+      'sess-1',
+      'hello-world (cool government pages)',
+    );
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/sessions/sess-1',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ title: 'hello-world (cool government pages)' }),
+      }),
+    );
+    expect(result.title).toBe('hello-world (cool government pages)');
+  });
+});
+```
+
+- [ ] **Step 3: Run test to verify it fails.**
+
+```bash
+cd src/elspeth/web/frontend && npm test -- client.tutorial.test.ts
+```
+
+Expected: FAIL — `runTutorialPipeline`, `getRunAuditSummary`, `renameSession`
+not exported.
+
+- [ ] **Step 4: Implement.**
+
+In `src/elspeth/web/frontend/src/api/client.ts`:
+
+1. **Add new types** alongside the existing type declarations (or in a new
+   `tutorialTypes.ts` if `client.ts` already exceeds the project's
+   conventional module-size threshold — recon decides):
+
+   ```typescript
+   export interface TutorialRunRequest {
+     session_id: string;
+     prompt: string;
+   }
+
+   export interface TutorialRunOutput {
+     rows: Array<Record<string, unknown>>;
+     source_data_hash: string;
+   }
+
+   export interface TutorialRunResponse {
+     run_id: string;
+     output: TutorialRunOutput;
+     seeded_from_cache: boolean;
+     cache_key: string | null;
+   }
+
+   export interface RunAuditStoryResponse {
+     run_id: string;
+     session_id: string;
+     llm_call_count: number;
+     output_file_hash: string;
+     run_started_at: string;
+     plugin_versions: Record<string, string>;
+     seeded_from_cache: boolean;
+     cache_key: string | null;
+   }
+   ```
+
+2. **Add `runTutorialPipeline`**:
+
+   ```typescript
+   /** Run the tutorial pipeline. Backend may serve a cached replay; the
+    * returned run_id is ALWAYS owned by the current session — see 21a
+    * §"New endpoints" for the cache-replay contract.
+    */
+   export async function runTutorialPipeline(
+     body: TutorialRunRequest,
+   ): Promise<TutorialRunResponse> {
+     const response = await fetch('/api/tutorial/run', {
+       method: 'POST',
+       headers: authHeaders('application/json'),
+       body: JSON.stringify(body),
+     });
+     return parseResponse<TutorialRunResponse>(response);
+   }
+   ```
+
+3. **Add `getRunAuditSummary`**:
+
+   ```typescript
+   /** Read the audit-story for a (session_id, run_id) pair.
+    *
+    * All fields are real audit data — no synthesis. A 500 response means
+    * the audit row is Tier-1 corrupt; surface the error rather than
+    * fabricating defaults (per CLAUDE.md no-defensive-programming).
+    */
+   export async function getRunAuditSummary(
+     sessionId: string,
+     runId: string,
+   ): Promise<RunAuditStoryResponse> {
+     const response = await fetch(
+       `/api/sessions/${sessionId}/runs/${runId}/audit-story`,
+       { headers: authHeaders() },
+     );
+     return parseResponse<RunAuditStoryResponse>(response);
+   }
+   ```
+
+4. **Rename `updateSessionTitle` → `renameSession`.** Per CLAUDE.md "No
+   Legacy Code Policy", do not leave an alias. The existing function body
+   (PATCH `/api/sessions/${sessionId}` with `{title}`) is structurally
+   correct — just rename. Update every call site discovered in Step 1's
+   `grep`. Atomic single commit.
+
+   ```typescript
+   /** Update the user-visible title for a session.
+    *
+    * Used by the tutorial finalisation flow (21b2 Task 10) and by any
+    * other UI that lets a user rename a session. Wire endpoint:
+    * PATCH /api/sessions/{id} with body {title}.
+    */
+   export async function renameSession(
+     sessionId: string,
+     title: string,
+   ): Promise<Session> {
+     const response = await fetch(`/api/sessions/${sessionId}`, {
+       method: 'PATCH',
+       headers: authHeaders('application/json'),
+       body: JSON.stringify({ title }),
+     });
+     return parseResponse<Session>(response);
+   }
+   ```
+
+- [ ] **Step 5: Update all call sites of the renamed function.**
+
+```bash
+grep -rn "updateSessionTitle" src/elspeth/web/frontend/src/ --include="*.ts" --include="*.tsx"
+```
+
+Replace every hit with `renameSession`. Run TypeScript compile to confirm
+no stragglers:
+
+```bash
+cd src/elspeth/web/frontend && npx tsc --noEmit
+```
+
+- [ ] **Step 6: Run test to verify it passes.**
+
+```bash
+cd src/elspeth/web/frontend && npm test -- client.tutorial.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Run the full frontend test suite to catch regressions.**
+
+```bash
+cd src/elspeth/web/frontend && npm test
+```
+
+Expected: PASS — the rename's call-site updates do not break existing tests.
+
+- [ ] **Step 8: Commit.**
+
+```bash
+git add src/elspeth/web/frontend/src/api/client.ts \
+        src/elspeth/web/frontend/src/api/client.tutorial.test.ts \
+        <renamed-call-sites>
+git commit -m "feat(frontend): runTutorialPipeline + getRunAuditSummary + rename updateSessionTitle (Phase 4A.7.3)"
+```
+
+---
+
 ## What Phase 4A leaves the backend in
 
-After Tasks 0–7: new column, Tier-1 guards, cache module (filesystem-backed,
-corruption-detecting), and run-path cache consult. Phase 4B wires the frontend.
+After Tasks 0–7.3: new column, Tier-1 guards, cache module (filesystem-backed,
+corruption-detecting), run-path cache consult, **tutorial-run route** (POST
+/api/tutorial/run, Task 7.1) with completed-user / freeform-user bypass,
+**audit-story route** (GET …/audit-story, Task 7.2) with no-synthesis Tier-1
+invariant, and **frontend client functions** (`runTutorialPipeline`,
+`getRunAuditSummary`, renamed `renameSession`, Task 7.3). Phase 4B wires
+the frontend components against these surfaces.
 
 ## Risks and mitigations
 
-Key risks: run-path entry point not where assumed (Task 7 Step 1 recon resolves); cache fires for non-tutorial users (gate on `tutorial_completed_at is None` + regression test); model_id derivation drifts (integration tests assert hit-on-pre-populated-cache); concurrent writers (atomic via `os.replace`).
+Key risks: run-path entry point not where assumed (Task 7 Step 1 recon resolves); cache fires for non-tutorial users (gate on `tutorial_completed_at is None` + regression test); model_id derivation drifts (integration tests assert hit-on-pre-populated-cache); concurrent writers (atomic via `os.replace`); audit-story synthesis (no-synthesis Tier-1 test `test_get_audit_story_synthesis_forbidden` in Task 7.2 pins the invariant); `_is_canonical_seed_pipeline` force-live flag collides with Task 7's existing canonical-seed shape check (Task 7.1 Step 5 adds the flag check at the top of the helper; Task 7's `test_non_tutorial_user_skips_cache` and `test_edited_prompt_skips_cache` must remain green after Task 7.1 lands — verified by Step 7); renamed `updateSessionTitle` call sites missed (Task 7.3 Step 5 runs `tsc --noEmit` to catch).
 
 ## Forward compatibility
 

@@ -44,7 +44,6 @@ export function MessageBubble({
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const [toolsExpanded, setToolsExpanded] = useState(false);
-  const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const hasToolCalls = !!(message.tool_calls && message.tool_calls.length > 0);
   const hasSourcesCreated = !!(sourcesCreated && sourcesCreated.length > 0);
   const [copied, setCopied] = useState(false);
@@ -258,36 +257,34 @@ export function MessageBubble({
         )}
 
         {/* Sources created section (assistant messages only).
-            The disclosure pattern parallels Tool calls above — same chevron
-            glyphs, same ARIA contract, same toggle semantics — so a user
-            who's learned the tool-calls affordance does not have to learn
-            a second pattern. The inner InlineSourceCreatedTurn widget brings
-            its own audit-info disclosure (the SHA-256 hash is gated behind
-            a nested <details>); that's a second level of disclosure showing
-            different information (outer = "what sources were created?", inner
-            = "show me the cryptographic audit detail"). */}
+            Deliberately NOT a collapsible disclosure (unlike Tool calls
+            above). Source creation is a notification of an action that
+            just got attached to the composition — the user needs to see
+            it to decide whether to amend or proceed. Burying it behind
+            a twisty would defer an actionable moment behind a click,
+            which is the opposite of "hey, this happened, you need to
+            know". The visual heading uses the same styling as the tool-
+            calls toggle (.message-tools-toggle) so the two groups still
+            read as siblings in the bubble, but the heading is a static
+            <div> rather than a button — no aria-expanded, nothing to
+            toggle. The inner InlineSourceCreatedTurn widget still has
+            its own audit-info <details> disclosure for the SHA-256 hash;
+            that nested twisty shows the cryptographic detail on demand
+            without hiding the notification itself. */}
         {hasSourcesCreated && (
           <div className="message-sources-created">
-            <button
-              onClick={() => setSourcesExpanded(!sourcesExpanded)}
-              aria-expanded={sourcesExpanded}
-              aria-label={`Sources created (${sourcesCreated!.length})`}
-              className="message-tools-toggle"
-            >
-              {sourcesExpanded ? "▼" : "▶"} Sources created (
-              {sourcesCreated!.length})
-            </button>
-            {sourcesExpanded && (
-              <div className="message-sources-created-list">
-                {sourcesCreated!.map((summary) => (
-                  <InlineSourceCreatedTurn
-                    key={summary.blobId}
-                    summary={summary}
-                    onEdit={onEditInlineSource ?? (() => undefined)}
-                  />
-                ))}
-              </div>
-            )}
+            <div className="message-tools-toggle message-sources-created-heading">
+              Sources created ({sourcesCreated!.length})
+            </div>
+            <div className="message-sources-created-list">
+              {sourcesCreated!.map((summary) => (
+                <InlineSourceCreatedTurn
+                  key={summary.blobId}
+                  summary={summary}
+                  onEdit={onEditInlineSource ?? (() => undefined)}
+                />
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -710,12 +710,7 @@ export interface RunOutputArtifact {
   size_bytes: number;
   created_at: string;
   exists_now: boolean;
-  // Optional in the wire shape so an OLDER backend (pre-`downloadable`
-  // rollout) doesn't make every artifact look "outside allowed sink
-  // directories" — that message implies sink misconfiguration but
-  // would actually be a deploy-skew. Missing → caller treats as
-  // "unknown, optimistic show-the-button"; explicit false → suppress.
-  downloadable?: boolean;
+  downloadable: boolean;
 }
 
 export interface RunOutputsResponse {

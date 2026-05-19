@@ -195,10 +195,11 @@ describe("MessageBubble", () => {
   // Sources-created in-bubble group
   // ------------------------------------------------------------------
   // The bubble surfaces dynamic-source events created by the LLM as a
-  // second collapsible group below the tool-calls group, separated by a
-  // horizontal ruler. Pattern mirrors tool calls so users only learn one
-  // disclosure affordance. Starts collapsed; the inner widget (with its
-  // own audit-info disclosure) renders only when expanded.
+  // second section below the tool-calls group, separated by a horizontal
+  // ruler. Deliberately NOT a disclosure — unlike Tool calls, this is a
+  // notification of an action the user needs to see (and may want to
+  // amend) immediately. The heading reads as a sibling to "Tool calls (N)"
+  // but is a static <div>, not a button.
   describe("sources-created group", () => {
     function makeSummary(overrides = {}) {
       return {
@@ -216,37 +217,13 @@ describe("MessageBubble", () => {
     it("renders no Sources-created group when sourcesCreated is empty/undefined", () => {
       const message = makeMessage({ role: "assistant", content: "Done." });
       render(<MessageBubble message={message} />);
-      expect(screen.queryByLabelText(/Sources created/)).not.toBeInTheDocument();
-    });
-
-    it("renders Sources created (N) toggle button when summaries are supplied", () => {
-      const message = makeMessage({ role: "assistant", content: "Done." });
-      render(
-        <MessageBubble
-          message={message}
-          sourcesCreated={[makeSummary()]}
-        />,
-      );
-      expect(
-        screen.getByRole("button", { name: "Sources created (1)" }),
-      ).toBeInTheDocument();
-    });
-
-    it("starts collapsed — the inner widget is not in the DOM until clicked", () => {
-      const message = makeMessage({ role: "assistant", content: "Done." });
-      render(
-        <MessageBubble
-          message={message}
-          sourcesCreated={[makeSummary()]}
-        />,
-      );
+      expect(screen.queryByText(/Sources created/)).not.toBeInTheDocument();
       expect(
         screen.queryByTestId("inline-source-created-turn"),
       ).not.toBeInTheDocument();
     });
 
-    it("expands to reveal the InlineSourceCreatedTurn when the toggle is clicked", async () => {
-      const user = userEvent.setup();
+    it("renders Sources created (N) heading when summaries are supplied", () => {
       const message = makeMessage({ role: "assistant", content: "Done." });
       render(
         <MessageBubble
@@ -254,8 +231,36 @@ describe("MessageBubble", () => {
           sourcesCreated={[makeSummary()]}
         />,
       );
-      await user.click(
-        screen.getByRole("button", { name: "Sources created (1)" }),
+      expect(screen.getByText("Sources created (1)")).toBeInTheDocument();
+    });
+
+    it("heading is NOT a button — no click affordance, no aria-expanded", () => {
+      // Source creation is a notification, not a disclosure. The label
+      // exists to name what follows, not to invite a toggle. Pinning the
+      // absence of button semantics keeps a future maintainer from
+      // re-introducing the twisty by force of habit.
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: /Sources created/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("inner widget is in the DOM immediately — no click required", () => {
+      // 'Hey, this happened, you need to know'. Burying the widget behind
+      // a click would defer an actionable moment (was that the right source?
+      // amend or proceed?) behind the disclosure that hides it.
+      const message = makeMessage({ role: "assistant", content: "Done." });
+      render(
+        <MessageBubble
+          message={message}
+          sourcesCreated={[makeSummary()]}
+        />,
       );
       expect(
         screen.getByTestId("inline-source-created-turn"),
@@ -311,21 +316,6 @@ describe("MessageBubble", () => {
       });
       const { container } = render(<MessageBubble message={message} />);
       expect(container.querySelector("hr.message-group-separator")).toBeNull();
-    });
-
-    it("aria-expanded reflects the disclosure state", async () => {
-      const user = userEvent.setup();
-      const message = makeMessage({ role: "assistant", content: "Done." });
-      render(
-        <MessageBubble
-          message={message}
-          sourcesCreated={[makeSummary()]}
-        />,
-      );
-      const toggle = screen.getByRole("button", { name: "Sources created (1)" });
-      expect(toggle).toHaveAttribute("aria-expanded", "false");
-      await user.click(toggle);
-      expect(toggle).toHaveAttribute("aria-expanded", "true");
     });
   });
 });

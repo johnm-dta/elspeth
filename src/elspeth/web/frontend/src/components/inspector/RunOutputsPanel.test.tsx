@@ -77,6 +77,14 @@ describe("RunOutputsPanel", () => {
     expect(screen.getByText("1.0 KiB")).toBeInTheDocument();
     expect(screen.getByText("abcdef012345…")).toBeInTheDocument();
     expect(screen.getByText("Download")).toBeInTheDocument();
+    // Run timestamp: rendered as a compact local YYYY-MM-DD HH:MM:SS
+    // alongside the file size. The exact text varies by host timezone
+    // (the fixture is "2026-05-10T00:00:00Z"), so assert the *shape*
+    // and verify the unmodified ISO survives in the tooltip.
+    expect(screen.getByText(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)).toBeInTheDocument();
+    expect(
+      screen.getByTitle("2026-05-10T00:00:00Z"),
+    ).toBeInTheDocument();
   });
 
   it("shows an empty state when the run produced no outputs", async () => {
@@ -101,28 +109,6 @@ describe("RunOutputsPanel", () => {
     );
     expect(screen.queryByText("Download")).not.toBeInTheDocument();
     expect(screen.queryByText("Preview")).not.toBeInTheDocument();
-  });
-
-  it("treats missing downloadable field optimistically (deploy-skew safety net)", async () => {
-    // An OLDER backend (pre-`downloadable` rollout) returns a manifest
-    // without the field. The frontend MUST NOT mass-label every
-    // artifact 'outside allowed sink directories' — that would be a
-    // misleading label for what is actually a deploy mismatch. The
-    // optimistic-show-button behaviour means the operator either gets
-    // a working download (best case) or a clear server error (worst
-    // case), instead of a wrong-cause tooltip.
-    const { downloadable: _omit, ...artifactWithoutFlag } = fileArtifact();
-    void _omit;
-    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
-      manifest([artifactWithoutFlag as unknown as RunOutputArtifact]),
-    );
-
-    render(<RunOutputsPanel runId={RUN_ID} />);
-
-    expect(await screen.findByRole("button", { name: /Download/ })).toBeInTheDocument();
-    expect(
-      screen.queryByText(/outside allowed sink directories/i),
-    ).not.toBeInTheDocument();
   });
 
   it("shows the 'outside allowed sink directories' tooltip when not downloadable", async () => {

@@ -23,6 +23,7 @@ import {
   fetchRunOutputPreview,
   fetchRunOutputs,
 } from "@/api/client";
+import { absoluteTime } from "@/utils/time";
 import type {
   ApiError,
   RunOutputArtifact,
@@ -304,6 +305,21 @@ function ArtifactRow({ artifact, expanded, onTogglePreview, onDownload }: Artifa
       <span style={{ color: "var(--color-text-muted)", whiteSpace: "nowrap" }}>
         {formatBytes(artifact.size_bytes)}
       </span>
+      {/* Run timestamp — same font size as file size (both inherit the
+          parent section's fontSize: 12) so the two pieces of inline
+          per-artifact metadata read as siblings. Tooltip carries the
+          unmodified wire-format timestamp (with timezone marker) for
+          anyone diffing against the audit DB directly. */}
+      <span
+        style={{
+          color: "var(--color-text-muted)",
+          whiteSpace: "nowrap",
+          fontVariantNumeric: "tabular-nums",
+        }}
+        title={artifact.created_at}
+      >
+        {absoluteTime(artifact.created_at)}
+      </span>
       <span
         style={{
           color: "var(--color-text-muted)",
@@ -344,12 +360,7 @@ function ArtifactActions({ artifact, expanded, onTogglePreview, onDownload }: Ar
       </span>
     );
   }
-  // Match on EXPLICIT false, not falsy. A missing `downloadable`
-  // field means the backend predates this feature — show the button
-  // optimistically and let any failure surface as a real server error,
-  // rather than mass-labelling everything "outside allowed sink
-  // directories" on a deploy skew.
-  if (artifact.downloadable === false) {
+  if (!artifact.downloadable) {
     // File exists on disk but is outside the sink-allowlist that the
     // /content endpoint enforces. The audit row is honest evidence;
     // the download is refused for defence-in-depth.

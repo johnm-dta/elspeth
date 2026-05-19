@@ -3418,6 +3418,15 @@ summary:focus-visible {
   padding-top: 6px;
 }
 
+/* Static section heading — shares the visual weight of .message-tools-toggle
+   so the two groups read as siblings, but it is NOT a button: no hover
+   state, no pointer cursor. The label exists to name what follows, not to
+   invite a click. The min-height inherited from .message-tools-toggle is
+   appropriate (44px aligns with the toggle above for vertical rhythm). */
+.message-sources-created-heading {
+  cursor: default;
+}
+
 .message-sources-created-list {
   margin: 4px 0 0;
   padding-left: 0;

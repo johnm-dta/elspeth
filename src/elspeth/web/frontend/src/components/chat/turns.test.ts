@@ -179,4 +179,72 @@ describe("groupIntoTurns", () => {
     const turns = groupIntoTurns(messages);
     expect(turns[1].primaryMessage.id).toBe("a2");
   });
+
+  // ----- isComplete (atomic-reveal contract) -----
+  //
+  // The agent bubble is rendered atomically: it must remain hidden while the
+  // turn is mid-flight (only tool-call rows visible so far, no LLM text reply
+  // landed) and appear in one piece once the final content row arrives. This
+  // reverses the prior "stream tool calls live" behaviour from commit ceb4d38a1.
+  //
+  // The contract is purely client-side and derived from already-present audit
+  // rows — no backend signal is required. An agent turn is "complete" iff some
+  // assistant row in the turn carries non-empty `content` (the LLM's text
+  // reply). User and system turns are standalone and always complete.
+
+  it("user turn isComplete is always true", () => {
+    const turns = groupIntoTurns([msg({ id: "u1", role: "user", content: "hi" })]);
+    expect(turns[0].isComplete).toBe(true);
+  });
+
+  it("system turn isComplete is always true", () => {
+    const turns = groupIntoTurns([msg({ id: "s1", role: "system", content: "Pipeline reverted." })]);
+    expect(turns[0].isComplete).toBe(true);
+  });
+
+  it("agent turn with only tool-call rows is isComplete=false (mid-flight)", () => {
+    const messages: ChatMessage[] = [
+      msg({ id: "u1", role: "user", content: "hi" }),
+      msg({ id: "a1", role: "assistant", tool_calls: [tc("list_models")] }),
+      msg({ id: "a2", role: "assistant", tool_calls: [tc("set_pipeline")] }),
+    ];
+    const turns = groupIntoTurns(messages);
+    expect(turns[1].kind).toBe("agent");
+    expect(turns[1].isComplete).toBe(false);
+  });
+
+  it("agent turn with a content-bearing assistant row is isComplete=true", () => {
+    const messages: ChatMessage[] = [
+      msg({ id: "u1", role: "user", content: "hi" }),
+      msg({ id: "a1", role: "assistant", tool_calls: [tc("list_models")] }),
+      msg({ id: "a2", role: "assistant", content: "Done." }),
+    ];
+    const turns = groupIntoTurns(messages);
+    expect(turns[1].isComplete).toBe(true);
+  });
+
+  it("agent turn becomes complete as soon as ANY assistant row has content", () => {
+    // Defensive case: content row appears before tool-call rows in the
+    // sequence (shouldn't happen with current backend ordering, but the rule
+    // is "content exists somewhere in the turn", not "content is last").
+    const messages: ChatMessage[] = [
+      msg({ id: "u1", role: "user", content: "hi" }),
+      msg({ id: "a1", role: "assistant", content: "First take." }),
+      msg({ id: "a2", role: "assistant", tool_calls: [tc("recheck")] }),
+    ];
+    const turns = groupIntoTurns(messages);
+    expect(turns[1].isComplete).toBe(true);
+  });
+
+  it("empty content strings do not satisfy isComplete", () => {
+    // An assistant row with content: "" (rather than null) must not be treated
+    // as a content-bearing reply. This protects against backend writes that
+    // pre-create the row with empty content before the LLM finishes streaming.
+    const messages: ChatMessage[] = [
+      msg({ id: "u1", role: "user", content: "hi" }),
+      msg({ id: "a1", role: "assistant", content: "", tool_calls: [tc("only")] }),
+    ];
+    const turns = groupIntoTurns(messages);
+    expect(turns[1].isComplete).toBe(false);
+  });
 });

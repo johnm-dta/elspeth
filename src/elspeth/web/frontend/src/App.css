@@ -1681,6 +1681,19 @@ summary:focus-visible {
   position: relative;
 }
 
+/* Composing-state cursors. While the agent is thinking, the cursor over the
+   chat input area reflects that the system is working on the previous
+   message. The ComposingIndicator (with its three-dot pulse and "Working
+   on..." block) is the primary visible affordance; these cursor rules are
+   reinforcement for users whose pointer is hovering the textarea or
+   send-button at the moment they hit Send. `progress` is the standard cursor
+   for "operation in progress but UI still interactive" — distinct from
+   `wait` (UI blocked) and from disabled cursors (action unavailable). */
+.chat-panel[data-composing="true"] .chat-input-textarea,
+.chat-panel[data-composing="true"] .chat-input-send-btn:disabled {
+  cursor: progress;
+}
+
 .chat-panel--empty {
   display: flex;
   align-items: center;
@@ -3387,12 +3400,35 @@ summary:focus-visible {
 
 .message-tools-pre {
   margin: 2px 0 0;
-  padding: var(--space-xs);
+  padding: 4px;
   background-color: var(--color-surface-elevated);
   border-radius: 3px;
   font-size: var(--font-size-2xs);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Sources-created group inside the assistant bubble — visually parallel to
+   .message-tools (same border-top, same toggle styling via shared
+   .message-tools-toggle class) so the two groups read as siblings in the
+   bubble. The horizontal ruler (.message-group-separator) is only painted
+   when both groups are present; see MessageBubble.tsx for the guard. */
+.message-sources-created {
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.message-sources-created-list {
+  margin: 4px 0 0;
+  padding-left: 0;
+  font-size: var(--font-size-xs);
+}
+
+.message-group-separator {
+  margin: 6px 0 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  opacity: 0.6;
 }
 
 .tool-call-ribbon {

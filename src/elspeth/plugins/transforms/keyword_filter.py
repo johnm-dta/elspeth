@@ -218,7 +218,7 @@ class KeywordFilter(BaseTransform):
     name = "keyword_filter"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:77db6f5c05af2cfd"
+    source_file_hash: str | None = "sha256:44530e78aa5b10c6"
     config_model = KeywordFilterConfig
     is_batch_aware = False
     creates_tokens = False

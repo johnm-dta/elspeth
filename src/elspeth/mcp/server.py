@@ -772,8 +772,7 @@ Environment Variables:
         passphrase = os.environ.get(args.passphrase_env)
         if passphrase is None or not passphrase.strip():
             sys.stderr.write(
-                f"Error: environment variable {args.passphrase_env} is not set or is empty.\n"
-                "Set the SQLCipher passphrase in that environment variable before retrying.\n"
+                "Error: required SQLCipher environment variable is not set or is empty.\nSet that environment variable before retrying.\n"
             )
             sys.exit(1)
 

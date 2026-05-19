@@ -85,7 +85,7 @@ class ReportAssemble(BaseTransform):
     name = "report_assemble"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8a483663e3309fc9"
+    source_file_hash: str | None = "sha256:82cc05ca5602c9f9"
     config_model = ReportAssembleConfig
     is_batch_aware = True
 

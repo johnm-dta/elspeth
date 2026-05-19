@@ -1,12 +1,12 @@
 # tests/property/core/test_fingerprint_properties.py
-"""Property-based tests for secret fingerprinting (HMAC-SHA256).
+"""Property-based tests for secret fingerprinting (keyed BLAKE2b).
 
 These tests verify the fundamental cryptographic properties of ELSPETH's
 secret fingerprinting system:
 
 Cryptographic Properties:
 - Determinism: Same inputs always produce same output
-- Fixed output length: Always 64 hex characters (SHA256)
+- Fixed output length: Always 64 hex characters (32-byte digest)
 - Collision resistance: Different inputs produce different outputs
 - Key sensitivity: Different keys produce different outputs
 
@@ -54,14 +54,14 @@ ascii_secrets = st.text(
 
 
 class TestFingerprintDeterminismProperties:
-    """Property tests for HMAC determinism."""
+    """Property tests for keyed-hash determinism."""
 
     @given(secret=secrets, key=keys)
     @settings(max_examples=200)
     def test_same_inputs_same_output(self, secret: str, key: bytes) -> None:
         """Property: secret_fingerprint(s, k) == secret_fingerprint(s, k) always.
 
-        HMAC is deterministic - this is the fundamental property that allows
+        The keyed hash is deterministic - this is the fundamental property that allows
         fingerprints to verify "same secret was used" across runs.
         """
         fp1 = secret_fingerprint(secret, key=key)
@@ -107,10 +107,10 @@ class TestFingerprintFormatProperties:
     @given(secret=secrets, key=keys)
     @settings(max_examples=200)
     def test_output_length_is_64_characters(self, secret: str, key: bytes) -> None:
-        """Property: Output is always exactly 64 characters (SHA256 hex).
+        """Property: Output is always exactly 64 characters.
 
-        SHA256 produces 256 bits = 32 bytes = 64 hex characters.
-        This is a cryptographic constant that never varies.
+        The fingerprint uses a 32-byte digest, which is 64 hex characters.
+        This storage contract must not vary.
         """
         fp = secret_fingerprint(secret, key=key)
         assert len(fp) == 64, f"Expected 64 chars, got {len(fp)}: '{fp}'"
@@ -182,17 +182,10 @@ class TestFingerprintCollisionResistanceProperties:
     def test_different_keys_different_fingerprints(self, secret: str, key1: bytes, key2: bytes) -> None:
         """Property: Same secret with different keys produces different fingerprints.
 
-        This is the key sensitivity property - changing the HMAC key
+        This is the key sensitivity property - changing the fingerprint key
         completely changes the output. Critical for key rotation scenarios.
-
-        Note: HMAC (RFC 2104) right-pads keys shorter than the hash block
-        size (64 bytes for SHA-256) with 0x00, so keys that differ only by
-        trailing null bytes are HMAC-equivalent and produce identical output.
-        This is correct HMAC behavior, not a bug.
         """
-        # Filter HMAC-equivalent key pairs: after right-padding to block
-        # size (64 bytes), these keys become identical internally.
-        assume(key1.ljust(64, b"\x00") != key2.ljust(64, b"\x00"))
+        assume(key1 != key2)
 
         fp1 = secret_fingerprint(secret, key=key1)
         fp2 = secret_fingerprint(secret, key=key2)
@@ -235,7 +228,7 @@ class TestFingerprintEdgeCaseProperties:
     def test_single_byte_key_works(self, secret: str) -> None:
         """Property: Minimum-length key (1 byte) produces valid fingerprint.
 
-        HMAC handles short keys by zero-padding to block size internally.
+        Keyed BLAKE2b accepts short keys.
         """
         key = b"x"
         fp = secret_fingerprint(secret, key=key)
@@ -246,10 +239,10 @@ class TestFingerprintEdgeCaseProperties:
     @given(secret=secrets)
     @settings(max_examples=50)
     def test_long_key_works(self, secret: str) -> None:
-        """Property: Long keys (> SHA256 block size) produce valid fingerprints.
+        """Property: Long keys produce valid fingerprints.
 
-        HMAC handles long keys by hashing them first. 64 bytes is the
-        SHA256 block size, so 128 bytes triggers the long-key path.
+        The implementation normalizes keys longer than BLAKE2b's key limit
+        before computing the fingerprint.
         """
         key = b"x" * 128  # > 64 byte block size
         fp = secret_fingerprint(secret, key=key)

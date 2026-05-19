@@ -149,90 +149,6 @@ per_file_rules:
   expires: null
   max_hits: 2
 allow_hits:
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=f307dc45ae044308
-  owner: source-boundary
-  reason: Azure blob CSV bytes are Tier 3 input; UnicodeDecodeError is converted into
-    an audited parse validation error and optional quarantine row.
-  safety: Catches only decode failure from external blob bytes, records ctx validation
-    evidence, yields quarantine unless discard, then stops loading the blob.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=a8b64136ebd5eaf7
-  owner: source-boundary
-  reason: Azure blob CSV header discovery reads Tier 3 input; StopIteration means
-    an empty file contains no header row.
-  safety: Records an audited parse validation error with blob preview metadata and
-    yields quarantine unless discard.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=9e1e09f95ac09c28
-  owner: source-boundary
-  reason: Azure blob CSV header parsing reads Tier 3 input; csv.Error represents malformed
-    external CSV syntax.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    returns before any untrusted rows are emitted.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=ccd03e650f386ee7
-  owner: source-boundary
-  reason: Headerless Azure blob CSV peeks at Tier 3 input; StopIteration means the
-    blob is empty and has no data row to infer columns from.
-  safety: Empty input produces no rows; no fabricated schema or synthetic data is
-    emitted.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=a7ca3aae0502794a
-  owner: source-boundary
-  reason: Azure blob CSV row iteration reads Tier 3 input; StopIteration is the normal
-    end-of-file signal.
-  safety: Loop exits cleanly only on EOF after already-recorded row-level validation
-    decisions.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=96102dae936f8fb2
-  owner: source-boundary
-  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
-    state may be corrupted by malformed external CSV.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    breaks to avoid trusting subsequent parser state.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=41fde2a974b278ce
-  owner: source-boundary
-  reason: Azure blob JSON bytes are Tier 3 input; UnicodeDecodeError is an external
-    file parse failure.
-  safety: Records file-level parse validation evidence and yields quarantine unless
-    discard.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=b8b353bc5dc1b63e
-  owner: source-boundary
-  reason: Azure blob JSON parsing handles Tier 3 input; JSONDecodeError and non-finite
-    ValueError are malformed external content.
-  safety: Records file-level parse validation evidence and yields quarantine unless
-    discard before returning.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=53b80f3a0e775853
-  owner: source-boundary
-  reason: Azure blob JSONL line parsing handles Tier 3 input; JSONDecodeError and
-    non-finite ValueError are malformed external rows.
-  safety: Records line-level parse validation evidence and yields quarantine unless
-    discard, then continues to the next independent line.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=20dee7daf05393c2
-  owner: source-boundary
-  reason: Azure blob JSONL streaming decodes Tier 3 input; UnicodeDecodeError is an
-    external parse failure.
-  safety: Records parse validation evidence with line metadata and yields quarantine
-    unless discard before returning.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=a1447191dee0f430
-  owner: source-boundary
-  reason: Azure blob JSON/JSONL rows are Tier 3 input; ValueError from field normalization
-    means the external row is not a JSON object with usable fields.
-  safety: Records field-normalization validation evidence and yields quarantine unless
-    discard.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=c4388d250890bb37
-  owner: source-boundary
-  reason: Azure blob source schema validation handles Tier 3 rows; ValidationError
-    means external row data violates the configured source schema.
-  safety: Records schema validation evidence and yields quarantine unless discard;
-    programmer errors still propagate.
-  expires: '2026-08-17'
 - key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=efb42c44febf0c23
   owner: source-boundary
   reason: Local CSV file opening decodes Tier 3 file bytes; UnicodeDecodeError is
@@ -360,20 +276,6 @@ allow_hits:
 - key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=6650d40e380ee359
   owner: source-boundary
   reason: JSON source schema validation handles Tier 3 rows; ValidationError means
-    external row data violates the configured schema.
-  safety: Records schema validation evidence and yields quarantine unless discard;
-    programmer errors still propagate.
-  expires: '2026-08-17'
-- key: plugins/sources/text_source.py:R6:TextSource:load:fp=d5cb0b6468b6d9a0
-  owner: source-boundary
-  reason: Text source line streaming decodes Tier 3 file input; UnicodeDecodeError
-    is an external parse failure.
-  safety: Records parse validation evidence with file path and line metadata and yields
-    quarantine unless discard.
-  expires: '2026-08-17'
-- key: plugins/sources/text_source.py:R6:TextSource:_validate_and_yield:fp=197cc257c3f897c6
-  owner: source-boundary
-  reason: Text source schema validation handles Tier 3 rows; ValidationError means
     external row data violates the configured schema.
   safety: Records schema validation evidence and yields quarantine unless discard;
     programmer errors still propagate.
@@ -566,13 +468,6 @@ allow_hits:
     before this handler; remaining exceptions are logged and the audited LLM result
     is preserved
   expires: null
-- key: plugins/sinks/azure_blob_sink.py:R5:AzureBlobSinkConfig:headers_mapping:fp=62d056151ce64838
-  owner: refactor
-  reason: isinstance(dict) check for config field type discrimination — same pattern
-    as SinkPathConfig.headers_mapping
-  safety: Config validated by Pydantic before this property runs; isinstance only
-    distinguishes dict from str
-  expires: null
 - key: plugins/transforms/rag/query.py:R5:QueryBuilder:_build_field_only:fp=8690adb65aebc738
   owner: feature
   reason: Offensive isinstance(str) guard on Tier 2 pipeline data — crashes immediately
@@ -665,51 +560,6 @@ allow_hits:
   reason: Azure AI Search API Tier 3 — @search.documentId fallback in source ID chain
   safety: No fabricated IDs; items without source_id skipped and recorded
   expires: null
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=384b4135dd2e54b8
-  owner: feature
-  reason: Per-row KeyError catch at Tier 2→external boundary — missing id/document
-    field diverts the row via _divert_row() instead of aborting the batch
-  safety: Row diverted to failsink with descriptive reason; remaining valid rows written
-    normally; no silent data loss
-  expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=d2b12097faa8028a
-  owner: feature
-  reason: Tier 2→external trust boundary — ChromaDB requires string IDs; isinstance(str)
-    validates before write to avoid batch-aborting TypeError from SDK
-  safety: Non-string ID diverts the row via _divert_row() with descriptive reason;
-    not silent suppression
-  expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=cc3a01cb6e4ca3b0
-  owner: feature
-  reason: Tier 2→external trust boundary — ChromaDB requires string documents; isinstance(str)
-    validates before write
-  safety: Non-string document diverts the row via _divert_row() with descriptive reason;
-    not silent suppression
-  expires: null
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=8bfc67e97b8b5ae3
-  owner: feature
-  reason: Per-row KeyError catch for optional metadata fields — missing metadata field
-    skipped (metadata is optional per-field)
-  safety: Missing metadata fields silently omitted from the per-row metadata dict;
-    no data fabrication
-  expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=5348af10db7f4a66
-  owner: feature
-  reason: Tier 2→external trust boundary — validates metadata value types before sending
-    to ChromaDB; isinstance check filters rows with non-scalar metadata (dict, list,
-    datetime) so they go to failsink instead of crashing the batch
-  safety: Invalid rows diverted via _divert_row() with per-field detail; valid rows
-    written normally; no silent data loss
-  expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=f8441bff114d7133
-  owner: bugfix
-  pattern: external-boundary-validator
-  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
-    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
-    rows instead of crashing the batch
-  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
-    valid rows written normally; no silent data loss
-  expires: null
 - key: plugins/infrastructure/preflight.py:R1:plugin_preflight_mode_enabled:fp=2019727813f38ff9
   owner: web-execution
   reason: ContextVar.get() is not dict.get() — _PLUGIN_PREFLIGHT_MODE is a ContextVar[bool];
@@ -792,3 +642,158 @@ allow_hits:
   safety: Non-string or empty values do not pass; the helper raises FrameworkBugError
     rather than fabricating a collection/index name
   expires: null
+- key: plugins/sinks/azure_blob_sink.py:R5:AzureBlobSinkConfig:headers_mapping:fp=f872b3213a3640aa
+  owner: refactor
+  reason: isinstance(dict) check for config field type discrimination — same pattern
+    as SinkPathConfig.headers_mapping
+  safety: Config validated by Pydantic before this property runs; isinstance only
+    distinguishes dict from str
+  expires: null
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=8501da8c0e5bf4c0
+  owner: feature
+  reason: Per-row KeyError catch for optional metadata fields — missing metadata field
+    skipped (metadata is optional per-field)
+  safety: Missing metadata fields silently omitted from the per-row metadata dict;
+    no data fabrication
+  expires: null
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=12aaa412bd91a810
+  owner: bugfix
+  pattern: external-boundary-validator
+  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
+    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
+    rows instead of crashing the batch
+  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
+    valid rows written normally; no silent data loss
+  expires: null
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=87156d7ec508a40b
+  owner: bugfix
+  pattern: external-boundary-validator
+  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
+    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
+    rows instead of crashing the batch
+  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
+    valid rows written normally; no silent data loss
+  expires: null
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=fe6fa1b761d7dd9c
+  owner: feature
+  reason: Per-row KeyError catch for optional metadata fields — missing metadata field
+    skipped (metadata is optional per-field)
+  safety: Missing metadata fields silently omitted from the per-row metadata dict;
+    no data fabrication
+  expires: null
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=817edacea0609417
+  owner: bugfix
+  pattern: external-boundary-validator
+  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
+    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
+    rows instead of crashing the batch
+  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
+    valid rows written normally; no silent data loss
+  expires: null
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=d7e05b8fc5f239a9
+  owner: bugfix
+  pattern: external-boundary-validator
+  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
+    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
+    rows instead of crashing the batch
+  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
+    valid rows written normally; no silent data loss
+  expires: null
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=0aae04fed261134e
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
+    state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=2ddbaeb134277967
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
+    state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=d185a47a28ea1849
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
+    state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=21042d8f5a00bfdc
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
+    state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=75ea795c9fcfba0a
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
+    state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=72eec8c8d199456a
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
+    state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=0ab7290586414304
+  owner: source-boundary
+  reason: Azure blob JSON parsing handles Tier 3 input; JSONDecodeError and non-finite
+    ValueError are malformed external content.
+  safety: Records file-level parse validation evidence and yields quarantine unless
+    discard before returning.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=1c58e06bcaace816
+  owner: source-boundary
+  reason: Azure blob JSON parsing handles Tier 3 input; JSONDecodeError and non-finite
+    ValueError are malformed external content.
+  safety: Records file-level parse validation evidence and yields quarantine unless
+    discard before returning.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=a91fda5ba94b42b4
+  owner: source-boundary
+  reason: Azure blob JSONL streaming decodes Tier 3 input; UnicodeDecodeError is an
+    external parse failure.
+  safety: Records parse validation evidence with line metadata and yields quarantine
+    unless discard before returning.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=5ac85d0ba56780c1
+  owner: source-boundary
+  reason: Azure blob JSONL streaming decodes Tier 3 input; UnicodeDecodeError is an
+    external parse failure.
+  safety: Records parse validation evidence with line metadata and yields quarantine
+    unless discard before returning.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=17453091b7b8fea0
+  owner: source-boundary
+  reason: Azure blob source schema validation handles Tier 3 rows; ValidationError
+    means external row data violates the configured source schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=da16f5a72ba44bc0
+  owner: source-boundary
+  reason: Azure blob source schema validation handles Tier 3 rows; ValidationError
+    means external row data violates the configured source schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/text_source.py:R6:TextSource:load:fp=75958c4926a6eef7
+  owner: source-boundary
+  reason: Text source line streaming decodes Tier 3 file input; UnicodeDecodeError
+    is an external parse failure.
+  safety: Records parse validation evidence with file path and line metadata and yields
+    quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/text_source.py:R6:TextSource:_validate_and_yield:fp=57eaf7e1d1239212
+  owner: source-boundary
+  reason: Text source schema validation handles Tier 3 rows; ValidationError means
+    external row data violates the configured schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'

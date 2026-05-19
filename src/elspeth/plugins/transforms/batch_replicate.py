@@ -98,7 +98,7 @@ class BatchReplicate(BaseTransform):
     name = "batch_replicate"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a9f881028f00329a"
+    source_file_hash: str | None = "sha256:8af0f1d050828429"
     config_model = BatchReplicateConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 

@@ -36,20 +36,20 @@ class TestSecretFingerprint:
         assert fp1 != fp2
 
     def test_fingerprint_length_is_64_chars(self) -> None:
-        """SHA256 hex digest is 64 characters."""
+        """The keyed digest is 64 hex characters."""
         result = secret_fingerprint("test", key=b"key")
         assert len(result) == 64
 
     def test_fingerprint_golden_vector(self) -> None:
-        """Verify HMAC-SHA256 algorithm with known test vector.
+        """Verify the keyed BLAKE2b algorithm with a known test vector.
 
-        This locks the algorithm to HMAC-SHA256. If the implementation
-        changes to plain SHA256 or another algorithm, this test will fail.
+        This locks the algorithm to keyed BLAKE2b. If the implementation
+        changes to an unkeyed hash or another algorithm, this test will fail.
         """
         result = secret_fingerprint("my-secret", key=b"test-key")
 
-        # Precomputed: hmac.new(b"test-key", b"my-secret", sha256).hexdigest()
-        expected = "2294b9e7a6dcb8be10f155c556b2ca74f419c7bd2ce6e1beec723751498f73c2"
+        # Precomputed with keyed BLAKE2b, digest_size=32, person=b"elspeth-sec-fp".
+        expected = "32a1498af9d10d3f08b3260f33ddd8ddbb3dce959edb3680cc234b45c68dda19"
         assert result == expected
 
     def test_fingerprint_without_key_uses_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,9 +58,8 @@ class TestSecretFingerprint:
 
         result = secret_fingerprint("my-secret")
 
-        # Verify the env key is actually used by checking against expected HMAC
-        # Precomputed: hmac.new(b"env-key-value", b"my-secret", sha256).hexdigest()
-        expected = "9bbccfbb68be10d7a8b2649a63b421167e1c05cd78e52fe2761f1743691c5630"
+        # Verify the env key is actually used by checking against expected keyed BLAKE2b.
+        expected = "43a92fd427188bc923aa0423a883aeb8f47098c1cc85cdba362f361a00bcec47"
         assert result == expected
 
     def test_fingerprint_without_key_raises_if_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:

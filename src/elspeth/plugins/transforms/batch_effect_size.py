@@ -115,7 +115,7 @@ class BatchEffectSize(BaseTransform):
     name = "batch_effect_size"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:9859bf65644b5388"
+    source_file_hash: str | None = "sha256:8128ecaabd37153e"
     config_model = BatchEffectSizeConfig
     is_batch_aware = True
 

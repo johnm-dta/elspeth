@@ -41,7 +41,7 @@ class PassThrough(BaseTransform):
     name = "passthrough"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c8b2693029d47c8e"
+    source_file_hash: str | None = "sha256:994456034738fd4d"
     config_model = PassThroughConfig
 
     # ADR-007: PassThrough emits a deep copy of the input row unchanged, so every

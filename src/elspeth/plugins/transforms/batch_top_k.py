@@ -78,7 +78,7 @@ class BatchTopK(BaseTransform):
     name = "batch_top_k"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ba5ef03f016f1092"
+    source_file_hash: str | None = "sha256:3f736dc3434a46f8"
     config_model = BatchTopKConfig
     is_batch_aware = True
 

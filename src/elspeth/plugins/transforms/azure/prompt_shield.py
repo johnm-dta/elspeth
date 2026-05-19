@@ -98,7 +98,7 @@ class AzurePromptShield(BaseAzureSafetyTransform):
     name = "azure_prompt_shield"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5d6f2f97f55a2f28"
+    source_file_hash: str | None = "sha256:8353fb154041529a"
     config_model = AzurePromptShieldConfig
     passes_through_input = True
 

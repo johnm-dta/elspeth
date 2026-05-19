@@ -106,7 +106,7 @@ class BatchDistributionProfile(BaseTransform):
     name = "batch_distribution_profile"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:54f0ba3185f28300"
+    source_file_hash: str | None = "sha256:dfff28e93b76f3d9"
     config_model = BatchDistributionProfileConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)

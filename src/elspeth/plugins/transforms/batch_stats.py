@@ -115,7 +115,7 @@ class BatchStats(BaseTransform):
     name = "batch_stats"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0e99d3ed33d1b3f9"
+    source_file_hash: str | None = "sha256:7506d083ef17eb83"
     config_model = BatchStatsConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 

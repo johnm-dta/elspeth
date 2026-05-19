@@ -9,8 +9,6 @@ from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-import structlog
-
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.coalesce_checkpoint import (
@@ -41,8 +39,6 @@ from elspeth.engine.spans import SpanFactory
 if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
     from elspeth.engine.tokens import TokenManager
-
-slog = structlog.get_logger(__name__)
 
 COALESCE_CHECKPOINT_VERSION = "1.0"
 
@@ -1046,45 +1042,37 @@ class CoalesceExecutor:
                 # (Happy path already recorded COALESCED outcome for these.)
                 if entry.state_id in completed_state_ids:
                     continue
-                try:
-                    # Pass metadata_for_audit so union_collision_policy=fail's full
-                    # collision record (field_origins + collision_values) reaches the
-                    # Landscape audit trail via context_after. None is acceptable for
-                    # early failures (e.g., contract merge) where no metadata exists.
-                    self._execution.complete_node_state(
-                        state_id=entry.state_id,
-                        status=NodeStateStatus.FAILED,
-                        output_data={},
-                        duration_ms=0.0,
-                        error=ExecutionError(
-                            exception=str(merge_exc),
-                            exception_type=type(merge_exc).__name__,
-                            phase="coalesce_merge_cleanup",
-                        ),
-                        context_after=metadata_for_audit,
-                    )
-                    # Record terminal FAILED outcome for consumed token.
-                    # Without this, recovery treats the row as incomplete and
-                    # lineage resolution can't find a terminal token.
-                    if self._data_flow is None:
-                        raise OrchestrationInvariantError(
-                            "CoalesceExecutor.data_flow is None but token outcome recording requires DataFlowRepository"
-                        )
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.FAILURE,
-                        path=TerminalPath.UNROUTED,
-                        error_hash=error_hash,
-                    )
-                except Exception as cleanup_exc:
-                    slog.error(
-                        "coalesce_merge_cleanup_failed",
-                        state_id=entry.state_id,
-                        error=str(cleanup_exc),
-                        exc_info=True,
-                    )
+                # Pass metadata_for_audit so union_collision_policy=fail's full
+                # collision record (field_origins + collision_values) reaches the
+                # Landscape audit trail via context_after. None is acceptable for
+                # early failures (e.g., contract merge) where no metadata exists.
+                self._execution.complete_node_state(
+                    state_id=entry.state_id,
+                    status=NodeStateStatus.FAILED,
+                    output_data={},
+                    duration_ms=0.0,
+                    error=ExecutionError(
+                        exception=str(merge_exc),
+                        exception_type=type(merge_exc).__name__,
+                        phase="coalesce_merge_cleanup",
+                    ),
+                    context_after=metadata_for_audit,
+                )
+                # Record terminal FAILED outcome for consumed token.
+                # Without this, recovery treats the row as incomplete and
+                # lineage resolution can't find a terminal token.
+                if self._data_flow is None:
+                    raise OrchestrationInvariantError(
+                        "CoalesceExecutor.data_flow is None but token outcome recording requires DataFlowRepository"
+                    ) from merge_exc
+                self._data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
+                    outcome=TerminalOutcome.FAILURE,
+                    path=TerminalPath.UNROUTED,
+                    error_hash=error_hash,
+                )
 
-            # Clean up pending state so recovery doesn't treat this as incomplete.
+            # Clean up pending state only after every cleanup audit write succeeds.
             del self._pending[key]
             self._mark_completed(key)
 

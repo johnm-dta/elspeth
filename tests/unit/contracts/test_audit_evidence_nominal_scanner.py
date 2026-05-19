@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -44,6 +45,24 @@ def test_scanner_accepts_compliant_tree(tmp_path: Path) -> None:
     allowlist_dir.mkdir()
     result = _run(["check", "--root", str(tmp_path), "--allowlist", str(allowlist_dir)])
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_scanner_json_mode_succeeds_on_current_codebase() -> None:
+    """Legacy audit-evidence nominal scanner emits JSON for shadow-mode parity."""
+    result = _run(
+        [
+            "check",
+            "--root",
+            "src/elspeth",
+            "--allowlist",
+            "config/cicd/enforce_audit_evidence_nominal",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
 
 
 def test_scanner_flags_non_compliant_class(tmp_path: Path) -> None:

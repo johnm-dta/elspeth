@@ -81,6 +81,12 @@ jobs:
             --rules immutability.freeze_guards,immutability.frozen_annotations \
             --root src/elspeth
 
+      - name: Shadow audit-evidence elspeth-lints rules
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution \
+            --root src/elspeth
+
       - name: Forbid new bespoke CI enforcers
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -113,6 +119,19 @@ jobs:
             exit "$status"
           fi
 
+      - name: Emit elspeth-lints audit-evidence SARIF artifact
+        if: always()
+        run: |
+          set +e
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution \
+            --root src/elspeth \
+            --format sarif > elspeth-lints-audit-evidence.sarif
+          status=$?
+          if [[ "$status" -gt 1 ]]; then
+            exit "$status"
+          fi
+
       - name: Upload elspeth-lints SARIF artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -121,6 +140,7 @@ jobs:
           path: |
             elspeth-lints.sarif
             elspeth-lints-immutability.sarif
+            elspeth-lints-audit-evidence.sarif
           retention-days: 7
 
   # ===========================================================================

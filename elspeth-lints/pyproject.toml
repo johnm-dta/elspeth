@@ -14,6 +14,10 @@ meta-no-new-bespoke-cicd-enforcer = "elspeth_lints.rules.meta_no_new_bespoke_cic
 plugin-contract-options-metadata = "elspeth_lints.rules.plugin_contract.options_metadata:RULE"
 immutability-freeze-guards = "elspeth_lints.rules.immutability.freeze_guards:RULE"
 immutability-frozen-annotations = "elspeth_lints.rules.immutability.frozen_annotations:RULE"
+audit-evidence-nominal-base = "elspeth_lints.rules.audit_evidence.audit_evidence_nominal:RULE"
+audit-evidence-tier-1-decoration = "elspeth_lints.rules.audit_evidence.tier_1_decoration:RULE"
+audit-evidence-guard-symmetry = "elspeth_lints.rules.audit_evidence.guard_symmetry:RULE"
+audit-evidence-gve-attribution = "elspeth_lints.rules.audit_evidence.gve_attribution:RULE"
 # Rule entry points are added by migration tasks.
 
 [build-system]

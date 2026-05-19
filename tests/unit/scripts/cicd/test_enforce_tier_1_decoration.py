@@ -11,6 +11,9 @@ is exercised by the live-repo invocation through pre-commit hooks.
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 from scripts.cicd.enforce_tier_1_decoration import (
@@ -19,6 +22,29 @@ from scripts.cicd.enforce_tier_1_decoration import (
     _is_tier_1_error_call,
     scan_file,
 )
+
+
+def test_tier_1_decoration_json_mode_succeeds_on_current_codebase() -> None:
+    """Legacy tier-1 decoration scanner emits JSON for shadow-mode parity."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/enforce_tier_1_decoration.py",
+            "check",
+            "--file",
+            "src/elspeth/contracts/errors.py",
+            "--allowlist",
+            "config/cicd/enforce_tier_1_decoration",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[4],
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
 
 
 def _write(tmp_path: Path, body: str) -> Path:

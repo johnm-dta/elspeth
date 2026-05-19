@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -321,6 +322,24 @@ def format_finding(finding: Finding) -> str:
     return f"{finding.file_path}:{finding.line}: {finding.class_name} defines to_audit_dict without inheriting AuditEvidenceBase"
 
 
+def json_findings(findings: list[Finding]) -> str:
+    """Render findings in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": RULE_ID,
+            "file_path": finding.file_path,
+            "line": finding.line,
+            "column": 0,
+            "message": f"{finding.class_name} defines to_audit_dict without inheriting AuditEvidenceBase",
+            "fingerprint": finding.canonical_key,
+            "severity": "error",
+            "suggestion": "Inherit AuditEvidenceBase explicitly, or remove the accidental to_audit_dict method",
+        }
+        for finding in findings
+    ]
+    return json.dumps(payload, sort_keys=True) + "\n"
+
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -348,6 +367,7 @@ def main() -> int:
         default=None,
         help="Path to allowlist YAML file or directory of YAML files",
     )
+    check_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format")
 
     args = parser.parse_args()
 
@@ -387,6 +407,10 @@ def run_check(args: argparse.Namespace) -> int:
     expired_entries = allowlist.get_expired_entries() if allowlist.fail_on_expired else []
 
     has_errors = bool(violations or stale_entries or expired_entries)
+
+    if getattr(args, "format", "text") == "json":
+        sys.stdout.write(json_findings(violations))
+        return 1 if has_errors else 0
 
     if violations:
         print(f"\n{'=' * 60}")

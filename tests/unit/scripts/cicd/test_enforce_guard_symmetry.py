@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
+import subprocess
+import sys
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
@@ -25,6 +28,29 @@ from scripts.cicd.enforce_guard_symmetry import (
     run_check,
     scan_files,
 )
+
+
+def test_guard_symmetry_json_mode_succeeds_on_current_codebase() -> None:
+    """Legacy guard-symmetry scanner emits JSON for shadow-mode parity."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/enforce_guard_symmetry.py",
+            "check",
+            "--root",
+            "src/elspeth",
+            "--allowlist",
+            "config/cicd/enforce_guard_symmetry",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[4],
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
 
 
 def scan_source(source: str, filename: str = "test.py") -> GuardSymmetryVisitor:

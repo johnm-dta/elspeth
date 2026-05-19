@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -415,6 +416,37 @@ def format_finding(finding: Finding) -> str:
     )
 
 
+def json_findings(tde1_findings: list[Finding], tde2_findings: list[CallerModuleFinding]) -> str:
+    """Render findings in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": RULE_ID,
+            "file_path": finding.file_path,
+            "line": finding.line,
+            "column": 0,
+            "message": (f"{finding.class_name} has no @tier_1_error(reason=...) decorator and no # TIER-2: justification comment"),
+            "fingerprint": finding.canonical_key,
+            "severity": "error",
+            "suggestion": "Add @tier_1_error(reason=...) or a non-empty # TIER-2: justification comment",
+        }
+        for finding in tde1_findings
+    ]
+    payload.extend(
+        {
+            "rule_id": RULE_ID_CALLER_MODULE,
+            "file_path": finding.file_path,
+            "line": finding.line,
+            "column": 0,
+            "message": finding.detail,
+            "fingerprint": finding.canonical_key,
+            "severity": "error",
+            "suggestion": "Pass caller_module=__name__ literally at every tier_1_error call site",
+        }
+        for finding in tde2_findings
+    )
+    return json.dumps(payload, sort_keys=True) + "\n"
+
+
 # =============================================================================
 # CLI
 # =============================================================================
@@ -443,6 +475,7 @@ def main() -> int:
         default=None,
         help="Path to allowlist YAML file or directory of YAML files",
     )
+    check_parser.add_argument("--format", choices=("text", "json"), default="text", help="Output format")
 
     args = parser.parse_args()
 
@@ -496,6 +529,10 @@ def run_check(args: argparse.Namespace) -> int:
     expired_entries = allowlist.get_expired_entries() if allowlist.fail_on_expired else []
 
     has_errors = bool(violations or tde2_violations or stale_entries or expired_entries)
+
+    if getattr(args, "format", "text") == "json":
+        sys.stdout.write(json_findings(violations, tde2_violations))
+        return 1 if has_errors else 0
 
     if violations:
         print(f"\n{'=' * 60}")

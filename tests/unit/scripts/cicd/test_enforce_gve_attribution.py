@@ -9,6 +9,9 @@ Follows the pattern established by test_enforce_component_type.py.
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
+import sys
 import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,6 +26,30 @@ from scripts.cicd.enforce_gve_attribution import (
     run_check,
     scan_all,
 )
+
+
+def test_gve_attribution_json_mode_succeeds_on_current_codebase() -> None:
+    """Legacy GVE-attribution scanner emits JSON for shadow-mode parity."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/cicd/enforce_gve_attribution.py",
+            "check",
+            "--root",
+            "src/elspeth",
+            "--allowlist",
+            "config/cicd/enforce_gve_attribution",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parents[4],
+    )
+
+    assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert json.loads(result.stdout) == []
+
 
 # =============================================================================
 # Helpers

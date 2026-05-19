@@ -17,9 +17,30 @@ rules:
     status: pending
     migration_issue: null
   - old_script: scripts/cicd/enforce_audit_evidence_nominal.py
-    new_rule: null
-    status: pending
-    migration_issue: null
+    new_rule: audit_evidence.nominal_base
+    status: shadow
+    migration_issue: elspeth-64d67da0de
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/src/elspeth"
+      - --allowlist
+      - "{root}/config/cicd/enforce_audit_evidence_nominal"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_component_type.py
     new_rule: null
     status: pending
@@ -87,13 +108,55 @@ rules:
       - --format
       - json
   - old_script: scripts/cicd/enforce_guard_symmetry.py
-    new_rule: null
-    status: pending
-    migration_issue: null
+    new_rule: audit_evidence.guard_symmetry
+    status: shadow
+    migration_issue: elspeth-64d67da0de
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/src/elspeth"
+      - --allowlist
+      - "{root}/config/cicd/enforce_guard_symmetry"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_gve_attribution.py
-    new_rule: null
-    status: pending
-    migration_issue: null
+    new_rule: audit_evidence.gve_attribution
+    status: shadow
+    migration_issue: elspeth-64d67da0de
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/src/elspeth"
+      - --allowlist
+      - "{root}/config/cicd/enforce_gve_attribution"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_options_metadata.py
     new_rule: plugin_contract.options_metadata
     status: shadow
@@ -122,9 +185,30 @@ rules:
     status: pending
     migration_issue: null
   - old_script: scripts/cicd/enforce_tier_1_decoration.py
-    new_rule: null
-    status: pending
-    migration_issue: null
+    new_rule: audit_evidence.tier_1_decoration
+    status: shadow
+    migration_issue: elspeth-64d67da0de
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --file
+      - "{root}/src/elspeth/contracts/errors.py"
+      - --allowlist
+      - "{root}/config/cicd/enforce_tier_1_decoration"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_tier_model.py
     new_rule: null
     status: pending

@@ -22,6 +22,7 @@ audit-evidence-nominal-base = "elspeth_lints.rules.audit_evidence.audit_evidence
 audit-evidence-tier-1-decoration = "elspeth_lints.rules.audit_evidence.tier_1_decoration:RULE"
 audit-evidence-guard-symmetry = "elspeth_lints.rules.audit_evidence.guard_symmetry:RULE"
 audit-evidence-gve-attribution = "elspeth_lints.rules.audit_evidence.gve_attribution:RULE"
+trust-tier-model = "elspeth_lints.rules.trust_tier.tier_model:RULE"
 # Rule entry points are added by migration tasks.
 
 [build-system]

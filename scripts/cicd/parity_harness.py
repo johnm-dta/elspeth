@@ -273,8 +273,10 @@ def _finding_list(payload: object, *, source: str) -> list[dict[str, Any]]:
         raw_findings = payload
     elif isinstance(payload, dict) and "findings" in payload:
         raw_findings = payload["findings"]
+    elif isinstance(payload, dict) and "violations" in payload:
+        raw_findings = payload["violations"]
     else:
-        raise ValueError(f"{source}: JSON must be a list of findings or a mapping with 'findings'")
+        raise ValueError(f"{source}: JSON must be a list of findings or a mapping with 'findings'/'violations'")
     if not isinstance(raw_findings, list):
         raise ValueError(f"{source}: findings must be a list")
     findings: list[dict[str, Any]] = []

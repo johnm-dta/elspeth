@@ -18,11 +18,12 @@ from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
-from types import SimpleNamespace
 
 import pytest
-from scripts.cicd.enforce_tier_model import (
+
+from elspeth_lints.rules.trust_tier.tier_model.rule import (
     Allowlist,
+    AllowlistBudgetViolation,
     AllowlistEntry,
     Finding,
     PerFileRule,
@@ -2088,7 +2089,7 @@ class TestAllowlistBudgetRatchet:
                 stale_entries=[],
                 expired_entries=[],
                 budget_violations=[
-                    SimpleNamespace(category="allow_hits", current=2, max_allowed=1),
+                    AllowlistBudgetViolation(category="allow_hits", current=2, max_allowed=1),
                 ],
             )
         )

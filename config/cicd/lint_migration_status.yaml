@@ -73,6 +73,31 @@ rules:
     status: deleted
     migration_issue: elspeth-64d67da0de
   - old_script: scripts/cicd/enforce_tier_model.py
-    new_rule: null
-    status: pending
+    new_rule: trust_tier.tier_model
+    status: shadow
     migration_issue: elspeth-73990ea9f8
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/src/elspeth"
+      - --allowlist
+      - "{root}/config/cicd/enforce_tier_model"
+      - --exclude
+      - "**/__pycache__/*"
+      - --exclude
+      - web/frontend/node_modules
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json

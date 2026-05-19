@@ -44,7 +44,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     dump_edges = subparsers.add_parser("dump-edges", help="Dump import edges for architecture review")
     dump_edges.add_argument("--root", type=Path, default=Path.cwd())
-    dump_edges.add_argument("--format", choices=("text", "json"), default="text")
+    dump_edges.add_argument("--format", choices=("json", "mermaid", "dot"), default="json")
+    dump_edges.add_argument("--output", type=Path)
+    dump_edges.add_argument("--include-layer", action="append", choices=("L0", "L1", "L2", "L3"))
+    dump_edges.add_argument("--collapse-to-subsystem", dest="collapse_to_subsystem", action="store_true", default=True)
+    dump_edges.add_argument("--no-collapse", dest="collapse_to_subsystem", action="store_false")
+    dump_edges.add_argument("--no-timestamp", action="store_true", default=False)
+    dump_edges.add_argument("--exclude", action="append", default=[])
     return parser
 
 
@@ -167,12 +173,63 @@ def _display_path(file_path: Path, root: Path) -> str:
 
 
 def _run_dump_edges(args: argparse.Namespace) -> int:
+    from elspeth_lints.rules.trust_tier.tier_model.rule import (
+        _LAYER_NAME_TO_INT,
+        LAYER_NAMES,
+        render_dump_edges_dot,
+        render_dump_edges_json,
+        render_dump_edges_mermaid,
+        scan_dump_edges,
+    )
+
+    root = args.root.resolve()
+    if not root.is_dir():
+        sys.stderr.write(f"Error: {root} is not a directory\n")
+        return 1
+    if args.format in ("json", "dot") and args.output is None:
+        sys.stderr.write(f"Error: --output is required for --format {args.format}\n")
+        return 1
+
+    layer_strs = args.include_layer or ["L3"]
+    include_layers = frozenset(_LAYER_NAME_TO_INT[layer] for layer in layer_strs)
+    nodes, edges, sccs = scan_dump_edges(
+        root=root,
+        include_layers=include_layers,
+        collapse_to_subsystem=args.collapse_to_subsystem,
+        exclude_patterns=args.exclude,
+    )
+
     if args.format == "json":
-        sys.stdout.write("[]\n")
-        return 0
-    if args.format == "text":
-        return 0
-    raise ValueError(f"unknown dump-edges format: {args.format}")
+        rendered = render_dump_edges_json(
+            root=args.root,
+            include_layers=include_layers,
+            collapse_to_subsystem=args.collapse_to_subsystem,
+            nodes=nodes,
+            edges=edges,
+            sccs=sccs,
+            use_stable_placeholder=args.no_timestamp,
+        )
+    elif args.format == "mermaid":
+        rendered = render_dump_edges_mermaid(nodes, edges)
+    elif args.format == "dot":
+        rendered = render_dump_edges_dot(nodes, edges)
+    else:
+        raise ValueError(f"unknown dump-edges format: {args.format}")
+
+    if args.output is None:
+        sys.stdout.write(rendered)
+    else:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
+
+    if sccs:
+        sys.stderr.write(
+            f"WARNING: {len(sccs)} non-trivial strongly-connected component(s) detected at "
+            f"{','.join(sorted(LAYER_NAMES[layer] for layer in include_layers))}.\n"
+        )
+        if args.output is not None:
+            sys.stderr.write(f"         See {args.output} stats.scc_count for details.\n")
+    return 0
 
 
 def _emit_findings(findings: list[Finding], *, output_format: str, rules: list[Rule]) -> int:

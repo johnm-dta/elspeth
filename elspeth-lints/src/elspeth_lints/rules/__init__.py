@@ -13,9 +13,11 @@ from elspeth_lints.rules.immutability import FREEZE_GUARDS_RULE, FROZEN_ANNOTATI
 from elspeth_lints.rules.manifest import CONTRACT_MANIFEST_RULE, SYMBOL_INVENTORY_RULE, TEST_TO_SOURCE_MAPPING_RULE
 from elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer import RULE as META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE
 from elspeth_lints.rules.plugin_contract import COMPONENT_TYPE_RULE, OPTIONS_METADATA_RULE, PLUGIN_HASHES_RULE
+from elspeth_lints.rules.trust_tier import TIER_MODEL_RULE
 
 BUILTIN_RULES = (
     META_NO_NEW_BESPOKE_CICD_ENFORCER_RULE,
+    TIER_MODEL_RULE,
     OPTIONS_METADATA_RULE,
     COMPONENT_TYPE_RULE,
     PLUGIN_HASHES_RULE,
@@ -49,4 +51,5 @@ __all__ = [
     "SYMBOL_INVENTORY_RULE",
     "TEST_TO_SOURCE_MAPPING_RULE",
     "TIER_1_DECORATION_RULE",
+    "TIER_MODEL_RULE",
 ]

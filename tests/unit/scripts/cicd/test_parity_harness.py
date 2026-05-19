@@ -50,7 +50,18 @@ def test_one_line_drift_fails(tmp_path: Path) -> None:
     assert [finding.line for finding in comparison.unexpected_in_new] == [5]
 
 
-def _write_emitter(path: Path, *, line: int) -> Path:
+def test_legacy_violations_mapping_matches_new_list(tmp_path: Path) -> None:
+    """Legacy report_json-style payloads compare against elspeth-lints finding lists."""
+    old_script = _write_emitter(tmp_path / "old.py", line=4, envelope="violations")
+    new_script = _write_emitter(tmp_path / "new.py", line=4)
+    manifest = _write_manifest(tmp_path, old_script=old_script, new_script=new_script)
+
+    result = run_parity(load_manifest(manifest), root=tmp_path)
+
+    assert result.ok
+
+
+def _write_emitter(path: Path, *, line: int, envelope: str | None = None) -> Path:
     payload = [
         {
             "rule_id": "demo.rule",
@@ -61,12 +72,13 @@ def _write_emitter(path: Path, *, line: int) -> Path:
             "fingerprint": f"demo:{line}:2",
         }
     ]
+    emitted: object = {envelope: payload} if envelope is not None else payload
     path.write_text(
         "\n".join(
             [
                 "from __future__ import annotations",
                 "import json",
-                f"print(json.dumps({json.dumps(payload)}))",
+                f"print(json.dumps({json.dumps(emitted)}))",
                 "raise SystemExit(1)",
             ]
         ),

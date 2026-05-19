@@ -1,4 +1,4 @@
-"""Unit tests for the enforce_tier_model.py ``dump-edges`` subcommand.
+"""Unit tests for the trust-tier ``dump-edges`` subcommand.
 
 Δ7 contract — 10 required cases:
 
@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -28,7 +29,8 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
-from scripts.cicd.enforce_tier_model import (
+
+from elspeth_lints.rules.trust_tier.tier_model.rule import (
     render_dump_edges_dot,
     render_dump_edges_json,
     render_dump_edges_mermaid,
@@ -354,12 +356,19 @@ def test_case08_determinism(temp_root: Path) -> None:
 
 def test_case09_cli_invalid_layer(temp_root: Path) -> None:
     """``--include-layer L9`` must be rejected by argparse with non-zero exit."""
-    script = Path(__file__).resolve().parents[4] / "scripts" / "cicd" / "enforce_tier_model.py"
+    project_root = Path(__file__).resolve().parents[4]
+    pythonpath = str(project_root / "elspeth-lints" / "src")
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    env = {
+        **os.environ,
+        "PYTHONPATH": f"{pythonpath}:{existing_pythonpath}" if existing_pythonpath else pythonpath,
+    }
     out_path = temp_root / "out.json"
     result = subprocess.run(
         [
             sys.executable,
-            str(script),
+            "-m",
+            "elspeth_lints.core.cli",
             "dump-edges",
             "--root",
             str(temp_root),
@@ -370,6 +379,8 @@ def test_case09_cli_invalid_layer(temp_root: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        cwd=project_root,
+        env=env,
         check=False,
     )
     assert result.returncode != 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 
@@ -21,12 +22,16 @@ def test_cli_dump_edges_contract_is_available(tmp_path: Path, capsys: object) ->
     """The foundation CLI exposes the import-edge command reserved by ADR-023."""
     from elspeth_lints.core.cli import main
 
-    exit_code = main(["dump-edges", "--root", str(tmp_path), "--format", "json"])
+    output = tmp_path / "edges.json"
+    exit_code = main(["dump-edges", "--root", str(tmp_path), "--format", "json", "--output", str(output), "--no-timestamp"])
 
     assert exit_code == 0
     captured = capsys.readouterr()
     assert captured.err == ""
-    assert captured.out == "[]\n"
+    assert captured.out == ""
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["nodes"] == []
+    assert payload["edges"] == []
 
 
 def test_cli_refuses_explicit_files_outside_rule_path_filter(tmp_path: Path, capsys: object) -> None:

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.contexts import LifecycleContext, SinkContext, SourceContext, TransformContext
     from elspeth.contracts.data import PluginSchema
     from elspeth.contracts.diversion import SinkWriteResult
+    from elspeth.contracts.plugin_assistance import PluginAssistance
     from elspeth.contracts.results import SourceRow, TransformResult
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
@@ -89,7 +90,41 @@ class _PluginReferenceContent(Protocol):
     audit_characteristics: DeclaredAuditCharacteristics
 
 
-class SourceProtocol(_PluginReferenceContent, Protocol):
+class _PluginAssistanceHooks(Protocol):
+    """Discovery-time and postscript-time assistance hooks.
+
+    Mixin shared by ``SourceProtocol`` / ``TransformProtocol`` /
+    ``BatchTransformProtocol`` / ``SinkProtocol``. The implementations
+    live on ``BaseSource`` / ``BaseTransform`` / ``BaseSink`` in
+    ``plugins/infrastructure/base.py``; this protocol declares them so
+    catalog and tool code typed against ``type[XProtocol]`` can call
+    them without per-protocol declarations drifting.
+
+    See ``contracts/plugin_assistance.py`` for the dual-use semantics
+    of ``issue_code`` and the audit-hash discipline.
+    """
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> "PluginAssistance | None":
+        """Return deterministic guidance for this plugin (dual-use; see PluginAssistance)."""
+        ...
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set config."""
+        ...
+
+
+class SourceProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for source plugins — type-checking only, not @runtime_checkable.
 
     Sources load data into the system. There is exactly one source per run.
@@ -255,7 +290,7 @@ class SourceProtocol(_PluginReferenceContent, Protocol):
 
 
 @runtime_checkable
-class TransformProtocol(_PluginReferenceContent, Protocol):
+class TransformProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for stateless single-row transforms.
 
     Transforms process individual rows and emit results.
@@ -456,7 +491,7 @@ class TransformProtocol(_PluginReferenceContent, Protocol):
         ...
 
 
-class BatchTransformProtocol(_PluginReferenceContent, Protocol):
+class BatchTransformProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for batch-aware transforms — type-checking only, not @runtime_checkable.
 
     Batch transforms receive lists of rows and emit results. Used in aggregation
@@ -614,7 +649,7 @@ class BatchTransformProtocol(_PluginReferenceContent, Protocol):
         ...
 
 
-class SinkProtocol(_PluginReferenceContent, Protocol):
+class SinkProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
     """Protocol for sink plugins — type-checking only, not @runtime_checkable.
 
     Sinks output data to external destinations.

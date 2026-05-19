@@ -255,7 +255,25 @@ class CatalogServiceImpl:
             description=description,
             json_schema=json_schema,
             knob_schema=cast(dict[str, Any], knob_schema),
+            composer_hints=self._discovery_composer_hints(plugin_cls),
         )
+
+    def _discovery_composer_hints(self, plugin_cls: PluginClass) -> tuple[str, ...]:
+        """Pull discovery-time composer_hints from a plugin's assistance hook.
+
+        Calls ``plugin_cls.get_agent_assistance(issue_code=None)`` and
+        returns ``assistance.composer_hints`` when populated, else an
+        empty tuple. The hook is part of the plugin contract (defined on
+        BaseTransform, BaseSink, BaseSource — see
+        ``plugins/infrastructure/base.py``); any plugin that doesn't
+        override it returns ``None`` here, which the catalog renders as
+        empty hints. Advisory coaching only — not part of any audit
+        hash; see ``contracts/plugin_assistance.py`` for the discipline.
+        """
+        assistance = plugin_cls.get_agent_assistance(issue_code=None)
+        if assistance is None:
+            return ()
+        return assistance.composer_hints
 
     def _knob_schema(self, plugin_cls: PluginClass, *, plugin_type: PluginKind, name: str) -> KnobSchema:
         try:
@@ -344,6 +362,7 @@ class CatalogServiceImpl:
             example_use=example_use,
             capability_tags=capability_tags,
             audit_characteristics=audit_characteristics,
+            composer_hints=self._discovery_composer_hints(plugin_cls),
         )
 
     def _catalog_schema(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> dict[str, Any]:

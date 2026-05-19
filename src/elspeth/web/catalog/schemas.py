@@ -65,6 +65,12 @@ class PluginSummary(_StrictResponse):
     capability_tags: tuple[str, ...] = ()
     audit_characteristics: DerivedAuditCharacteristics = ()
 
+    # JIT-hints Phase 1: discovery-time composer hints. Populated from
+    # ``plugin_cls.get_agent_assistance(issue_code=None).composer_hints``
+    # when the plugin overrides the hook; ``()`` otherwise. Advisory
+    # coaching only — not contract, not audit-hashed.
+    composer_hints: tuple[str, ...] = ()
+
 
 class PluginSchemaInfo(_StrictResponse):
     """Full plugin schema detail for the composer.
@@ -80,3 +86,10 @@ class PluginSchemaInfo(_StrictResponse):
     json_schema: dict[str, Any]
     knob_schema: dict[str, Any]
     """Lowered composer knob schema, computed once at catalog load."""
+
+    # JIT-hints Phase 1: same semantics as PluginSummary.composer_hints.
+    # Carried on the full-schema response so an LLM that asked for the
+    # schema (e.g. to introspect config fields before set_source) sees
+    # the same hints it would have seen from list_*. Avoids requiring
+    # a follow-up get_plugin_assistance call to surface the hints.
+    composer_hints: tuple[str, ...] = ()

@@ -237,6 +237,14 @@ class TestTransformProtocol:
             def get_config_schema(cls) -> dict[str, Any]:
                 return {}
 
+            @classmethod
+            def get_agent_assistance(cls, *, issue_code: str | None = None) -> Any:
+                return None
+
+            @classmethod
+            def get_post_call_hints(cls, *, tool_name: str, config_snapshot: Any) -> tuple[str, ...]:
+                return ()
+
         transform = DoubleTransform({})
 
         # IMPORTANT: Verify protocol conformance at runtime (see test_source_protocol_conformance).

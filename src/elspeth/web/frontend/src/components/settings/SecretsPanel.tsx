@@ -26,8 +26,13 @@ function ScopeBadge({ scope }: { scope: SecretInventoryItem["scope"] }) {
 }
 
 function AvailabilityDot({ available }: { available: boolean }) {
+  // Two orthogonal cues so the on/off distinction survives a monochromatic
+  // palette and colour-vision deficiency:
+  //   - filled disc with a soft halo  → "lit"
+  //   - hollow ring on transparent bg → "off"
   return (
     <span
+      role="img"
       aria-label={available ? "Available" : "Unavailable"}
       title={available ? "Available" : "Not set"}
       style={{
@@ -35,9 +40,16 @@ function AvailabilityDot({ available }: { available: boolean }) {
         width: 12,
         height: 12,
         borderRadius: "50%",
+        boxSizing: "border-box",
         backgroundColor: available
           ? "var(--color-success, #16a34a)"
-          : "var(--color-text-muted, #9ca3af)",
+          : "transparent",
+        border: available
+          ? "1px solid var(--color-success, #16a34a)"
+          : "1.5px solid var(--color-text-muted, #9ca3af)",
+        boxShadow: available
+          ? "0 0 0 2px var(--color-success-bg, rgba(20, 176, 174, 0.12))"
+          : "none",
         flexShrink: 0,
       }}
     />
@@ -269,7 +281,13 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
               </div>
             ) : (
               <ul role="list" className="secrets-list">
-                {secrets.map((secret) => {
+                {[...secrets]
+                  .sort((a, b) => {
+                    // Available first, then alphabetical by name.
+                    if (a.available !== b.available) return a.available ? -1 : 1;
+                    return a.name.localeCompare(b.name);
+                  })
+                  .map((secret) => {
                   const unavailableReason = reasonLabel(secret.reason);
                   return (
                     <li key={secret.name} className="secrets-list-item">

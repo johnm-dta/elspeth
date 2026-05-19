@@ -1438,15 +1438,18 @@ summary:focus-visible {
 
 /* CompletionBar (TSX: src/components/CompletionBar.tsx) mounts Save-for-review
    (.btn), ExecuteButton (.btn .side-rail-execute-btn), and ExportYamlButton
-   (.btn .side-rail-export-yaml-btn) in one row. The side-rail layout the latter
-   two ship is wrong in row context — they'd render as full-width stacked rows
-   with 8px outside margins, breaking the "three co-equal verbs" intent. This
-   scope override gives the bar a flex layout and resets each child to flex-grow
-   equal share with no margin. The base .btn typography/size carries through,
-   so all three render at --size-control with identical padding/weight. */
+   (.btn .side-rail-export-yaml-btn).
+   The earlier horizontal layout clipped Export-YAML: the side rail is 320px
+   wide (Layout.tsx SIDERAIL_WIDTH), the three labels need ~436px of min-content
+   width at --font-size-base with white-space:nowrap, and the row overflowed
+   into .layout-siderail's overflow:hidden region — making the third button
+   invisible. The three-co-equal-verbs intent is preserved by stacking them
+   vertically: each button takes full rail width, all three are visible, no
+   button gets primary emphasis. */
 .completion-bar {
   display: flex;
-  gap: var(--space-md);
+  flex-direction: column;
+  gap: var(--space-sm);
   padding: var(--space-md);
   align-items: stretch;
 }
@@ -1455,9 +1458,8 @@ summary:focus-visible {
 .completion-bar .side-rail-execute-btn,
 .completion-bar .side-rail-export-yaml-btn,
 .completion-bar .side-rail-catalog-btn {
-  width: auto;
+  width: 100%;
   margin: 0;
-  flex: 1 1 0;
 }
 
 .graph-mini {

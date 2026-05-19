@@ -21,8 +21,14 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from elspeth.contracts import CallStatus, CallType, NodeType
+from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.schema import SchemaConfig
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.journal import JournalRecord, LandscapeJournal
+from elspeth.core.payload_store import FilesystemPayloadStore
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -776,6 +782,65 @@ class TestEnrichWithPayloads:
 
         assert "payloads" in record
         assert len(record["payloads"]) == 2
+
+
+class TestPayloadEnrichmentProductionPath:
+    """Regression tests for payload inlining through recorder-owned writes."""
+
+    def test_record_call_auto_persist_update_records_inline_payloads(self, tmp_path: Path) -> None:
+        """Auto-persisted call refs are written by UPDATE and must be journal-enriched."""
+        journal_path = tmp_path / "journal.jsonl"
+        payload_dir = tmp_path / "payloads"
+        db_path = tmp_path / "audit.db"
+        db = LandscapeDB.from_url(
+            f"sqlite:///{db_path}",
+            dump_to_jsonl=True,
+            dump_to_jsonl_path=str(journal_path),
+            dump_to_jsonl_include_payloads=True,
+            dump_to_jsonl_payload_base_path=str(payload_dir),
+        )
+        payload_store = FilesystemPayloadStore(payload_dir)
+        factory = RecorderFactory(db, payload_store=payload_store)
+
+        schema = SchemaConfig.from_dict({"mode": "observed"})
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        node = factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="llm_transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            schema_config=schema,
+        )
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=node.node_id,
+            row_index=0,
+            data={"input": "test"},
+        )
+        token = factory.data_flow.create_token(row_id=row.row_id)
+        state = factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id=node.node_id,
+            run_id=run.run_id,
+            step_index=0,
+            input_data={"input": "test"},
+        )
+
+        factory.execution.record_call(
+            state_id=state.state_id,
+            call_index=0,
+            call_type=CallType.LLM,
+            status=CallStatus.SUCCESS,
+            request_data=RawCallPayload({"model": "gpt-4", "prompt": "Hi"}),
+            response_data=RawCallPayload({"content": "Hello!"}),
+        )
+
+        records = [json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()]
+        call_updates = [record for record in records if record["statement"].lstrip().upper().startswith("UPDATE CALLS SET")]
+
+        assert any(record.get("request_payload") == '{"model":"gpt-4","prompt":"Hi"}' for record in call_updates)
+        assert any(record.get("response_payload") == '{"content":"Hello!"}' for record in call_updates)
 
 
 # ===========================================================================

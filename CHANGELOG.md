@@ -311,10 +311,10 @@ now share one evidence story.
   `npm run build` refreshes `src/elspeth/web/frontend/dist/`; backend Python,
   dependency, environment, systemd, or Caddy changes still require
   `elspeth-web.service` restart.
-- **Current PR check posture** — PR #39 now includes 771 committed branch commits
-  over `main`, including the docs-cleanout merge. The PR body and release docs
-  should be treated as the review map for the whole RC5.2 train, not for a
-  single feature slice.
+- **Current PR check posture** — PR #39 now includes more than 770 committed
+  branch commits over `main`, including the docs-cleanout merge. The PR body and
+  release docs should be treated as the review map for the whole RC5.2 train,
+  not for a single feature slice.
 
 ---
 

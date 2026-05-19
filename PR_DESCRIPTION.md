@@ -4,8 +4,9 @@
 
 RC5.2 is the Web Composer release train from `RC5.2` into `main`. I reviewed the
 full branch log against `main`: the merge base with `main` is `7bf364da`, and
-the committed branch contains **771 commits** over `main` (**230 first-parent
-commits**) across 2026-05-08 through 2026-05-19 after this release-doc refresh.
+the committed branch contains **more than 770 commits** over `main` (**230+
+first-parent commits**) across 2026-05-08 through 2026-05-19 after this
+release-doc refresh.
 
 The branch is no longer a single frontend recovery slice. It folds together:
 

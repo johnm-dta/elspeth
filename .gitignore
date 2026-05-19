@@ -249,6 +249,7 @@ deploy/
 # Build-artefact PDFs from tools/pdf/ (regeneratable; exceed
 # the pre-commit large-file threshold).
 docs/assets/*.pdf
+docs/release/pdf/
 .claude/scheduled_tasks.lock
 *.db-shm
 *.db-wal

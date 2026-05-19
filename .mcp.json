@@ -19,7 +19,7 @@
     "filigree": {
       "type": "stdio",
       "command": "/home/john/.local/bin/filigree-mcp",
-      "args": []
+      "args": ["--project", "/home/john/elspeth"]
     }
   }
 }

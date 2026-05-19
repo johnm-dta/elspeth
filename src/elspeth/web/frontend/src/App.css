@@ -2204,6 +2204,10 @@ summary:focus-visible {
 /* ---------------------------------------------------------------------------
    Shortcuts Help
    --------------------------------------------------------------------------- */
+.shortcuts-group {
+  margin-bottom: var(--space-md);
+}
+
 .shortcuts-list {
   margin: 0 0 var(--space-xl);
   padding: 0;
@@ -3527,6 +3531,21 @@ summary:focus-visible {
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   line-height: 1.4;
+}
+
+.template-card-sda {
+  margin-top: 0.5rem;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+.template-card-sda dt {
+  font-weight: 600;
+}
+.template-card-sda dd {
+  margin: 0;
 }
 
 /* ---------------------------------------------------------------------------

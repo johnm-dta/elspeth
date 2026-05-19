@@ -25,6 +25,26 @@ EXPECTED_METRIC_NAMES = {
     # for /execute attempts that hit an unresolved
     # ``{{interpretation:<term>}}`` placeholder at runtime.
     "composer.interpretation_placeholder_unresolved_at_runtime_total",
+    # ── Phase 8 wire names ──
+    # Mode + per-session + tutorial + completion + B3 cohorts + B5.
+    # NOTE: ``composer.tutorial.replayed_total`` is DELIBERATELY ABSENT
+    # (Phase 9 deferred per Decision 2 / Option C). Do NOT add it back
+    # without re-opening that decision. ``composer.phase_8.probe_failed_total``
+    # is also absent — it's a module-local counter in
+    # ``elspeth.web.composer.telemetry_phase8`` (W8-r2 — not a slot on
+    # ``_SessionsTelemetry``); covered separately by the Q1 test in
+    # ``tests/unit/web/composer/test_telemetry_phase8.py``.
+    "composer.mode.opted_out_total",
+    "composer.mode.opted_in_total",
+    "composer.session.switched_total",
+    "composer.tutorial.started_total",
+    "composer.tutorial.completed_total",
+    "composer.session.completed_total",
+    "composer.share.token_verify_failure_total",
+    "composer.share.link_expiry_hit_total",
+    "composer.interpretation.opt_out_total",
+    "composer.audit.fetch_failure_total",
+    "composer.source.dynamic_created_total",
 }
 
 
@@ -46,6 +66,20 @@ def test_telemetry_field_names_match_spec_exactly():
         "interpretation_rate_cap_exceeded_total",
         # Phase 5b Task 5 follow-on (F-17 / F-21).
         "interpretation_placeholder_unresolved_at_runtime_total",
+        # ── Phase 8 fields ──
+        # Tutorial-replayed slot DELIBERATELY ABSENT (Phase 9 / Decision 2).
+        # Probe-failed counter DELIBERATELY ABSENT (W8-r2 module-local).
+        "mode_opted_out_total",
+        "mode_opted_in_total",
+        "session_switched_total",
+        "tutorial_started_total",
+        "tutorial_completed_total",
+        "session_completed_total",
+        "share_token_verify_failure_total",
+        "share_link_expiry_hit_total",
+        "interpretation_opt_out_total",
+        "audit_fetch_failure_total",
+        "source_dynamic_created_total",
     }
     actual = set(telem.__dataclass_fields__)
     assert actual == expected_fields, f"field-name mismatch — added: {actual - expected_fields}; removed: {expected_fields - actual}"
@@ -97,7 +131,13 @@ def test_production_meter_registers_named_metrics():
         def __init__(self) -> None:
             self.registered: dict[str, _FakeCounter] = {}
 
-        def create_counter(self, name: str) -> _FakeCounter:
+        def create_counter(self, name: str, *, description: str = "") -> _FakeCounter:
+            # ``description`` kwarg matches the widened ``_Meter`` Protocol
+            # (Phase 8: production wiring passes operator-readable HELP text
+            # to ``Meter.create_counter``). We don't assert on it here —
+            # the description is operational documentation, not part of the
+            # wire contract this test guards.
+            del description
             counter = _FakeCounter()
             self.registered[name] = counter
             return counter

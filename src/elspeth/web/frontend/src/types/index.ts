@@ -24,17 +24,7 @@ export interface AuthConfig {
 }
 
 /**
- * Minimal identity claims extracted from the JWT or session.
- * Used internally for attribution and display.
- */
-export interface UserIdentity {
-  user_id: string;
-  username: string;
-}
-
-/**
  * Full user profile returned by GET /api/auth/me.
- * Extends UserIdentity with display-oriented fields.
  */
 export interface UserProfile {
   user_id: string;
@@ -54,6 +44,14 @@ export interface Session {
   updated_at: string;
   forked_from_session_id?: string;
   forked_from_message_id?: string;
+  /**
+   * Present only when the backend exposes archived sessions in list results.
+   * The current backend physically deletes on archive, so this field is absent
+   * at runtime. It is declared here so the frontend filter/toggle works
+   * correctly if the backend is extended to soft-delete. Phase 9 follow-up:
+   * expose archived sessions via GET /api/sessions?include_archived=true.
+   */
+  archived?: boolean;
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────

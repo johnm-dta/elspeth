@@ -39,6 +39,7 @@ import type {
   InlineSourceSummary,
 } from "@/types/api";
 import type { GuidedStep } from "@/types/guided";
+import type { ExampleUseCase } from "./templates_data";
 
 /**
  * Best-effort row-count from CSV-like text content.
@@ -951,8 +952,15 @@ export function ChatPanel({
   );
 
   const handleSelectTemplate = useCallback(
-    (prompt: string) => {
-      setInputText(prompt);
+    (
+      seedPrompt: string,
+      // recommendedStartingPoint is accepted but not yet dispatched: Phase 5a's
+      // dynamic-source-from-chat wiring for template clicks is absent at the
+      // 2026-05-19 gate. See docs/composer/ux-redesign-2026-05/21-phase-9-followups.md
+      // "Template card dynamic-source dispatch" for the closure path.
+      _recommendedStartingPoint: ExampleUseCase["recommended_starting_point"],
+    ) => {
+      setInputText(seedPrompt);
       // Focus the input so user can edit or press Enter to send
       inputRef.current?.focus();
     },

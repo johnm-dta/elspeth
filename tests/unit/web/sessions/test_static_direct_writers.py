@@ -890,6 +890,22 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         ),
     ),
     ReviewedWriter(
+        path="tests/unit/web/shareable_reviews/test_telemetry_session_completed.py",
+        enclosing_symbol="session_engine_with_row",
+        table="composition_states",
+        operation="sqlalchemy_table_insert",
+        purpose=(
+            "Phase 8 Sub-task 7c (telemetry-backfill: phase-6) telemetry test: "
+            "seeds a composition_states row so the ShareableReviewService's "
+            "mark_ready_for_review audit insert resolves the composite FK on "
+            "composer_completion_events. Mirrors the precedent immediately "
+            "above (test_service.py session_engine_with_row); the new test "
+            "asserts the composer.session.completed_total counter emit at the "
+            "service. No production lock required — telemetry-emit test, not a "
+            "production write path."
+        ),
+    ),
+    ReviewedWriter(
         path="tests/unit/web/sessions/test_interpretation_events_table.py",
         enclosing_symbol="TestCompositionStatesProvenanceEnum.test_interpretation_resolve_provenance_accepted",
         table="composition_states",

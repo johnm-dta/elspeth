@@ -16,8 +16,11 @@ import structlog
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -66,6 +69,22 @@ from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
 from elspeth.web.shareable_reviews.service import ShareableReviewService
 from elspeth.web.shareable_reviews.signer import ShareTokenSigner
+
+# B1-r3: Wire a real MeterProvider at module-import time (process-global per
+# OTel design — NOT inside create_app, which may be called multiple times in
+# tests). Without this, get_meter() returns OTel's NoOpMeter and every
+# counter.add() call is silently discarded. The PrometheusMetricReader backs
+# the /metrics exposition endpoint mounted in create_app() below.
+#
+# Side effect on existing counters: after this commit,
+# composer.preferences.patch_total, composer.redaction.*, composer.service.*,
+# composer.tools.*, and blobs.* all start emitting real data. These counters
+# were always correctly instrumented — they were just exporting to /dev/null
+# because no provider was set. The first production deploy after this commit
+# will surface metrics that were previously invisible. This is observability
+# landing, not a regression.
+_PROMETHEUS_READER = PrometheusMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[_PROMETHEUS_READER]))
 
 _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
     {
@@ -286,6 +305,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
         sessions_db_engine=app.state.session_engine,
         payload_store=payload_store,
+        # Phase 8 Sub-task 7c — composer.session.completed_total counter.
+        # ``app.state.sessions_telemetry`` is set in ``create_app`` (the
+        # synchronous factory) BEFORE the lifespan runs, so it is
+        # available here. Mirrors the
+        # ``telemetry=app.state.sessions_telemetry`` pattern at line 259
+        # for the execution service.
+        telemetry=app.state.sessions_telemetry,
     )
 
     # Periodic orphan cleanup — catches runs orphaned by SIGKILL/OOM
@@ -829,6 +855,20 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             "composer_reason": composer.reason,
             "composer_missing_keys": list(composer.missing_keys),
         }
+
+    # --- Prometheus metrics scrape endpoint ---
+    # Registered as a route (not a mount) so bare `/metrics` matches without
+    # the trailing-slash redirect that a Mount requires. The SPA StaticFiles
+    # mount at `/` (registered below) would otherwise shadow `/metrics` for
+    # the non-slash variant, returning 404 because no `metrics` file exists
+    # in dist/. Route handlers match before mounts in Starlette, so this
+    # also wins precedence over the SPA catch-all regardless of order.
+    # Backed by the process-level _PROMETHEUS_READER wired at module import;
+    # all OTel counters/histograms registered via metrics.get_meter() feed
+    # into this endpoint automatically via the global REGISTRY.
+    @app.get("/metrics", include_in_schema=False)
+    def _prometheus_metrics() -> Response:
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     # --- Static file serving for the React SPA (production) ---
     # Mount frontend/dist/ AFTER all API and WS routes so /api/* takes precedence.

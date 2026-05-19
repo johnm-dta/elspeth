@@ -28,9 +28,12 @@ export function HeaderSessionSwitcher(): JSX.Element {
   const [open, setOpen] = useState(false);
   const [focusIndex, setFocusIndex] = useState(0);
   const [archiveTarget, setArchiveTarget] = useState<Session | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [renamePending, setRenamePending] = useState(false);
+  const [filterText, setFilterText] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const itemRefs = useRef<(HTMLElement | null)[]>([]);
@@ -38,7 +41,12 @@ export function HeaderSessionSwitcher(): JSX.Element {
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const triggerLabel = activeSession?.title || "Untitled";
-  const itemCount = 1 + sessions.length * 3;
+  const filteredSessions = sessions.filter(
+    (s) =>
+      (showArchived || !s.archived) &&
+      s.title.toLowerCase().includes(filterText.toLowerCase()),
+  );
+  const itemCount = 1 + filteredSessions.length * 3;
 
   const closeAndReturnFocus = useCallback(() => {
     setOpen(false);
@@ -120,12 +128,22 @@ export function HeaderSessionSwitcher(): JSX.Element {
     }
   }, [closeAndReturnFocus, renamePending, renameSession, renameText, renamingSessionId]);
 
-  const confirmArchive = useCallback(() => {
+  const confirmArchive = useCallback(async () => {
     if (!archiveTarget) return;
     const targetId = archiveTarget.id;
     setArchiveTarget(null);
     closeAndReturnFocus();
-    void archiveSession(targetId);
+    try {
+      await archiveSession(targetId);
+      setArchiveError(null);
+    } catch (err) {
+      // Preserve the backend's diagnostic message when available — an
+      // auditable system shouldn't drop the actual failure reason.  Fall
+      // back to a friendly message when the rejection isn't an Error
+      // (e.g. a string thrown manually somewhere in the call chain).
+      const detail = err instanceof Error && err.message ? err.message : null;
+      setArchiveError(detail !== null ? `Could not archive session: ${detail}` : "Could not archive session. Please try again.");
+    }
   }, [archiveSession, archiveTarget, closeAndReturnFocus]);
 
   const activateMenuIndex = useCallback(
@@ -135,7 +153,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
         return;
       }
       const offset = index - 1;
-      const session = sessions[Math.floor(offset / 3)];
+      const session = filteredSessions[Math.floor(offset / 3)];
       if (!session) return;
       const action = offset % 3;
       if (action === 0) {
@@ -146,7 +164,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
         setArchiveTarget(session);
       }
     },
-    [onNewSession, onSelect, sessions, startRename],
+    [onNewSession, onSelect, filteredSessions, startRename],
   );
 
   const onMenuKeyDown = useCallback(
@@ -204,13 +222,30 @@ export function HeaderSessionSwitcher(): JSX.Element {
           aria-expanded={open}
           aria-controls={MENU_ID}
           aria-label={`Session switcher: ${triggerLabel}`}
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            setOpen((v) => {
+              // Reopening the menu clears a stale archive-error alert so the
+              // user doesn't see a previous failure persisting next to a
+              // fresh menu interaction.  The alert still renders when
+              // archiveError is set; this just stops it sticking around
+              // after the user has dismissed and reopened the menu.
+              if (!v) {
+                setArchiveError(null);
+              }
+              return !v;
+            });
+          }}
           className="header-session-switcher-trigger"
         >
           <span aria-hidden="true">Session:</span>{" "}
           <strong>{triggerLabel}</strong>
           <span aria-hidden="true"> ▾</span>
         </button>
+        {archiveError !== null && (
+          <div role="alert" className="header-session-switcher-archive-error">
+            {archiveError}
+          </div>
+        )}
         {open && (
           <ul
             id={MENU_ID}
@@ -219,6 +254,28 @@ export function HeaderSessionSwitcher(): JSX.Element {
             className="header-session-switcher-menu"
             onKeyDown={onMenuKeyDown}
           >
+            <li role="none" className="header-session-switcher-filter-row">
+              <input
+                type="text"
+                aria-label="Find a session…"
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                onKeyDown={(e) => e.stopPropagation()}
+                className="header-session-switcher-filter"
+                placeholder="Find a session…"
+              />
+            </li>
+            <li role="none" className="header-session-switcher-filter-row">
+              <label className="header-session-switcher-show-archived">
+                <input
+                  type="checkbox"
+                  aria-label="Show archived"
+                  checked={showArchived}
+                  onChange={(e) => setShowArchived(e.target.checked)}
+                />
+                {" "}Show archived
+              </label>
+            </li>
             <li
               ref={(el) => {
                 itemRefs.current[0] = el;
@@ -230,7 +287,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
             >
               + New session
             </li>
-            {sessions.map((session, idx) => {
+            {filteredSessions.map((session, idx) => {
               const title = session.title || `Session ${session.id.slice(0, 8)}`;
               const selectIndex = 1 + idx * 3;
               const renameIndex = selectIndex + 1;

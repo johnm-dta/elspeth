@@ -4,6 +4,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useAuthStore, selectIsAuthenticated } from "@/stores/authStore";
 
+
 /**
  * Session lifecycle effects that must stay mounted with the app shell.
  * HeaderSessionSwitcher reads store state directly after SessionSidebar removal,
@@ -36,19 +37,4 @@ export function useSessionLifecycle(): void {
       void loadRuns(activeSessionId);
     }
   }, [activeSessionId, loadRuns]);
-}
-
-/**
- * Hook for session consumers that need session actions plus lifecycle effects.
- */
-export function useSession() {
-  useSessionLifecycle();
-  const sessions = useSessionStore((s) => s.sessions);
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const createSession = useSessionStore((s) => s.createSession);
-  const selectSession = useSessionStore((s) => s.selectSession);
-  const renameSession = useSessionStore((s) => s.renameSession);
-  const archiveSession = useSessionStore((s) => s.archiveSession);
-
-  return { sessions, activeSessionId, createSession, selectSession, renameSession, archiveSession };
 }

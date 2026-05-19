@@ -209,6 +209,35 @@ class ComposerSessionPreferencesRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ComposerSessionPreferencesTransition:
+    """Result of a per-session composer-preferences PATCH.
+
+    Carries both the value the PATCH overwrote (``prior``) and the value
+    the PATCH wrote (``current``). Both are loaded inside the same write
+    transaction as the audit + state update, so there is no TOCTOU
+    window between read and write — see Phase 8 plan §"Service signature
+    precondition (B2 — load-bearing)" for the rationale and the
+    explicitly-rejected route-handler read-before-write alternative.
+
+    The Phase 8b telemetry consumer reads ``prior.trust_mode`` to
+    compute the ``from_mode`` attribute on
+    ``composer.session.switched_total``; the B1 audit-payload extension
+    records ``prior.trust_mode`` into ``proposal_events_table.payload``
+    so the telemetry counter remains a strict subset of audit-recorded
+    reality (audit-primacy superset rule, CLAUDE.md
+    §"Telemetry and Logging").
+
+    Both fields hold immutable frozen dataclass instances; no container
+    fields here, so no ``__post_init__`` deep-freeze guard is required
+    (per CLAUDE.md §"Frozen Dataclass Immutability"; scalar/frozen-
+    dataclass wrappers do not need guards).
+    """
+
+    prior: ComposerSessionPreferencesRecord
+    current: ComposerSessionPreferencesRecord
+
+
+@dataclass(frozen=True, slots=True)
 class CompositionProposalRecord:
     """Represents a durable pending/committed/rejected composer proposal."""
 
@@ -660,7 +689,7 @@ class SessionServiceProtocol(Protocol):
         trust_mode: ComposerTrustMode,
         density_default: ComposerDensityDefault,
         actor: str,
-    ) -> ComposerSessionPreferencesRecord: ...
+    ) -> ComposerSessionPreferencesTransition: ...
 
     async def create_composition_proposal(
         self,

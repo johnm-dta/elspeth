@@ -48,8 +48,10 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.schema_contract import PipelineRow
 
 # Module-level counter — both call sites import this module and share the
-# same instrument.
-_VIOLATIONS_COUNTER = metrics.get_meter(__name__).create_counter(
+# same instrument.  Tests that need to assert on increments should monkeypatch
+# this module global with a counter created from a local MeterProvider+reader
+# pair; see tests/unit/engine/test_executors.py for the canonical pattern.
+_VIOLATIONS_COUNTER: metrics.Counter = metrics.get_meter(__name__).create_counter(
     "pass_through_cross_check_violations_total",
     description="Count of passes_through_input=True transforms that dropped input fields at runtime",
 )

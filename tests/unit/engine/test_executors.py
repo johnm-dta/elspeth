@@ -98,7 +98,6 @@ from elspeth.contracts.results import ArtifactDescriptor, GateResult
 from elspeth.contracts.routing import RouteDestination, RoutingAction
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, SinkName
-from elspeth.core.canonical import stable_hash
 from elspeth.core.config import AggregationSettings, GateSettings, TriggerConfig
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.executors import (
@@ -112,6 +111,7 @@ from elspeth.engine.executors import (
 )
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row
+from tests.fixtures.audit_hashing import assert_stable_hash
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 from tests.unit.engine.conftest import make_test_step_resolver as _make_step_resolver
@@ -661,8 +661,8 @@ class TestTransformExecutor:
             ctx,
         )
 
-        assert result.input_hash == stable_hash(token.row_data.to_dict())
-        assert result.output_hash == stable_hash(output_row)
+        assert_stable_hash(result.input_hash, token.row_data.to_dict())
+        assert_stable_hash(result.output_hash, output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 
@@ -5724,8 +5724,8 @@ class TestTransformExecutorBatchPath:
 
         result, _, _ = executor.execute_transform(transform, token, ctx)
 
-        assert result.input_hash == stable_hash(token.row_data.to_dict())
-        assert result.output_hash == stable_hash(output_row)
+        assert_stable_hash(result.input_hash, token.row_data.to_dict())
+        assert_stable_hash(result.output_hash, output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 

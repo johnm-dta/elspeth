@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,9 +9,9 @@ import pytest
 
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import DependencyFailedError
-from elspeth.core.canonical import canonical_json
 from elspeth.core.dependency_config import DependencyConfig
 from elspeth.engine.dependency_resolver import _hash_settings_file, _load_depends_on, detect_cycles, resolve_dependencies
+from tests.fixtures.audit_hashing import assert_prefixed_canonical_sha256
 
 
 class TestLoadDependsOnValidation:
@@ -350,8 +349,7 @@ class TestHashSettingsFile:
                 },
             },
         }
-        expected_hash = hashlib.sha256(canonical_json(expected_payload).encode()).hexdigest()
-        assert result == f"sha256:{expected_hash}"
+        assert_prefixed_canonical_sha256(result, expected_payload)
 
     def test_same_content_same_hash(self, tmp_path: Path) -> None:
         a = tmp_path / "a.yaml"

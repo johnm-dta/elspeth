@@ -77,6 +77,10 @@ Remediation status:
   `tests/unit/engine/test_executors.py` still fails on the unrelated
   `TestPassThroughCrossCheck.test_cross_check_is_tier_1_registered`
   subclass assertion; the focused hash-binding tests pass.
+- 2026-05-20: `elspeth-e0afd080cc` added shared hash-binding assertions in
+  `tests.fixtures.audit_hashing` for stable hashes, prefixed canonical SHA-256,
+  and HMAC-SHA256 signatures. The engine hash-binding sites and dependency
+  settings hash test now use the shared helper surface.
 
 ### UENG-2 — Private processor outcome tests mostly test dataclass construction
 

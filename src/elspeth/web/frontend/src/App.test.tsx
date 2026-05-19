@@ -583,43 +583,39 @@ describe("App preferences bootstrap (Phase 1B)", () => {
     });
   });
 
-  it("App still renders when preferences bootstrap rejects (Panel test #1)", async () => {
+  it("App still renders when preferences bootstrap fails (Panel test #1)", async () => {
     // Resilience claim: a failing prefs bootstrap MUST NOT block app
-    // render. The earlier test only spied on bootstrap; it never made
-    // bootstrap reject, so the .catch branch was uncovered — the test
-    // would have passed even if the .catch were deleted, making the
-    // "preferences are non-fatal" claim unverified.
+    // render. The earlier test spied on bootstrap-rejection and asserted
+    // the App.tsx caller's .catch(console.error) was hit — but that
+    // silent-swallow was the I5 bug (CorruptPreferencesError got
+    // logged-and-forgotten, leaving the user with no signal). Bootstrap
+    // is now contracted to NEVER reject; failures are surfaced via the
+    // store's writeError so the role="alert" region (Phase 1B-round-2)
+    // shows the user something is wrong.
+    //
+    // We exercise the failure path through the lower API mock rather
+    // than spying on bootstrap directly, so the test runs through the
+    // real bootstrap() implementation including the catch/writeError
+    // branch — the part that was previously uncovered.
+    const apiClient = await import("@/api/client");
     const { usePreferencesStore } = await import("@/stores/preferencesStore");
-    const bootstrap = vi
-      .spyOn(usePreferencesStore.getState(), "bootstrap")
-      .mockRejectedValueOnce(new Error("network down"));
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
+    (
+      apiClient.fetchUserComposerPreferences as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("network down"));
 
     render(<App />);
 
+    // Wait for bootstrap to settle into the failure-path state.
     await waitFor(() => {
-      expect(bootstrap).toHaveBeenCalled();
+      const state = usePreferencesStore.getState();
+      expect(state.loaded).toBe(true);
+      expect(state.writeError).not.toBeNull();
     });
-    // The error path was exercised — operator-side breadcrumb logged.
-    // We tolerate the exact message format; the contract is "[preferences]"
-    // prefix so logs are greppable.
-    await waitFor(() => {
-      expect(
-        consoleError.mock.calls.some(
-          ([first]) =>
-            typeof first === "string" && first.includes("[preferences]"),
-        ),
-      ).toBe(true);
-    });
+    // No-fabrication shape: defaultMode is still null (we don't guess).
+    expect(usePreferencesStore.getState().defaultMode).toBeNull();
     // App chrome remains rendered. The Layout/ChatPanel stubs are still
-    // present — proves the bootstrap rejection didn't unmount the tree.
-    // Using the chat-panel-stub testid (App.test.tsx wires its own stubs
-    // for the sub-components).
+    // present — proves the bootstrap failure didn't unmount the tree.
     expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
-
-    consoleError.mockRestore();
   });
 
   it("renders the tutorial instead of the composer layout before completion", async () => {

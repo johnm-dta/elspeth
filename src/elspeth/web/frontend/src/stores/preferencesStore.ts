@@ -36,7 +36,7 @@ import {
   fetchUserComposerPreferences,
   updateUserComposerPreferences,
 } from "@/api/client";
-import type { ComposerMode } from "@/types/api";
+import type { ApiError, ComposerMode } from "@/types/api";
 
 // localStorage key for cross-tab banner-dismiss broadcasts. Versioned
 // (`v1`) so a future schema change can add a `v2` key without colliding
@@ -87,14 +87,59 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   ...INITIAL_STATE,
 
   bootstrap: async () => {
-    const payload = await fetchUserComposerPreferences();
-    set({
-      defaultMode: payload.default_mode,
-      bannerDismissedAt: payload.banner_dismissed_at,
-      tutorialCompletedAt: payload.tutorial_completed_at,
-      tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
-      loaded: true,
-    });
+    // I5 — silent-failure-hunter remediation. bootstrap() is contracted
+    // to NEVER reject: callers (App.tsx, resolveDefaultMode) treat
+    // bootstrap as "load OR record why we couldn't". On failure we
+    // degrade to the guided default and surface the failure via
+    // writeError so the role="alert" region (Phase 1B-round-2) shows
+    // the user something is wrong. Loaded is set true on the failure
+    // branch as well so the UI doesn't block on a condition that will
+    // never become true (a corrupt-row user would otherwise be unable
+    // to even create a session).
+    //
+    // The error_type discriminator distinguishes a CorruptPreferencesError
+    // (the row is structurally invalid — needs operator action) from a
+    // transient network failure (will probably recover). The frontend
+    // does not show bad_value (the backend handler strips it), only the
+    // user-actionable framing.
+    try {
+      const payload = await fetchUserComposerPreferences();
+      set({
+        defaultMode: payload.default_mode,
+        bannerDismissedAt: payload.banner_dismissed_at,
+        tutorialCompletedAt: payload.tutorial_completed_at,
+        tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
+        loaded: true,
+      });
+    } catch (err) {
+      // No-fabrication shape (CLAUDE.md "fabrication test"). Leave
+      // defaultMode and tutorialCompletedAt at null — we genuinely
+      // don't know what they were. Setting defaultMode="guided" here
+      // would attribute a preference choice to the user that they
+      // never made; the audit trail would later carry a confident
+      // answer to a question the system never resolved.
+      //
+      // Set loaded:true so the UI unblocks (gating the whole UI on
+      // loaded would leave a corrupt-row user unable to create a
+      // session at all — strictly worse than presenting them with an
+      // accurate "we couldn't load your preferences" banner).
+      //
+      // resolveDefaultMode() continues to throw when defaultMode is
+      // null after a bootstrap pass; sessionStore.createSession()
+      // catches that and presents the "couldn't apply your default
+      // mode, you're in freeform" message — honest about not knowing.
+      const apiError = err as Partial<ApiError>;
+      const isCorrupt = apiError?.error_type === "corrupt_preferences";
+      const message = isCorrupt
+        ? "Your saved preferences are corrupted. Contact your administrator to restore them."
+        : err instanceof Error
+          ? `Couldn't load your preferences (${err.message}).`
+          : "Couldn't load your preferences.";
+      set({
+        loaded: true,
+        writeError: message,
+      });
+    }
   },
 
   resolveDefaultMode: async () => {

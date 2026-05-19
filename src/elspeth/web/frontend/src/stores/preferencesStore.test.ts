@@ -246,6 +246,77 @@ describe("preferencesStore", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(usePreferencesStore.getState().loaded).toBe(true);
   });
+
+  // I5 — silent-failure-hunter remediation. Before this fix, bootstrap()
+  // would reject and the App.tsx caller's `.catch(console.error)` would
+  // swallow the failure. `loaded` stayed false, gating the UI on a
+  // condition that would never become true — a CorruptPreferencesError
+  // (named for incident response) was completely invisible to the user.
+  //
+  // The new contract: bootstrap() NEVER rejects. On failure it sets
+  // loaded:true + writeError but LEAVES defaultMode null (the
+  // no-fabrication shape per CLAUDE.md). Setting defaultMode="guided"
+  // on failure would attribute a preference choice to the user that
+  // they never made. resolveDefaultMode() continues to throw on the
+  // null branch; sessionStore.createSession catches that and tells the
+  // user "you're in freeform; we couldn't apply your default mode" —
+  // an honest secondary-failure attribution.
+
+  it("bootstrap sets loaded+writeError on generic API failure without fabricating a defaultMode", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("network failure"));
+
+    await expect(
+      usePreferencesStore.getState().bootstrap(),
+    ).resolves.toBeUndefined();
+
+    const state = usePreferencesStore.getState();
+    expect(state.loaded).toBe(true);
+    // Honest: we don't know what mode the user had set.
+    expect(state.defaultMode).toBeNull();
+    expect(state.writeError).not.toBeNull();
+    expect(state.writeError).toMatch(/network failure/);
+  });
+
+  it("bootstrap surfaces a corrupt-preferences message when the backend signals error_type=corrupt_preferences", async () => {
+    // ApiError shape produced by parseResponse() in @/api/client when the
+    // backend returns a structured 5xx with error_type. The store branches
+    // on error_type to distinguish a corrupt-row failure (needs operator
+    // action) from a transient unavailability.
+    const apiError = {
+      status: 500,
+      detail: "Saved preferences are corrupt; the composer is using defaults.",
+      error_type: "corrupt_preferences",
+    };
+    mockFetch.mockRejectedValueOnce(apiError);
+
+    await expect(
+      usePreferencesStore.getState().bootstrap(),
+    ).resolves.toBeUndefined();
+
+    const state = usePreferencesStore.getState();
+    expect(state.loaded).toBe(true);
+    expect(state.defaultMode).toBeNull();
+    expect(state.writeError).not.toBeNull();
+    expect(state.writeError).toMatch(/corrupt/i);
+    expect(state.writeError).toMatch(/administrator|operator|contact/i);
+  });
+
+  it("resolveDefaultMode still throws after a failed bootstrap (preserves sessionStore secondary-failure attribution)", async () => {
+    // mockRejected is consumed twice because resolveDefaultMode awaits
+    // bootstrap() once and that bootstrap consumes one mockRejectedValueOnce.
+    // Use mockRejectedValue (not Once) so the implementation can retry
+    // without exhausting the queue.
+    mockFetch.mockRejectedValue(new Error("server unreachable"));
+
+    await expect(
+      usePreferencesStore.getState().resolveDefaultMode(),
+    ).rejects.toThrow(/bootstrap completed but defaultMode is null/);
+
+    // The writeError is set on the failure path even though the throw
+    // bubbles out of resolveDefaultMode — that's the channel
+    // sessionStore.createSession surfaces to the user.
+    expect(usePreferencesStore.getState().writeError).not.toBeNull();
+  });
 });
 
 // ── Phase 1B Task 4.5: preferences → session integration ───────────────────

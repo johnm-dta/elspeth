@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.app import create_app
 from elspeth.web.config import WebSettings
+from elspeth.web.preferences.service import CorruptPreferencesError
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
 from elspeth.web.sessions.protocol import AuditAccessLogWriteError, StaleComposeStateError
 
@@ -104,6 +105,42 @@ async def test_audit_access_log_write_error_handler_returns_static_500(tmp_path:
     body = json.loads(response.body)
     assert body["error_type"] == "audit_access_log_write_failed"
     assert "hidden db path" not in response.body.decode()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_preferences_error_handler_returns_structured_500(tmp_path: Path) -> None:
+    # ``CorruptPreferencesError`` is the named Tier-1 read-guard exception
+    # the preferences service raises when a stored row violates a closed-
+    # list invariant (default_composer_mode outside ``_VALID_MODES``,
+    # tutorial_completed_at unparseable, etc.). The exception's docstring
+    # (``preferences/service.py``) promises that "the application's
+    # exception handlers (`app.py`) match this specific failure mode for
+    # incident response without string-grepping the message" — but no
+    # handler existed before this test. Without the handler the backend
+    # returned a bare 500 and the frontend swallowed it (App.tsx
+    # bootstrapPrefs().catch(console.error)) leaving a corrupt-row user
+    # with no signal anything was wrong.
+    #
+    # The structured body exposes ``field_name`` (closed enum) and
+    # ``user_id`` (the caller's own id) so the frontend can distinguish
+    # corruption from transient unavailability; ``bad_value`` is
+    # deliberately NOT exposed (could carry arbitrary content).
+    app = create_app(_settings(tmp_path))
+    handler = app.exception_handlers[CorruptPreferencesError]
+
+    response = await handler(
+        cast(Request, object()),
+        CorruptPreferencesError("alice", "bogus_mode", field_name="default_composer_mode"),
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 500
+    body = json.loads(response.body)
+    assert body["error_type"] == "corrupt_preferences"
+    assert body["field_name"] == "default_composer_mode"
+    assert body["user_id"] == "alice"
+    # bad_value deliberately not in body — could be arbitrary content
+    assert "bogus_mode" not in response.body.decode()
 
 
 @pytest.mark.asyncio

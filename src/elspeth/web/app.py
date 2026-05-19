@@ -57,7 +57,7 @@ from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.preferences.routes import create_preferences_router
-from elspeth.web.preferences.service import PreferencesService
+from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
 from elspeth.web.preferences.tutorial_cache import TutorialCache
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
@@ -465,6 +465,39 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
                     "tool_responses_persisted": failed_turn.tool_responses_persisted or 0,
                     "transcript_url": None,
                 },
+            },
+        )
+
+    @app.exception_handler(CorruptPreferencesError)
+    async def _corrupt_preferences_error_handler(_request: Request, exc: CorruptPreferencesError) -> JSONResponse:
+        # Named Tier-1 read-guard exception from
+        # ``preferences/service.py`` — a stored composer-preferences row
+        # violates a closed-list invariant (default_composer_mode outside
+        # ``_VALID_MODES``, tutorial_completed_at unparseable, etc.). The
+        # docstring on the exception promises this handler exists so that
+        # incident-response code can switch on ``error_type`` rather than
+        # string-grep the message; without the handler the failure was
+        # rendered as a bare 500 and the frontend's bootstrap path
+        # silently swallowed it (``App.tsx``'s
+        # ``bootstrapPrefs().catch(console.error)``), leaving a corrupt-
+        # row user with no signal anything was wrong.
+        #
+        # Body contract: ``error_type`` is the discriminator the frontend
+        # store branches on; ``field_name`` (closed enum) and ``user_id``
+        # (caller's own id) help the operator locate the row.
+        # ``detail`` is a static phrase rather than ``str(exc)`` because
+        # the exception's __str__ embeds ``bad_value`` — corrupt content
+        # could carry arbitrary writes from a tampering or fuzzing event
+        # and must not echo to the client. Same redaction pattern as
+        # ``_audit_integrity_error_handler`` and
+        # ``_audit_access_log_write_error_handler``.
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error_type": "corrupt_preferences",
+                "detail": "Saved preferences are corrupt; the composer is using defaults.",
+                "field_name": exc.field_name,
+                "user_id": exc.user_id,
             },
         )
 

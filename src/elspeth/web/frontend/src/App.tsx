@@ -99,7 +99,16 @@ function App() {
   const bootstrapPrefs = usePreferencesStore((s) => s.bootstrap);
   const preferencesLoaded = usePreferencesStore((s) => s.loaded);
   const tutorialCompleted = usePreferencesStore(selectTutorialCompleted);
-  const showTutorial = preferencesLoaded && !tutorialCompleted;
+  const preferencesWriteError = usePreferencesStore((s) => s.writeError);
+  // I5: when bootstrap failed (writeError is set), tutorialCompleted is at
+  // its initial-state default of false — but that's "we don't know," not
+  // "definitively not completed." Showing the tutorial on the failure
+  // branch would re-prompt a returning user who has already completed it
+  // (and who is already seeing a corrupt-preferences alert). Treat the
+  // unknown state as "don't surface tutorial," consistent with the
+  // no-fabrication contract in the store.
+  const showTutorial =
+    preferencesLoaded && !tutorialCompleted && preferencesWriteError === null;
 
   useEffect(() => {
     function handleOpenCatalog() {
@@ -110,15 +119,16 @@ function App() {
     return () => window.removeEventListener(OPEN_CATALOG_EVENT, handleOpenCatalog);
   }, []);
 
-  // Phase 1B: load account-level composer preferences once authenticated.
-  // Failure is non-fatal — the store stays at its initial state (guided,
-  // not-dismissed) so the UI degrades to the default behaviour rather than
-  // blocking the user from creating sessions.
+  // Phase 1B + I5: load account-level composer preferences once authenticated.
+  // bootstrapPrefs() is contracted to NEVER reject — it catches failures
+  // internally, degrades to the guided default, and surfaces the failure
+  // via the store's writeError (rendered by the role="alert" region wired
+  // by Phase 1B-round-2). The earlier .catch(console.error) was silently
+  // swallowing CorruptPreferencesError, the named backend integrity
+  // exception, with no user-visible signal at all.
   useEffect(() => {
     if (!isAuthenticated) return;
-    bootstrapPrefs().catch((err) => {
-      console.error("[preferences] bootstrap failed:", err);
-    });
+    void bootstrapPrefs();
   }, [isAuthenticated, bootstrapPrefs]);
 
   const openSecrets = useCallback(() => setShowSecrets(true), []);

@@ -406,7 +406,7 @@ allow_hits:
 
     '
   expires: null
-- key: web/app.py:R1:create_app:fp=3a67f2bb0ce65155
+- key: web/app.py:R1:create_app:fp=42f3b7f017c68a23
   owner: web-app
   reason: Tier 3 — os.environ.get() for optional WEB_CONCURRENCY env var
   safety: Defaults to "1" when absent
@@ -419,12 +419,12 @@ allow_hits:
     with a 413 before any handler or downstream middleware touches the body. The Pydantic per-field caps (SendMessageRequest.content 64 KiB, _InlineBlobModel.content
     256 KiB) remain the binding contract.
   expires: null
-- key: web/app.py:R1:create_app:fp=858b6e456117d804
+- key: web/app.py:R1:create_app:fp=a68164a66f8e5872
   owner: web-app
   reason: Tier 3 — os.environ.get() for optional ELSPETH_ENV
   safety: Returns None when absent; only used for test guard
   expires: null
-- key: web/app.py:R4:create_app:_prometheus_metrics:fp=94a895a2b67d9708
+- key: web/app.py:R4:create_app:_prometheus_metrics:fp=4189e89a7c3d101b
   owner: web-app
   reason: 'Tier 3 — public ``/metrics`` scrape endpoint. ``generate_latest()``
     walks the global Prometheus REGISTRY and runs collector code we do
@@ -595,7 +595,7 @@ allow_hits:
   reason: YAML navigation — source key may be absent in generated YAML
   safety: Returns None; source path rewriting skipped
   expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=6f321989856b7905
+- key: web/app.py:R2:create_app:_request_id:fp=51bd2beffd0d2d19
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
 

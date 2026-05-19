@@ -181,12 +181,22 @@ at the same conclusion or file a new comment on H2 to document disagreement.
 **Decision.** The declaration-contract dispatcher adopts **audit-complete**
 semantics. On a row that would violate multiple registered contracts'
 invariants, the dispatcher continues iteration past a raised
-`DeclarationContractViolation` (or `PluginContractViolation` subclass, per
-the `PassThroughContractViolation` legacy), collects all violations
-applicable to a single (row, call-site) tuple, and raises
+`DeclarationContractViolation`, collects all violations applicable to a
+single (row, call-site) tuple, and raises
 `AggregateDeclarationContractViolation` when M > 1. Single-violation
 (M = 1) cases raise the original violation unchanged via reference equality
 (`raise violations[0]`).
+
+**Amendment 2026-05-20** (commit `075508b1d`). The original H2 wording
+documented a transitional `PluginContractViolation` catch branch because
+`PassThroughContractViolation` predated this ADR and inherited
+`PluginContractViolation` rather than `DeclarationContractViolation`. That
+legacy is closed: `PassThroughContractViolation` now inherits
+`DeclarationContractViolation` directly and routes through the same single
+DCV catch branch as every other adopter. A new ABC invariant —
+`DeclarationContract.violation_class: ClassVar[type[DeclarationContractViolation]]`
+— is enforced at registration time so future adopters cannot reintroduce
+the legacy pattern. The dispatcher now has exactly one catch branch.
 
 **Rationale (verbatim for audit-trail posterity).**
 

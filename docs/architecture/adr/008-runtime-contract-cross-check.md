@@ -114,9 +114,18 @@ Future ADRs may extend the pattern. This ADR establishes the architectural templ
 
 ### Alternative 3: Do not register in TIER_1_ERRORS — let `on_error` route the violation
 
-**Description:** `PassThroughContractViolation` remains a subclass of `PluginContractViolation` (which is not a TIER_1 error); `on_error` routing absorbs it like any other plugin error.
+**Description:** `PassThroughContractViolation` is treated as an ordinary plugin error (not TIER_1-registered); `on_error` routing absorbs it like any other plugin error.
 
 **Rejected because:** A pass-through-annotation lie is a framework contract violation, not a row-level data error. The static validator was told the transform emits a superset of input; runtime observed otherwise. Routing the row to `on_error` would record a misleading audit entry (implying this was a row-data problem) and continue the pipeline with a mis-annotated transform — future rows would keep producing silently wrong results. TIER_1 registration is the only mechanism that enforces the crash.
+
+**Amendment 2026-05-20** (commit `075508b1d`). The original wording stated
+that `PassThroughContractViolation` "remains a subclass of
+`PluginContractViolation` (which is not a TIER_1 error)" — this was a
+transitional fact at the time of ADR-008 and is no longer accurate.
+`PassThroughContractViolation` now inherits `DeclarationContractViolation`
+(itself a TIER_1 class) under ADR-010's declaration-trust framework. The
+TIER_1 registration is still load-bearing for the rejection rationale; the
+parent-class change does not weaken it.
 
 ### Alternative 4: Cross-check across ALL declarations (`creates_tokens`, schema modes, etc.)
 

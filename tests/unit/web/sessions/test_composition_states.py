@@ -32,8 +32,10 @@ def test_provenance_check_accepts_known_values(engine):
         "convergence_persist",
         "plugin_crash_persist",
         "preflight_persist",
+        "tutorial_normalization",
         "session_seed",
         "session_fork",
+        "interpretation_resolve",
     ):
         with engine.begin() as conn:
             _make_session(conn, session_id=f"s_{provenance}")

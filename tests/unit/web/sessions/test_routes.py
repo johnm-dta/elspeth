@@ -1452,6 +1452,13 @@ class TestIDORCoverageDrift:
             "list_interpretations",
             "opt_out_of_interpretations",
             "opt_out_summary",
+            # Phase 4 hello-world tutorial (commit ca9bc05bd) added the
+            # audit-story endpoint at ``GET /api/sessions/{session_id}
+            # /runs/{run_id}/audit-story``. Like every other session-scoped
+            # route it routes through ``_verify_session_ownership``; this
+            # inventory entry was missed at the original PR open and is
+            # caught now as part of the post-merge residual closeout.
+            "get_run_audit_story",
         }
     )
 

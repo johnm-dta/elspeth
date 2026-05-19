@@ -11,6 +11,7 @@ import type {
 } from "@/types/index";
 import {
   CANONICAL_TUTORIAL_PROMPT,
+  HELLO_WORLD_PENDING_SESSION_TITLE,
   TURN_2_PRIMARY_BUTTON,
   TURN_2_RESTORE_BUTTON,
 } from "./copy";
@@ -96,6 +97,12 @@ export async function buildTutorialDraft(
 ): Promise<TutorialBuildResult> {
   const effectivePrompt = prompt.trim() || CANONICAL_TUTORIAL_PROMPT;
   const session = await api.createSession();
+  // Tag the session as a tutorial session BEFORE any further work so the
+  // backend orphan-cleanup scan (filters by "hello-world (" title prefix)
+  // catches sessions abandoned anywhere between createSession and Turn 6's
+  // final rename. Without this, a tab close at any point in buildTutorialDraft
+  // would leave a "New session" titled session that cleanup never matches.
+  await api.renameSession(session.id, HELLO_WORLD_PENDING_SESSION_TITLE);
   await api.optOutOfInterpretations(session.id);
   const response = await api.sendMessage(session.id, effectivePrompt);
   const pendingProposals = (response.proposals ?? []).filter(
@@ -118,10 +125,19 @@ export async function buildTutorialDraft(
     compositionState,
   );
 
+  // The three post-build fetches and the interpretation-events store refresh
+  // form a *single* atomic state-publish step: every consumer (chat history,
+  // proposals list, composer-preferences trust banner, interpretation-events
+  // store) must be wired to the same backend snapshot before the user is
+  // shown the built tutorial. Any failure here — auth expiry (401), upstream
+  // degradation (5xx), schema drift, or store-refresh rejection — is
+  // surfaced to ``onSubmit``'s error region. The prior implementation wrapped
+  // each fetch in an ``OrFallback`` helper that substituted materially
+  // different state on error, hiding auth and 5xx failures from the user.
   const [messages, proposals, composerPreferences] = await Promise.all([
-    fetchMessagesOrFallback(session.id, response.message),
-    fetchProposalsOrFallback(session.id, response.proposals ?? []),
-    fetchComposerPreferencesOrNull(session.id),
+    api.fetchMessages(session.id),
+    api.fetchCompositionProposals(session.id),
+    api.fetchComposerPreferences(session.id),
   ]);
 
   publishTutorialSession(session, {
@@ -130,10 +146,7 @@ export async function buildTutorialDraft(
     proposals,
     composerPreferences,
   });
-  await useInterpretationEventsStore
-    .getState()
-    .refreshAll(session.id)
-    .catch(() => undefined);
+  await useInterpretationEventsStore.getState().refreshAll(session.id);
 
   return {
     sessionId: session.id,
@@ -185,38 +198,6 @@ function publishTutorialSession(
     errorDetails: null,
     selectedNodeId: null,
   }));
-}
-
-async function fetchMessagesOrFallback(
-  sessionId: string,
-  assistantMessage: ChatMessage,
-): Promise<ChatMessage[]> {
-  try {
-    return await api.fetchMessages(sessionId);
-  } catch {
-    return [assistantMessage];
-  }
-}
-
-async function fetchProposalsOrFallback(
-  sessionId: string,
-  fallback: CompositionProposal[],
-): Promise<CompositionProposal[]> {
-  try {
-    return await api.fetchCompositionProposals(sessionId);
-  } catch {
-    return fallback;
-  }
-}
-
-async function fetchComposerPreferencesOrNull(
-  sessionId: string,
-): Promise<ComposerPreferences | null> {
-  try {
-    return await api.fetchComposerPreferences(sessionId);
-  } catch {
-    return null;
-  }
 }
 
 function formatError(err: unknown): string {

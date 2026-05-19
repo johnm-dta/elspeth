@@ -91,6 +91,13 @@ CompositionStateProvenance = Literal[
     "convergence_persist",
     "plugin_crash_persist",
     "preflight_persist",
+    # System-initiated: pre-execution template normalization for the
+    # first-run tutorial pipeline (replaces a previous misuse of
+    # ``convergence_persist`` which is reserved for the validator-failure
+    # writer in routes.py). See ``models.py`` CHECK constraint and
+    # spec amendment in
+    # ``docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md``.
+    "tutorial_normalization",
     "session_seed",
     "session_fork",
     "interpretation_resolve",

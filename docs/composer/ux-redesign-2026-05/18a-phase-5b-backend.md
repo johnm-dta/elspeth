@@ -3311,3 +3311,37 @@ operator before committing to an interpretation:
    `set_pipeline` or `remove_node` that could remove it. The Task 5
    handler's `_assert_affected_llm_node` is the structural enforcement
    of this property.
+
+---
+
+## Addendum (post-merge, Phase 4 hello-world tutorial residual): closed-enum extension to `tutorial_normalization`
+
+This addendum records the eighth value added to the `composition_states.provenance` closed enum, following the same governance posture used to add `interpretation_resolve` above (CHECK + Literal paired extension + Filigree ticket + spec amendment + integration test). It is filed here because this document is the established precedent for documenting closed-enum extensions to that constraint.
+
+### Writer path
+
+`elspeth.web.composer.tutorial_service._normalise_current_tutorial_state_for_execution` is the sole writer. The function runs at the entry point of every live (non-cache-replay) Phase 4 hello-world tutorial run, immediately before `_run_live_tutorial`. It inspects the user's current composition state for `llm`-plugin transform nodes whose `prompt_template` references `{{ field }}` bare (without the `row.` namespace prefix) and rewrites the placeholders to `{{ row.field }}`. The rewrite is non-load-bearing in the runtime sense — the LLM transform plugin would still accept either form — but it produces canonical prompt text that round-trips identically through `stable_hash`, which the audit-row `resolved_prompt_template_hash` relies on for state-version diffing.
+
+When `_normalise_bare_required_field_templates` reports `changed=True`, the function calls `save_composition_state(... provenance="tutorial_normalization")` with the rewritten nodes, the original source/edges/outputs/metadata, and a composer-meta header recording `tutorial_runtime_normalized=True`, `tutorial_normalization="bare_required_field_templates"`, and the originating `state_id`. Telemetry counter `composer.tutorial.runtime_normalization_total{kind="bare_required_field_templates"}` is incremented in the same code path.
+
+### Audit semantics
+
+`tutorial_normalization` is a SYSTEM-INITIATED writer, sibling to `convergence_persist` / `plugin_crash_persist` / `preflight_persist` / `session_seed`. The distinguishing semantics versus those neighbouring values:
+
+- **vs. `convergence_persist`** — `convergence_persist` is reserved for the routes.py `_handle_convergence_error` writer, which persists state after a validator-failure recovery. `tutorial_normalization` runs at the START of a tutorial execution, not after a failure; it is a deliberate canonicalisation, not a recovery. Conflating the two would obscure the validator failure rate in the audit history.
+
+- **vs. `tool_call`** — `tool_call` is user-initiated (via the LLM tool call surface). `tutorial_normalization` is system-initiated and never user-visible (the user did not request the rewrite).
+
+- **vs. `session_seed`** — `session_seed` writes the initial empty/fresh state at session creation or fork. `tutorial_normalization` writes a non-empty rewrite of an existing state.
+
+- **vs. `interpretation_resolve`** — Both rewrite an existing composition state mid-flow, but `interpretation_resolve` is user-initiated (the user resolves a surfaced interpretation event) and `tutorial_normalization` is system-initiated (no user gesture triggers it).
+
+### Deploy constraint
+
+Same as the precedent above. This enum extension requires the staging session DB delete (per `project_db_migration_policy`). `SESSION_SCHEMA_EPOCH` bumps `7 → 8`; the staging operator runs the recreation runbook (`docs/runbooks/staging-session-db-recreation.md`) after deploy. Production sequencing remains AFTER Phase 9's migration runner.
+
+### Governance bundle
+
+- **CHECK + Literal paired extension** — `web/sessions/models.py::ck_composition_states_provenance` and `web/sessions/protocol.py::CompositionStateProvenance`. The `test_composition_state_provenance_python_and_sql_enums_agree` test in `tests/unit/web/sessions/test_routes.py` pins them equal.
+- **Integration / unit test** — `tests/unit/web/composer/test_tutorial_service.py::test_normalise_current_tutorial_state_persists_tutorial_normalization_provenance` drives the writer via a stub session-service and asserts the captured `provenance` kwarg. The DB-level CHECK accept path is covered by `tests/unit/web/sessions/test_composition_states.py::test_provenance_check_accepts_known_values`.
+- **Filigree ticket** — filed at PR-open time; cited in the commit body (this is the residual close-out of the post-`ca9bc05bd` PR review's I7 finding).

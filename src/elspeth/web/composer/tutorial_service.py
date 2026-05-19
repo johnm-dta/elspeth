@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import json
 import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,6 +19,7 @@ import yaml
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
 
+from elspeth.contracts import NodeType
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
@@ -28,11 +31,13 @@ from elspeth.core.landscape.schema import (
     rows_table,
     runs_table,
 )
-from elspeth.core.landscape.write_repository import LandscapeWriteRepository
+from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
 from elspeth.plugins.infrastructure.discovery import discover_all_plugins
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialOrphanCleanupResponse, TutorialRunOutput, TutorialRunResponse
+from elspeth.web.composer.tutorial_telemetry import record_tutorial_runtime_normalization
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.outputs import path_or_uri_to_filesystem_path
 from elspeth.web.execution.protocol import ExecutionService
@@ -104,7 +109,7 @@ async def run_tutorial_pipeline(
     prefs = await preferences_service.get_composer_preferences(user.user_id)
     effective_prompt = prompt.strip() or CANONICAL_SEED_PROMPT
     is_canonical_prompt = effective_prompt == CANONICAL_SEED_PROMPT
-    model_id = _tutorial_model_id(settings)
+    model_id = tutorial_model_id(settings)
 
     bypass_reason: str | None = None
     if prefs.tutorial_completed_at is not None:
@@ -115,13 +120,23 @@ async def run_tutorial_pipeline(
     if bypass_reason is None and is_canonical_prompt:
         cache_entry = cache.lookup(CANONICAL_SEED_PROMPT, model_id)
         if cache_entry is not None:
-            return await _replay_cache_entry(
-                session_service=session_service,
-                settings=settings,
-                session_id=session_uuid,
-                cache_entry=cache_entry,
-                cache_key=tutorial_cache_key(CANONICAL_SEED_PROMPT, model_id),
-            )
+            # Verify the user's current composition state has the same plugin
+            # topology as the cached tutorial pipeline. Without this gate, a
+            # client posting the canonical prompt against an unrelated or
+            # edited session would attach cached pipeline_yaml + rows to a
+            # state_id pointing at a structurally different pipeline — a
+            # Tier-1 audit lie. Mismatch falls through to live compose so the
+            # synthesised audit faithfully describes whatever runs.
+            current_state = await session_service.get_current_state(session_uuid)
+            if current_state is not None and _state_matches_cached_topology(current_state, cache_entry.pipeline_yaml):
+                return await _replay_cache_entry(
+                    session_service=session_service,
+                    settings=settings,
+                    session_id=session_uuid,
+                    current_state=current_state,
+                    cache_entry=cache_entry,
+                    cache_key=tutorial_cache_key(CANONICAL_SEED_PROMPT, model_id),
+                )
 
     await _normalise_current_tutorial_state_for_execution(
         session_service=session_service,
@@ -174,8 +189,9 @@ async def _normalise_current_tutorial_state_for_execution(
             validation_errors=current_state.validation_errors,
             composer_meta=composer_meta,
         ),
-        provenance="convergence_persist",
+        provenance="tutorial_normalization",
     )
+    record_tutorial_runtime_normalization("bare_required_field_templates")
 
 
 def _normalise_bare_required_field_templates(
@@ -247,22 +263,24 @@ async def _replay_cache_entry(
     session_service: SessionServiceProtocol,
     settings: WebSettings,
     session_id: Any,
+    current_state: Any,
     cache_entry: TutorialCacheEntry,
     cache_key: str,
 ) -> TutorialRunResponse:
-    current_state = await session_service.get_current_state(session_id)
-    if current_state is None:
-        raise HTTPException(
-            status_code=409,
-            detail={"error_type": "tutorial_state_missing", "detail": "The tutorial session has no composition state to attach a run to."},
-        )
+    """Project a cache hit into a synthesised Landscape run.
 
+    The caller MUST have already verified
+    ``_state_matches_cached_topology(current_state, cache_entry.pipeline_yaml)``
+    is True. This function attaches the cached ``pipeline_yaml`` and rows to
+    ``current_state.id``; that attachment is only audit-honest when the
+    state and cache describe the same plugin topology.
+    """
     run_record = await session_service.create_run(
         session_id=session_id,
         state_id=current_state.id,
         pipeline_yaml=cache_entry.pipeline_yaml,
     )
-    plugin_versions = _plugin_versions_from_pipeline_yaml(cache_entry.pipeline_yaml)
+    node_specs = _node_specs_from_pipeline_yaml(cache_entry.pipeline_yaml)
 
     def _write_landscape_run() -> str:
         with LandscapeDB.from_url(
@@ -274,7 +292,7 @@ async def _replay_cache_entry(
                 rows=cache_entry.rows,
                 source_data_hash=cache_entry.source_data_hash,
                 llm_call_count=0,
-                plugin_versions=plugin_versions,
+                node_specs=node_specs,
                 started_at=run_record.started_at,
                 metadata={
                     "seeded_from_cache": True,
@@ -302,7 +320,9 @@ async def _replay_cache_entry(
     return TutorialRunResponse(
         run_id=str(run_record.id),
         output=TutorialRunOutput(
-            rows=[dict(row) for row in cache_entry.rows],
+            # ``TutorialRunOutput.model_config`` is strict; list-to-tuple
+            # coercion is disabled, so build the tuple explicitly.
+            rows=tuple(dict(row) for row in cache_entry.rows),
             source_data_hash=cache_entry.source_data_hash,
         ),
         seeded_from_cache=True,
@@ -378,6 +398,7 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
         conn.execute(
             update(runs_table)
             .where(runs_table.c.run_id == landscape_run_id)
+            # Tier-1 contract assertion: live runs are non-cache-replay identity.
             .values(llm_call_count=llm_call_count, seeded_from_cache=False, cache_key=None)
         )
         source_hashes = tuple(
@@ -408,7 +429,7 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
         run_id=run_id,
     )
     return _LiveTutorialProjection(
-        output=TutorialRunOutput(rows=rows, source_data_hash=source_data_hash),
+        output=TutorialRunOutput(rows=tuple(rows), source_data_hash=source_data_hash),
         llm_call_count=llm_call_count,
     )
 
@@ -435,8 +456,27 @@ def _count_calls_for_run(conn: Any, landscape_run_id: str) -> int:
     return int(state_call_count) + int(operation_call_count)
 
 
+_ROW_FORMAT_SUFFIXES = frozenset({".csv", ".tsv", ".jsonl", ".ndjson", ".json"})
+
+
 def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id: str) -> list[dict[str, Any]]:
+    """Project the rows produced by a tutorial run from its file artifacts.
+
+    Three distinct Tier-1 failure modes are surfaced separately rather than
+    collapsed into one "empty result" message:
+
+    1. **Corrupt row-format artifact** — ``_parse_rows_file`` raises
+       ``TutorialRunIntegrityError`` directly. Caller never sees the
+       ambiguous empty list.
+    2. **No row-bearing artifact** — every file artifact has a suffix outside
+       ``_ROW_FORMAT_SUFFIXES`` (e.g. only ``.txt`` or ``.parquet`` files
+       were emitted). Distinct error names the recognised formats so the
+       operator can fix the sink configuration or extend the parser.
+    3. **All row-bearing artifacts yielded zero rows** — distinct error makes
+       it clear the parse succeeded but the pipeline produced no output rows.
+    """
     allowed = allowed_sink_directories(str(data_dir))
+    saw_row_format = False
     for artifact in artifact_rows:
         if artifact.artifact_type != "file":
             continue
@@ -449,13 +489,46 @@ def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id
         if not resolved.exists():
             raise TutorialRunIntegrityError(f"Tutorial run {run_id} artifact {artifact.artifact_id!r} is missing from disk")
         rows = _parse_rows_file(resolved)
+        if rows is None:
+            # Non-row-bearing artifact (auxiliary debug file, parquet we
+            # don't read, etc.). Skip cleanly — distinct from "this row
+            # artifact parsed empty".
+            continue
+        saw_row_format = True
         if rows:
             return rows
-    raise TutorialRunIntegrityError(f"Tutorial run {run_id} has no readable file artifact with rows")
+    if saw_row_format:
+        raise TutorialRunIntegrityError(
+            f"Tutorial run {run_id} row-bearing artifacts yielded zero rows after parsing — the pipeline succeeded but produced no output"
+        )
+    raise TutorialRunIntegrityError(
+        f"Tutorial run {run_id}: no row-bearing artifact found (recognised formats: {sorted(_ROW_FORMAT_SUFFIXES)})"
+    )
 
 
-def _parse_rows_file(path: Path) -> list[dict[str, Any]]:
+def _parse_rows_file(path: Path) -> list[dict[str, Any]] | None:
+    """Parse a file artifact as a row sequence.
+
+    Returns:
+        ``list[dict[str, Any]]`` — rows successfully parsed from a recognised
+            row format (the list may be empty: a legitimate "header-only
+            CSV" or "empty JSON list" yields zero rows).
+        ``None`` — the file's suffix is not in ``_ROW_FORMAT_SUFFIXES``. The
+            caller should skip this artifact and try the next; distinct
+            from "this row artifact yielded zero rows".
+
+    Raises:
+        TutorialRunIntegrityError: the file IS a row-format artifact but its
+            contents are structurally corrupt (non-object JSONL row, bare
+            scalar/null at the top level of a JSON document, JSON object
+            without a ``rows: object[]`` field, etc.). Corruption in a
+            Tier-1 audit artifact must crash — silently coalescing to an
+            empty list would shadow the corruption behind the misleading
+            ``"no row-bearing artifact"`` projection message.
+    """
     suffix = path.suffix.lower()
+    if suffix not in _ROW_FORMAT_SUFFIXES:
+        return None
     if suffix == ".csv":
         with path.open(newline="", encoding="utf-8") as f:
             return [dict(row) for row in csv.DictReader(f)]
@@ -473,18 +546,21 @@ def _parse_rows_file(path: Path) -> list[dict[str, Any]]:
                     raise TutorialRunIntegrityError(f"Tutorial artifact {path} contains a non-object JSONL row")
                 rows.append(dict(value))
         return rows
-    if suffix == ".json":
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if type(value) is list:
-            if not all(type(item) is dict for item in value):
-                raise TutorialRunIntegrityError(f"Tutorial artifact {path} JSON list contains a non-object row")
-            return [dict(item) for item in value]
-        if type(value) is dict:
-            rows_value = value["rows"] if "rows" in value else None
-            if type(rows_value) is not list or not all(type(item) is dict for item in rows_value):
-                raise TutorialRunIntegrityError(f"Tutorial artifact {path} JSON object must contain rows: object[]")
-            return [dict(item) for item in rows_value]
-    return []
+    # suffix == ".json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if type(value) is list:
+        if not all(type(item) is dict for item in value):
+            raise TutorialRunIntegrityError(f"Tutorial artifact {path} JSON list contains a non-object row")
+        return [dict(item) for item in value]
+    if type(value) is dict:
+        rows_value = value["rows"] if "rows" in value else None
+        if type(rows_value) is not list or not all(type(item) is dict for item in rows_value):
+            raise TutorialRunIntegrityError(f"Tutorial artifact {path} JSON object must contain rows: object[]")
+        return [dict(item) for item in rows_value]
+    raise TutorialRunIntegrityError(
+        f"Tutorial artifact {path} JSON top-level must be a list of objects or an object with a "
+        f"'rows: object[]' field; got {type(value).__name__}"
+    )
 
 
 async def _store_successful_live_projection(
@@ -504,7 +580,10 @@ async def _store_successful_live_projection(
             canonical_prompt=CANONICAL_SEED_PROMPT,
             model_id=model_id,
             cached_at=datetime.now(UTC),
-            rows=output.rows,
+            # TutorialRunOutput.rows is a tuple (frozen-model immutability);
+            # TutorialCacheEntry.rows is typed list[dict] for JSON round-trip.
+            # Explicit conversion at the boundary keeps each type honest.
+            rows=list(output.rows),
             source_data_hash=output.source_data_hash,
             llm_call_count=llm_call_count,
             pipeline_yaml=run_record.pipeline_yaml,
@@ -524,36 +603,179 @@ def _all_rows_succeeded(run_record: RunRecord) -> bool:
     )
 
 
-def _plugin_versions_from_pipeline_yaml(pipeline_yaml: str) -> dict[str, str]:
+def _node_specs_from_pipeline_yaml(pipeline_yaml: str) -> tuple[SynthesisedNodeSpec, ...]:
+    """Build the ordered Tier-1 audit topology for a cached tutorial pipeline.
+
+    One ``SynthesisedNodeSpec`` per YAML occurrence — plugin reuse (e.g. two
+    ``llm`` transforms, csv source plus csv sink) must produce one node row
+    per occurrence, with ``node_type`` taken from the YAML's source / transforms
+    / sinks key, not derived from list position.
+    """
     parsed = yaml.safe_load(pipeline_yaml)
     if type(parsed) is not dict:
         raise TutorialRunIntegrityError("Cached tutorial pipeline YAML must parse to an object")
-    plugin_names = _plugin_names_from_pipeline_dict(parsed)
-    if not plugin_names:
+    roles = _plugin_nodes_from_pipeline_dict(parsed)
+    if not roles:
         raise TutorialRunIntegrityError("Cached tutorial pipeline YAML contains no plugin nodes")
     versions = _discovered_plugin_versions()
-    missing = [name for name in plugin_names if name not in versions]
+    missing = sorted({name for _, name in roles if name not in versions})
     if missing:
         raise TutorialRunIntegrityError(f"Cached tutorial pipeline YAML references unknown plugins: {missing!r}")
-    return {name: versions[name] for name in plugin_names}
+    return tuple(SynthesisedNodeSpec(node_type=node_type, plugin_name=name, plugin_version=versions[name]) for node_type, name in roles)
 
 
-def _plugin_names_from_pipeline_dict(doc: Mapping[str, Any]) -> tuple[str, ...]:
-    names: list[str] = []
+def _plugin_nodes_from_pipeline_dict(doc: Mapping[str, Any]) -> tuple[tuple[NodeType, str], ...]:
+    """Return ``(node_type, plugin_name)`` pairs in YAML order, preserving duplicates.
+
+    Tier-1 audit topology — the ``nodes`` table — must reflect one row per
+    YAML node occurrence. Deduplicating by plugin name (the prior shape) made
+    plugin reuse invisible and shifted role assignment onto list-index
+    inference. Duplicates are preserved here; the role is carried explicitly.
+
+    Schema accepted (the production composer YAML shape emitted by
+    ``yaml_generator.generate_pipeline_dict`` and consumed by
+    ``core.config`` at ``elspeth/core/config.py:1798``):
+
+    - ``source``: single dict with a ``plugin`` key.
+    - ``transforms``: **list[dict]** of plugin entries (each with ``plugin``).
+    - ``aggregations``: **list[dict]** of plugin entries (each with ``plugin``).
+    - ``sinks``: dict keyed by sink name, values containing ``plugin``.
+
+    ``gates`` and ``coalesce`` are pipeline routing primitives without plugin
+    identity (yaml_generator.py:110, 159) — they cannot be faithfully
+    encoded in a (NodeType, plugin_name) topology row and the tutorial
+    canonical pipeline never generates them. If the cached YAML contains
+    either, raise rather than emit a half-truth audit.
+    """
+    roles: list[tuple[NodeType, str]] = []
     source = doc["source"] if "source" in doc else None
     if type(source) is dict and "plugin" in source:
-        names.append(_require_plugin_name(source["plugin"]))
-    transforms = doc["transforms"] if "transforms" in doc else {}
-    if type(transforms) is dict:
-        for transform in transforms.values():
-            if type(transform) is dict and "plugin" in transform:
-                names.append(_require_plugin_name(transform["plugin"]))
+        roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    _collect_list_form_plugins(doc, "transforms", NodeType.TRANSFORM, roles)
+    _collect_list_form_plugins(doc, "aggregations", NodeType.AGGREGATION, roles)
+    for routing_section in ("gates", "coalesce"):
+        if routing_section in doc and doc[routing_section]:
+            raise TutorialRunIntegrityError(
+                f"Cached tutorial pipeline YAML contains {routing_section!r} — "
+                "routing primitives without plugin identity cannot be encoded "
+                "into the synthesised Tier-1 audit topology; the tutorial canonical "
+                "pipeline never generates them"
+            )
     sinks = doc["sinks"] if "sinks" in doc else {}
     if type(sinks) is dict:
         for sink in sinks.values():
             if type(sink) is dict and "plugin" in sink:
-                names.append(_require_plugin_name(sink["plugin"]))
-    return tuple(dict.fromkeys(names))
+                roles.append((NodeType.SINK, _require_plugin_name(sink["plugin"])))
+    return tuple(roles)
+
+
+def _plugin_nodes_from_composition_state(record: Any) -> tuple[tuple[NodeType, str], ...]:
+    """Extract the plugin-node topology from a ``CompositionStateRecord``.
+
+    Mirrors the ordering of ``yaml_generator.generate_pipeline_dict``:
+    source first, then every ``transform``-typed node in ``record.nodes``
+    list order, then every ``aggregation``-typed node in list order, then
+    ``record.outputs`` (sinks) in list order. The sequence is the same one
+    ``_plugin_nodes_from_pipeline_dict`` extracts from the rendered YAML,
+    so the two are directly comparable for cache-replay state matching.
+
+    Gate and coalesce nodes are routing primitives without plugin identity
+    (consistent with the YAML parser policy) and raise rather than emit a
+    half-truth topology row.
+
+    ``record`` is typed as ``Any`` to avoid a hard L3 backward import on
+    ``CompositionStateRecord`` from sessions/protocol; the attribute
+    contract is enforced by ``__post_init__`` on the dataclass.
+    """
+    # ``CompositionStateRecord`` is a frozen dataclass whose source/nodes/
+    # outputs fields are typed ``Mapping[str, Any] | None`` (or
+    # ``Sequence[Mapping[str, Any]] | None``) and deep-frozen by
+    # ``__post_init__``. Trust the contract — no defensive isinstance at a
+    # Tier-1 internal read boundary. If the record was constructed with a
+    # non-Mapping where a Mapping was promised, that is a contract violation
+    # the dataclass constructor should have rejected; letting a missing-key
+    # KeyError or non-subscriptable TypeError propagate here surfaces the
+    # writer bug rather than masking it.
+    roles: list[tuple[NodeType, str]] = []
+    source = record.source
+    if source is not None and "plugin" in source:
+        roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    nodes = record.nodes if record.nodes is not None else ()
+    transform_entries: list[Mapping[str, Any]] = []
+    aggregation_entries: list[Mapping[str, Any]] = []
+    for node in nodes:
+        node_type = node["node_type"] if "node_type" in node else None
+        if node_type == "transform":
+            transform_entries.append(node)
+        elif node_type == "aggregation":
+            aggregation_entries.append(node)
+        elif node_type in ("gate", "coalesce"):
+            raise TutorialRunIntegrityError(
+                f"Composition state contains {node_type!r} node — routing primitives "
+                "without plugin identity cannot participate in synthesised Tier-1 "
+                "audit topology comparisons"
+            )
+    for entry in transform_entries:
+        if "plugin" in entry:
+            roles.append((NodeType.TRANSFORM, _require_plugin_name(entry["plugin"])))
+    for entry in aggregation_entries:
+        if "plugin" in entry:
+            roles.append((NodeType.AGGREGATION, _require_plugin_name(entry["plugin"])))
+    outputs = record.outputs if record.outputs is not None else ()
+    for output in outputs:
+        if "plugin" in output:
+            roles.append((NodeType.SINK, _require_plugin_name(output["plugin"])))
+    return tuple(roles)
+
+
+def _state_matches_cached_topology(record: Any, cached_pipeline_yaml: str) -> bool:
+    """Return True when the state's plugin topology equals the cache's.
+
+    Tier-1 audit invariant: cache replay attaches cached pipeline_yaml and
+    rows to the user's current ``state_id``. If the state and cached
+    pipeline describe different plugin topologies, that attachment is an
+    audit lie. This check gates the replay path; mismatches fall through to
+    live compose so the audit faithfully reflects what was actually run.
+
+    Comparison is by ``(NodeType, plugin_name)`` sequence — option values,
+    node names, and YAML formatting do not matter. The LLM composer is
+    non-deterministic in those surface details but the canonical pipeline
+    topology should be stable for the cache hit to be safe.
+    """
+    cached_doc = yaml.safe_load(cached_pipeline_yaml)
+    if type(cached_doc) is not dict:
+        raise TutorialRunIntegrityError("Cached tutorial pipeline YAML must parse to an object for topology comparison")
+    cached_topology = _plugin_nodes_from_pipeline_dict(cached_doc)
+    state_topology = _plugin_nodes_from_composition_state(record)
+    return state_topology == cached_topology
+
+
+def _collect_list_form_plugins(
+    doc: Mapping[str, Any],
+    section: str,
+    node_type: NodeType,
+    roles: list[tuple[NodeType, str]],
+) -> None:
+    """Append ``(node_type, plugin_name)`` for each entry in a list-form section.
+
+    Production composer YAML emits ``transforms`` and ``aggregations`` as
+    ``list[dict]`` (yaml_generator.py:86, 126). The engine config loader at
+    ``core/config.py:1798, 1811`` requires list-form. Per No Legacy Code
+    Policy, dict-form is rejected — it is not a production-reachable
+    contract.
+    """
+    if section not in doc:
+        return
+    entries = doc[section]
+    if not entries:
+        return
+    if type(entries) is not list:
+        raise TutorialRunIntegrityError(
+            f"Cached tutorial pipeline YAML {section!r} must be a list of plugin entries, got {type(entries).__name__}"
+        )
+    for entry in entries:
+        if type(entry) is dict and "plugin" in entry:
+            roles.append((node_type, _require_plugin_name(entry["plugin"])))
 
 
 def _require_plugin_name(value: object) -> str:
@@ -562,6 +784,7 @@ def _require_plugin_name(value: object) -> str:
     return value
 
 
+@cache  # Process-scoped: plugin discovery is idempotent within a process.
 def _discovered_plugin_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
     discovered = discover_all_plugins()
@@ -576,8 +799,44 @@ def _discovered_plugin_versions() -> dict[str, str]:
     return versions
 
 
-def _tutorial_model_id(settings: WebSettings) -> str:
-    return settings.composer_model
+def tutorial_model_id(settings: WebSettings) -> str:
+    """Build the compound tutorial-cache identifier.
+
+    The cache key (``SHA-256(canonical_prompt + ":" + model_id)``) invalidates
+    on the operator-controlled inputs that determine the composer's choice of
+    pipeline shape and transform model. Three such inputs are folded into the
+    returned identifier; any one change forces a fresh live composition.
+
+    Covered (automatic invalidation):
+
+    1. ``settings.composer_model`` — the LLM that authors the pipeline YAML.
+    2. Core composer skill markdown (``pipeline_composer.md``) shipped with
+       the package — biases the composer's plugin selection and the
+       transform model named inside the generated pipeline YAML.
+    3. Optional deployment skill overlay at
+       ``{data_dir}/skills/pipeline_composer.md`` — operator-supplied
+       guidance that further shapes composer behaviour.
+
+    Out of scope (operator clears ``{data_dir}/tutorial_cache/`` manually
+    when one of these changes — same "operator deletes the artifact"
+    pattern as elsewhere in the project):
+
+    - LLM non-determinism. Same composer_model + same skill may produce a
+      different ``pipeline_yaml`` on re-compose; the cache freezes whichever
+      pipeline was authored first. The Tier-1 audit replay remains internally
+      consistent because the cached ``pipeline_yaml`` (with its embedded
+      transform model) is what the synthesised run records.
+    - Plugin pack defaults (``packs/llm/defaults.yaml``) and profile YAMLs.
+      These can bias the composer's transform-model choice without changing
+      the three keyed inputs. Cache replay remains attribution-correct (the
+      cached YAML's embedded model is what's recorded) but the canonical
+      experience may be older than the operator expects until the cache is
+      cleared.
+    """
+    _, core_skill_hash = load_skill_with_hash("pipeline_composer")
+    deployment_overlay = load_deployment_skill("pipeline_composer", settings.data_dir)
+    deployment_hash = hashlib.sha256(deployment_overlay.encode("utf-8")).hexdigest()
+    return f"composer={settings.composer_model}|skill={core_skill_hash}|deployment_skill={deployment_hash}"
 
 
 async def cleanup_tutorial_orphans(

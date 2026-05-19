@@ -67,7 +67,10 @@ allowed_dict_patterns:
   # sink artifacts. The schema is intentionally arbitrary and is carried in
   # typed response/cache containers at the boundary.
   - "src/elspeth/web/composer/tutorial_service.py:_rows_from_artifacts:return (list)"
-  - "src/elspeth/web/composer/tutorial_service.py:_parse_rows_file:return (list)"
+  # ``_parse_rows_file`` returns ``list[dict] | None`` after the C3 fix
+  # (None = non-row-format suffix; caller skips). The pre-C3 entry for
+  # ``return (list)`` no longer matches the checker's context and was
+  # pruned during the post-ca9bc05bd residual closeout.
 
   # Sink plugins - row output (batch writes)
   - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink._ensure_table:row"

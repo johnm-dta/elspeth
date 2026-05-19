@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import update
 
+from elspeth.contracts import NodeType
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.schema import rows_table
-from elspeth.core.landscape.write_repository import LandscapeWriteRepository
+from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryService
 from tests.fixtures.landscape import make_landscape_db
 
@@ -22,7 +23,10 @@ def test_audit_story_reads_real_landscape_rows() -> None:
         rows=[{"url": "ato.gov.au", "rating": 5}],
         source_data_hash="a7f3e2cached",
         llm_call_count=0,
-        plugin_versions={"inline_blob": "1.0", "tutorial_summary": "1.0"},
+        node_specs=[
+            SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
+            SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="tutorial_summary", plugin_version="1.0"),
+        ],
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
         metadata={"seeded_from_cache": True, "cache_key": "b" * 64},
     )
@@ -53,7 +57,10 @@ def test_audit_story_aggregates_multiple_row_source_hashes() -> None:
         rows=[{"url": "ato.gov.au"}, {"url": "data.gov.au"}],
         source_data_hash="initial",
         llm_call_count=0,
-        plugin_versions={"inline_blob": "1.0", "tutorial_summary": "1.0"},
+        node_specs=[
+            SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
+            SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="tutorial_summary", plugin_version="1.0"),
+        ],
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
         metadata={"seeded_from_cache": False, "cache_key": "c" * 64},
     )

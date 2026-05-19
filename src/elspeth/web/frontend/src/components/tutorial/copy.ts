@@ -14,6 +14,13 @@ export const TURN_6_PRIMARY_BUTTON = "Save and go";
 
 export const HELLO_WORLD_SESSION_TITLE = "hello-world (cool government pages)";
 
+// Set immediately after createSession in buildTutorialDraft so the backend
+// orphan-cleanup scan (which filters by the "hello-world (" prefix) catches
+// sessions abandoned mid-tutorial. Without this tag, a user leaving any
+// time before Turn 6's rename leaves a "New session" titled session that
+// the cleanup never matches.
+export const HELLO_WORLD_PENDING_SESSION_TITLE = "hello-world (pending)";
+
 export const WELCOME_LAYERS = [
   {
     label: "Sense",

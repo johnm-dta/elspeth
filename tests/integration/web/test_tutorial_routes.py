@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
+from elspeth.web.composer.tutorial_service import tutorial_model_id
 from elspeth.web.config import WebSettings
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import PreferencesService
@@ -79,14 +80,33 @@ def _app(tmp_path: Path) -> FastAPI:
     return app
 
 
-def _seed_session_with_state(app: FastAPI) -> UUID:
+def _seed_session_with_state(app: FastAPI, *, match_canonical_cache: bool = False) -> UUID:
+    """Seed a session with a composition state.
+
+    When ``match_canonical_cache`` is True, the state's source/transforms/
+    outputs topology mirrors the canonical cached tutorial pipeline. The
+    cache-replay path requires structural match before attaching cached
+    pipeline_yaml + rows to the session's state_id; an unmatched state
+    causes fall-through to live compose (per the P2-2 fix in
+    ``_state_matches_cached_topology``).
+    """
     session_id = uuid4()
     with app.state.session_engine.begin() as conn:
         _make_session(conn, session_id=str(session_id), user_id="alice")
+    if match_canonical_cache:
+        state_data = CompositionStateData(
+            source={"plugin": "null"},
+            nodes=[
+                {"id": "keep", "node_type": "transform", "plugin": "passthrough"},
+            ],
+            outputs=[{"name": "out", "plugin": "json"}],
+        )
+    else:
+        state_data = CompositionStateData()
     asyncio.run(
         app.state.session_service.save_composition_state(
             session_id,
-            CompositionStateData(),
+            state_data,
             provenance="session_seed",
         )
     )
@@ -94,7 +114,10 @@ def _seed_session_with_state(app: FastAPI) -> UUID:
 
 
 def _seed_canonical_cache(app: FastAPI) -> str:
-    model_id = app.state.settings.composer_model
+    # Use the same compound model_id helper the production path uses. Going
+    # through ``settings.composer_model`` directly would seed at a key the
+    # service no longer looks up, masking the real cache-hit path.
+    model_id = tutorial_model_id(app.state.settings)
     key = tutorial_cache_key(CANONICAL_SEED_PROMPT, model_id)
     app.state.tutorial_cache.store(
         TutorialCacheEntry(
@@ -104,7 +127,18 @@ def _seed_canonical_cache(app: FastAPI) -> str:
             rows=[{"url": "ato.gov.au", "score": 5, "rationale": "clear"}],
             source_data_hash="a7f3e2cached",
             llm_call_count=5,
-            pipeline_yaml=("source:\n  plugin: 'null'\ntransforms:\n  keep:\n    plugin: passthrough\nsinks:\n  out:\n    plugin: json\n"),
+            # Production composer YAML shape (yaml_generator.py): source is
+            # a single dict, transforms is list[dict], sinks is dict-keyed.
+            pipeline_yaml=(
+                "source:\n  plugin: 'null'\n"
+                "transforms:\n"
+                "  - name: keep\n"
+                "    plugin: passthrough\n"
+                "    input: source\n"
+                "    on_success: out\n"
+                "    on_error: abort\n"
+                "sinks:\n  out:\n    plugin: json\n"
+            ),
         )
     )
     return key
@@ -113,7 +147,9 @@ def _seed_canonical_cache(app: FastAPI) -> str:
 def test_post_run_cache_hit_creates_current_session_run_and_audit_story(tmp_path: Path) -> None:
     app = _app(tmp_path)
     cache_key = _seed_canonical_cache(app)
-    session_id = _seed_session_with_state(app)
+    # State topology must match the cached pipeline for the P2-2 guard to
+    # permit replay (otherwise cache hit falls through to live).
+    session_id = _seed_session_with_state(app, match_canonical_cache=True)
     client = TestClient(app)
 
     response = client.post(
@@ -135,6 +171,62 @@ def test_post_run_cache_hit_creates_current_session_run_and_audit_story(tmp_path
     assert story_body["llm_call_count"] == 0
     assert story_body["seeded_from_cache"] is True
     assert story_body["cache_key"] == cache_key
+
+
+def test_post_run_cache_topology_mismatch_does_not_replay_cache(tmp_path: Path) -> None:
+    """P2-2: cache hit with state topology mismatch must NOT attach cached output to the wrong state.
+
+    A client posts the canonical prompt against a session whose composition
+    state describes a different pipeline (csv source, no transforms, csv sink)
+    than the cached tutorial (null source, passthrough transform, json sink).
+    The cache lookup hits, but the topology check refuses replay; the request
+    falls through to the live path. The Tier-1 invariant: a 200 cache-replay
+    response (``seeded_from_cache=True``) MUST NOT be returned in this case
+    — that would be the audit lie the P2-2 review found.
+    """
+    app = _app(tmp_path)
+    _seed_canonical_cache(app)
+    # Seed a state whose plugin topology disagrees with the cached pipeline.
+    session_id = uuid4()
+    with app.state.session_engine.begin() as conn:
+        _make_session(conn, session_id=str(session_id), user_id="alice")
+    asyncio.run(
+        app.state.session_service.save_composition_state(
+            session_id,
+            CompositionStateData(
+                source={"plugin": "csv"},
+                nodes=[],
+                outputs=[{"name": "out", "plugin": "csv"}],
+            ),
+            provenance="session_seed",
+        )
+    )
+    client = TestClient(app)
+
+    # The live path requires ``execution_service`` which this fixture
+    # intentionally does not wire (the integration scope here is the
+    # tutorial-run + audit-story slice, not the full execution backbone).
+    # What this test asserts is the *negative* invariant: the cache-replay
+    # branch must NOT silently take over when topology mismatches. The
+    # audit lie the P2-2 review caught is a 200 with
+    # ``seeded_from_cache=True`` attaching cached rows to the wrong state.
+    # Fall-through to live presents as 500 (missing execution_service) —
+    # that's correct behaviour for this test surface; the cache replay
+    # would have been the wrong outcome.
+    try:
+        response = client.post(
+            "/api/tutorial/run",
+            json={"session_id": str(session_id), "prompt": CANONICAL_SEED_PROMPT},
+        )
+    except AttributeError as exc:
+        # Live path's app.state.execution_service is the missing dep; fall-
+        # through reached it, confirming cache replay was correctly skipped.
+        assert "execution_service" in str(exc)
+        return
+
+    assert response.json().get("seeded_from_cache") is not True, (
+        "Cache replay must refuse to attach cached output to a state whose topology does not match the cached pipeline — Tier-1 audit lie."
+    )
 
 
 def test_post_run_unknown_session_returns_404(tmp_path: Path) -> None:

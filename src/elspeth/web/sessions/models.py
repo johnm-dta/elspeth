@@ -66,7 +66,13 @@ from sqlalchemy.types import JSON
 #        policy remains delete-and-recreate for stale session DBs.
 #   7 → resolved interpretation DELETE trigger permits whole-session
 #        archival cascades while preserving direct-delete protection.
-SESSION_SCHEMA_EPOCH = 7
+#   8 → ``composition_states.provenance`` closed enum gains the
+#        ``tutorial_normalization`` value (Phase 4 hello-world tutorial
+#        template-normalization writer). SQLite cannot ALTER a CHECK
+#        constraint in place, so the operator deletes the staging
+#        session DB and the schema is recreated. Pre-release policy
+#        remains delete-and-recreate for stale session DBs.
+SESSION_SCHEMA_EPOCH = 8
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -321,7 +327,7 @@ composition_states_table = Table(
     # Adding a value here without amending the spec creates an
     # untraceable writer category in the audit DB.
     #
-    # All six original values are actively written as of
+    # All seven original values were actively written as of
     # elspeth-obs-f217c634aa (closed by the same commit that retired the
     # dormant-value friction block here). The previous block warned that
     # three values (``convergence_persist``, ``plugin_crash_persist``,
@@ -338,6 +344,16 @@ composition_states_table = Table(
     #   - ``convergence_persist``     — routes.py _handle_convergence_error
     #   - ``plugin_crash_persist``    — routes.py _handle_plugin_crash
     #   - ``preflight_persist``       — routes.py _handle_runtime_preflight_failure
+    #   - ``tutorial_normalization``  — tutorial_service.py
+    #                                    _normalise_current_tutorial_state_for_execution
+    #                                    (Phase 4 hello-world tutorial: rewrites
+    #                                    bare ``{{ field }}`` placeholders to
+    #                                    the ``row.field`` namespace before the
+    #                                    live composer pass executes the
+    #                                    pipeline. Distinct audit category so the
+    #                                    rewrite is not conflated with the
+    #                                    validator-failure writer
+    #                                    ``convergence_persist``.)
     #   - ``session_seed``            — service.py create_session + set_active_state
     #                                    (also: routes.py post-compose state advance
     #                                     + fork source-storage rewrite — these two
@@ -351,7 +367,7 @@ composition_states_table = Table(
     #                                    prompt template is committed alongside the
     #                                    ``interpretation_events`` row.
     #
-    # NO SILENT EXTENSION. Adding an eighth value MUST include all three
+    # NO SILENT EXTENSION. Adding a ninth value MUST include all three
     # of: (a) a spec amendment documenting the writer path and the audit
     # semantics that distinguish it from neighbouring values; (b) an
     # integration test that drives the writer and asserts the row was
@@ -363,7 +379,7 @@ composition_states_table = Table(
     # IN PHASE 1A" block below for the same closed-list-of-permitted-
     # writers posture.
     CheckConstraint(
-        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'session_seed', 'session_fork', 'interpretation_resolve')",
+        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'tutorial_normalization', 'session_seed', 'session_fork', 'interpretation_resolve')",
         name="ck_composition_states_provenance",
     ),
 )

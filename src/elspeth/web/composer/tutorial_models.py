@@ -20,16 +20,20 @@ class TutorialRunRequest(BaseModel):
 class TutorialRunOutput(BaseModel):
     """Output preview returned by the tutorial run endpoint."""
 
-    model_config = ConfigDict(strict=True, extra="forbid")
+    # ``frozen=True`` prevents post-construction mutation of attributes; ``rows``
+    # is typed as ``tuple`` so the in-memory representation is itself immutable
+    # (a list field on a frozen model would still permit ``model.rows.append(...)``).
+    # Pydantic accepts a list at construction time and coerces to tuple.
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
-    rows: list[dict[str, Any]]
+    rows: tuple[dict[str, Any], ...]
     source_data_hash: str
 
 
 class TutorialRunResponse(BaseModel):
     """Response for ``POST /api/tutorial/run``."""
 
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     run_id: str
     output: TutorialRunOutput

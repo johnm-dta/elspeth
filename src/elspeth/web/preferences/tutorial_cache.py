@@ -3,9 +3,33 @@
 Key: ``SHA-256(canonical_prompt + ":" + model_id)``.
 
 ``model_id`` is an opaque string supplied by the run path. Phase 4 uses a
-compound model identifier because output depends on both the composer model
-that shapes the pipeline and the transform model that rates rows. This module
-does not interpret the string; changing it simply invalidates the cache.
+compound identifier assembled by
+``elspeth.web.composer.tutorial_service.tutorial_model_id``.
+
+Invalidation envelope (what causes a different key, hence cache miss):
+
+- ``settings.composer_model`` change.
+- Core composer skill markdown (``pipeline_composer.md``) content change.
+- Deployment skill overlay (``{data_dir}/skills/pipeline_composer.md``)
+  content change.
+
+Out of scope (cache does NOT auto-invalidate on these — operator clears the
+cache directory manually, consistent with the project's
+"operator deletes the artifact" pattern documented elsewhere):
+
+- LLM non-determinism. The composer LLM may pick a different transform model
+  on a re-compose with identical inputs; the cache freezes whichever
+  pipeline was produced first.
+- Plugin pack defaults (``packs/llm/defaults.yaml``) or profile YAMLs that
+  bias the composer's transform-model choice but do not change the key
+  inputs above. The cached ``pipeline_yaml`` has the chosen model embedded,
+  so the audit replay attribution is internally consistent — the operator
+  just sees an older canonical experience until they clear
+  ``{data_dir}/tutorial_cache/``.
+
+This module does not interpret the ``model_id`` string; any single covered
+input changing simply invalidates the cache. Uncovered inputs require
+manual cache directory removal.
 """
 
 from __future__ import annotations

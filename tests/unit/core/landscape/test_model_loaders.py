@@ -113,6 +113,13 @@ class TestRunLoader:
             "exported_at": None,
             "export_format": None,
             "export_sink": None,
+            # Phase 4 (commit ca9bc05bd) audit-story columns on runs_table.
+            # The loader at ``core/landscape/model_loaders.py:109-111`` reads
+            # these unconditionally; fixture must supply them so the
+            # SimpleNamespace stand-in mirrors the real SA row shape.
+            "llm_call_count": None,
+            "seeded_from_cache": False,
+            "cache_key": None,
         }
         defaults.update(overrides)
         return _make_sa_row(**defaults)

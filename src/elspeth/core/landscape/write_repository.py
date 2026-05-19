@@ -9,11 +9,17 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import Determinism, NodeType, RunStatus
+from elspeth.contracts.synthesised_audit import SynthesisedNodeSpec
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
+
+# Re-export for back-compat with existing import sites (``from
+# elspeth.core.landscape.write_repository import SynthesisedNodeSpec``).
+# Canonical location is ``elspeth.contracts.synthesised_audit``.
+__all__ = ["LandscapeWriteRepository", "SynthesisedNodeSpec"]
 
 
 class LandscapeWriteRepository:
@@ -29,7 +35,7 @@ class LandscapeWriteRepository:
         rows: Sequence[Mapping[str, Any]],
         source_data_hash: str,
         llm_call_count: int,
-        plugin_versions: Mapping[str, str],
+        node_specs: Sequence[SynthesisedNodeSpec],
         started_at: datetime,
         metadata: Mapping[str, Any],
     ) -> str:
@@ -37,10 +43,13 @@ class LandscapeWriteRepository:
 
         The cache stores content, not identity. This method mints a fresh
         Landscape run id for the replay and records the replay marker
-        (`seeded_from_cache`, `cache_key`) on the run row.
+        (``seeded_from_cache``, ``cache_key``) on the run row, plus one
+        ``nodes`` row per element of ``node_specs`` carrying the YAML-declared
+        role. Structural invariants (exactly one SOURCE at index 0, at least
+        one SINK) are enforced offensively before any write — a misshapen
+        sequence is a caller bug, not an audit anomaly to silently absorb.
         """
-        if not plugin_versions:
-            raise LandscapeRecordError("record_synthesised_run requires at least one plugin version")
+        self._validate_node_specs(node_specs)
         seeded_from_cache = metadata["seeded_from_cache"]
         cache_key = metadata["cache_key"]
         if type(seeded_from_cache) is not bool:
@@ -53,7 +62,6 @@ class LandscapeWriteRepository:
             "pipeline_yaml": pipeline_yaml,
             "metadata": dict(metadata),
         }
-        node_items = tuple(plugin_versions.items())
         source_node_id = self._node_id(run_id, 0)
 
         try:
@@ -83,15 +91,15 @@ class LandscapeWriteRepository:
                         cache_key=cache_key,
                     )
                 )
-                for index, (plugin_name, plugin_version) in enumerate(node_items):
-                    node_config = {"plugin_name": plugin_name, "plugin_version": plugin_version}
+                for index, spec in enumerate(node_specs):
+                    node_config = {"plugin_name": spec.plugin_name, "plugin_version": spec.plugin_version}
                     conn.execute(
                         nodes_table.insert().values(
                             node_id=self._node_id(run_id, index),
                             run_id=run_id,
-                            plugin_name=plugin_name,
-                            node_type=self._node_type(index, len(node_items)).value,
-                            plugin_version=plugin_version,
+                            plugin_name=spec.plugin_name,
+                            node_type=spec.node_type.value,
+                            plugin_version=spec.plugin_version,
                             source_file_hash=None,
                             determinism=Determinism.DETERMINISTIC.value,
                             config_hash=stable_hash(node_config),
@@ -129,9 +137,14 @@ class LandscapeWriteRepository:
         return f"{run_id}-n{index}"
 
     @staticmethod
-    def _node_type(index: int, count: int) -> NodeType:
-        if index == 0:
-            return NodeType.SOURCE
-        if index == count - 1:
-            return NodeType.SINK
-        return NodeType.TRANSFORM
+    def _validate_node_specs(node_specs: Sequence[SynthesisedNodeSpec]) -> None:
+        if len(node_specs) == 0:
+            raise LandscapeRecordError("record_synthesised_run requires at least one node spec")
+        if node_specs[0].node_type is not NodeType.SOURCE:
+            raise LandscapeRecordError(f"record_synthesised_run: first node must be SOURCE, got {node_specs[0].node_type.value}")
+        source_count = sum(1 for spec in node_specs if spec.node_type is NodeType.SOURCE)
+        if source_count != 1:
+            raise LandscapeRecordError(f"record_synthesised_run requires exactly one SOURCE node, got {source_count}")
+        sink_count = sum(1 for spec in node_specs if spec.node_type is NodeType.SINK)
+        if sink_count < 1:
+            raise LandscapeRecordError("record_synthesised_run requires at least one SINK node")

@@ -3619,7 +3619,7 @@ class TestSinkExecutor:
         ctx = make_context()
         pending = _default_pending()
 
-        with pytest.raises((ContractMergeError, FrameworkBugError)):
+        with pytest.raises(FrameworkBugError, match=r"Contract merge failed after .*ms") as exc_info:
             executor.write(
                 sink,
                 tokens,
@@ -3629,6 +3629,7 @@ class TestSinkExecutor:
                 pending_outcome=pending,
             )
 
+        assert isinstance(exc_info.value.__cause__, ContractMergeError)
         sink.write.assert_not_called()
         sink.flush.assert_not_called()
         factory.data_flow.record_token_outcome.assert_not_called()

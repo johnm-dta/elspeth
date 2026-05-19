@@ -134,6 +134,12 @@ Filed:
 
 - `elspeth-462f50680f`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-462f50680f` resolved. The sink merge-failure test now
+  requires `FrameworkBugError`, asserts the underlying cause is
+  `ContractMergeError`, and preserves the no-write/no-flush/no-outcome checks.
+
 ### UENG-4 — TRANSFORM flush dispatcher tests allow duplicate dispatch
 
 Evidence:

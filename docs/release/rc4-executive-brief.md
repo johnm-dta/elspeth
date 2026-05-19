@@ -1,8 +1,15 @@
 # RC 4.0 Executive Brief — Semi-Autonomous Pipeline Platform
 
+> **ARCHIVED PLANNING BRIEF — RC-4.0 planning, 3 March 2026.**
+> This brief described the planned RC-4 work package as of 3 March 2026. Scope evolved during execution and the semi-autonomous-platform deliverables described here ultimately shipped as part of the **RC-5 cut on 3 April 2026** (Web UX Composer + Composer MCP server + audited tool loop). The version-number framing ("RC 4 / v4.0.0") in this document does not match how the work was ultimately released.
+>
+> **For what actually shipped, see** [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (Periods 4–5) and [`../../CHANGELOG.md`](../../CHANGELOG.md) ([0.4.0], [0.4.1], [0.5.0] sections).
+>
+> Read this document only for historical context on how the RC-5 deliverables were originally scoped.
+
 **Date:** 2026-03-03
 **Release:** RC 4 (v4.0.0)
-**Status:** Planning complete, ready to begin implementation
+**Status:** Planning complete, ready to begin implementation *(superseded — see banner above)*
 **Prepared by:** Architecture analysis, synthesized from design document and Filigree work package
 **Intended audience:** Project stakeholders evaluating scope, sequencing, and risk for the 4.0 release
 

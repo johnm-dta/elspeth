@@ -1,5 +1,10 @@
 # ELSPETH RC-3 Release Notes
 
+> **ARCHIVED RELEASE NOTES — RC-3 (February–March 2026).**
+> This document records the RC-3.3 release. Subsequent RC-3.4, RC-4, RC-5.0, RC-5.1, and RC-5.2 releases have shipped since.
+>
+> **For the current state, see** [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) and the canonical record in [`../../CHANGELOG.md`](../../CHANGELOG.md).
+
 **Date:** February--March 2026
 **Version:** 0.3.3
 **Branch:** `RC3-quality-sprint`, `RC3.3-architectural-remediation`

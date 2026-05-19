@@ -183,7 +183,7 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     // only matches the freeform/empty body. In guided mode the body's
     // aria-label is "Guided composer" — so click + wait inline here.
     await page.getByRole("button", { name: /session switcher/i }).click();
-    await page.getByRole("menuitem", { name: /new session/i }).click();
+    await page.getByRole("menuitem", { name: "+ New session" }).click();
     await page
       .getByLabel(/guided composer/i)
       .waitFor({ state: "visible" });
@@ -293,7 +293,7 @@ test.describe("composer preferences — default mode + opt-out journeys", () => 
     const composer = new ComposerPage(page);
     await composer.goto();
     await page.getByRole("button", { name: /session switcher/i }).click();
-    await page.getByRole("menuitem", { name: /new session/i }).click();
+    await page.getByRole("menuitem", { name: "+ New session" }).click();
     await page
       .getByLabel(/guided composer/i)
       .waitFor({ state: "visible" });

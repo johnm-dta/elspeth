@@ -39,6 +39,7 @@ class AllowlistEntry:
     expires: date | None
     file_fingerprint: str | None = None
     ast_path: str | None = None
+    pattern: str | None = None
     source_file: str = ""
     matched: bool = field(default=False, compare=False)
 
@@ -66,6 +67,22 @@ class PerFileRule:
         return fnmatch.fnmatch(finding.file_path, self.pattern)
 
 
+@dataclass(frozen=True, slots=True)
+class AllowlistBudgetViolation:
+    """A loaded allowlist count exceeded a configured ratchet ceiling.
+
+    Emitted by ``Allowlist.get_budget_violations()`` when the loaded entry
+    counts exceed any of the six ratchet ceilings declared under
+    ``defaults.allowlist_budget`` in the YAML. Permanent entries are those
+    with no ``expires`` field; the permanent_* counts let callers ratchet
+    against debt that was never bounded.
+    """
+
+    category: str
+    current: int
+    max_allowed: int
+
+
 @dataclass(slots=True)
 class Allowlist:
     """Loaded allowlist entries and per-file rules."""
@@ -74,6 +91,12 @@ class Allowlist:
     per_file_rules: list[PerFileRule] = field(default_factory=list)
     fail_on_stale: bool = True
     fail_on_expired: bool = True
+    max_allow_hits: int | None = None
+    max_per_file_rules: int | None = None
+    max_total_entries: int | None = None
+    max_permanent_allow_hits: int | None = None
+    max_permanent_per_file_rules: int | None = None
+    max_permanent_total_entries: int | None = None
 
     def match(self, finding: FindingKey) -> AllowlistEntry | PerFileRule | None:
         """Return the first matching suppression, if any."""
@@ -109,6 +132,26 @@ class Allowlist:
         """Return per-file allowlist rules that matched more than their cap."""
         return [rule for rule in self.per_file_rules if rule.max_hits is not None and rule.matched_count > rule.max_hits]
 
+    def get_budget_violations(self) -> list[AllowlistBudgetViolation]:
+        """Return configured allowlist-count ratchet overruns."""
+        total_entries = len(self.entries) + len(self.per_file_rules)
+        permanent_allow_hits = sum(1 for entry in self.entries if entry.expires is None)
+        permanent_per_file_rules = sum(1 for rule in self.per_file_rules if rule.expires is None)
+        permanent_total_entries = permanent_allow_hits + permanent_per_file_rules
+        checks = (
+            ("allow_hits", len(self.entries), self.max_allow_hits),
+            ("per_file_rules", len(self.per_file_rules), self.max_per_file_rules),
+            ("total_entries", total_entries, self.max_total_entries),
+            ("permanent_allow_hits", permanent_allow_hits, self.max_permanent_allow_hits),
+            ("permanent_per_file_rules", permanent_per_file_rules, self.max_permanent_per_file_rules),
+            ("permanent_total_entries", permanent_total_entries, self.max_permanent_total_entries),
+        )
+        return [
+            AllowlistBudgetViolation(category=category, current=current, max_allowed=max_allowed)
+            for category, current, max_allowed in checks
+            if max_allowed is not None and current > max_allowed
+        ]
+
 
 def load_allowlist(path: Path, *, valid_rule_ids: Collection[str]) -> Allowlist:
     """Load an allowlist from a YAML file or directory of YAML files."""
@@ -120,27 +163,52 @@ def load_allowlist(path: Path, *, valid_rule_ids: Collection[str]) -> Allowlist:
             data = _load_yaml_file(yaml_file)
             entries.extend(_parse_allow_hits(data, source_file=yaml_file.name))
             per_file_rules.extend(_parse_per_file_rules(data, valid_rule_ids=valid_rule_ids, source_file=yaml_file.name))
-        return Allowlist(
-            entries=entries,
-            per_file_rules=per_file_rules,
-            fail_on_stale=defaults.fail_on_stale,
-            fail_on_expired=defaults.fail_on_expired,
-        )
+        return _allowlist_from_defaults(entries=entries, per_file_rules=per_file_rules, defaults=defaults)
 
     data = _load_yaml_file(path)
     defaults = _defaults_from_mapping(data)
-    return Allowlist(
+    return _allowlist_from_defaults(
         entries=_parse_allow_hits(data, source_file=path.name),
         per_file_rules=_parse_per_file_rules(data, valid_rule_ids=valid_rule_ids, source_file=path.name),
+        defaults=defaults,
+    )
+
+
+def _allowlist_from_defaults(
+    *,
+    entries: list[AllowlistEntry],
+    per_file_rules: list[PerFileRule],
+    defaults: _Defaults,
+) -> Allowlist:
+    return Allowlist(
+        entries=entries,
+        per_file_rules=per_file_rules,
         fail_on_stale=defaults.fail_on_stale,
         fail_on_expired=defaults.fail_on_expired,
+        max_allow_hits=defaults.budget.max_allow_hits,
+        max_per_file_rules=defaults.budget.max_per_file_rules,
+        max_total_entries=defaults.budget.max_total_entries,
+        max_permanent_allow_hits=defaults.budget.max_permanent_allow_hits,
+        max_permanent_per_file_rules=defaults.budget.max_permanent_per_file_rules,
+        max_permanent_total_entries=defaults.budget.max_permanent_total_entries,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _BudgetCeilings:
+    max_allow_hits: int | None = None
+    max_per_file_rules: int | None = None
+    max_total_entries: int | None = None
+    max_permanent_allow_hits: int | None = None
+    max_permanent_per_file_rules: int | None = None
+    max_permanent_total_entries: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _Defaults:
     fail_on_stale: bool = True
     fail_on_expired: bool = True
+    budget: _BudgetCeilings = field(default_factory=_BudgetCeilings)
 
 
 def _load_yaml_file(path: Path) -> dict[str, Any]:
@@ -163,6 +231,28 @@ def _defaults_from_mapping(data: dict[str, Any]) -> _Defaults:
     return _Defaults(
         fail_on_stale=_bool_value(defaults, "fail_on_stale", default=True),
         fail_on_expired=_bool_value(defaults, "fail_on_expired", default=True),
+        budget=_parse_allowlist_budget(defaults),
+    )
+
+
+def _parse_allowlist_budget(defaults: dict[str, Any]) -> _BudgetCeilings:
+    """Parse the optional ``defaults.allowlist_budget`` block.
+
+    A missing ``allowlist_budget`` key, missing per-ceiling keys, and
+    explicit per-ceiling ``null`` values all produce ``None`` (permissive).
+    Non-negative integers tighten the corresponding ceiling. A block-level
+    ``allowlist_budget: null`` raises ``ValueError`` — write either an empty
+    mapping (``{}``) or omit the key entirely if you want permissive
+    defaults. Any other value also raises ``ValueError``.
+    """
+    budget = _mapping_or_empty(defaults, "allowlist_budget")
+    return _BudgetCeilings(
+        max_allow_hits=_optional_nonneg_int(budget, "max_allow_hits", context="allowlist_budget"),
+        max_per_file_rules=_optional_nonneg_int(budget, "max_per_file_rules", context="allowlist_budget"),
+        max_total_entries=_optional_nonneg_int(budget, "max_total_entries", context="allowlist_budget"),
+        max_permanent_allow_hits=_optional_nonneg_int(budget, "max_permanent_allow_hits", context="allowlist_budget"),
+        max_permanent_per_file_rules=_optional_nonneg_int(budget, "max_permanent_per_file_rules", context="allowlist_budget"),
+        max_permanent_total_entries=_optional_nonneg_int(budget, "max_permanent_total_entries", context="allowlist_budget"),
     )
 
 
@@ -180,6 +270,7 @@ def _parse_allow_hits(data: dict[str, Any], *, source_file: str) -> list[Allowli
                 expires=_optional_date_alias(entry, "expires", "expires_at", context=f"allow_hits[{index}]"),
                 file_fingerprint=_optional_string(entry, "file_fingerprint", context=f"allow_hits[{index}]"),
                 ast_path=_optional_string(entry, "ast_path", context=f"allow_hits[{index}]"),
+                pattern=_optional_string(entry, "pattern", context=f"allow_hits[{index}]"),
                 source_file=source_file,
             )
         )
@@ -283,9 +374,22 @@ def _optional_int(data: dict[str, Any], key: str, *, context: str) -> int | None
     if key not in data or data[key] is None:
         return None
     value = data[key]
+    # Reject bool explicitly — Python's bool is an int subclass, so a YAML
+    # `true`/`false` would otherwise parse as 1/0 and silently pass through.
+    # At a Tier-3 boundary the audit posture is to reject ambiguous coercions.
+    if isinstance(value, bool):
+        raise ValueError(f"{context}.{key} must be an integer, not a boolean")
     if isinstance(value, int):
         return value
     raise ValueError(f"{context}.{key} must be an integer, null, or absent")
+
+
+def _optional_nonneg_int(data: dict[str, Any], key: str, *, context: str) -> int | None:
+    """Like ``_optional_int`` but rejects negatives."""
+    value = _optional_int(data, key, context=context)
+    if value is not None and value < 0:
+        raise ValueError(f"{context}.{key} must be non-negative")
+    return value
 
 
 def _bool_value(data: dict[str, Any], key: str, *, default: bool) -> bool:

@@ -448,6 +448,24 @@ def test_frozen_annotations_handles_future_annotations() -> None:
     assert clean == []
 
 
+def test_frozen_annotations_uses_core_loader() -> None:
+    """After Plan A Task 6 the rule must not define its own loader."""
+    from elspeth_lints.rules.immutability.frozen_annotations import rule as r
+
+    assert "_load_allowlist" not in vars(r), "degenerate loader must be removed"
+    assert "_list_value" not in vars(r), "private helper must be removed"
+    assert "_mapping_value" not in vars(r), "private helper must be removed"
+
+
+def test_existing_yaml_loads_with_core_loader() -> None:
+    """The migrated YAML must parse under the core allow_hits schema."""
+    from elspeth_lints.core.allowlist import load_allowlist
+
+    path = Path("config/cicd/enforce_frozen_annotations/existing.yaml")
+    result = load_allowlist(path, valid_rule_ids={"immutability.frozen_annotations"})
+    assert len(result.entries) == 16, f"expected 16 entries, got {len(result.entries)}"
+
+
 def _analyze_freeze_guards(source: str) -> list[Finding]:
     tree = ast.parse(textwrap.dedent(source))
     return list(FREEZE_GUARDS_RULE.analyze(tree, Path("example.py"), RuleContext(root=Path("."))))

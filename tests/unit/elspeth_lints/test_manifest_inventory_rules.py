@@ -65,7 +65,14 @@ def test_symbol_inventory_uses_directory_allowlist(tmp_path: Path) -> None:
     allowlist = tmp_path / "config" / "cicd" / "symbol_inventory"
     allowlist.mkdir(parents=True)
     (allowlist / "migration_files.yaml").write_text(
-        "allowed:\n  - file: src/elspeth/contracts/enums.py\n    justification: compatibility mapping fixture\n",
+        textwrap.dedent(
+            """
+            per_file_rules:
+              - pattern: "src/elspeth/contracts/enums.py"
+                rules: ["manifest.symbol_inventory"]
+                reason: "compatibility mapping fixture"
+            """
+        ).lstrip(),
         encoding="utf-8",
     )
 
@@ -184,9 +191,10 @@ def test_test_to_source_mapping_uses_directory_allowlist(tmp_path: Path) -> None
     _write(
         allowlist / "migration_files.yaml",
         """
-        allowed:
-          - file: tests/unit/contracts/test_enums.py
-            justification: compatibility mapping fixture
+        per_file_rules:
+          - pattern: "tests/unit/contracts/test_enums.py"
+            rules: ["manifest.test_to_source_mapping"]
+            reason: "compatibility mapping fixture"
         """,
     )
 
@@ -194,6 +202,40 @@ def test_test_to_source_mapping_uses_directory_allowlist(tmp_path: Path) -> None
 
     assert [finding.rule_id for finding in findings] == ["row_outcome_compare", "row_outcome_attribute"]
     assert {finding.file_path for finding in findings} == {"tests/integration/test_real_output.py"}
+
+
+def test_test_to_source_mapping_rule_uses_core_loader() -> None:
+    """After Tasks 1+5 the rule must not define its own allowlist loader."""
+    from elspeth_lints.rules.manifest.test_to_source_mapping import rule as r
+
+    assert "_load_allowlist" not in vars(r), "degenerate loader must be removed"
+    assert "_is_allowed" not in vars(r), "degenerate matcher must be removed"
+
+
+def test_symbol_inventory_rule_uses_core_loader() -> None:
+    """After Tasks 1+5 the rule must not define its own allowlist loader."""
+    from elspeth_lints.rules.manifest.symbol_inventory import rule as r
+
+    assert "_load_allowlist" not in vars(r), "degenerate loader must be removed"
+    assert "_is_allowed" not in vars(r), "degenerate matcher must be removed"
+
+
+def test_test_to_source_mapping_yaml_loads_with_core_loader() -> None:
+    """The committed YAML must parse under the shared per_file_rules schema."""
+    from elspeth_lints.core.allowlist import load_allowlist
+
+    path = Path("config/cicd/test_to_source_mapping/migration_files.yaml")
+    result = load_allowlist(path, valid_rule_ids={"manifest.test_to_source_mapping"})
+    assert len(result.per_file_rules) == 3
+
+
+def test_symbol_inventory_yaml_loads_with_core_loader() -> None:
+    """The committed YAML must parse under the shared per_file_rules schema."""
+    from elspeth_lints.core.allowlist import load_allowlist
+
+    path = Path("config/cicd/symbol_inventory/migration_files.yaml")
+    result = load_allowlist(path, valid_rule_ids={"manifest.symbol_inventory"})
+    assert len(result.per_file_rules) == 2
 
 
 def _write(path: Path, source: str) -> Path:

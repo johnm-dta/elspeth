@@ -28,14 +28,16 @@ from elspeth_lints.rules.trust_tier.tier_model.rule import (
     Finding,
     PerFileRule,
     TierModelVisitor,
-    _parse_allow_hits,
-    _parse_per_file_rules,
+    _match_finding,
     _suggest_module_file,
+    _validate_allowlist_governance,
     format_stale_entry_text,
-    load_allowlist,
     report_json,
     run_check,
     scan_file,
+)
+from elspeth_lints.rules.trust_tier.tier_model.rule import (
+    _load_tier_model_allowlist as load_allowlist,
 )
 
 # =============================================================================
@@ -930,7 +932,7 @@ class TestAllowlistMatching:
             message="test",
         )
 
-        matched = allowlist.match(finding)
+        matched = _match_finding(allowlist, finding)
         assert matched is not None
         assert isinstance(matched, AllowlistEntry)
         assert matched.key == entry.key
@@ -958,7 +960,7 @@ class TestAllowlistMatching:
             message="test",
         )
 
-        matched = allowlist.match(finding)
+        matched = _match_finding(allowlist, finding)
         assert matched is None
         assert entry.matched is False
 
@@ -983,7 +985,7 @@ class TestStaleDetection:
         allowlist = Allowlist(entries=[entry])
 
         # No findings matched
-        stale = allowlist.get_stale_entries()
+        stale = allowlist.get_unused_entries()
         assert len(stale) == 1
         assert stale[0].key == entry.key
 
@@ -1001,7 +1003,7 @@ class TestStaleDetection:
         # Simulate matching
         entry.matched = True
 
-        stale = allowlist.get_stale_entries()
+        stale = allowlist.get_unused_entries()
         assert len(stale) == 0
 
 
@@ -1194,11 +1196,11 @@ class TestIntegration:
         allowlist = Allowlist(entries=[entry_matching, entry_stale])
 
         # Match finding
-        matched = allowlist.match(finding)
+        matched = _match_finding(allowlist, finding)
         assert matched is not None
 
         # Check stale entries
-        stale = allowlist.get_stale_entries()
+        stale = allowlist.get_unused_entries()
         assert len(stale) == 1
         assert stale[0].key == entry_stale.key
 
@@ -1362,7 +1364,7 @@ class TestDirectoryLoading:
 
         allowlist = load_allowlist(allowlist_dir)
         # No findings matched — all entries are stale
-        stale = allowlist.get_stale_entries()
+        stale = allowlist.get_unused_entries()
         assert len(stale) == 2
 
     def test_source_file_tracking(self, temp_dir: Path) -> None:
@@ -1478,7 +1480,7 @@ class TestPerFileRuleMaxHits:
         """Per-file rule with no max_hits should allow any number of matches."""
         rule = PerFileRule(
             pattern="core/canonical.py",
-            rules=["R5"],
+            rules=("R5",),
             reason="Type dispatch for normalization",
             expires=None,
             max_hits=None,
@@ -1486,16 +1488,16 @@ class TestPerFileRuleMaxHits:
         allowlist = Allowlist(entries=[], per_file_rules=[rule])
 
         for _ in range(50):
-            allowlist.match(self._make_finding("core/canonical.py"))
+            _match_finding(allowlist, self._make_finding("core/canonical.py"))
 
         assert rule.matched_count == 50
-        assert allowlist.get_exceeded_file_rules() == []
+        assert allowlist.get_exceeded_rules() == []
 
     def test_max_hits_within_limit(self) -> None:
         """Per-file rule with matched_count <= max_hits should not be exceeded."""
         rule = PerFileRule(
             pattern="core/canonical.py",
-            rules=["R5"],
+            rules=("R5",),
             reason="Type dispatch",
             expires=None,
             max_hits=18,
@@ -1503,16 +1505,16 @@ class TestPerFileRuleMaxHits:
         allowlist = Allowlist(entries=[], per_file_rules=[rule])
 
         for _ in range(18):
-            allowlist.match(self._make_finding("core/canonical.py"))
+            _match_finding(allowlist, self._make_finding("core/canonical.py"))
 
         assert rule.matched_count == 18
-        assert allowlist.get_exceeded_file_rules() == []
+        assert allowlist.get_exceeded_rules() == []
 
     def test_max_hits_exceeded(self) -> None:
         """Per-file rule exceeding max_hits should be reported."""
         rule = PerFileRule(
             pattern="core/canonical.py",
-            rules=["R5"],
+            rules=("R5",),
             reason="Type dispatch",
             expires=None,
             max_hits=5,
@@ -1520,10 +1522,10 @@ class TestPerFileRuleMaxHits:
         allowlist = Allowlist(entries=[], per_file_rules=[rule])
 
         for _ in range(8):
-            allowlist.match(self._make_finding("core/canonical.py"))
+            _match_finding(allowlist, self._make_finding("core/canonical.py"))
 
         assert rule.matched_count == 8
-        exceeded = allowlist.get_exceeded_file_rules()
+        exceeded = allowlist.get_exceeded_rules()
         assert len(exceeded) == 1
         assert exceeded[0] is rule
 
@@ -1531,7 +1533,7 @@ class TestPerFileRuleMaxHits:
         """max_hits should only count hits for the matching rule, not other rules."""
         rule = PerFileRule(
             pattern="core/canonical.py",
-            rules=["R5"],
+            rules=("R5",),
             reason="Type dispatch",
             expires=None,
             max_hits=2,
@@ -1539,14 +1541,14 @@ class TestPerFileRuleMaxHits:
         allowlist = Allowlist(entries=[], per_file_rules=[rule])
 
         # R5 matches the rule
-        allowlist.match(self._make_finding("core/canonical.py", rule_id="R5"))
-        allowlist.match(self._make_finding("core/canonical.py", rule_id="R5"))
-        # R1 does NOT match this rule (rules=["R5"])
-        result = allowlist.match(self._make_finding("core/canonical.py", rule_id="R1"))
+        _match_finding(allowlist, self._make_finding("core/canonical.py", rule_id="R5"))
+        _match_finding(allowlist, self._make_finding("core/canonical.py", rule_id="R5"))
+        # R1 does NOT match this rule (rules=("R5",))
+        result = _match_finding(allowlist, self._make_finding("core/canonical.py", rule_id="R1"))
         assert result is None  # R1 not in rule's rules list
 
         assert rule.matched_count == 2
-        assert allowlist.get_exceeded_file_rules() == []
+        assert allowlist.get_exceeded_rules() == []
 
     def test_max_hits_parsed_from_yaml(self, temp_dir: Path) -> None:
         """max_hits should be parsed from YAML per_file_rules."""
@@ -1617,84 +1619,82 @@ class TestDirectoryLoadingSuggestModuleFile:
 
 
 class TestBannedRuleKeyValidation:
-    """Tests for elspeth-9f34362456: banned-rule key-format check validates rule ID."""
+    """Tests for elspeth-9f34362456: banned-rule key-format check validates rule ID.
 
-    def test_valid_banned_rule_in_allow_hits_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+    Plan A Task 7: governance moved out of ``_parse_allow_hits`` (now in core)
+    and into ``_validate_allowlist_governance``. The previous ``sys.exit(1)`` +
+    stderr-print pattern was replaced with ``ValueError`` per CLAUDE.md
+    audit-primacy order. Tests now exercise the validator directly.
+    """
+
+    def test_valid_banned_rule_in_allow_hits_rejected(self) -> None:
         """allow_hits entry with banned rule R3 should be rejected."""
-        data = {
-            "allow_hits": [
-                {
-                    "key": "core/events.py:R3:SomeClass:fp=abc123",
-                    "owner": "test",
-                    "reason": "test",
-                    "safety": "test",
-                    "expires": "2099-01-01",
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R3:SomeClass:fp=abc123",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=datetime(2099, 1, 1, tzinfo=UTC).date(),
+                )
             ]
-        }
-        with pytest.raises(SystemExit) as exc_info:
-            _parse_allow_hits(data)
-        assert exc_info.value.code == 1
-        assert "banned rule R3" in capsys.readouterr().err
+        )
+        with pytest.raises(ValueError, match="banned rule R3"):
+            _validate_allowlist_governance(al)
 
-    def test_invalid_rule_id_in_key_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_invalid_rule_id_in_key_rejected(self) -> None:
         """allow_hits entry with invalid (non-existent) rule ID should be rejected.
 
-        Previously, a malformed key like 'foo.py:GARBAGE:bar:fp=abc' would silently
-        pass because 'GARBAGE' is not in _BANNED_RULES. The validation should also
-        verify that the rule ID is valid.
+        A malformed key like 'foo.py:GARBAGE:bar:fp=abc' must not silently pass
+        just because 'GARBAGE' is not banned — the rule-id is also checked
+        against the live registry.
         """
-        data = {
-            "allow_hits": [
-                {
-                    "key": "core/events.py:NONEXISTENT_RULE:SomeClass:fp=abc123",
-                    "owner": "test",
-                    "reason": "test",
-                    "safety": "test",
-                    "expires": "2099-01-01",
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:NONEXISTENT_RULE:SomeClass:fp=abc123",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=datetime(2099, 1, 1, tzinfo=UTC).date(),
+                )
             ]
-        }
-        with pytest.raises(SystemExit) as exc_info:
-            _parse_allow_hits(data)
-        assert exc_info.value.code == 1
-        assert "unknown rule ID" in capsys.readouterr().err
-        # Distinct from banned-rule rejection — error names the offending ID
+        )
+        with pytest.raises(ValueError, match="unknown rule ID"):
+            _validate_allowlist_governance(al)
 
-    def test_malformed_key_missing_rule_id_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_malformed_key_missing_rule_id_rejected(self) -> None:
         """allow_hits entry with no colon (no rule ID extractable) should be rejected."""
-        data = {
-            "allow_hits": [
-                {
-                    "key": "bare-key-no-colons",
-                    "owner": "test",
-                    "reason": "test",
-                    "safety": "test",
-                    "expires": "2099-01-01",
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="bare-key-no-colons",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=datetime(2099, 1, 1, tzinfo=UTC).date(),
+                )
             ]
-        }
-        with pytest.raises(SystemExit) as exc_info:
-            _parse_allow_hits(data)
-        assert exc_info.value.code == 1
-        assert "malformed key" in capsys.readouterr().err
+        )
+        with pytest.raises(ValueError, match="malformed key"):
+            _validate_allowlist_governance(al)
 
     def test_valid_rule_id_in_key_accepted(self) -> None:
         """allow_hits entry with valid non-banned rule ID should be accepted."""
-        data = {
-            "allow_hits": [
-                {
-                    "key": "core/events.py:R1:SomeClass:fp=abc123",
-                    "owner": "test",
-                    "reason": "test",
-                    "safety": "test",
-                    "expires": "2099-01-01",
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="core/events.py:R1:SomeClass:fp=abc123",
+                    owner="test",
+                    reason="test",
+                    safety="test",
+                    expires=datetime(2099, 1, 1, tzinfo=UTC).date(),
+                )
             ]
-        }
-        entries = _parse_allow_hits(data)
-        assert len(entries) == 1
-        assert entries[0].key == "core/events.py:R1:SomeClass:fp=abc123"
+        )
+        _validate_allowlist_governance(al)  # must not raise
+        assert al.entries[0].key == "core/events.py:R1:SomeClass:fp=abc123"
 
 
 class TestAllowHitPatternTags:
@@ -1702,159 +1702,161 @@ class TestAllowHitPatternTags:
 
     def test_valid_pattern_tag_is_preserved(self) -> None:
         """A valid pattern tag is parsed into the AllowlistEntry."""
-        data = {
-            "allow_hits": [
-                {
-                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
-                    "owner": "bugfix",
-                    "reason": "Type object display fallback",
-                    "safety": "Used only in error message text",
-                    "pattern": "display-fallback",
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    owner="bugfix",
+                    reason="Type object display fallback",
+                    safety="Used only in error message text",
+                    expires=None,
+                    pattern="display-fallback",
+                )
             ]
-        }
+        )
+        _validate_allowlist_governance(al)
+        assert al.entries[0].pattern == "display-fallback"
 
-        entries = _parse_allow_hits(data)
-
-        assert entries[0].pattern == "display-fallback"
-
-    def test_unknown_pattern_tag_is_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_unknown_pattern_tag_is_rejected(self) -> None:
         """Pattern tags must come from the closed project vocabulary."""
-        data = {
-            "allow_hits": [
-                {
-                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
-                    "owner": "bugfix",
-                    "reason": "Type object display fallback",
-                    "safety": "Used only in error message text",
-                    "pattern": "whatever-this-is",
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    owner="bugfix",
+                    reason="Type object display fallback",
+                    safety="Used only in error message text",
+                    expires=None,
+                    pattern="whatever-this-is",
+                )
             ]
-        }
+        )
+        with pytest.raises(ValueError, match="unknown pattern tag"):
+            _validate_allowlist_governance(al)
 
-        with pytest.raises(SystemExit) as exc_info:
-            _parse_allow_hits(data)
-
-        assert exc_info.value.code == 1
-        assert "unknown pattern tag" in capsys.readouterr().err
-
-    def test_permanent_bugfix_entry_requires_pattern(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_permanent_bugfix_entry_requires_pattern(self) -> None:
         """owner=bugfix entries need expires or a pattern tag."""
-        data = {
-            "allow_hits": [
-                {
-                    "key": "contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
-                    "owner": "bugfix",
-                    "reason": "Type object display fallback",
-                    "safety": "Used only in error message text",
-                    "expires": None,
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="contracts/transform_contract.py:R2:_get_python_type:fp=abc123",
+                    owner="bugfix",
+                    reason="Type object display fallback",
+                    safety="Used only in error message text",
+                    expires=None,
+                    pattern=None,
+                )
             ]
-        }
-
-        with pytest.raises(SystemExit) as exc_info:
-            _parse_allow_hits(data)
-
-        assert exc_info.value.code == 1
-        assert "owner=bugfix" in capsys.readouterr().err
+        )
+        with pytest.raises(ValueError, match="owner=bugfix"):
+            _validate_allowlist_governance(al)
 
     def test_bugfix_entry_with_expiry_does_not_require_pattern(self) -> None:
         """Bounded bugfix entries may rely on expiry instead of a permanent pattern."""
-        data = {
-            "allow_hits": [
-                {
-                    "key": "contracts/data.py:R6:_get_allow_inf_nan:fp=abc123",
-                    "owner": "bugfix",
-                    "reason": "Temporary narrow TypeError catch",
-                    "safety": "Only catches TypeError from vars()",
-                    "expires": "2099-01-01",
-                }
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key="contracts/data.py:R6:_get_allow_inf_nan:fp=abc123",
+                    owner="bugfix",
+                    reason="Temporary narrow TypeError catch",
+                    safety="Only catches TypeError from vars()",
+                    expires=datetime(2099, 1, 1, tzinfo=UTC).date(),
+                    pattern=None,
+                )
             ]
-        }
-
-        entries = _parse_allow_hits(data)
-
-        assert entries[0].pattern is None
+        )
+        _validate_allowlist_governance(al)
+        assert al.entries[0].pattern is None
 
 
 class TestMaxHitsParseError:
-    """Tests for elspeth-cdeeeccde3: int(raw_max_hits) should give contextual error."""
+    """Tests for elspeth-cdeeeccde3: non-numeric max_hits is rejected by the core loader."""
 
-    def test_non_numeric_max_hits_gives_context(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Non-numeric max_hits should produce an error message with pattern context.
+    def test_non_numeric_max_hits_rejected(self, tmp_path: Path) -> None:
+        """Non-numeric max_hits should raise a ``ValueError`` from the core loader.
 
-        Previously, int('five') raised a bare ValueError with no indication of
-        which per_file_rules entry or YAML file contained the error.
+        Core's loader rejects bool / non-int types for max_hits unconditionally,
+        replacing tier_model's bespoke ``int(...)`` coercion + sys.exit pattern.
+        The yaml-parsed string ``"five"`` reaches the loader as a ``str`` (not
+        an int), so the typed parser rejects it.
         """
-        data = {
-            "per_file_rules": [
-                {
-                    "pattern": "plugins/sources/*",
-                    "rules": ["R1"],
-                    "reason": "test",
-                    "max_hits": "five",
-                }
-            ]
-        }
-        with pytest.raises(SystemExit) as exc_info:
-            _parse_per_file_rules(data, source_file="plugins.yaml")
-        assert exc_info.value.code == 1
-        err = capsys.readouterr().err
-        assert "plugins/sources/*" in err
-        assert "plugins.yaml" in err
-        assert "'five'" in err
+        al_file = tmp_path / "al.yaml"
+        al_file.write_text(
+            dedent("""\
+                per_file_rules:
+                  - pattern: "plugins/sources/*"
+                    rules: [R1]
+                    reason: test
+                    max_hits: "five"
+            """)
+        )
+        with pytest.raises(ValueError, match="max_hits"):
+            load_allowlist(al_file)
 
-    def test_numeric_string_max_hits_parses(self) -> None:
-        """Numeric string max_hits like '18' should still parse correctly."""
-        data = {
-            "per_file_rules": [
-                {
-                    "pattern": "plugins/sources/*",
-                    "rules": ["R1"],
-                    "reason": "test",
-                    "max_hits": "18",
-                }
-            ]
-        }
-        rules = _parse_per_file_rules(data)
-        assert rules[0].max_hits == 18
+    def test_numeric_int_max_hits_parses(self, tmp_path: Path) -> None:
+        """Numeric ``max_hits: 18`` should parse correctly."""
+        al_file = tmp_path / "al.yaml"
+        al_file.write_text(
+            dedent("""\
+                per_file_rules:
+                  - pattern: "plugins/sources/*"
+                    rules: [R1]
+                    reason: test
+                    max_hits: 18
+            """)
+        )
+        al = load_allowlist(al_file)
+        assert al.per_file_rules[0].max_hits == 18
 
 
 class TestPerFileRulesUnknownRuleValidation:
-    """Tests for symmetric unknown-rule-ID validation in per_file_rules."""
+    """Tests for symmetric unknown-rule-ID validation in per_file_rules.
 
-    def test_unknown_rule_id_in_per_file_rules_rejected(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """per_file_rules with unknown rule ID should be rejected at parse time."""
-        data = {
-            "per_file_rules": [
-                {
-                    "pattern": "plugins/sources/*",
-                    "rules": ["R1", "TYPO_RULE"],
-                    "reason": "test",
-                }
-            ]
-        }
-        with pytest.raises(SystemExit) as exc_info:
-            _parse_per_file_rules(data, source_file="plugins.yaml")
-        assert exc_info.value.code == 1
-        err = capsys.readouterr().err
-        assert "unknown rule ID" in err
-        assert "TYPO_RULE" in err
+    Core's loader validates ``per_file_rules[].rules`` against the
+    ``valid_rule_ids`` collection passed in (tier_model passes ``_ALL_RULE_IDS``
+    via ``_load_tier_model_allowlist``). Unknown ids surface as ``ValueError``.
+    """
 
-    def test_valid_rule_ids_in_per_file_rules_accepted(self) -> None:
-        """per_file_rules with all valid non-banned rule IDs should be accepted."""
-        data = {
-            "per_file_rules": [
-                {
-                    "pattern": "plugins/sources/*",
-                    "rules": ["R1", "R4", "R5"],
-                    "reason": "test",
-                }
-            ]
-        }
-        rules = _parse_per_file_rules(data)
-        assert len(rules) == 1
-        assert rules[0].rules == ["R1", "R4", "R5"]
+    def test_unknown_rule_id_in_per_file_rules_rejected(self, tmp_path: Path) -> None:
+        al_file = tmp_path / "al.yaml"
+        al_file.write_text(
+            dedent("""\
+                per_file_rules:
+                  - pattern: "plugins/sources/*"
+                    rules: [R1, TYPO_RULE]
+                    reason: test
+            """)
+        )
+        with pytest.raises(ValueError, match="TYPO_RULE"):
+            load_allowlist(al_file)
+
+    def test_valid_rule_ids_in_per_file_rules_accepted(self, tmp_path: Path) -> None:
+        al_file = tmp_path / "al.yaml"
+        al_file.write_text(
+            dedent("""\
+                per_file_rules:
+                  - pattern: "plugins/sources/*"
+                    rules: [R1, R4, R5]
+                    reason: test
+            """)
+        )
+        al = load_allowlist(al_file)
+        assert len(al.per_file_rules) == 1
+        assert al.per_file_rules[0].rules == ("R1", "R4", "R5")
+
+    def test_banned_rule_in_per_file_rules_rejected(self, tmp_path: Path) -> None:
+        """Banned rules (RULES[id].banned=True) cannot appear in per_file_rules."""
+        al_file = tmp_path / "al.yaml"
+        al_file.write_text(
+            dedent("""\
+                per_file_rules:
+                  - pattern: "plugins/sources/*"
+                    rules: [R3]
+                    reason: test
+            """)
+        )
+        with pytest.raises(ValueError, match="banned rule"):
+            load_allowlist(al_file)
 
 
 class TestExceededFileRulesPreCommitMode:
@@ -1882,7 +1884,7 @@ class TestExceededFileRulesPreCommitMode:
         """
         rule = PerFileRule(
             pattern="core/canonical.py",
-            rules=["R5"],
+            rules=("R5",),
             reason="Type dispatch",
             expires=None,
             max_hits=2,
@@ -1891,10 +1893,10 @@ class TestExceededFileRulesPreCommitMode:
 
         # Simulate 5 matches — exceeds max_hits=2
         for _ in range(5):
-            allowlist.match(self._make_finding())
+            _match_finding(allowlist, self._make_finding())
 
         # In a full scan, this would be exceeded
-        assert allowlist.get_exceeded_file_rules() == [rule]
+        assert allowlist.get_exceeded_rules() == [rule]
 
         # But get_exceeded_file_rules should NOT contribute to failure
         # when we're in pre-commit mode. The fix should suppress this
@@ -2028,8 +2030,8 @@ class TestAllowlistBudgetRatchet:
                 ),
             ],
             per_file_rules=[
-                PerFileRule(pattern="core/config.py", rules=["R1"], reason="test", expires=None),
-                PerFileRule(pattern="core/canonical.py", rules=["R5"], reason="test", expires=None),
+                PerFileRule(pattern="core/config.py", rules=("R1",), reason="test", expires=None),
+                PerFileRule(pattern="core/canonical.py", rules=("R5",), reason="test", expires=None),
             ],
             max_allow_hits=1,
             max_per_file_rules=1,
@@ -2065,8 +2067,8 @@ class TestAllowlistBudgetRatchet:
                 ),
             ],
             per_file_rules=[
-                PerFileRule(pattern="core/config.py", rules=["R1"], reason="test", expires=None),
-                PerFileRule(pattern="core/canonical.py", rules=["R5"], reason="test", expires=bounded_expiry),
+                PerFileRule(pattern="core/config.py", rules=("R1",), reason="test", expires=None),
+                PerFileRule(pattern="core/canonical.py", rules=("R5",), reason="test", expires=bounded_expiry),
             ],
             max_permanent_allow_hits=0,
             max_permanent_per_file_rules=0,
@@ -2188,3 +2190,99 @@ class TestAllowlistBudgetRatchet:
         captured = capsys.readouterr()
         assert "ALLOWLIST BUDGET EXCEEDED" in captured.out
         assert "permanent_allow_hits" in captured.out
+
+
+# =============================================================================
+# Plan A Task 7 consolidation invariants
+# =============================================================================
+
+
+class TestCoreAllowlistConsolidation:
+    """Plan A Task 7: tier_model must reuse core's allowlist dataclasses.
+
+    These tests pin the consolidation contract: identity (not just equivalence)
+    of the dataclasses, absence of the deleted parser functions, and the
+    governance validator's ``ValueError`` semantics.
+    """
+
+    def test_tier_model_imports_dataclasses_from_core(self) -> None:
+        import elspeth_lints.rules.trust_tier.tier_model.rule as r
+        from elspeth_lints.core.allowlist import Allowlist as CoreAllowlist
+        from elspeth_lints.core.allowlist import AllowlistBudgetViolation as CoreBudget
+        from elspeth_lints.core.allowlist import AllowlistEntry as CoreEntry
+        from elspeth_lints.core.allowlist import PerFileRule as CorePerFileRule
+
+        assert r.Allowlist is CoreAllowlist
+        assert r.AllowlistBudgetViolation is CoreBudget
+        assert r.AllowlistEntry is CoreEntry
+        assert r.PerFileRule is CorePerFileRule
+
+    def test_tier_model_does_not_export_duplicate_loaders(self) -> None:
+        """The duplicate parser/loader helpers must be gone, not shadowed."""
+        import elspeth_lints.rules.trust_tier.tier_model.rule as r
+
+        assert "load_allowlist_from_directory" not in vars(r), "duplicate loader must be removed"
+        assert "_parse_allow_hits" not in vars(r), "duplicate allow_hits parser must be removed"
+        assert "_parse_per_file_rules" not in vars(r), "duplicate per_file_rules parser must be removed"
+        assert "_parse_allowlist_budget" not in vars(r), "duplicate budget parser must be removed"
+        assert "_load_yaml_file" not in vars(r), "duplicate yaml loader must be removed"
+
+    def test_governance_validator_raises_valueerror_on_banned_rule(self) -> None:
+        """sys.exit(1) was replaced with ValueError per CLAUDE.md audit-primacy."""
+        # Pick a banned rule from the live registry rather than hard-coding "R3"
+        import re as _re
+
+        import elspeth_lints.rules.trust_tier.tier_model.rule as r
+
+        banned_rule_id = next(iter(r._BANNED_RULES))
+        bad_key = f"some/file.py:{banned_rule_id}:_module_:fp=abc"
+        al = Allowlist(
+            entries=[
+                AllowlistEntry(
+                    key=bad_key,
+                    owner="x",
+                    reason="x",
+                    safety="x",
+                    expires=datetime(2099, 1, 1, tzinfo=UTC).date(),
+                )
+            ]
+        )
+        with pytest.raises(ValueError, match=_re.compile(r"banned", _re.IGNORECASE)):
+            _validate_allowlist_governance(al)
+
+    def test_match_finding_preserves_per_file_first_order(self) -> None:
+        """tier_model's historical match order (per_file_rules first) is preserved.
+
+        Core's ``Allowlist.match`` checks entries first; we wrap it in
+        ``_match_finding`` to preserve tier_model's historical accounting
+        (per_file_rule gets the credit when both could match).
+        """
+        finding = Finding(
+            rule_id="R1",
+            file_path="plugins/foo.py",
+            line=1,
+            col=0,
+            symbol_context=("f",),
+            fingerprint="abc",
+            code_snippet="x",
+            message="m",
+        )
+        entry = AllowlistEntry(
+            key=finding.canonical_key,
+            owner="t",
+            reason="t",
+            safety="t",
+            expires=None,
+        )
+        rule = PerFileRule(
+            pattern="plugins/foo.py",
+            rules=("R1",),
+            reason="t",
+            expires=None,
+        )
+        al = Allowlist(entries=[entry], per_file_rules=[rule])
+        matched = _match_finding(al, finding)
+        # The per_file_rule should be credited, not the exact entry.
+        assert matched is rule
+        assert rule.matched_count == 1
+        assert entry.matched is False

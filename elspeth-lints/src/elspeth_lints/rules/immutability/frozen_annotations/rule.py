@@ -6,10 +6,8 @@ import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import yaml
-
+from elspeth_lints.core.allowlist import FindingKey, load_allowlist
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.immutability.frozen_annotations.metadata import RULE_ID, RULE_METADATA
 from elspeth_lints.rules.immutability.shared import allowlist_path_for_root, is_frozen_dataclass, repo_relative_display_path
@@ -28,9 +26,28 @@ class FrozenAnnotationsRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[Finding]:
         """Analyze one Python syntax tree for mutable frozen dataclass annotations."""
         display = repo_relative_display_path(file_path, context.root)
-        allowlist = _load_allowlist(allowlist_path_for_root(context.root, "enforce_frozen_annotations"))
         findings = find_findings(tree, display)
-        return [finding for finding in findings if _finding_key(finding) not in allowlist]
+        allowlist_dir = (
+            context.allowlist_dir_override
+            if context.allowlist_dir_override is not None
+            else allowlist_path_for_root(context.root, "enforce_frozen_annotations")
+        )
+        if not allowlist_dir.exists():
+            return findings
+        loaded = load_allowlist(allowlist_dir, valid_rule_ids={RULE_ID})
+        return [
+            finding
+            for finding in findings
+            if loaded.match(
+                FindingKey(
+                    file_path=finding.file_path,
+                    rule_id=finding.rule_id,
+                    symbol_context=(),
+                    fingerprint=finding.fingerprint,
+                )
+            )
+            is None
+        ]
 
 
 def find_findings(tree: ast.AST, filename: str) -> list[Finding]:
@@ -65,41 +82,6 @@ def _finding(filename: str, class_name: str, field_name: str, annotation: str, l
         severity=RULE_METADATA.severity,
         suggestion="Use Sequence/Mapping/tuple/frozenset instead of list/dict/set",
     )
-
-
-def _finding_key(finding: Finding) -> str:
-    return finding.fingerprint
-
-
-def _load_allowlist(path: Path) -> set[str]:
-    allowed: set[str] = set()
-    if not path.exists():
-        return allowed
-    for yaml_file in sorted(path.glob("*.yaml") if path.is_dir() else [path]):
-        data = yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
-        if not isinstance(data, dict):
-            raise ValueError(f"{yaml_file}: allowlist YAML must be a mapping")
-        for entry in _list_value(data, "allow"):
-            item = _mapping_value(entry, f"{yaml_file}: allow entry")
-            key = item.get("key", "")
-            if isinstance(key, str) and key:
-                allowed.add(key)
-    return allowed
-
-
-def _list_value(data: dict[str, Any], key: str) -> list[object]:
-    if key not in data:
-        return []
-    value = data[key]
-    if not isinstance(value, list):
-        raise ValueError(f"{key} must be a list")
-    return value
-
-
-def _mapping_value(value: object, context: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{context} must be a mapping")
-    return value
 
 
 RULE = FrozenAnnotationsRule()

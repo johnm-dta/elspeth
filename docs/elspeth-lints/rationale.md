@@ -11,6 +11,12 @@ For the toolchain decision, read
 answers the next question: what does the analyzer enforce, how did those rule
 families arise, and how should contributors evolve them?
 
+For the dual perspective — what the analyzer deliberately does **not** enforce
+statically, and which runtime mechanism completes each contract — read
+[static-runtime-boundary.md](static-runtime-boundary.md). When evaluating a
+proposed new lint rule, walk that document first to confirm the property is
+actually statically decidable rather than value-dependent.
+
 For the repository governance posture that makes these analyzer results part of
 single-maintainer delivery evidence, read
 [ADR-024](../architecture/adr/024-delivery-governance-for-single-maintainer-mode.md).

@@ -101,13 +101,16 @@ class ContractManifestRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[Finding]:
         """Run the repository-scoped contract-manifest scan."""
         del tree, file_path
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
-def scan_root(root: Path) -> list[Finding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
     """Scan a repository or src/elspeth root and apply the legacy allowlist."""
     source_root, manifest_file = resolve_scan_roots(root)
-    allowlist = load_contract_allowlist(allowlist_path_for_root(source_root, "enforce_contract_manifest"))
+    allowlist_dir = (
+        allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(source_root, "enforce_contract_manifest")
+    )
+    allowlist = load_contract_allowlist(allowlist_dir)
     manifest_sites, manifest_name_to_line, assign_line = extract_manifest(manifest_file)
     manifest_file_rel = repo_relative_display_path(manifest_file, source_root)
     registrations = scan_source_tree(source_root, manifest_file)

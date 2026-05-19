@@ -10,8 +10,7 @@ from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path
 
-import yaml
-
+from elspeth_lints.core.allowlist import FindingKey, load_allowlist
 from elspeth_lints.core.protocols import Finding as LintFinding
 from elspeth_lints.core.protocols import RuleContext, RuleMetadata, RuleScope, Severity
 from elspeth_lints.rules.manifest.test_to_source_mapping.metadata import RULE_ID, RULE_METADATA
@@ -85,7 +84,7 @@ class TestToSourceMappingRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[LintFinding]:
         """Run the tests-tree inventory scan."""
         del tree, file_path
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
 class ADR019TestInventoryVisitor(ast.NodeVisitor):
@@ -179,11 +178,14 @@ class ADR019TestInventoryVisitor(ast.NodeVisitor):
                 self._add(FindingKind.OLD_OUTCOME_STRING_MEMBERSHIP, node, ",".join(sorted(values & ROW_OUTCOME_VALUES)))
 
 
-def scan_root(root: Path) -> list[LintFinding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[LintFinding]:
     """Scan tests and apply the ADR-019 test inventory allowlist."""
     tests_root, project_root = tests_scan_roots(root)
     findings = scan_tree(tests_root, project_root)
-    active = filter_findings(findings, allowlist_path_for_root(root, "test_to_source_mapping"))
+    allowlist_dir = (
+        allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "test_to_source_mapping")
+    )
+    active = filter_findings(findings, allowlist_dir)
     return [to_lint_finding(finding) for finding in active]
 
 
@@ -224,9 +226,25 @@ def scan_file(path: Path, project_root: Path | None = None) -> list[InventoryFin
 
 
 def filter_findings(findings: Iterable[InventoryFinding], allowlist: Path | None) -> list[InventoryFinding]:
-    """Filter tests-tree inventory findings by the legacy file allowlist."""
-    patterns = _load_allowlist(allowlist)
-    return [finding for finding in findings if not _is_allowed(finding.path, patterns)]
+    """Filter tests-tree inventory findings via the unified core allowlist loader."""
+    if allowlist is None or not allowlist.exists():
+        return list(findings)
+    loaded = load_allowlist(allowlist, valid_rule_ids={RULE_ID})
+    return [
+        finding
+        for finding in findings
+        if not any(
+            rule.matches(
+                FindingKey(
+                    file_path=finding.path,
+                    rule_id=RULE_ID,
+                    symbol_context=(),
+                    fingerprint="",
+                )
+            )
+            for rule in loaded.per_file_rules
+        )
+    ]
 
 
 def to_lint_finding(finding: InventoryFinding) -> LintFinding:
@@ -364,31 +382,6 @@ def _iter_python_files(root: Path) -> Iterable[Path]:
         if any(part in excluded for part in rel_parts):
             continue
         yield path
-
-
-def _load_allowlist(allowlist: Path | None) -> list[str]:
-    if allowlist is None or not allowlist.exists():
-        return []
-    yaml_files = sorted(allowlist.glob("*.yaml")) if allowlist.is_dir() else [allowlist]
-    patterns: list[str] = []
-    for yaml_file in yaml_files:
-        data = yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
-        for item in data.get("allowed", []):
-            file_value = str(item.get("file", "")).strip()
-            justification = str(item.get("justification", "")).strip()
-            if file_value and justification:
-                patterns.append(file_value)
-    return patterns
-
-
-def _is_allowed(path: str, patterns: Iterable[str]) -> bool:
-    for pattern in patterns:
-        if pattern.endswith("/"):
-            if path.startswith(pattern):
-                return True
-        elif path == pattern:
-            return True
-    return False
 
 
 RULE = TestToSourceMappingRule()

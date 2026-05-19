@@ -49,12 +49,15 @@ class ComponentTypeRule:
         """Run a whole-root scan, or a direct tree scan for focused tests."""
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             return find_component_type_findings(scan_tree_classes(tree, display_path(file_path, context.root), []))
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
-def scan_root(root: Path) -> list[Finding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
     """Scan a root and apply the legacy component-type allowlist."""
-    allowlist = load_allowlist(allowlist_path_for_root(root, "enforce_component_type"), valid_rule_ids=_ALL_RULE_IDS)
+    allowlist_dir = (
+        allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "enforce_component_type")
+    )
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_ALL_RULE_IDS)
     all_classes: list[ClassInfo] = []
     for parsed in walk_python_files(root):
         if isinstance(parsed, PythonSyntaxError):

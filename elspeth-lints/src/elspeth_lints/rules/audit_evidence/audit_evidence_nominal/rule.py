@@ -29,12 +29,15 @@ class AuditEvidenceNominalRule:
         """Analyze one syntax tree for tests, or scan a whole repository root."""
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             return scan_tree(tree, display_path(file_path, context.root))
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
-def scan_root(root: Path) -> list[Finding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
     """Scan a root for AEN1 findings and apply the legacy allowlist."""
-    allowlist = load_class_allowlist(allowlist_path_for_root(root, "enforce_audit_evidence_nominal"))
+    allowlist_dir = (
+        allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root, "enforce_audit_evidence_nominal")
+    )
+    allowlist = load_class_allowlist(allowlist_dir)
     findings: list[Finding] = []
     for path in iter_python_paths(root):
         parsed = parse_python_file(path)

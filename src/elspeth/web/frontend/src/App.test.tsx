@@ -616,6 +616,19 @@ describe("App preferences bootstrap (Phase 1B)", () => {
     // App chrome remains rendered. The Layout/ChatPanel stubs are still
     // present — proves the bootstrap failure didn't unmount the tree.
     expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
+    // I5: the failure MUST be surfaced to the user via the always-mounted
+    // alert region in App.tsx. Without this assertion the test would
+    // pass even if writeError were set in the store but never rendered
+    // to the DOM — the silent-failure-one-layer-up regression I5
+    // exists to prevent. The role="alert" region carries the
+    // writeError text from the store.
+    await waitFor(() => {
+      const alerts = screen.getAllByRole("alert");
+      const surfaced = alerts.some(
+        (el) => el.textContent !== null && el.textContent.includes("network down"),
+      );
+      expect(surfaced).toBe(true);
+    });
   });
 
   it("renders the tutorial instead of the composer layout before completion", async () => {

@@ -333,6 +333,26 @@ function App() {
           </div>
         )}
 
+        {/* I5: preferences-bootstrap failure banner. The store's bootstrap()
+            is contracted to set writeError on failure (no fabricated defaults);
+            without this always-mounted surface, the writeError would be set
+            but invisible — the other components that read writeError mount
+            conditionally (DefaultModeChangedBanner only on mode-change flows,
+            ComposerPreferencesPanel only when settings is open, and
+            ComposerPreferencesForm explicitly returns null when defaultMode
+            is null, which is exactly the bootstrap-failure shape). Moving the
+            silent failure one layer up would defeat the purpose of I5.
+            Mounting here, alongside the backend-unavailable and
+            composer-unavailable banners, is the standard "always-on chrome"
+            surface for non-blocking failure signals. */}
+        {preferencesWriteError !== null && (
+          <div role="alert" className="alert-banner">
+            <span>
+              <strong>Preferences:</strong> {preferencesWriteError}
+            </span>
+          </div>
+        )}
+
         {/* Composer unavailable banner (backend is up but LLM not configured) */}
         {backendAvailable && systemStatus && !systemStatus.composer_available && (
           <div role="status" className="alert-banner">

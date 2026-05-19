@@ -167,6 +167,12 @@ Filed:
 
 - `elspeth-f295b77e76`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-f295b77e76` resolved. The TRANSFORM-mode flush
+  dispatcher tests now assert the exact single invocation, including triggering
+  token identity and effective input-field intersection.
+
 ### UENG-5 — Pipeline-row processor tests allow duplicated terminal results
 
 Evidence:

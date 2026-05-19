@@ -243,7 +243,7 @@ class TestBatchFlushDispatcherRouting:
 
         processor._cross_check_flush_output(fctx, result)
 
-        assert len(_CountingContract.invocations) >= 1, "TRANSFORM-flush bypassed dispatcher"
+        assert _CountingContract.invocations == [("t2", frozenset({"x", "y"}))]
 
     def test_transform_mode_passes_batch_intersection_as_effective_input_fields(self) -> None:
         """Batch intersection reaches the dispatcher via ``effective_input_fields``.
@@ -268,11 +268,7 @@ class TestBatchFlushDispatcherRouting:
 
         processor._cross_check_flush_output(fctx, result)
 
-        assert len(_CountingContract.invocations) >= 1, "TRANSFORM-flush bypassed dispatcher"
-        for token_id, effective_input_fields in _CountingContract.invocations:
-            assert effective_input_fields == frozenset({"x"}), (
-                f"Expected effective_input_fields=frozenset({{'x'}}) for {token_id!r}, got {effective_input_fields!r}"
-            )
+        assert _CountingContract.invocations == [("t1", frozenset({"x"}))]
 
     def test_passes_through_false_still_dispatches_non_pass_through_contracts(self) -> None:
         """Non-pass-through transforms still route through the batch dispatcher.

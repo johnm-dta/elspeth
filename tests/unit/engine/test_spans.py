@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import pytest
-
 if TYPE_CHECKING:
     from elspeth.engine.spans import SpanFactory
 
@@ -41,7 +39,6 @@ class TestSpanFactory:
 
     def test_with_tracer(self) -> None:
         """Test with actual tracer if opentelemetry available."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -59,7 +56,6 @@ class TestSpanFactory:
 
     def test_span_names_stable(self) -> None:
         """Span names should not include variable IDs."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -106,7 +102,6 @@ class TestSpanFactoryEnabled:
         assert factory.enabled is False
 
     def test_enabled_true_with_tracer(self) -> None:
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -128,7 +123,6 @@ class TestSourceSpan:
             assert isinstance(span, NoOpSpan)
 
     def test_source_span_with_tracer(self) -> None:
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -152,7 +146,6 @@ class TestGateSpan:
             assert isinstance(span, NoOpSpan)
 
     def test_gate_span_with_tracer(self) -> None:
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -176,7 +169,6 @@ class TestAggregationSpan:
             assert isinstance(span, NoOpSpan)
 
     def test_aggregation_span_with_tracer(self) -> None:
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -200,7 +192,6 @@ class TestSinkSpan:
             assert isinstance(span, NoOpSpan)
 
     def test_sink_span_with_tracer(self) -> None:
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -229,7 +220,6 @@ class TestNestedSpans:
                     assert isinstance(transform, NoOpSpan)
 
     def test_nested_spans_with_tracer(self) -> None:
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
 
         from elspeth.engine.spans import SpanFactory
@@ -257,7 +247,6 @@ class TestTokenIdOnChildSpans:
 
     def test_transform_span_includes_token_id(self) -> None:
         """Transform span should include token.id when provided."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -286,7 +275,6 @@ class TestTokenIdOnChildSpans:
 
     def test_gate_span_includes_token_id(self) -> None:
         """Gate span should include token.id when provided."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -312,7 +300,6 @@ class TestTokenIdOnChildSpans:
 
     def test_sink_span_includes_token_ids(self) -> None:
         """Sink span should include token.ids (list) when provided."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -344,7 +331,6 @@ class TestTokenIdOnChildSpans:
         This test documents the architectural fix: row_span keeps parent token.id,
         but transform_span/gate_span get the actual child token.id being processed.
         """
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -403,7 +389,6 @@ class TestTokenIdOnChildSpans:
 
     def test_transform_span_without_token_id_still_works(self) -> None:
         """Backwards compatibility: transform_span without token_id should work."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -439,7 +424,6 @@ class TestTokenIdEdgeCases:
 
     def test_transform_span_with_explicit_none_omits_attribute(self) -> None:
         """token_id=None should omit attribute (not set it to 'None' string)."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -474,7 +458,6 @@ class TestTokenIdEdgeCases:
         This is semantically correct for audit: an explicitly provided empty batch
         is different from "we didn't track tokens at all".
         """
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -500,7 +483,6 @@ class TestTokenIdEdgeCases:
 
     def test_transform_span_with_token_ids_for_batch(self) -> None:
         """Batch transforms should use token_ids (plural) not token_id."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -527,7 +509,6 @@ class TestTokenIdEdgeCases:
 
     def test_transform_span_token_ids_takes_precedence_over_token_id(self) -> None:
         """If both token_id and token_ids are provided, token_ids takes precedence."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -558,7 +539,6 @@ class TestTokenIdEdgeCases:
 
     def test_gate_span_with_explicit_none_omits_attribute(self) -> None:
         """gate_span with token_id=None should omit attribute."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -582,7 +562,6 @@ class TestTokenIdEdgeCases:
 
     def test_aggregation_span_with_token_ids(self) -> None:
         """Aggregation span should support token_ids for batch tracking."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -622,7 +601,6 @@ class TestNodeIdOnSpans:
 
     def test_transform_span_includes_node_id(self) -> None:
         """Transform span should include node.id when provided."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -650,7 +628,6 @@ class TestNodeIdOnSpans:
 
     def test_gate_span_includes_node_id(self) -> None:
         """Gate span should include node.id when provided."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -678,7 +655,6 @@ class TestNodeIdOnSpans:
 
     def test_sink_span_includes_node_id(self) -> None:
         """Sink span should include node.id when provided."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -706,7 +682,6 @@ class TestNodeIdOnSpans:
 
     def test_aggregation_span_includes_node_id(self) -> None:
         """Aggregation span should include node.id when provided."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -743,7 +718,6 @@ class TestNodeIdOnSpans:
         aggregation_span() was created without input_hash parameter when
         migrating from transform_span(). This breaks trace-to-audit correlation.
         """
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -778,7 +752,6 @@ class TestNodeIdOnSpans:
 
     def test_duplicate_plugins_distinguishable_by_node_id(self) -> None:
         """Two instances of same plugin type should have different node.id."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -825,7 +798,6 @@ class TestNodeIdOnSpans:
 
     def test_node_id_none_omits_attribute(self) -> None:
         """node_id=None should omit the attribute (backwards compatible)."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -859,7 +831,6 @@ class TestTruthinessChecks:
 
     def _make_factory(self) -> tuple[SpanFactory, Any]:
         """Create a SpanFactory with in-memory exporter for attribute inspection."""
-        pytest.importorskip("opentelemetry")
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 

@@ -15,7 +15,8 @@
 // ============================================================================
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 import { axe } from "./axe-config";
 
@@ -292,8 +293,24 @@ describe("AppHeader", () => {
 });
 
 describe("HeaderSessionSwitcher", () => {
-  it("has no axe violations", async () => {
+  it("has no axe violations (closed/default state)", async () => {
     const { container } = render(<HeaderSessionSwitcher />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // I5: the closed-state audit above only covers the trigger button.
+  // The entire interactive surface (filter input, archived toggle,
+  // session rows, rename form, archive error region) lives in the open
+  // menu and was previously unaudited.  Without this test a missing
+  // ``aria-label`` on the filter input, a focus-trap regression on the
+  // archive confirmation, or a missing ``role="alert"`` on the inline
+  // error would not be caught.
+  it("has no axe violations in the open state", async () => {
+    const { container } = render(<HeaderSessionSwitcher />);
+    const trigger = screen.getByRole("button", { name: /session switcher/i });
+    await userEvent.click(trigger);
+    // Menu, filter input, archived-toggle checkbox, and any session
+    // rows are now rendered.  axe walks the full container.
     expect(await axe(container)).toHaveNoViolations();
   });
 });

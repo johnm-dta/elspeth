@@ -478,12 +478,51 @@ jobs:
           retention-days: 7
 
   # ===========================================================================
+  # Frontend unit tests + type check (vitest, gating)
+  # ===========================================================================
+  # Phase 8 post-merge fix: before this job existed, the entire vitest
+  # suite under ``src/elspeth/web/frontend/src/**/*.test.{ts,tsx}`` ran
+  # only locally — no workflow invoked ``npm test`` or ``npm run
+  # typecheck``.  That meant the ~525-case HeaderSessionSwitcher /
+  # ComposerPreferencesPanel / TemplateCards / a11y-harness etc. test
+  # corpus was advisory documentation rather than regression protection.
+  # This lane is in ``ci-success.needs`` below so a red vitest run
+  # blocks merge.
+  frontend-unit:
+    name: Frontend unit (vitest + typecheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: src/elspeth/web/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: src/elspeth/web/frontend
+        run: npm ci
+
+      - name: Type check
+        working-directory: src/elspeth/web/frontend
+        run: npm run typecheck
+
+      - name: Run vitest
+        working-directory: src/elspeth/web/frontend
+        env:
+          CI: "true"
+        run: npm test -- --run
+
+  # ===========================================================================
   # Summary Job - Required for branch protection
   # ===========================================================================
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [lint, enforce-tier-model, enforce-freeze-guards, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test, test-postgres-testcontainer]
+    needs: [lint, enforce-tier-model, enforce-freeze-guards, enforce-audit-evidence-nominal, enforce-tier-1-decoration, contract-enforcement, test, test-postgres-testcontainer, frontend-unit]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -518,6 +557,10 @@ jobs:
           fi
           if [[ "${{ needs.test-postgres-testcontainer.result }}" != "success" ]]; then
             echo "Postgres testcontainer test job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.frontend-unit.result }}" != "success" ]]; then
+            echo "Frontend unit (vitest + typecheck) job failed"
             exit 1
           fi
           echo "All CI checks passed!"

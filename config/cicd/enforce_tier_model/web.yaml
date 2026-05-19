@@ -424,6 +424,25 @@ allow_hits:
   reason: Tier 3 — os.environ.get() for optional ELSPETH_ENV
   safety: Returns None when absent; only used for test guard
   expires: null
+- key: web/app.py:R4:create_app:_prometheus_metrics:fp=4eb7848bed057858
+  owner: web-app
+  reason: 'Tier 3 — public ``/metrics`` scrape endpoint. ``generate_latest()``
+    walks the global Prometheus REGISTRY and runs collector code we do
+    not own; a collector raising on a corrupted state would, under
+    Starlette''s default 500 handler, leak the traceback into the
+    response body. The bare ``except Exception`` traps the collector
+    failure and returns a safe 503 with a one-line ``# scrape failed``
+    body and no internal detail. Closes the Phase 8 PR-review S4
+    finding.'
+  safety: 'Audit-primacy not implicated — ``/metrics`` reads in-memory
+    counter state only, emits nothing to audit. Scrapers retry on 5xx;
+    service degrades gracefully. The actual exception is unreachable in
+    tests (would require a deliberately-corrupted collector) but the
+    handler exists so a production regression in any third-party
+    collector cannot escalate to a traceback-leaking 500. Allowlist
+    expiry deliberately bounded (90d) per project policy on new
+    suggested entries.'
+  expires: '2026-08-19'
 - key: web/execution/routes.py:R1:create_execution_router:websocket_run_progress:fp=2e7290677ad9bc65
   owner: web-execution
   reason: False positive — asyncio.Queue.get() is an async queue method, not dict.get()

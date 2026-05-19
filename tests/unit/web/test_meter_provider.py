@@ -120,6 +120,8 @@ def test_metrics_endpoint_returns_prometheus_format(tmp_path: Path) -> None:
     so the test runs without an asyncio event loop.  The ``/metrics`` mount is
     independent of the lifespan context; it works before ``yield`` completes.
     """
+    from opentelemetry import metrics
+
     from elspeth.web.app import create_app
     from elspeth.web.config import WebSettings
 
@@ -133,6 +135,23 @@ def test_metrics_endpoint_returns_prometheus_format(tmp_path: Path) -> None:
     )
 
     app = create_app(settings)
+
+    # Pin the emit → exposition round-trip.  Without a known counter that
+    # we register and increment, the previous body assertion ("at least
+    # one non-comment line OR # HELP/# TYPE preamble") passed against a
+    # stub body of just preamble.  A regression where every
+    # production-registered counter silently failed to appear in
+    # exposition would still produce ``# HELP`` / ``# TYPE`` lines and
+    # pass.  By emitting a known counter and asserting its specific wire
+    # name, we anchor the test to actual emit behaviour.
+    pin_meter_name = "test.meter_provider.endpoint_pin"
+    pin_counter_name = "elspeth_test_metrics_endpoint_pin_total"
+    pin_meter = metrics.get_meter(pin_meter_name)
+    pin_counter = pin_meter.create_counter(
+        pin_counter_name.removesuffix("_total"),
+        description="Pin counter for /metrics exposition round-trip test.",
+    )
+    pin_counter.add(1, {"phase8_pr_review": "s2"})
 
     # Use raise_server_exceptions=False so that lifespan exceptions (e.g. the
     # OIDC discovery step that isn't configured in tests) don't propagate.  The
@@ -150,10 +169,18 @@ def test_metrics_endpoint_returns_prometheus_format(tmp_path: Path) -> None:
     assert "text/plain" in content_type, f"Expected text/plain content-type from /metrics but got {content_type!r}."
 
     body = response.text
-    # Must contain at least one line that is non-empty and non-comment —
-    # Prometheus clients emit ``# HELP`` and ``# TYPE`` lines even for
-    # zero-value counters.
-    non_comment_lines = [line for line in body.splitlines() if line.strip() and not line.startswith("#")]
-    assert len(non_comment_lines) > 0 or "# HELP" in body or "# TYPE" in body, (
-        f"Prometheus body appears empty or malformed. Body: {body[:500]!r}"
+    # Hard-pin: the counter we just emitted must appear in exposition with
+    # the value we added.  Prometheus normalises the metric name (dot →
+    # underscore) but otherwise preserves it; the value line carries the
+    # attribute we attached.
+    assert pin_counter_name in body, (
+        f"Pin counter {pin_counter_name!r} not present in /metrics body — "
+        "registered counters are not reaching exposition.  Body head: "
+        f"{body[:500]!r}"
+    )
+    assert 'phase8_pr_review="s2"' in body, (
+        "Pin counter attribute not preserved through the meter → reader → "
+        "exposition path.  Either the global REGISTRY is wired to a "
+        "different reader than the one /metrics reads, or attribute "
+        f"serialisation has regressed.  Body head: {body[:500]!r}"
     )

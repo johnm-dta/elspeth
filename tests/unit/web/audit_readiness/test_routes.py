@@ -17,16 +17,25 @@ from elspeth.web.sessions.protocol import SessionRecord
 from elspeth.web.sessions.telemetry import build_sessions_telemetry, observed_value
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
-# Phase 8 Sub-task 7f (Q7 FastAPI route-table probe). Gates the
-# route-level fetch-failure emit test on the Phase 2C audit-readiness
-# endpoint being mounted. Per memory
-# ``project_phase2c_implementation_complete.md`` the endpoint should be
-# present; the skip pathway preserves test-suite green behaviour if a
-# sibling-phase rename moves the route. The router-construction probe
-# is decoupled from the production app so test discovery does not pay
-# the cost of full app import.
+# Phase 8 Sub-task 7f (Q7 FastAPI route-table probe). Verifies the
+# Phase 2C audit-readiness endpoint is mounted on the router this test
+# file imports. Phase 2C is shipped (see memory
+# ``project_phase2c_implementation_complete.md``); the probe is now a
+# hard precondition rather than a skip-gate so a future route rename
+# surfaces loud at test-import time instead of silently skipping the
+# four Sub-task 7f telemetry-emit tests below.  CLAUDE.md "no silent
+# failures": a silent-skip on telemetry-emit regression is exactly the
+# audit-trail gap the policy forbids. Decoupled from the production
+# app so test discovery doesn't pay full-app-import cost.
 _router_for_probe = create_audit_readiness_router()
-_PHASE_2C_AUDIT_READINESS_MOUNTED = any(getattr(r, "path", "").endswith("/audit-readiness") for r in _router_for_probe.routes)
+if not any(getattr(r, "path", "").endswith("/audit-readiness") for r in _router_for_probe.routes):
+    raise RuntimeError(
+        "Phase 2C audit-readiness endpoint not mounted on "
+        "create_audit_readiness_router(). The four Sub-task 7f "
+        "telemetry-emit tests in this module cannot run. Verify the "
+        "router suffix has not been renamed by a sibling-phase change; "
+        "if it has, update this probe and the test paths in lockstep."
+    )
 
 _SESSION_ID = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -91,10 +100,6 @@ def test_snapshot_does_not_flatten_unrelated_lookup_error_to_404() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(
-    not _PHASE_2C_AUDIT_READINESS_MOUNTED,
-    reason="Phase 2C audit-readiness endpoint not mounted; Sub-task 7f is a documented no-op per Task 0 probe.",
-)
 def test_snapshot_fetch_failure_emits_audit_fetch_failure_counter() -> None:
     """Phase 8 Sub-task 7f (B3 cohort b2):
 
@@ -118,10 +123,6 @@ def test_snapshot_fetch_failure_emits_audit_fetch_failure_counter() -> None:
     assert observed_value(telemetry.audit_fetch_failure_total) == 1
 
 
-@pytest.mark.skipif(
-    not _PHASE_2C_AUDIT_READINESS_MOUNTED,
-    reason="Phase 2C audit-readiness endpoint not mounted; Sub-task 7f is a documented no-op per Task 0 probe.",
-)
 def test_snapshot_composition_state_not_found_does_not_emit_fetch_failure() -> None:
     """Phase 8 Sub-task 7f — negative guard.
 
@@ -245,10 +246,6 @@ def _explain_app(session_service: object) -> FastAPI:
     return app
 
 
-@pytest.mark.skipif(
-    not _PHASE_2C_AUDIT_READINESS_MOUNTED,
-    reason="Phase 2C audit-readiness endpoint not mounted; Sub-task 7f is a documented no-op per Task 0 probe.",
-)
 def test_explain_get_current_state_failure_emits_audit_fetch_failure_counter() -> None:
     """Phase 8 Sub-task 7f — explain handler, first try/except path.
 
@@ -263,10 +260,6 @@ def test_explain_get_current_state_failure_emits_audit_fetch_failure_counter() -
     assert observed_value(app.state.sessions_telemetry.audit_fetch_failure_total) == 1
 
 
-@pytest.mark.skipif(
-    not _PHASE_2C_AUDIT_READINESS_MOUNTED,
-    reason="Phase 2C audit-readiness endpoint not mounted; Sub-task 7f is a documented no-op per Task 0 probe.",
-)
 def test_explain_state_construction_failure_emits_audit_fetch_failure_counter() -> None:
     """Phase 8 Sub-task 7f — explain handler, second try/except path.
 

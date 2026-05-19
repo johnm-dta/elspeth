@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import InvalidRequestError, OperationalError
 
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.audit_readiness.models import AuditReadinessSnapshot, ReadinessRow
@@ -323,7 +324,14 @@ async def test_mark_ready_for_review_audit_failure_does_not_emit_counter(
 
     assert observed_value(telemetry.session_completed_total) == 0
 
-    with pytest.raises(Exception):  # noqa: B017 — exact exception varies by SQLA version
+    # Narrowed from bare Exception to the specific SQLAlchemy classes a
+    # post-dispose engine raises.  ``InvalidRequestError`` is the typical
+    # raise from a closed pool on 2.x; ``OperationalError`` is the SQLite
+    # connection-closed variant when the underlying connection is gone.
+    # Both are stable across the 1.4/2.0 boundary.  Bare Exception was
+    # hiding regressions where the engine silently succeeded — see
+    # advisory commentary in S3 of the Phase 8 PR review.
+    with pytest.raises((InvalidRequestError, OperationalError)):
         await service.mark_ready_for_review(
             session_id=session_record.id,
             user_id=session_record.user_id,

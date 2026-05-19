@@ -350,8 +350,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             : {}),
         };
       });
-    } catch {
+    } catch (err) {
+      // Preserve the original error for callers that want to surface
+      // ``err.message`` inline (HeaderSessionSwitcher renders an inline
+      // role="alert" co-located with the trigger).  We also set the
+      // composer-level fallback so the global error region stays useful
+      // if no inline handler is wired.  Re-throwing lets the component
+      // catch keep the diagnostic detail without losing the fallback.
       set({ error: "Failed to archive session. Please try again." });
+      throw err;
     }
   },
 
@@ -366,8 +373,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ),
         error: null,
       }));
-    } catch {
+    } catch (err) {
+      // Same pattern as ``archiveSession`` above — re-raise so an inline
+      // handler can preserve ``err.message`` while the global error
+      // region still receives a friendly fallback.
       set({ error: "Failed to rename session. Please try again." });
+      throw err;
     }
   },
 

@@ -3,7 +3,14 @@ defaults:
   fail_on_stale: true
   fail_on_expired: true
   allowlist_budget:
-    max_allow_hits: 392
+    # Bumped from 392 → 393 on 2026-05-19 (second bump same day) to
+    # accommodate the Phase 8 PR-review S4 entry for
+    # ``web/app.py:_prometheus_metrics`` (R4 — public /metrics scrape
+    # endpoint hardened against ``generate_latest()`` collector failures
+    # to avoid leaking tracebacks into the response body). Bounded
+    # 90-day expiry (2026-08-19); reviewer must renew or reify after
+    # production traffic confirms the handler is unreachable.
+    max_allow_hits: 393
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -13,7 +20,9 @@ defaults:
     # avoids AST-shift fingerprint rotation and concentrates the W5
     # rationale at one site.
     max_per_file_rules: 93
-    max_total_entries: 485
+    # Bumped from 485 → 486 on 2026-05-19 for the same Phase 8 PR-review
+    # S4 entry as ``max_allow_hits`` above.
+    max_total_entries: 486
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

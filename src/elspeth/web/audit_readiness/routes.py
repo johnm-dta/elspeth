@@ -129,10 +129,11 @@ def create_audit_readiness_router() -> APIRouter:
                 ),
             )
         except Exception:
-            # ``telemetry`` is already bound (and annotated) from the first
-            # except block above; re-annotating in the same function scope
-            # would trigger mypy's no-redef rule.  Plain reassignment is
-            # correct here.
+            # Annotated in the first except above; mypy carries the type
+            # across branches even though that branch ended in ``raise``.
+            # Re-annotating here would trip mypy's no-redef rule. The
+            # runtime binding always happens on this assignment — the
+            # first except never reaches this point because it re-raises.
             telemetry = request.app.state.sessions_telemetry
             record_audit_fetch_failure(telemetry)
             raise

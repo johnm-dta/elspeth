@@ -104,7 +104,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:61ea9aa36a0e8a07"
+    source_file_hash: str | None = "sha256:5af6ffb333a487c1"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -507,13 +507,11 @@ class JSONSink(BaseSink):
         config_snapshot: Mapping[str, object],
     ) -> tuple[str, ...]:
         hints: list[str] = []
-        fmt = config_snapshot.get("format")
-        if fmt == "json":
+        if "format" in config_snapshot and config_snapshot["format"] == "json":
             hints.append(
                 "format: 'json' (array mode) rewrites the entire file at every checkpoint and is not resumable. "
                 "If the run might be interrupted or long-running, switch to format: 'jsonl'."
             )
-        # No on_write_failure declared → flag.
         if "on_write_failure" not in config_snapshot:
             hints.append(
                 "on_write_failure is not set. The default routes write errors to 'discard'; set it to a quarantine sink if write failures should be audited rather than dropped."

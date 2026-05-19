@@ -147,7 +147,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:42878f4e566994f3"
+    source_file_hash: str | None = "sha256:af07fcdc3bef7b61"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -636,8 +636,12 @@ class JSONSource(BaseSource):
         tool_name: str,
         config_snapshot: Mapping[str, object],
     ) -> tuple[str, ...]:
-        schema = config_snapshot.get("schema")
-        if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
+        if "schema" not in config_snapshot:
+            return ()
+        schema = config_snapshot["schema"]
+        if not isinstance(schema, Mapping):
+            return ()
+        if "mode" in schema and schema["mode"] == "fixed":
             return (
                 "You declared schema.mode: 'fixed'. Did you call inspect_source first? "
                 "Fixed mode drops every row whose keys don't exactly match the declared fields.",

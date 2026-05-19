@@ -113,7 +113,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b6a47faeaf0e407c"
+    source_file_hash: str | None = "sha256:3d718ccaa8bb05b7"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

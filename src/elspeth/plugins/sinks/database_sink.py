@@ -102,7 +102,7 @@ class DatabaseSink(BaseSink):
     name = "database"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fdae3de60fbab58c"
+    source_file_hash: str | None = "sha256:68e6879b19f97cb4"
     config_model = DatabaseSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -624,13 +624,14 @@ class DatabaseSink(BaseSink):
         config_snapshot: Mapping[str, object],
     ) -> tuple[str, ...]:
         hints: list[str] = []
-        write_mode = config_snapshot.get("write_mode")
-        if write_mode == "replace":
-            hints.append(
-                "write_mode: 'replace' DROPS and recreates the target table at run start. Confirm with the operator that the existing data is expendable before running."
-            )
-        elif write_mode == "upsert":
-            hints.append(
-                "write_mode: 'upsert' requires a unique constraint on the target table for the merge key. Verify the constraint exists before running, or the upsert will degenerate to insert."
-            )
+        if "write_mode" in config_snapshot:
+            write_mode = config_snapshot["write_mode"]
+            if write_mode == "replace":
+                hints.append(
+                    "write_mode: 'replace' DROPS and recreates the target table at run start. Confirm with the operator that the existing data is expendable before running."
+                )
+            elif write_mode == "upsert":
+                hints.append(
+                    "write_mode: 'upsert' requires a unique constraint on the target table for the merge key. Verify the constraint exists before running, or the upsert will degenerate to insert."
+                )
         return tuple(hints)

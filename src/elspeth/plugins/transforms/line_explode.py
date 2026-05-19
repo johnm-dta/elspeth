@@ -164,7 +164,7 @@ class LineExplode(BaseTransform):
     name = "line_explode"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2bf6fedc84a2eb4c"
+    source_file_hash: str | None = "sha256:f586c7efbb342c87"
     config_model = LineExplodeConfig
     creates_tokens = True
 

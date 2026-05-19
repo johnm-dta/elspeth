@@ -344,7 +344,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:fdf63d8bbfccc3b9"
+    source_file_hash: str | None = "sha256:bd60b4225aec0157"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -504,9 +504,12 @@ class WebScrapeTransform(BaseTransform):
     ) -> tuple[str, ...]:
         hints: list[str] = []
         # format=text with whitespace separator → flag the compact_text issue.
-        fmt = config_snapshot.get("format")
-        sep = config_snapshot.get("text_separator")
-        if fmt == "text" and isinstance(sep, str) and "\n" not in sep:
+        if "format" not in config_snapshot or "text_separator" not in config_snapshot:
+            return ()
+        if config_snapshot["format"] != "text":
+            return ()
+        sep = config_snapshot["text_separator"]
+        if isinstance(sep, str) and "\n" not in sep:
             hints.append(
                 "format: 'text' with a non-newline text_separator collapses page lines into one string. "
                 "Downstream line_explode cannot recover boundaries. Either set text_separator: '\\n' or switch format: 'markdown'."

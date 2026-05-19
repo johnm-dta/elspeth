@@ -89,7 +89,7 @@ class Truncate(BaseTransform):
     name = "truncate"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5bf45bf268729584"
+    source_file_hash: str | None = "sha256:393331d8a6a09fb0"
     config_model = TruncateConfig
     passes_through_input = True
 

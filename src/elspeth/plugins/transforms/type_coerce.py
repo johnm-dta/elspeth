@@ -280,7 +280,7 @@ class TypeCoerce(BaseTransform):
     name = "type_coerce"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e46602a8358337aa"
+    source_file_hash: str | None = "sha256:f6735afbb2dc53db"
     config_model = TypeCoerceConfig
     passes_through_input = True
 

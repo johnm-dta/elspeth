@@ -26,6 +26,14 @@ function isTerminalPhase(
   return phase === "complete" || phase === "failed" || phase === "cancelled";
 }
 
+function terminalStatusLabel(
+  phase: ComposerProgressSnapshot["phase"] | undefined,
+): string {
+  if (phase === "failed") return "Failed";
+  if (phase === "cancelled") return "Stopped";
+  return "Updated";
+}
+
 function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
   return count === 1 ? `1 ${singular}` : `${count} ${pluralLabel}`;
 }
@@ -152,11 +160,7 @@ export function ComposingIndicator({
       <div className="composing-bubble">
         {isTerminal ? (
           <div className="composing-terminal-mark" aria-hidden="true">
-            {composerProgress?.phase === "failed"
-              ? "!"
-              : composerProgress?.phase === "cancelled"
-                ? "x"
-                : "ok"}
+            {terminalStatusLabel(composerProgress?.phase)}
           </div>
         ) : (
           <div className="composing-pulse" aria-hidden="true">

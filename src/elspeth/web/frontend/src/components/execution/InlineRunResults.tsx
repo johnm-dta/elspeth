@@ -12,8 +12,50 @@ import { ProgressView } from "@/components/execution/ProgressView";
 import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
 import { NarrativeResults } from "@/components/composer/NarrativeResults";
 import { useNarrativeMode } from "@/hooks/useNarrativeMode";
-import { isTerminalRunStatus } from "@/types/index";
+import { isTerminalRunStatus, type Run, type RunProgress, type RunStatus } from "@/types/index";
 import { RunsHistoryDrawer } from "./RunsHistoryDrawer";
+
+function statusLabel(status: RunStatus | null): string {
+  if (!status) return "No run";
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "completed_with_failures":
+      return "Completed with failures";
+    case "failed":
+      return "Failed";
+    case "empty":
+      return "Empty";
+    case "cancelled":
+      return "Cancelled";
+    case "running":
+      return "Running";
+    case "pending":
+      return "Pending";
+  }
+}
+
+function runSummaryParts(
+  status: RunStatus | null,
+  progress: RunProgress | null,
+  run: Run | null,
+): string[] {
+  const accounting = progress?.accounting ?? run?.accounting ?? null;
+  const rows =
+    progress?.source_rows_processed ?? accounting?.source.rows_processed ?? null;
+  const succeeded =
+    progress?.tokens_succeeded ?? accounting?.tokens.succeeded ?? null;
+  const failed = progress?.tokens_failed ?? accounting?.tokens.failed ?? null;
+  const parts = [statusLabel(status)];
+  if (rows !== null) parts.push(`${rows} ${rows === 1 ? "row" : "rows"}`);
+  if (succeeded !== null) {
+    parts.push(`${succeeded} succeeded`);
+  }
+  if (failed !== null) {
+    parts.push(`${failed} failed`);
+  }
+  return parts;
+}
 
 export function InlineRunResults(): JSX.Element | null {
   const activeRunId = useExecutionStore((s) => s.activeRunId);
@@ -22,6 +64,7 @@ export function InlineRunResults(): JSX.Element | null {
   const loadRuns = useExecutionStore((s) => s.loadRuns);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const [showHistory, setShowHistory] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(false);
 
   useEffect(() => {
     if (!activeSessionId) return;
@@ -58,28 +101,54 @@ export function InlineRunResults(): JSX.Element | null {
         ? displayRun.id
         : null;
   const hasHistory = visibleRuns.length > 0;
+  const summaryParts = runSummaryParts(
+    displayStatus,
+    progressBelongsToActiveRun ? progress : null,
+    displayRun,
+  );
 
   if (!showProgress && !outputRunId && !hasHistory) {
     return null;
   }
 
   return (
-    <section className="inline-run-results" aria-label="Pipeline run results">
+    <section
+      className={`inline-run-results${isCollapsed ? " inline-run-results--collapsed" : ""}`}
+      aria-label="Pipeline run results"
+    >
       <div className="inline-run-results-toolbar">
-        <span className="inline-run-results-title">Run results</span>
-        {hasHistory && (
+        <div className="inline-run-results-heading">
+          <span className="inline-run-results-title">Run results</span>
+          {isCollapsed && (
+            <span className="inline-run-results-summary">
+              {summaryParts.join(" · ")}
+            </span>
+          )}
+        </div>
+        <div className="inline-run-results-actions">
           <button
             type="button"
-            onClick={() => setShowHistory(true)}
-            className="btn-compact inline-run-results-history-btn"
+            onClick={() => setIsCollapsed((value) => !value)}
+            className="btn-compact inline-run-results-collapse-btn"
+            aria-label={isCollapsed ? "Show run results" : "Hide run results"}
+            title={isCollapsed ? "Show run results" : "Hide run results"}
           >
-            Past runs ({visibleRuns.length})
+            <span aria-hidden="true">{isCollapsed ? "\u25B2" : "\u25BC"}</span>
           </button>
-        )}
+          {hasHistory && (
+            <button
+              type="button"
+              onClick={() => setShowHistory(true)}
+              className="btn-compact inline-run-results-history-btn"
+            >
+              Past runs ({visibleRuns.length})
+            </button>
+          )}
+        </div>
       </div>
 
-      {showProgress && <ProgressView />}
-      {outputRunId && <NarrativeResultsBranch runId={outputRunId} />}
+      {!isCollapsed && showProgress && <ProgressView />}
+      {!isCollapsed && outputRunId && <NarrativeResultsBranch runId={outputRunId} />}
 
       {showHistory && (
         <RunsHistoryDrawer onClose={() => setShowHistory(false)} />

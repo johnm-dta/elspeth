@@ -274,7 +274,7 @@ export function MessageBubble({
         {hasSourcesCreated && (
           <div className="message-sources-created">
             <div className="message-tools-toggle message-sources-created-heading">
-              Sources created ({sourcesCreated!.length})
+              Sources ({sourcesCreated!.length})
             </div>
             <div className="message-sources-created-list">
               {sourcesCreated!.map((summary) => (

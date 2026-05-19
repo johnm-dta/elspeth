@@ -137,6 +137,60 @@ describe("InlineRunResults", () => {
     ).toBeInTheDocument();
   });
 
+  it("collapses run results behind a compact retained summary", async () => {
+    useExecutionStore.setState({
+      activeRunId: null,
+      progress: null,
+      runs: [
+        {
+          id: "run-latest",
+          session_id: "sess-1",
+          status: "completed",
+          accounting: {
+            source: { rows_processed: 3 },
+            tokens: {
+              emitted: 3,
+              terminal: 3,
+              succeeded: 3,
+              failed: 0,
+              structural: 0,
+              pending: 0,
+            },
+            routing: {
+              routed_success: 0,
+              routed_failure: 0,
+              quarantined: 0,
+              discarded: 0,
+            },
+            integrity: {
+              closure: "closed",
+              missing_terminal_outcomes: 0,
+              duplicate_terminal_outcomes: 0,
+            },
+          },
+        } as never,
+      ],
+    } as never);
+    const user = userEvent.setup();
+
+    render(<InlineRunResults />);
+    expect(screen.getByTestId("run-outputs-stub")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /hide run results/i }),
+    );
+
+    expect(screen.queryByTestId("run-outputs-stub")).not.toBeInTheDocument();
+    expect(screen.getByText(/Completed/i)).toBeInTheDocument();
+    expect(screen.getByText(/3 rows/i)).toBeInTheDocument();
+    expect(screen.getByText(/3 succeeded/i)).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /show run results/i }),
+    );
+    expect(screen.getByTestId("run-outputs-stub")).toBeInTheDocument();
+  });
+
   it("opens and closes the Past runs drawer", async () => {
     useExecutionStore.setState({
       activeRunId: null,

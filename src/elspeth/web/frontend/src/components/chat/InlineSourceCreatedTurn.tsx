@@ -99,7 +99,7 @@ export function InlineSourceCreatedTurn({
       className="inline-source-created-turn"
     >
       <header className="inline-source-created-turn-header">
-        <h3 className="inline-source-created-turn-title">Source created</h3>
+        <h3 className="inline-source-created-turn-title">Source file</h3>
         <dl className="inline-source-created-turn-facts">
           <div>
             <dt>Filename</dt>
@@ -116,12 +116,17 @@ export function InlineSourceCreatedTurn({
         </dl>
       </header>
 
-      <pre
-        data-testid="inline-source-preview"
-        className="inline-source-created-turn-preview"
-      >
-        {clippedPreview}
-      </pre>
+      <div className="inline-source-created-turn-content">
+        <h4 className="inline-source-created-turn-content-title">
+          Source contents
+        </h4>
+        <pre
+          data-testid="inline-source-preview"
+          className="inline-source-created-turn-preview"
+        >
+          {clippedPreview}
+        </pre>
+      </div>
 
       {showEdit && (
         <div className="inline-source-created-turn-actions">

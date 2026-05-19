@@ -52,9 +52,20 @@ describe("InlineSourceCreatedTurn", () => {
 
   it("renders the filename, MIME type, and row count for a verbatim source", () => {
     render(<InlineSourceCreatedTurn summary={verbatim} onEdit={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Source file" })).toBeInTheDocument();
     expect(screen.getByText(/chat\.csv/)).toBeInTheDocument();
     expect(screen.getByText(/text\/csv/)).toBeInTheDocument();
     expect(screen.getByText(/1 row/)).toBeInTheDocument();
+  });
+
+  it("labels the inline preview as content before rendering source bytes", () => {
+    render(<InlineSourceCreatedTurn summary={verbatim} onEdit={vi.fn()} />);
+    expect(
+      screen.getByRole("heading", { name: /source contents/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("inline-source-preview")).toHaveTextContent(
+      "https://finance.gov.au",
+    );
   });
 
   it("does NOT show an Edit button for verbatim provenance", () => {

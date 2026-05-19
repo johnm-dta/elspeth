@@ -109,8 +109,10 @@ describe("ComposingIndicator", () => {
     render(<ComposingIndicator composerProgress={progress} />);
 
     expect(screen.getByText("Last composer update")).toBeInTheDocument();
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
     expect(screen.getByText("Composition stopped before saving.")).toBeInTheDocument();
     expect(screen.getByRole("status")).not.toHaveTextContent("Working on...");
+    expect(screen.getByRole("status")).not.toHaveTextContent(/\bok\b/i);
   });
 });
 

@@ -223,7 +223,7 @@ describe("MessageBubble", () => {
       ).not.toBeInTheDocument();
     });
 
-    it("renders Sources created (N) heading when summaries are supplied", () => {
+    it("renders a concise Sources (N) heading when summaries are supplied", () => {
       const message = makeMessage({ role: "assistant", content: "Done." });
       render(
         <MessageBubble
@@ -231,7 +231,8 @@ describe("MessageBubble", () => {
           sourcesCreated={[makeSummary()]}
         />,
       );
-      expect(screen.getByText("Sources created (1)")).toBeInTheDocument();
+      expect(screen.getByText("Sources (1)")).toBeInTheDocument();
+      expect(screen.queryByText("Sources created (1)")).not.toBeInTheDocument();
     });
 
     it("heading is NOT a button — no click affordance, no aria-expanded", () => {
@@ -247,7 +248,7 @@ describe("MessageBubble", () => {
         />,
       );
       expect(
-        screen.queryByRole("button", { name: /Sources created/i }),
+        screen.queryByRole("button", { name: /Sources/i }),
       ).not.toBeInTheDocument();
     });
 

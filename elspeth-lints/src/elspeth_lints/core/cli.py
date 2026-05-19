@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -48,11 +49,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
-    requested_rules = _parse_rules(args.rules)
-    if not requested_rules:
+    requested_tokens = _parse_rules(args.rules)
+    if not requested_tokens:
         return _emit_findings([], output_format=args.format, rules=[])
 
     available = set(registry.ids())
+    requested_rules = _expand_rule_tokens(requested_tokens, available)
     unknown = sorted(set(requested_rules).difference(available))
     if unknown:
         sys.stderr.write(f"Unknown rule id(s): {', '.join(unknown)}\n")
@@ -69,7 +71,21 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
         findings.extend(rule.analyze(empty_tree, args.root, context))
 
     if incremental_rules:
-        for item in walk_python_files(args.root, args.files):
+        explicit_files = tuple(args.files or ())
+        if explicit_files:
+            out_of_scope = _out_of_scope_explicit_files(explicit_files, root=args.root, rules=incremental_rules)
+            if out_of_scope:
+                for file_path in out_of_scope:
+                    sys.stderr.write(
+                        f"{file_path}: no selected incremental rule path_filter applies "
+                        f"({', '.join(rule.id for rule in incremental_rules)})\n"
+                    )
+                return 2
+        for item in walk_python_files(args.root, explicit_files or None):
+            item_path = item.path
+            applicable_rules = _rules_for_path(item_path, root=args.root, rules=incremental_rules)
+            if not applicable_rules:
+                continue
             if isinstance(item, PythonSyntaxError):
                 findings.append(
                     Finding(
@@ -82,7 +98,7 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
                     )
                 )
                 continue
-            findings.extend(_run_rules(item, incremental_rules, context=context))
+            findings.extend(_run_rules(item, applicable_rules, context=context))
 
     return _emit_findings(findings, output_format=args.format, rules=selected_rules)
 
@@ -94,11 +110,60 @@ def _parse_rules(raw: str) -> tuple[str, ...]:
     return rules
 
 
+def _expand_rule_tokens(tokens: tuple[str, ...], available: set[str]) -> tuple[str, ...]:
+    expanded: list[str] = []
+    unknown: list[str] = []
+    for token in tokens:
+        if token.endswith("/*"):
+            prefix = token[:-2].replace("/", ".")
+            matches = sorted(rule_id for rule_id in available if rule_id.startswith(f"{prefix}."))
+            if matches:
+                expanded.extend(matches)
+            else:
+                unknown.append(token)
+        else:
+            expanded.append(token)
+    return tuple(dict.fromkeys([*expanded, *unknown]))
+
+
 def _run_rules(item: ParsedPythonFile, rules: list[Rule], *, context: RuleContext) -> list[Finding]:
     findings: list[Finding] = []
     for rule in rules:
         findings.extend(rule.analyze(item.tree, item.path, context))
     return findings
+
+
+def _out_of_scope_explicit_files(files: Sequence[Path], *, root: Path, rules: list[Rule]) -> list[str]:
+    out_of_scope: list[str] = []
+    for file_path in files:
+        if not any(_path_matches_rule(file_path, root=root, rule=rule) for rule in rules):
+            out_of_scope.append(_display_path(_candidate_path(root, file_path), root))
+    return out_of_scope
+
+
+def _rules_for_path(file_path: Path, *, root: Path, rules: list[Rule]) -> list[Rule]:
+    return [rule for rule in rules if _path_matches_rule(file_path, root=root, rule=rule)]
+
+
+def _path_matches_rule(file_path: Path, *, root: Path, rule: Rule) -> bool:
+    return re.search(rule.metadata.path_filter, _display_path(_candidate_path(root, file_path), root)) is not None
+
+
+def _candidate_path(root: Path, file_path: Path) -> Path:
+    if file_path.is_absolute() or file_path.exists():
+        return file_path
+    return root / file_path
+
+
+def _display_path(file_path: Path, root: Path) -> str:
+    try:
+        return file_path.relative_to(root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return file_path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return file_path.as_posix()
 
 
 def _run_dump_edges(args: argparse.Namespace) -> int:

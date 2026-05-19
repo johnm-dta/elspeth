@@ -265,3 +265,20 @@ class TestComposerExceptionChannelEnforcer:
         result = _run(["check", "--root", str(tmp_path), "--allowlist", str(bogus)])
         assert result.returncode != 0
         assert "does not exist" in (result.stdout + result.stderr).lower()
+
+    def test_json_mode_succeeds_on_current_codebase(self) -> None:
+        """Legacy script exposes structured output for parity harness comparison."""
+        project_root = Path(__file__).resolve().parents[4]
+        result = _run(
+            [
+                "check",
+                "--root",
+                str(project_root / "src" / "elspeth"),
+                "--allowlist",
+                str(project_root / "config" / "cicd" / "enforce_composer_exception_channel"),
+                "--format",
+                "json",
+            ]
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.strip() == "[]"

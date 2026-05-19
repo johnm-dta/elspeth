@@ -360,6 +360,23 @@ class TestComposerCatchOrderEnforcer:
         )
         assert result.returncode == 0, result.stdout + result.stderr
 
+    def test_json_mode_succeeds_on_current_codebase(self) -> None:
+        """Legacy script exposes structured output for parity harness comparison."""
+        project_root = Path(__file__).resolve().parents[4]
+        result = _run(
+            [
+                "check",
+                "--root",
+                str(project_root / "src" / "elspeth"),
+                "--allowlist",
+                str(project_root / "config" / "cicd" / "enforce_composer_catch_order"),
+                "--format",
+                "json",
+            ]
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.stdout.strip() == "[]"
+
 
 class TestHierarchyConsistency:
     """Cross-check the hard-coded subclass map against the real MRO.

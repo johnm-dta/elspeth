@@ -93,6 +93,12 @@ jobs:
             --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution \
             --root src/elspeth
 
+      - name: Shadow composer elspeth-lints rules
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules 'composer/*' \
+            --root src/elspeth
+
       - name: Forbid new bespoke CI enforcers
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -151,6 +157,19 @@ jobs:
             exit "$status"
           fi
 
+      - name: Emit elspeth-lints composer SARIF artifact
+        if: always()
+        run: |
+          set +e
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules 'composer/*' \
+            --root src/elspeth \
+            --format sarif > elspeth-lints-composer.sarif
+          status=$?
+          if [[ "$status" -gt 1 ]]; then
+            exit "$status"
+          fi
+
       - name: Upload elspeth-lints SARIF artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -161,6 +180,7 @@ jobs:
             elspeth-lints-immutability.sarif
             elspeth-lints-plugin-contract.sarif
             elspeth-lints-audit-evidence.sarif
+            elspeth-lints-composer.sarif
           retention-days: 7
 
   # ===========================================================================

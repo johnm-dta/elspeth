@@ -67,13 +67,55 @@ rules:
       - --format
       - json
   - old_script: scripts/cicd/enforce_composer_catch_order.py
-    new_rule: null
-    status: pending
-    migration_issue: null
+    new_rule: composer.catch_order
+    status: shadow
+    migration_issue: elspeth-48db98bd88
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/src/elspeth"
+      - --allowlist
+      - "{root}/config/cicd/enforce_composer_catch_order"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_composer_exception_channel.py
-    new_rule: null
-    status: pending
-    migration_issue: null
+    new_rule: composer.exception_channel
+    status: shadow
+    migration_issue: elspeth-48db98bd88
+    old_command:
+      - "{python}"
+      - "{old_script}"
+      - check
+      - --root
+      - "{root}/src/elspeth"
+      - --allowlist
+      - "{root}/config/cicd/enforce_composer_exception_channel"
+      - --format
+      - json
+    new_command:
+      - "{python}"
+      - -m
+      - elspeth_lints.core.cli
+      - check
+      - --rules
+      - "{new_rule}"
+      - --root
+      - "{root}/src/elspeth"
+      - --format
+      - json
   - old_script: scripts/cicd/enforce_contract_manifest.py
     new_rule: null
     status: pending

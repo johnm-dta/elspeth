@@ -90,6 +90,12 @@ elspeth-lints dump-edges --root . --format json
 populated from `RuleMetadata` and `runs[].results[]` populated from `Finding`.
 GitHub workflow-command output is available with `--format github`.
 
+Incremental rules are scoped by `RuleMetadata.path_filter`, matched against
+paths relative to `--root`. When `--files` is provided, any file outside every
+selected incremental rule's path filter is rejected with exit code `2` instead
+of being analyzed out of scope. During a full-root scan, files outside a rule's
+path filter are skipped for that rule.
+
 Exit codes:
 
 - `0`: no findings, command succeeded.

@@ -54,6 +54,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,7 +104,14 @@ class Finding:
     rule_id: str
     file_path: str
     lineno: int
+    sub_name: str
+    super_name: str
     message: str
+
+    @property
+    def fingerprint(self) -> str:
+        payload = f"{self.rule_id}|{self.file_path}|{self.lineno}|{self.sub_name}|{self.super_name}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _handler_class_names(handler: ast.ExceptHandler) -> list[str]:
@@ -159,6 +168,8 @@ def _scan_try(try_node: ast.Try, rel: str) -> list[Finding]:
                                 rule_id="CCO1",
                                 file_path=rel,
                                 lineno=handler_j.lineno,
+                                sub_name=sub_name,
+                                super_name=super_name,
                                 message=(
                                     f"{rel}:{handler_j.lineno}: except {sub_name} "
                                     f"is unreachable — preceding except {super_name} "
@@ -239,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check")
     check.add_argument("--root", required=True, type=Path)
     check.add_argument("--allowlist", type=Path, default=None)
+    check.add_argument("--format", choices=("text", "json"), default="text")
     check.add_argument("files", nargs="*", type=Path)
     args = parser.parse_args(argv)
 
@@ -267,9 +279,30 @@ def main(argv: list[str] | None = None) -> int:
         findings.extend(_scan_file(target, root))
 
     active = [f for f in findings if (f.file_path, f.lineno) not in allowlist]
+    if args.format == "json":
+        sys.stdout.write(json_findings(active))
+        return 1 if active else 0
     for f in active:
         print(f"[{f.rule_id}] {f.message}")
     return 1 if active else 0
+
+
+def json_findings(findings: list[Finding]) -> str:
+    """Render findings in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": finding.rule_id,
+            "file_path": finding.file_path,
+            "line": finding.lineno,
+            "column": 0,
+            "message": finding.message,
+            "fingerprint": finding.fingerprint,
+            "severity": "error",
+            "suggestion": RULES[finding.rule_id]["remediation"],
+        }
+        for finding in findings
+    ]
+    return json.dumps(payload, sort_keys=True) + "\n"
 
 
 if __name__ == "__main__":

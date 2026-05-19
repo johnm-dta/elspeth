@@ -32,7 +32,10 @@ def iter_python_files(root: Path, files: Iterable[Path] | None = None) -> Iterat
     """Yield Python files either from an explicit list or by walking root."""
     if files is not None:
         for file_path in files:
-            candidate = file_path if file_path.is_absolute() else root / file_path
+            if file_path.is_absolute() or file_path.exists():
+                candidate = file_path
+            else:
+                candidate = root / file_path
             if candidate.suffix == ".py":
                 yield candidate
         return

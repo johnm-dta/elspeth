@@ -102,6 +102,13 @@ repos:
         files: ^(src/elspeth/|config/cicd/enforce_audit_evidence_nominal/|config/cicd/enforce_tier_1_decoration/|config/cicd/enforce_guard_symmetry/|config/cicd/enforce_gve_attribution/|elspeth-lints/src/elspeth_lints/rules/audit_evidence/)
         pass_filenames: false
 
+      - id: elspeth-lints-composer-shadow
+        name: elspeth-lints composer shadow
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules 'composer/*' --root src/elspeth
+        language: system
+        files: ^(src/elspeth/web/|config/cicd/enforce_composer_(catch_order|exception_channel)/|elspeth-lints/src/elspeth_lints/rules/composer/)
+        pass_filenames: false
+
       - id: enforce-tier-model
         name: Enforce Tier Model
         entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*" --exclude "web/frontend/node_modules"

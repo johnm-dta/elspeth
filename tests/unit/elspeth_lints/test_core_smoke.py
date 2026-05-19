@@ -29,6 +29,68 @@ def test_cli_dump_edges_contract_is_available(tmp_path: Path, capsys: object) ->
     assert captured.out == "[]\n"
 
 
+def test_cli_refuses_explicit_files_outside_rule_path_filter(tmp_path: Path, capsys: object) -> None:
+    """Explicit --files input must respect each rule's metadata path filter."""
+    import argparse
+    from collections.abc import Iterable
+
+    from elspeth_lints.core.cli import _run_check
+    from elspeth_lints.core.protocols import Category, Finding, RuleContext, RuleMetadata, RuleScope, Severity
+    from elspeth_lints.core.registry import RuleRegistry
+
+    class ScopedRule:
+        id = "demo.scoped"
+        scope = RuleScope.INCREMENTAL
+        metadata = RuleMetadata(
+            id=id,
+            name="Scoped",
+            description="Only applies to allowed.py.",
+            severity=Severity.ERROR,
+            category=Category.MANIFEST,
+            cwe=(),
+            scope=scope,
+            path_filter=r"^allowed\.py$",
+            examples_violation_count=1,
+            examples_clean_count=1,
+        )
+
+        def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> Iterable[Finding]:
+            del tree, context
+            return (
+                Finding(
+                    rule_id=self.id,
+                    file_path=file_path.name,
+                    line=1,
+                    column=0,
+                    message="should not run",
+                    fingerprint="demo",
+                    severity=self.metadata.severity,
+                ),
+            )
+
+    outside = tmp_path / "outside.py"
+    outside.write_text("value = 1\n", encoding="utf-8")
+    registry = RuleRegistry()
+    registry.register(ScopedRule())
+
+    exit_code = _run_check(
+        argparse.Namespace(
+            rules="demo.scoped",
+            rule_set="static",
+            format="text",
+            root=tmp_path,
+            allowlist_dir=None,
+            files=[outside],
+        ),
+        registry=registry,
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "outside.py" in captured.err
+    assert "demo.scoped" in captured.err
+
+
 def test_registry_decorator_registers_rule() -> None:
     """The registry exposes a decorator-based API for future rule modules."""
     from elspeth_lints.core.findings import Finding

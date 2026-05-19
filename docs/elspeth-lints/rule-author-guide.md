@@ -16,6 +16,12 @@ bespoke enforcers during the migration window.
 6. If the rule ports an existing `scripts/cicd/enforce_*.py` check, add or
    update the entry in `config/cicd/lint_migration_status.yaml`.
 
+Set `RuleMetadata.path_filter` to the rule's real ownership boundary. The CLI
+uses that filter for incremental rules: full-root scans skip out-of-scope files,
+and explicit `--files` input outside the selected rules' filters fails with
+exit code `2`. This keeps pre-commit trigger scopes and rule ownership
+mechanical instead of relying on comments near hook definitions.
+
 Ports must move through the manifest lifecycle:
 
 ```text

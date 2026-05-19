@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,7 +55,13 @@ class Finding:
     rule_id: str
     file_path: str
     lineno: int
+    exception_name: str
     message: str
+
+    @property
+    def fingerprint(self) -> str:
+        payload = f"{self.rule_id}|{self.file_path}|{self.lineno}|{self.exception_name}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _scan_file(path: Path, root: Path) -> list[Finding]:
@@ -83,6 +91,7 @@ def _scan_file(path: Path, root: Path) -> list[Finding]:
                     rule_id="CEC1",
                     file_path=rel,
                     lineno=node.lineno,
+                    exception_name=name,
                     message=f"raise {name}(...) at {rel}:{node.lineno} — use ToolArgumentError",
                 )
             )
@@ -138,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check")
     check.add_argument("--root", required=True, type=Path)
     check.add_argument("--allowlist", type=Path, default=None)
+    check.add_argument("--format", choices=("text", "json"), default="text")
     check.add_argument("files", nargs="*", type=Path)
     args = parser.parse_args(argv)
 
@@ -166,9 +176,30 @@ def main(argv: list[str] | None = None) -> int:
         findings.extend(_scan_file(target, root))
 
     active = [f for f in findings if (f.file_path, f.lineno) not in allowlist]
+    if args.format == "json":
+        sys.stdout.write(json_findings(active))
+        return 1 if active else 0
     for f in active:
         print(f"[{f.rule_id}] {f.message}")
     return 1 if active else 0
+
+
+def json_findings(findings: list[Finding]) -> str:
+    """Render findings in the elspeth-lints parity schema."""
+    payload = [
+        {
+            "rule_id": finding.rule_id,
+            "file_path": finding.file_path,
+            "line": finding.lineno,
+            "column": 0,
+            "message": finding.message,
+            "fingerprint": finding.fingerprint,
+            "severity": "error",
+            "suggestion": RULES[finding.rule_id]["remediation"],
+        }
+        for finding in findings
+    ]
+    return json.dumps(payload, sort_keys=True) + "\n"
 
 
 if __name__ == "__main__":

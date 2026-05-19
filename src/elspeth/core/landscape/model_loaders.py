@@ -106,6 +106,9 @@ class RunLoader:
             exported_at=row.exported_at,
             export_format=row.export_format,
             export_sink=row.export_sink,
+            llm_call_count=row.llm_call_count,
+            seeded_from_cache=bool(row.seeded_from_cache),
+            cache_key=row.cache_key,
         )
 
 

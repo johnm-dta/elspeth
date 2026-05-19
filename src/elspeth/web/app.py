@@ -46,6 +46,8 @@ from elspeth.web.catalog.routes import catalog_router
 from elspeth.web.composer import yaml_generator as yaml_generator_module
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.composer.tutorial_abandon_routes import create_tutorial_abandon_router
+from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
 from elspeth.web.config import _LOCAL_HOSTS, WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.progress import ProgressBroadcaster
@@ -56,6 +58,7 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import PreferencesService
+from elspeth.web.preferences.tutorial_cache import TutorialCache
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
@@ -595,9 +598,14 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.state.session_engine = session_engine  # available to guided step handlers
 
     # --- Preferences service ---
-    # Per-user composer settings (default_composer_mode, banner_dismissed_at).
+    # Per-user composer settings (default_composer_mode, banner_dismissed_at,
+    # tutorial_completed_at).
     # Shares the session engine; preferences live on the same metadata.
     app.state.preferences_service = PreferencesService(session_engine)
+    tutorial_cache_dir = settings.tutorial_cache_dir
+    if tutorial_cache_dir is None:
+        raise RuntimeError("tutorial_cache_dir must be initialised by WebSettings")
+    app.state.tutorial_cache = TutorialCache(cache_dir=tutorial_cache_dir)
 
     # --- Blob service ---
     app.state.blob_service = BlobServiceImpl(
@@ -676,6 +684,8 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.include_router(create_auth_router())
     app.include_router(create_session_router())
     app.include_router(create_preferences_router())
+    app.include_router(create_tutorial_run_router())
+    app.include_router(create_tutorial_abandon_router())
     app.include_router(create_blobs_router())
     app.include_router(create_secrets_router())
     app.include_router(create_execution_router())

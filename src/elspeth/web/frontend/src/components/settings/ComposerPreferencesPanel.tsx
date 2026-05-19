@@ -21,7 +21,9 @@ export function ComposerPreferencesForm(): JSX.Element | null {
   const loaded = usePreferencesStore((s) => s.loaded);
   const writing = usePreferencesStore((s) => s.writing);
   const writeError = usePreferencesStore((s) => s.writeError);
+  const tutorialCompleted = usePreferencesStore((s) => s.tutorialCompleted);
   const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
+  const resetTutorial = usePreferencesStore((s) => s.resetTutorial);
 
   // useCallback must be unconditional (React rules of hooks); the early-return
   // for !loaded sits after the hook calls.
@@ -37,6 +39,14 @@ export function ComposerPreferencesForm(): JSX.Element | null {
     },
     [setDefaultMode],
   );
+
+  const onResetTutorial = useCallback(async () => {
+    try {
+      await resetTutorial();
+    } catch (err) {
+      console.error("[preferences] resetTutorial failed:", err);
+    }
+  }, [resetTutorial]);
 
   if (!loaded || defaultMode === null) return null;
 
@@ -79,6 +89,17 @@ export function ComposerPreferencesForm(): JSX.Element | null {
         >
           {writeError}
         </div>
+      )}
+      {tutorialCompleted && (
+        <button
+          type="button"
+          className="tutorial-link-button"
+          disabled={writing}
+          onClick={() => void onResetTutorial()}
+          style={{ marginTop: 16 }}
+        >
+          Reset tutorial
+        </button>
       )}
     </>
   );

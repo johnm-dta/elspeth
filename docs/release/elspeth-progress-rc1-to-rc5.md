@@ -3,9 +3,20 @@
 **Period covered:** 12 January 2026 → 19 May 2026 (128 days)
 **Repository state:** 4,521 unique commits across `origin/full-history-pre-rc1`, `origin/pre-RC2`, and `HEAD` (branch `RC5.2`)
 **Author of record:** John Morrissey
+**Audience:** Engineering team and engineering leadership
+**Register:** Technical
 **Purpose:** Cumulative view of what ELSPETH delivered, when, and how the surface evolved from an empty scaffold to a high-assurance, web-authored, auditable pipeline platform.
 
 This document is the **progress / outputs** view. For per-day work volume, see [elspeth-velocity-rc1-to-rc5.md](elspeth-velocity-rc1-to-rc5.md).
+
+## How to read this report
+
+1. **Framing.** This is a cumulative *outputs* view, not a feature roadmap and not a release record. The authoritative line-by-line release records are `CHANGELOG-RC1.md`, `CHANGELOG-RC2.md`, and `CHANGELOG.md` (RC-3 onwards). This report aggregates and narrates those records by Period.
+2. **Periods, not releases.** The report's grouping unit is the "Period" — a chunk of work bounded by phase change, not always by RC tag. Period boundaries are documented in each Period's header. Where a Period spans multiple RC tags, the RC tags appear as sub-headings inside the Period.
+3. **Commit counts.** Counts are deduplicated across the three RC-snapshot branches (`full-history-pre-rc1`, `pre-RC2`, `HEAD`). Small gaps in the cumulative-commit column of the executive timeline reflect that dedup, not missing work.
+4. **Date qualification.** Where the `CHANGELOG.md` does not stamp explicit release commits (notably RC-4.0 and RC-4.1), date ranges are inferred from the dominant feature-commit cluster. Inferred dates carry an in-period date callout.
+5. **Per-Period *Sized* blocks.** Every Period closes with a standardised `Sized` block (commits, calendar days, active days, peak day, tests at end of period, notable infrastructure). The standardised shape is intended to make Periods diff-comparable across the project's life.
+6. **What this report does not cover.** Plugin internals (see the plugin README under each plugin directory), frontend internals (see `src/elspeth/web/frontend/`), pipeline-author UX (see `pipeline-composer` skill), and operational procedures (see `docs/runbooks/`).
 
 ---
 
@@ -61,8 +72,14 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 
 ### Sized
 
-- **782 commits** in 11 calendar days (average 71/day; peak 177 commits on 2026-01-20).
-- Comprehensive test regime across unit, integration, and mutation testing — golden-hash stability tests, contract tests for every plugin, property-based tests for the reorder buffer.
+| Metric | Value |
+|---|---|
+| Commits | 782 |
+| Calendar days | 11 |
+| Active days | 11 |
+| Peak day | 177 commits (2026-01-20) |
+| Tests at end of period | Mutation + unit + integration regime; counts not yet pinned to a stable suite |
+| Notable infrastructure | Dockerfile (Python 3.12), GitHub Actions, pre-commit hooks, mutation runner, line-length-140 ruff format |
 
 ---
 
@@ -81,8 +98,14 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 
 ### Sized
 
-- **811 commits** in 11 calendar days (average 74/day; peak 156 on 2026-01-30).
-- Hypothesis property tests added across telemetry; ChaosLLM stress framework runnable in CI.
+| Metric | Value |
+|---|---|
+| Commits | 811 |
+| Calendar days | 11 |
+| Active days | 11 |
+| Peak day | 156 commits (2026-01-30) |
+| Tests at end of period | Hypothesis property tests added across telemetry; ChaosLLM stress framework runnable in CI |
+| Notable infrastructure | Telemetry export pipeline (OTLP, Azure Monitor, Datadog); ChaosLLM fake-server framework; rate limiting and pooling; Python 3.13 added to CI |
 
 ---
 
@@ -123,7 +146,14 @@ Langfuse SDK v3 (OpenTelemetry-based); failed LLM calls now produce traces.
 
 ### Sized
 
-- **527 commits** in 10 days. Peak 125 on 2026-02-03 (RC-2.1 land); 118 on 2026-02-02 (RC-2 cutover).
+| Metric | Value |
+|---|---|
+| Commits | 527 |
+| Calendar days | 10 |
+| Active days | 10 |
+| Peak day | 125 commits (2026-02-03, RC-2.1 land); 118 (2026-02-02, RC-2 cutover) |
+| Tests at end of period | 8,138 v2 tests collected, 8,037 passing; v1 suite (7,487 tests) deleted at the cutover |
+| Notable infrastructure | Key Vault secrets backend; schema-contract layer; declarative DAG wiring; SQLCipher; ChaosWeb fake server; LandscapeRecorder decomposed into 8 mixins; orchestrator package split |
 
 ---
 
@@ -162,12 +192,22 @@ Langfuse SDK v3 (OpenTelemetry-based); failed LLM calls now produce traces.
 
 ### Sized
 
-- **475 commits across 26 calendar days** (25 active). One large multi-day burst around RC-3.3 cutover (29 commits 2026-03-01, 24 on 2026-03-05, 24 on 2026-03-08); calmest stretch of the project at 19 commits per active day.
+| Metric | Value |
+|---|---|
+| Commits | 475 |
+| Calendar days | 26 |
+| Active days | 25 |
+| Peak day | 29 (2026-03-01), 24 (2026-03-05), 24 (2026-03-08) — RC-3.3 cutover cluster |
+| Tests at end of period | ~10,563 collected at RC-3.3; +191 bugs triaged in RC-3.4 |
+| Notable infrastructure | T10 / T17 / T18 / T19 architectural remediation; SDA-aligned plugin tree; deep-freeze utilities; `hasattr()` ban; structlog migration; agentic-code threat-model paper with MkDocs + LaTeX pipeline |
+| Cadence note | Calmest stretch of the project at 19 commits per active day — characteristic of correctness sprints |
 
 ---
 
 <a id="period-5"></a>
 ## Period 5 — RC-4 Plugins & RC-5 Cut (11 March – 3 April 2026)
+
+> **Date note.** `CHANGELOG.md` does not stamp explicit release commits for `[0.4.0]` or `[0.4.1]`. The sub-period dates ("mid-March", "late March → 2 April") are inferred from the dominant feature-commit cluster between RC-3.4 (10 Mar) and the RC-5 cut (3 Apr): Dataverse + RAG + output-schema-contracts landed around 22–29 March; ChromaSink + `depends_on` + commencement gates landed 30 March – 2 April. The RC-5 cut date (3 April) is taken from the explicit `ELSPETH - Release Candidate 5` commit. Read each sub-period boundary as a dominant work-cluster, not a release stamp.
 
 **Outcome:** The first external-system plugins shipped (Dataverse, RAG); the first pipeline-level orchestration primitives shipped (`depends_on`, commencement gates); the **Web UX Composer** was cut as RC-5 — a chat-first, LLM-assisted pipeline authoring surface.
 
@@ -217,6 +257,17 @@ A full web application platform for **chat-first pipeline composition**. This is
 | Bug closure campaign | ~100+ P1 bugs closed plus a post-cut systematic sweep of ~130 additional bugs |
 | Test hygiene | ~500 low-value tests deleted, ~200 gap-filling tests added (net: better coverage of actual behaviour) |
 
+### Sized
+
+| Metric | Value |
+|---|---|
+| Commits | 478 (across the three RC-4 + RC-5 cut sub-periods) |
+| Calendar days | 24 |
+| Active days | 21 |
+| Peak day | Various; smaller bursts rather than single peaks |
+| Tests at end of period | ~10,500 framework tests plus composer + web track additions |
+| Notable infrastructure | Dataverse OData v4 client; RAG retrieval contract; ChromaSink; `depends_on` orchestration; FastAPI web app; React SPA with AGDS theming; three-provider auth; composer LLM tool-use loop; MCP composer server |
+
 ---
 
 <a id="period-6"></a>
@@ -247,6 +298,17 @@ A full web application platform for **chat-first pipeline composition**. This is
 - **Run-evidence widgets** — `RunOutputsPanel` (full audit-evidence manifest, downloadable artifacts gated by `downloadable` flag); cancellation-requested badge separate from terminal `cancelled`; GraphView viewport preservation across topology changes; `data_dir` resolved to absolute path at validation time; source-inspection silent-failure surfacing; failure-sample aggregation in run-level errors.
 - **Audit-integrity test coverage** — direct unit coverage added for **ADR-019 deferred-invariant sweep**, `_validate_token_row_ownership`, `link_validation_error_to_row` branches, all 12 entries in `_REQUIRED_COMPOSITE_FOREIGN_KEYS`, and SSRF blocked-IP residual coverage (including `::ffff:0:0/96` and seven other previously untested boundary cases).
 - **Tier-1 panel-review accessibility pass** — `aria-controls` IDREF when run collapsed; `aria-expanded` on `RunsView` Inspect; health-check banners downgraded to `role=status`; nested `aria-live` removed from `ComposingIndicator`; light-theme `--color-status-empty` override.
+
+### Sized
+
+| Metric | Value |
+|---|---|
+| Commits | 810 |
+| Calendar days | 38 |
+| Active days | 37 |
+| Peak day | 93 (2026-05-09) — Phase 1B persist_compose_turn happy path |
+| Tests at end of period | ~10,500 framework + composer/web additions; audit-integrity test suite expanded for ADR-019 deferred-invariant sweep |
+| Notable infrastructure | Substrate-first README; composer reliability + advisor escalation; 10 statistical batch plugins; two-axis terminal outcome model; identity-node-advisory validator; OPERATOR_REQUIRED sentinels; forced-repair loop with proof diagnostics; Playwright E2E baseline |
 
 ---
 
@@ -286,6 +348,18 @@ A full web application platform for **chat-first pipeline composition**. This is
 ### Operational change of note
 
 > Sessions DB schema deployment requires recreation. Phase 1A columns / tables / CHECKs / partial unique indices are **not applied via Alembic**. Operator stops the service, archives the old `sessions.db`, and restarts; the bootstrap creates the new schema on first start. Procedure documented in `docs/runbooks/staging-session-db-recreation.md`.
+
+### Sized
+
+| Metric | Value |
+|---|---|
+| Commits | 638 (12 → 19 May; period continues — `HEAD` count as of 2026-05-19) |
+| Calendar days | 8 |
+| Active days | 8 |
+| Peak day | 142 (2026-05-12) — RC-5.2 composer redaction MANIFEST pass; 97 (2026-05-14) RC-5.2 release-stamp; 94 (2026-05-18, 2026-05-19) |
+| Tests at end of period | 3,159 backend + 447 frontend (per-step-chat branch baseline); framework suite continues at ~10,500 |
+| Notable infrastructure | Composer guided mode; `ComposerLLMCall` audit channel; 4-phase composer progress persistence (schema → primitive → Postgres portability → redaction walker → compose-loop persistence → frontend recovery); 2,752-line redaction walker; Postgres testcontainer lane; recovery panel UX |
+| Cadence note | Highest sustained tempo since RC-1 cutover (79.8 commits / active day over 8 consecutive days) |
 
 ---
 
@@ -389,12 +463,27 @@ Visible from the in-progress filigree state and the current `RC5.2` branch:
 
 ---
 
+## What this report does not cover
+
+This is the project-level outputs view. For depth on the topics it summarises:
+
+- **Plugin internals** — see the README of each plugin directory under `src/elspeth/plugins/`.
+- **Frontend internals** — see `src/elspeth/web/frontend/` (components, stores, tests).
+- **Pipeline-author UX** — see the `pipeline-composer` skill and its companion sessions under `evals/composer-rgr/`.
+- **Operational procedures** — see `docs/runbooks/` (resume, routing investigation, incident response, database maintenance, backup, Key Vault configuration, Ansible-based Ubuntu deployment).
+- **ADRs (architectural decisions)** — see `docs/architecture/adr/`.
+- **The contractual surface** — see `guarantees.md` in this directory.
+- **Per-day commit cadence** — see `elspeth-velocity-rc1-to-rc5.md` in this directory.
+- **Audience-tier executive view** — see `executive-summary.md` in this directory (drafted for Australian public-sector evaluators).
+
+---
+
 ## Sources
 
 - `CHANGELOG-RC1.md` — Pre-RC1 and RC-1 Hardening (Jan 12 – Feb 2, 2026)
 - `CHANGELOG-RC2.md` — RC-2.0 through RC-2.5 (Feb 2–12, 2026)
 - `CHANGELOG.md` — RC-3.2 through RC-5.2 + Unreleased (Feb 13, 2026 – present)
-- `docs/release/feature-inventory.md` — RC-3.3 feature reconciliation (1 March 2026)
-- `docs/release/rc4-executive-brief.md` — RC-4 work-package summary (3 March 2026)
+- `docs/release/archive/feature-inventory.md` — RC-3.3 feature reconciliation (1 March 2026) — archived snapshot
+- `docs/release/archive/rc4-planning-brief.md` — RC-4 work-package summary (3 March 2026) — archived planning brief
 - Git remotes: `origin/full-history-pre-rc1`, `origin/pre-RC2`, `origin/RC5.2`, `origin/main`
 - Filigree session-context snapshot (19 May 2026)

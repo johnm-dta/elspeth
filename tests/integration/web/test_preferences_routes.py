@@ -142,6 +142,7 @@ def test_get_returns_guided_default_for_brand_new_user(client_as_alice: TestClie
     body = response.json()
     assert body["default_mode"] == "guided"
     assert body["banner_dismissed_at"] is None
+    assert body["tutorial_completed_at"] is None
 
 
 def test_patch_updates_default_mode(client_as_alice: TestClient) -> None:
@@ -166,6 +167,53 @@ def test_patch_persists_banner_dismissal(client_as_alice: TestClient) -> None:
     assert body["banner_dismissed_at"] is not None
     # SQLite strips tzinfo; the value is preserved either way.
     assert "2026-05-15T12:00:00" in body["banner_dismissed_at"]
+
+
+def test_patch_sets_tutorial_completed_at(client_as_alice: TestClient) -> None:
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": "2026-05-15T12:30:00Z"},
+    )
+    assert response.status_code == 200
+    assert "2026-05-15T12:30:00" in response.json()["tutorial_completed_at"]
+
+
+def test_patch_atomic_finalisation_payload(client_as_alice: TestClient) -> None:
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={
+            "default_mode": "freeform",
+            "tutorial_completed_at": "2026-05-15T12:35:00Z",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["default_mode"] == "freeform"
+    assert "2026-05-15T12:35:00" in body["tutorial_completed_at"]
+
+
+def test_patch_with_explicit_null_clears_tutorial(client_as_alice: TestClient) -> None:
+    set_response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": "2026-05-15T12:40:00Z"},
+    )
+    assert set_response.status_code == 200
+    assert set_response.json()["tutorial_completed_at"] is not None
+
+    clear_response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": None},
+    )
+    assert clear_response.status_code == 200
+    assert clear_response.json()["tutorial_completed_at"] is None
+
+
+def test_patch_rejects_non_datetime_tutorial(client_as_alice: TestClient) -> None:
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": "yesterday"},
+    )
+    assert response.status_code == 422
 
 
 def test_patch_rejects_invalid_mode(client_as_alice: TestClient) -> None:

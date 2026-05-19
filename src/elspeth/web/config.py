@@ -45,6 +45,9 @@ class WebSettings(BaseModel):
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
+    # Phase 4A: cache directory for the tutorial-seed run cache. Defaults
+    # to ``data_dir / "tutorial_cache"`` after ``data_dir`` is normalized.
+    tutorial_cache_dir: Path | None = Field(default=None)
     composer_model: str = "gpt-5.5"
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
@@ -341,14 +344,14 @@ class WebSettings(BaseModel):
             raise ValueError("shareable_link_signing_key must be at least 32 bytes")
         return v
 
-    @field_validator("data_dir", "payload_store_path", mode="before")
+    @field_validator("data_dir", "payload_store_path", "tutorial_cache_dir", mode="before")
     @classmethod
     def _reject_blank_path_strings(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip():
             raise ValueError("must not be blank")
         return v
 
-    @field_validator("data_dir", "payload_store_path")
+    @field_validator("data_dir", "payload_store_path", "tutorial_cache_dir")
     @classmethod
     def _normalize_paths(cls, v: Path | None) -> Path | None:
         if v is None:
@@ -364,6 +367,13 @@ class WebSettings(BaseModel):
         # `.resolve()` makes the answer immutable for the process
         # lifetime regardless of later os.chdir calls.
         return v.expanduser().resolve()
+
+    @model_validator(mode="after")
+    def _default_tutorial_cache_dir(self) -> WebSettings:
+        """Resolve the tutorial cache directory under the validated data_dir."""
+        if self.tutorial_cache_dir is None:
+            object.__setattr__(self, "tutorial_cache_dir", self.data_dir / "tutorial_cache")
+        return self
 
     @field_validator("server_secret_allowlist")
     @classmethod

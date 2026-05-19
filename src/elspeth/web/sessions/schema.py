@@ -29,8 +29,9 @@ _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 # * ``trg_interpretation_events_immutable_resolved`` — resolved
 #   ``interpretation_events`` rows cannot be retroactively edited.
 # * ``trg_interpretation_events_no_delete_resolved`` — resolved
-#   ``interpretation_events`` rows cannot be deleted, while unresolved
-#   PENDING rows remain deletable for orphan recovery.
+#   ``interpretation_events`` rows cannot be deleted directly, while
+#   unresolved PENDING rows remain deletable for orphan recovery and
+#   whole-session archival can still cascade session-scoped rows.
 # * ``trg_composer_completion_events_no_update`` — Phase 6A: every
 #   completion-gesture row (mark_ready_for_review, export_yaml) is a
 #   permanent audit fact. Unconditional UPDATE ABORT, no PENDING-row

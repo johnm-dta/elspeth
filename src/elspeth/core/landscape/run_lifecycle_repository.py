@@ -174,6 +174,9 @@ class RunLifecycleRepository:
                 schema_contract_json=schema_contract_json,
                 schema_contract_hash=schema_contract_hash,
                 runtime_val_manifest_json=runtime_val_manifest_json,
+                llm_call_count=None,
+                seeded_from_cache=False,
+                cache_key=None,
             )
         )
         if initiated_by_user_id is not None and auth_provider_type is not None:

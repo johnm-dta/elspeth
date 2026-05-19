@@ -1,14 +1,17 @@
 # ELSPETH RC-3 Release Notes
 
-> **ARCHIVED RELEASE NOTES — RC-3 (February–March 2026).**
-> This document records the RC-3.3 release. Subsequent RC-3.4, RC-4, RC-5.0, RC-5.1, and RC-5.2 releases have shipped since.
+> **ARCHIVED — Release notes captured at February–March 2026 (RC-3).**
+> This document records the RC-3.3 release.
+> RC-3.4, RC-4.0, RC-4.1, RC-5.0, RC-5.1, and RC-5.2 have all shipped since.
 >
-> **For the current state, see** [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) and the canonical record in [`../../CHANGELOG.md`](../../CHANGELOG.md).
+> **For the current state, see** [`../elspeth-progress-rc1-to-rc5.md`](../elspeth-progress-rc1-to-rc5.md) and the canonical line-by-line record in [`../../../CHANGELOG.md`](../../../CHANGELOG.md).
 
 **Date:** February--March 2026
 **Version:** 0.3.3
 **Branch:** `RC3-quality-sprint`, `RC3.3-architectural-remediation`
 **Commits since RC-2:** 200+
+**Audience:** Engineering team and engineering leadership — historical reference
+**Register:** Technical
 
 ---
 
@@ -201,7 +204,7 @@ transforms:
     on_success: output
 ```
 
-See [ADR-004: Explicit Sink Routing](../architecture/adr/004-adr-explicit-sink-routing.md) for the full rationale.
+See [ADR-004: Explicit Sink Routing](../../architecture/adr/004-adr-explicit-sink-routing.md) for the full rationale.
 
 ### Explicit `input` wiring replaces positional ordering
 
@@ -227,7 +230,7 @@ sinks:
   output: { plugin: csv, options: { path: results.csv } }
 ```
 
-Connection names and sink names occupy separate namespaces. A collision between the two is a `GraphValidationError`. See [ADR-005: Declarative DAG Wiring](../architecture/adr/005-adr-declarative-dag-wiring.md).
+Connection names and sink names occupy separate namespaces. A collision between the two is a `GraphValidationError`. See [ADR-005: Declarative DAG Wiring](../../architecture/adr/005-adr-declarative-dag-wiring.md).
 
 ### Gate plugins removed
 
@@ -504,8 +507,8 @@ A full project audit identified 20 documentation and metadata findings (F-01 thr
 
 | ADR | Title | Status |
 |-----|-------|--------|
-| [ADR-004](../architecture/adr/004-adr-explicit-sink-routing.md) | Explicit Sink Routing | Approved, Implemented |
-| [ADR-005](../architecture/adr/005-adr-declarative-dag-wiring.md) | Declarative DAG Wiring | Approved, Implemented |
+| [ADR-004](../../architecture/adr/004-adr-explicit-sink-routing.md) | Explicit Sink Routing | Approved, Implemented |
+| [ADR-005](../../architecture/adr/005-adr-declarative-dag-wiring.md) | Declarative DAG Wiring | Approved, Implemented |
 
 ---
 
@@ -546,7 +549,7 @@ Aggregation timeout triggers fire when the next row arrives, not during complete
 
 ## Release Guarantees
 
-The full set of RC-3 guarantees is documented in [docs/release/guarantees.md](../release/guarantees.md). Key additions for RC-3:
+The full set of RC-3 guarantees is documented in [docs/release/guarantees.md](../guarantees.md). Key additions for RC-3:
 
 - Declarative DAG wiring with explicit input/output connections
 - Graceful shutdown with checkpoint creation and resumable interrupted runs

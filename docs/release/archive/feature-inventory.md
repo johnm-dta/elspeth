@@ -1,16 +1,18 @@
 # ELSPETH Feature Inventory - March 1, 2026
 
-> **ARCHIVED SNAPSHOT — RC-3.3 (1 March 2026).**
-> This inventory captures plugin and capability state as of RC-3.3. It has **not** been maintained since, and ELSPETH has shipped multiple major releases (RC-3.4, RC-4.0, RC-4.1, RC-5.0, RC-5.1, RC-5.2) since this was written — including the Web UX Composer, Dataverse and RAG plugins, ChromaSink, ten statistical batch plugins, guided composer, and composer progress persistence.
+> **ARCHIVED — Feature-inventory snapshot captured at 1 March 2026 (RC-3.3).**
+> This document records the platform's plugin and capability inventory as it stood at RC-3.3.
+> RC-3.4, RC-4.0, RC-4.1, RC-5.0, RC-5.1, and RC-5.2 have all shipped since — including the Web UX Composer, Dataverse and RAG plugins, ChromaSink, ten statistical batch plugins, guided composer, and composer progress persistence — and this document has not been refreshed.
 >
-> **For the current state, see** [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (updated 19 May 2026, RC-5.2) and the canonical line-by-line record in [`../../CHANGELOG.md`](../../CHANGELOG.md).
->
-> Read this document only for historical context.
+> **For the current state, see** [`../elspeth-progress-rc1-to-rc5.md`](../elspeth-progress-rc1-to-rc5.md) (updated 19 May 2026, RC-5.2) and the canonical line-by-line record in [`../../../CHANGELOG.md`](../../../CHANGELOG.md).
 
 **Version:** RC-3.3
-**Purpose:** Complete inventory of what ELSPETH actually does today, reconciled against the original architecture.md (Jan 12) and requirements.md (Jan 22). Updated for RC-3.3 architectural remediation.
+**Snapshot date:** 1 March 2026 (all status tables in this document are valid as of this date only)
+**Audience:** Engineering team and engineering leadership — historical reference
+**Register:** Technical
+**Purpose:** Complete inventory of what ELSPETH did at RC-3.3, reconciled against the original architecture.md (Jan 12) and requirements.md (Jan 22). Updated for RC-3.3 architectural remediation.
 
-**This document was the truth at RC-3.3.** If code existed at that point, it's listed. *(As of 19 May 2026 this claim no longer holds — see banner above.)*
+> Every `✅ / ⚠️ / ❌` status mark in this document carries the implicit suffix *[as of RC-3.3, 1 March 2026]*. Many items marked `❌ Not implemented` or `❌ Deferred` in §9 have since shipped — do not cite this document for current capability claims.
 
 ---
 
@@ -578,10 +580,12 @@ All gate plugin infrastructure deliberately removed (~3,000 lines deleted):
 
 ---
 
-## 9. NOT IMPLEMENTED (Deferred)
+## 9. NOT IMPLEMENTED (Deferred) — as of RC-3.3, 1 March 2026
 
-| Feature | Original Phase | Status |
-|---------|---------------|--------|
+> **Stale section warning.** Many entries below have since shipped (notably access control, blob storage backend, and Dataverse / RAG / Chroma sources). This list is preserved verbatim for historical context only. **Do not cite this list as current.** For the current capability surface see the progress report.
+
+| Feature | Original Phase | Status at RC-3.3 (1 March 2026) |
+|---------|---------------|----------------------------------|
 | Database source | Phase 4 | Not started |
 | HTTP API source | Phase 6 | Not started |
 | Message queue source | Phase 6+ | Not started |
@@ -589,8 +593,8 @@ All gate plugin infrastructure deliberately removed (~3,000 lines deleted):
 | Profile system (`--profile`) | Phase 4 | Deferred |
 | Pack defaults | Phase 6+ | Deferred |
 | Redaction profiles | Phase 5 | Deferred |
-| Access control (Operator/Auditor/Admin) | Phase 5+ | Deferred |
-| S3/blob payload backend | Phase 7 | Not started |
+| Access control (Operator/Auditor/Admin) | Phase 5+ | Deferred *(shipped in a different shape at RC-5 as three-provider authentication; redaction-profile work tracked separately)* |
+| S3/blob payload backend | Phase 7 | Not started *(blob storage manager shipped at RC-5)* |
 | Multi-destination copy routing | Phase 7 | Not started |
 | Concurrent processing integration | Phase 5 | Config exists, not wired |
 | Circuit breaker for retry logic | RC-3+ | FEAT-06 deferred |
@@ -615,7 +619,9 @@ All gate plugin infrastructure deliberately removed (~3,000 lines deleted):
 
 ---
 
-## 11. REQUIREMENTS.MD GAPS
+## 11. REQUIREMENTS.MD GAPS — as of RC-3.3, 1 March 2026
+
+> **Stale section warning.** `REQUIREMENTS.md` was deleted in RC-3 as part of the documentation remediation (F-05) — `pyproject.toml` and `CHANGELOG.md` are the single sources of truth. The "gaps" tracked below are historical and have no current binding.
 
 ### In requirements.md but not fully implemented:
 - FAI-009: Every token reaches terminal state (edge case gaps remain)

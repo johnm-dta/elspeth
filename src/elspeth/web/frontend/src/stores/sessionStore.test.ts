@@ -28,7 +28,7 @@ vi.mock("@/api/client", () => ({
   revertToVersion: vi.fn(),
   fetchStateVersions: vi.fn(),
   archiveSession: vi.fn(),
-  updateSessionTitle: vi.fn(),
+  renameSession: vi.fn(),
   getGuided: vi.fn(),
   // Phase 1B — sessionStore.createSession calls resolveDefaultMode() on the
   // preferencesStore, which falls back to fetchUserComposerPreferences()
@@ -38,6 +38,7 @@ vi.mock("@/api/client", () => ({
   fetchUserComposerPreferences: vi.fn().mockResolvedValue({
     default_mode: "freeform",
     banner_dismissed_at: null,
+    tutorial_completed_at: null,
     updated_at: "2026-05-15T00:00:00Z",
   }),
   updateUserComposerPreferences: vi.fn(),
@@ -138,6 +139,7 @@ describe("sessionStore", () => {
     (apiMod.fetchUserComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
     // Phase 5b — sessionStore.selectSession fires a fire-and-forget
@@ -396,7 +398,7 @@ describe("sessionStore", () => {
         updated_at: "2026-05-14T00:01:00Z",
       };
       (
-        apiClient.updateSessionTitle as ReturnType<typeof vi.fn>
+        apiClient.renameSession as ReturnType<typeof vi.fn>
       ).mockResolvedValue(renamed);
       useSessionStore.setState({
         activeSessionId: "session-1",
@@ -412,7 +414,7 @@ describe("sessionStore", () => {
 
       await useSessionStore.getState().renameSession("session-1", "  Renamed pipeline  ");
 
-      expect(apiClient.updateSessionTitle).toHaveBeenCalledWith(
+      expect(apiClient.renameSession).toHaveBeenCalledWith(
         "session-1",
         "Renamed pipeline",
       );
@@ -435,7 +437,7 @@ describe("sessionStore", () => {
 
       await useSessionStore.getState().renameSession("session-1", "   ");
 
-      expect(apiClient.updateSessionTitle).not.toHaveBeenCalled();
+      expect(apiClient.renameSession).not.toHaveBeenCalled();
       expect(useSessionStore.getState().sessions[0].title).toBe("Current session");
     });
   });
@@ -901,6 +903,7 @@ describe("sessionStore", () => {
       (apiClient.fetchUserComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
         default_mode: "guided",
         banner_dismissed_at: null,
+        tutorial_completed_at: null,
         updated_at: "2026-05-15T00:00:00Z",
       });
       (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({

@@ -18,12 +18,16 @@ import { AuditReadinessPanel } from "./components/audit/AuditReadinessPanel";
 import { RecoveryPanel } from "./components/recovery/RecoveryPanel";
 import { SecretsPanel } from "./components/settings/SecretsPanel";
 import { ComposerPreferencesPanel } from "./components/settings/ComposerPreferencesPanel";
+import { HelloWorldTutorial } from "./components/tutorial";
 import { SideRailValidationBanner } from "./components/sidebar/SideRailValidationBanner";
 import { useAuthStore } from "./stores/authStore";
 import { initStoreSubscriptions, requestValidate } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
 import { useExecutionStore } from "./stores/executionStore";
-import { usePreferencesStore } from "./stores/preferencesStore";
+import {
+  selectTutorialCompleted,
+  usePreferencesStore,
+} from "./stores/preferencesStore";
 import { useHashRouter } from "./hooks/useHashRouter";
 import { useSharedToken } from "./hooks/useSharedToken";
 import { useAuth } from "./hooks/useAuth";
@@ -93,6 +97,9 @@ function App() {
   const discardRecovery = useSessionStore((s) => s.discardRecovery);
   const pendingFanoutGuard = useExecutionStore((s) => s.pendingFanoutGuard);
   const bootstrapPrefs = usePreferencesStore((s) => s.bootstrap);
+  const preferencesLoaded = usePreferencesStore((s) => s.loaded);
+  const tutorialCompleted = usePreferencesStore(selectTutorialCompleted);
+  const showTutorial = preferencesLoaded && !tutorialCompleted;
 
   useEffect(() => {
     function handleOpenCatalog() {
@@ -338,32 +345,36 @@ function App() {
           onOpenSettings={openComposerSettings}
           onSignOut={logout}
         />
-        <div className="app-main" role="main">
-          <Layout
-            chat={
-              <ChatPanel
-                onOpenSecrets={openSecrets}
-                onOpenComposerPreferences={openComposerSettings}
-              />
-            }
-            siderail={
-              <SideRail
-                auditReadinessSlot={<AuditReadinessPanel />}
-                validationBannerSlot={<SideRailValidationBanner />}
-                graphMiniSlot={<GraphMiniView />}
-                catalogSlot={<CatalogButton />}
-                // Phase 6B Task 9 / Task 10: the three-button CompletionBar
-                // is the single mount surface for Save-for-review, Run,
-                // and Copy-YAML. The standalone ExportYamlButton +
-                // ExecuteButton primitives that previously occupied
-                // dedicated slots are now rendered INSIDE CompletionBar;
-                // Phase 5b interpretation-gating and YAML modal dispatch
-                // are preserved untouched.
-                completionBarSlot={<CompletionBar />}
-              />
-            }
-          />
-        </div>
+        {showTutorial ? (
+          <HelloWorldTutorial />
+        ) : (
+          <div className="app-main" role="main">
+            <Layout
+              chat={
+                <ChatPanel
+                  onOpenSecrets={openSecrets}
+                  onOpenComposerPreferences={openComposerSettings}
+                />
+              }
+              siderail={
+                <SideRail
+                  auditReadinessSlot={<AuditReadinessPanel />}
+                  validationBannerSlot={<SideRailValidationBanner />}
+                  graphMiniSlot={<GraphMiniView />}
+                  catalogSlot={<CatalogButton />}
+                  // Phase 6B Task 9 / Task 10: the three-button CompletionBar
+                  // is the single mount surface for Save-for-review, Run,
+                  // and Copy-YAML. The standalone ExportYamlButton +
+                  // ExecuteButton primitives that previously occupied
+                  // dedicated slots are now rendered INSIDE CompletionBar;
+                  // Phase 5b interpretation-gating and YAML modal dispatch
+                  // are preserved untouched.
+                  completionBarSlot={<CompletionBar />}
+                />
+              }
+            />
+          </div>
+        )}
 
         {showSecrets && <SecretsPanel onClose={closeSecrets} />}
         <GraphModal />

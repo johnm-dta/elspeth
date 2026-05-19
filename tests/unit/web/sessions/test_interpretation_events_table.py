@@ -529,6 +529,20 @@ class TestImmutabilityTrigger:
                 {"id": row_id},
             )
 
+    def test_delete_resolved_row_allowed_through_session_cascade(self, engine) -> None:
+        """Whole-session archival may purge resolved interpretation rows."""
+        session_id, row_id = self._insert_resolved_row(engine)
+
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM sessions WHERE id = :id"),
+                {"id": session_id},
+            )
+
+        with engine.connect() as conn:
+            row = conn.execute(select(interpretation_events_table.c.id).where(interpretation_events_table.c.id == row_id)).fetchone()
+        assert row is None
+
     def test_delete_pending_row_does_not_raise(self, engine) -> None:
         """F-29 orphan recovery can delete unresolved PENDING rows."""
         session_id = str(uuid.uuid4())

@@ -366,7 +366,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const trimmed = title.trim();
     if (!trimmed) return;
     try {
-      const session = await api.updateSessionTitle(id, trimmed);
+      const session = await api.renameSession(id, trimmed);
       set((state) => ({
         sessions: state.sessions.map((existing) =>
           existing.id === id ? session : existing,

@@ -12,7 +12,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { usePreferencesStore } from "./preferencesStore";
+import { selectTutorialCompleted, usePreferencesStore } from "./preferencesStore";
 import { resetStore } from "@/test/store-helpers";
 import {
   fetchUserComposerPreferences,
@@ -41,6 +41,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -49,7 +50,18 @@ describe("preferencesStore", () => {
     const state = usePreferencesStore.getState();
     expect(state.defaultMode).toBe("freeform");
     expect(state.bannerDismissedAt).toBeNull();
+    expect(state.tutorialCompletedAt).toBeNull();
+    expect(selectTutorialCompleted(state)).toBe(false);
     expect(state.loaded).toBe(true);
+  });
+
+  it("selectTutorialCompleted derives true when tutorialCompletedAt is set", () => {
+    usePreferencesStore.setState({
+      tutorialCompletedAt: "2026-05-19T12:00:00Z",
+      tutorialCompleted: true,
+    });
+
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
   });
 
   it("setDefaultMode updates state optimistically and persists", async () => {
@@ -57,6 +69,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -91,12 +104,69 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().defaultMode).toBe("guided");
   });
 
+  it("markTutorialCompleted PATCHes default mode and completion timestamp together", async () => {
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      tutorial_completed_at: "2026-05-19T12:30:00Z",
+      updated_at: "2026-05-19T12:30:00Z",
+    });
+
+    await usePreferencesStore.getState().markTutorialCompleted("freeform");
+
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    const body = mockUpdate.mock.calls[0][0];
+    expect(body.default_mode).toBe("freeform");
+    expect(typeof body.tutorial_completed_at).toBe("string");
+    expect(usePreferencesStore.getState().defaultMode).toBe("freeform");
+    expect(usePreferencesStore.getState().tutorialCompletedAt).toBe(
+      "2026-05-19T12:30:00Z",
+    );
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
+  });
+
+  it("markTutorialCompleted respects the writing guard", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      writing: true,
+    });
+
+    await usePreferencesStore.getState().markTutorialCompleted("freeform");
+
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
+  });
+
+  it("resetTutorial clears tutorial_completed_at through the PATCH contract", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      tutorialCompletedAt: "2026-05-19T12:00:00Z",
+      tutorialCompleted: true,
+    });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      tutorial_completed_at: null,
+      updated_at: "2026-05-19T12:30:00Z",
+    });
+
+    await usePreferencesStore.getState().resetTutorial();
+
+    expect(mockUpdate).toHaveBeenCalledWith({ tutorial_completed_at: null });
+    expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull();
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
+  });
+
   it("dismissDefaultChangedBanner persists timestamp", async () => {
     const stamp = "2026-05-15T12:00:00Z";
     usePreferencesStore.setState({ loaded: true, defaultMode: "freeform" });
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: stamp,
+      tutorial_completed_at: null,
       updated_at: stamp,
     });
 
@@ -142,6 +212,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValue({
       default_mode: "guided",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -165,6 +236,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
 
@@ -234,6 +306,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-16T00:00:00Z",
     });
 
@@ -251,6 +324,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-16T00:00:00Z",
     });
 
@@ -291,6 +365,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      tutorial_completed_at: null,
       updated_at: "2026-05-16T00:00:00Z",
     });
 
@@ -305,6 +380,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: stamp,
+      tutorial_completed_at: null,
       updated_at: stamp,
     });
 

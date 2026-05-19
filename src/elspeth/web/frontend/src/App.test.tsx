@@ -57,6 +57,10 @@ vi.mock("./components/settings/SecretsPanel", () => ({
   SecretsPanel: () => <div data-testid="secrets-panel-stub" />,
 }));
 
+vi.mock("./components/tutorial", () => ({
+  HelloWorldTutorial: () => <div data-testid="tutorial-stub" />,
+}));
+
 vi.mock("./components/audit/AuditReadinessPanel", () => ({
   AuditReadinessPanel: () => <div data-testid="audit-readiness-stub" />,
 }));
@@ -129,6 +133,7 @@ vi.mock("./api/client", () => ({
   fetchUserComposerPreferences: vi.fn().mockResolvedValue({
     default_mode: "guided",
     banner_dismissed_at: null,
+    tutorial_completed_at: "2026-05-19T00:00:00Z",
     updated_at: "2026-05-15T00:00:00Z",
   }),
   updateUserComposerPreferences: vi.fn(),
@@ -615,6 +620,24 @@ describe("App preferences bootstrap (Phase 1B)", () => {
     expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
 
     consoleError.mockRestore();
+  });
+
+  it("renders the tutorial instead of the composer layout before completion", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+    });
+    vi.spyOn(usePreferencesStore.getState(), "bootstrap").mockResolvedValueOnce(
+      undefined,
+    );
+
+    render(<App />);
+
+    expect(screen.getByTestId("tutorial-stub")).toBeInTheDocument();
+    expect(screen.queryByTestId("layout-stub")).not.toBeInTheDocument();
   });
 });
 

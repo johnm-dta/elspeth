@@ -1,6 +1,6 @@
 # Session DB Reset Runbook
 
-Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From Phase 5b (commit `2e390fc0b`) onward this is no longer true for the session/Landscape pair:** the session DB and the Landscape audit DB now share a cross-DB invariant (`interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`) and must be reset *together*. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
+Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
 ## Deployment Scope (Schedule 1A)
 
@@ -113,20 +113,20 @@ Never print secret values from `deploy/elspeth-web.env`. It is acceptable to pri
 
 ## Phase 5b: Two-DB Reset
 
-From the Phase 5b deploy onward, the session DB **and** the Landscape audit DB must be deleted as a pair on any schema-changing cutover that crosses the Phase 5b boundary. Skipping the Landscape delete after a Phase 5b deploy leaves stale `calls_table` rows whose `resolved_prompt_template_hash` is absent or stale; the first composer run after deploy will diverge from the session DB's `interpretation_events.resolved_prompt_template_hash` and the cross-DB byte-equality invariant (asserted by `tests/integration/web/composer/test_interpretation_runtime_handoff.py`) will fire.
+This procedure applies to any staging deploy that changes both the web session DB schema and the Landscape audit DB schema in the same cutover. Phase 4 hello-world tutorial work is in scope because it changes `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` together for tutorial completion and run/audit-story replay. Phase 5b is also in scope: skipping the Landscape delete after a Phase 5b deploy leaves stale `calls_table` rows whose `resolved_prompt_template_hash` is absent or stale; the first composer run after deploy will diverge from the session DB's `interpretation_events.resolved_prompt_template_hash` and the cross-DB byte-equality invariant (asserted by `tests/integration/web/composer/test_interpretation_runtime_handoff.py`) will fire.
 
 Authority: `docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md` §"Migration runner ownership", lines 160–177.
 
-### Phase 5b preconditions
+### Two-DB preconditions
 
 1. The Stop/Go Gates above have been run for the session DB.
-2. The deploy includes commit `2e390fc0b` or later (Phase 5b session/Landscape schema changes).
+2. The deploy changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH`; this includes the Phase 4 hello-world tutorial dual-schema cutover and commit `2e390fc0b` or later (Phase 5b session/Landscape schema changes).
 3. The operator has resolved the active Landscape DB path per "Resolve Database Paths" above:
    - If `ELSPETH_WEB__LANDSCAPE_URL` is set, that is the Landscape URL.
    - Otherwise the default is `${ELSPETH_WEB__DATA_DIR}/runs/audit.db`, or `data/runs/audit.db` if `ELSPETH_WEB__DATA_DIR` is unset.
-4. The operator has explicitly signed off on losing the Landscape audit history in staging. The Phase 5b reset destroys staging audit data alongside session data; this is acceptable for staging only.
+4. The operator has explicitly signed off on losing the Landscape audit history in staging. The two-DB reset destroys staging audit data alongside session data; this is acceptable for staging only.
 
-### Phase 5b procedure (in addition to the staging session-DB reset below)
+### Two-DB procedure (in addition to the staging session-DB reset below)
 
 Run after `sudo systemctl stop "$SERVICE"` and before `sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset under the same service-stop window.
 
@@ -185,7 +185,7 @@ for artifact in "${LANDSCAPE_ARTIFACTS[@]}"; do
 done
 
 if [ "$FOUND_LANDSCAPE_ARTIFACT" -eq 1 ]; then
-    LANDSCAPE_SNAPSHOT_DIR="$LANDSCAPE_PATH.pre-phase5b.$(date -u +%Y%m%dT%H%M%SZ)"
+    LANDSCAPE_SNAPSHOT_DIR="$LANDSCAPE_PATH.pre-two-db-reset.$(date -u +%Y%m%dT%H%M%SZ)"
     sudo mkdir -p "$LANDSCAPE_SNAPSHOT_DIR"
     for artifact in "${LANDSCAPE_ARTIFACTS[@]}"; do
         if [ -e "$artifact" ]; then
@@ -202,7 +202,7 @@ done
 
 `LandscapeDB.from_url(...)` recreates the audit DB on the first pipeline execution after restart.
 
-### Phase 5b verification
+### Two-DB verification
 
 After both DBs are reset, both health checks pass, and a new session is created through the UI:
 
@@ -230,7 +230,7 @@ After restart, verify by composing a new session and confirming the new guidance
 
 The staging site is a source-checkout systemd/Caddy deployment from `/home/john/elspeth`, not the generic VM/Docker flow. When a pre-release plan changes the session DB schema (e.g. composer-progress-persistence Phase 1A and later schema-changing phases), the schema validator at startup will refuse a stale DB; the only accepted cutover path is archive + delete + recreate. Row-level `DELETE FROM chat_messages` / `DELETE FROM composition_states` is incorrect: it leaves the old table shape behind and startup rejects the stale DB.
 
-This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **For pre-Phase-5b deploys it also does not touch the Landscape audit DB; for Phase 5b and later deploys, run the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure inside the same service-stop window — the cross-DB hash invariant will fire on the first run otherwise.** **Do not run any of this outside staging.**
+This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch the Landscape audit DB. If the deploy changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH`, run the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure inside the same service-stop window. Phase 4 hello-world tutorial is a dual-schema cutover; Phase 5b and later dual-schema cutovers also require it, and the cross-DB hash invariant will fire on the first run otherwise.** **Do not run any of this outside staging.**
 
 For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and rollback.
 

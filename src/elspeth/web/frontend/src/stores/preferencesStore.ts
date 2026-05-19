@@ -46,6 +46,8 @@ const BANNER_DISMISSED_STORAGE_KEY = "elspeth_prefs_banner_dismissed_v1";
 interface PreferencesState {
   defaultMode: ComposerMode | null;
   bannerDismissedAt: string | null;
+  tutorialCompletedAt: string | null;
+  tutorialCompleted: boolean;
   loaded: boolean;
   writing: boolean;
   // Most-recent error from a setDefaultMode or dismiss call. Components
@@ -59,14 +61,22 @@ interface PreferencesState {
   bootstrap: () => Promise<void>;
   resolveDefaultMode: () => Promise<ComposerMode>;
   setDefaultMode: (mode: ComposerMode, activeSessionId?: string | null) => Promise<void>;
+  markTutorialCompleted: (mode: ComposerMode) => Promise<void>;
+  resetTutorial: () => Promise<void>;
   dismissDefaultChangedBanner: () => Promise<void>;
   clearError: () => void;
   reset: () => void;
 }
 
+function tutorialCompletedFrom(value: string | null): boolean {
+  return value !== null;
+}
+
 const INITIAL_STATE = {
   defaultMode: null as ComposerMode | null,
   bannerDismissedAt: null as string | null,
+  tutorialCompletedAt: null as string | null,
+  tutorialCompleted: false,
   loaded: false,
   writing: false,
   writeError: null as string | null,
@@ -81,6 +91,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     set({
       defaultMode: payload.default_mode,
       bannerDismissedAt: payload.banner_dismissed_at,
+      tutorialCompletedAt: payload.tutorial_completed_at,
+      tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
       loaded: true,
     });
   },
@@ -124,7 +136,12 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       const payload = await updateUserComposerPreferences({
         default_mode: mode,
       });
-      set({ defaultMode: payload.default_mode, writing: false });
+      set({
+        defaultMode: payload.default_mode,
+        tutorialCompletedAt: payload.tutorial_completed_at,
+        tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
+        writing: false,
+      });
     } catch (err) {
       set({
         defaultMode: previous,
@@ -136,6 +153,84 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         // Revert the watermark on failure so the banner doesn't suppress
         // for a write that didn't land.
         optedOutAtSessionId: wasOptOut ? null : get().optedOutAtSessionId,
+      });
+      throw err;
+    }
+  },
+
+  markTutorialCompleted: async (mode) => {
+    if (get().writing) return;
+    const stamp = new Date().toISOString();
+    const previous = {
+      defaultMode: get().defaultMode,
+      tutorialCompletedAt: get().tutorialCompletedAt,
+      tutorialCompleted: get().tutorialCompleted,
+      optedOutAtSessionId: get().optedOutAtSessionId,
+    };
+    set({
+      defaultMode: mode,
+      writing: true,
+      writeError: null,
+      optedOutAtSessionId: mode === "guided" ? null : get().optedOutAtSessionId,
+    });
+    try {
+      const payload = await updateUserComposerPreferences({
+        default_mode: mode,
+        tutorial_completed_at: stamp,
+      });
+      set({
+        defaultMode: payload.default_mode,
+        bannerDismissedAt: payload.banner_dismissed_at,
+        tutorialCompletedAt: payload.tutorial_completed_at,
+        tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
+        writing: false,
+      });
+    } catch (err) {
+      set({
+        defaultMode: previous.defaultMode,
+        tutorialCompletedAt: previous.tutorialCompletedAt,
+        tutorialCompleted: previous.tutorialCompleted,
+        optedOutAtSessionId: previous.optedOutAtSessionId,
+        writing: false,
+        writeError:
+          err instanceof Error
+            ? `Couldn't save tutorial completion: ${err.message}`
+            : "Couldn't save tutorial completion.",
+      });
+      throw err;
+    }
+  },
+
+  resetTutorial: async () => {
+    if (get().writing) return;
+    const previous = {
+      tutorialCompletedAt: get().tutorialCompletedAt,
+      tutorialCompleted: get().tutorialCompleted,
+    };
+    set({
+      writing: true,
+      writeError: null,
+    });
+    try {
+      const payload = await updateUserComposerPreferences({
+        tutorial_completed_at: null,
+      });
+      set({
+        defaultMode: payload.default_mode,
+        bannerDismissedAt: payload.banner_dismissed_at,
+        tutorialCompletedAt: payload.tutorial_completed_at,
+        tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
+        writing: false,
+      });
+    } catch (err) {
+      set({
+        tutorialCompletedAt: previous.tutorialCompletedAt,
+        tutorialCompleted: previous.tutorialCompleted,
+        writing: false,
+        writeError:
+          err instanceof Error
+            ? `Couldn't reset the tutorial: ${err.message}`
+            : "Couldn't reset the tutorial.",
       });
       throw err;
     }
@@ -153,6 +248,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       const resolved = payload.banner_dismissed_at;
       set({
         bannerDismissedAt: resolved,
+        tutorialCompletedAt: payload.tutorial_completed_at,
+        tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
         writing: false,
       });
       // Cross-tab broadcast (Panel banner cluster): write the resolved
@@ -214,3 +311,7 @@ export function initCrossTabSync(): void {
 // Auto-initialise on module load in browser environments. SSR/test
 // environments without window are gracefully skipped.
 initCrossTabSync();
+
+export function selectTutorialCompleted(state: PreferencesState): boolean {
+  return state.tutorialCompleted;
+}

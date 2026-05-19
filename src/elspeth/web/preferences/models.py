@@ -56,6 +56,7 @@ class ComposerPreferences(BaseModel):
 
     default_mode: ComposerMode
     banner_dismissed_at: datetime | None
+    tutorial_completed_at: datetime | None
     updated_at: datetime | None
 
 
@@ -75,17 +76,22 @@ class UpdateComposerPreferencesRequest(BaseModel):
       - ISO-8601 datetime string → set to that value (one-way
         dismissal; see spec 12 §"Banner lifecycle").
 
-    Both "absent" and "explicit null" collapse to the same wire shape
-    because Pydantic v2 cannot distinguish JSON-missing from JSON-null
-    without a sentinel. The user-visible spec is one-way dismissal —
-    there is no "un-dismiss" affordance — so the no-clear contract
-    matches user-visible behaviour. If a future spec adds an
-    un-dismiss surface, the model must grow a sentinel (e.g.
-    ``Annotated[datetime | None | UnsetType]``) and the service must
-    branch on it; the current code does not branch on null.
+    The service intentionally preserves the historical banner behavior:
+    it does not branch on explicit banner ``null`` even though Pydantic
+    v2 exposes ``model_fields_set``.
+
+    ``tutorial_completed_at`` semantics:
+
+      - Field absent from JSON → unchanged.
+      - JSON ``null`` → clear/reset the tutorial completion gate.
+      - ISO-8601 datetime string → set to that value.
+
+    This field uses ``model_fields_set`` in the service so the reset
+    affordance can distinguish "not mentioned" from "clear it".
     """
 
     model_config = ConfigDict(extra="forbid")
 
     default_mode: ComposerMode | None = None
     banner_dismissed_at: datetime | None = None
+    tutorial_completed_at: datetime | None = None

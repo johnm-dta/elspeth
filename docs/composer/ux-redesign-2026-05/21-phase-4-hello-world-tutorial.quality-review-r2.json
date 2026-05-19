@@ -1,0 +1,118 @@
+{
+  "reviewer": "plan-review-quality",
+  "review_round": "r2",
+  "plan": "21-phase-4-hello-world-tutorial",
+  "date": "2026-05-19",
+  "context": "Post-fix review. 23 punch-list items from r1 have been applied. This review treats the patched plan as a fresh document and surfaces any remaining or newly-introduced quality gaps.",
+  "files_reviewed": [
+    "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+    "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+    "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+    "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+    "src/elspeth/web/preferences/service.py",
+    "src/elspeth/web/frontend/src/components/chat/guided/InterpretationReviewTurn.tsx"
+  ],
+  "verdict": "BLOCKING",
+  "confidence": "high",
+  "findings": [
+    {
+      "id": "R2-B1",
+      "severity": "BLOCKING",
+      "category": "operator-action",
+      "file": "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+      "task_or_section": "Task 15 — staging smoke runbook, Step 1",
+      "evidence": "Task 15 Step 1 instructs: 'Delete the sessions DB at <data_dir>/sessions.db.' The plan's own §'Phase 4 lifecycle: two DB-delete events' table (in 21a-phase-4-backend.md) is explicit that Phase 4 requires TWO destructive delete operations: (1) the sessions DB delete at Task 1 (SESSION_SCHEMA_EPOCH bump) and (2) the Landscape audit DB delete at Task 7.0 (SQLITE_SCHEMA_EPOCH bump for the new audit-story columns added to runs_table). Step 1 of the runbook lists only the sessions DB. If an operator follows this runbook on staging after the full plan is merged, the Landscape DB startup-abort guard fires on service restart (Step 2) and the service fails to start — leaving staging broken with no guidance. The feedback_operator_gate_destructive_actions memory entry is explicit: 'Surface BEFORE the destructive step; don't take precursor actions that leave staging broken if the destructive step gets denied.' The Landscape audit DB delete is not surfaced at all in the runbook, making the runbook self-defeatingly incomplete at its most critical step.",
+      "recommendation": "Expand Step 1 of the Task 15 runbook to read: 'Delete BOTH databases: (a) the sessions DB at <data_dir>/sessions.db (SESSION_SCHEMA_EPOCH bumped in Task 1) and (b) the Landscape audit DB at <data_dir>/runs/audit.db (SQLITE_SCHEMA_EPOCH bumped in Task 7.0). Both deletes must happen before the service restart in Step 2 or the service will abort on startup.' Add a verification sub-step after the restart: assert elspeth-web.service is active (systemctl status) before proceeding to Step 3."
+    },
+    {
+      "id": "R2-B2",
+      "severity": "BLOCKING",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 8 — complete-vs-skip-vs-repeat discrimination predicate",
+      "evidence": "Task 8 specifies the telemetry discrimination predicate: 'if wrote and tutorial_changed and existing.tutorial_completed_at is None: emit composer.tutorial.complete_total'. The variable `existing` is not defined in the new tutorial-completion code path. A grep of the live src/elspeth/web/preferences/service.py confirms that `existing_raw` is used only in the `_sync` closure's read for `default_composer_mode` — there is no analogous pre-PATCH read of the prior `tutorial_completed_at` value. Without knowing the prior value of `tutorial_completed_at` before the PATCH, the service cannot distinguish 'first-time set' from 'idempotent re-finalisation'. The five counter test cases the plan names — including `test_neither_counter_fires_on_repeat_completion` and `test_complete_counter_fires_only_on_first_completion` — cannot be correctly implemented because the predicate they rely on is undefined at the code level. This is a missing code specification, not merely a test gap.",
+      "recommendation": "Add an explicit pre-PATCH read of `tutorial_completed_at` in the service's update path, analogous to how `existing_raw` captures `default_composer_mode`. Show the captured value as `existing_tutorial_completed_at: datetime | None`. Update the discrimination predicate to `if wrote and tutorial_changed and existing_tutorial_completed_at is None:`. Add a test that PATCHes tutorial_completed_at twice with the same value and asserts the complete counter fires exactly once (not twice), verifying the guard against idempotent re-finalisation."
+    },
+    {
+      "id": "R2-M1",
+      "severity": "MAJOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 8 — tutorial_telemetry.py counter test infrastructure",
+      "evidence": "Task 3 specifies the `preferences_metric_reader` conftest fixture and the `_last_patch_counter_attributes` helper in detail, including the module-import-time counter handle rebind contract (the counter is created at import time, so the conftest must rebind it after test-module import). Task 8 adds three new counters from a separate `tutorial_telemetry.py` meter — `composer.tutorial.complete_total`, `.skip_total`, `.abandon_total` — but provides no analogous conftest extension for these counters. The plan says 'add a sibling helper `_last_tutorial_counter_attributes(meter, counter_name)`' but shows no implementation body and does not address the module-import-time rebind problem for the new meter. The six Task 8 test cases are un-implementable without a working fixture, and the rebind contract for the new meter is entirely unspecified.",
+      "recommendation": "Add a `tutorial_metric_reader` fixture to the Task 8 conftest section, mirroring the structure of `preferences_metric_reader`: (1) create an InMemoryMetricReader, (2) set it on the tutorial_telemetry module's meter provider before the test, (3) yield the reader, (4) reset after. Show the `_last_tutorial_counter_attributes(reader, counter_name)` helper body. Explicitly document whether `tutorial_telemetry.py` uses a module-level counter handle (requiring rebind) or acquires the counter inside the function (safe to test without rebind). This is a load-bearing specification gap."
+    },
+    {
+      "id": "R2-M2",
+      "severity": "MAJOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 7.2 — test_get_audit_story_synthesis_forbidden",
+      "evidence": "The plan specifies `test_get_audit_story_synthesis_forbidden` with a single test case: `omit_field='llm_call_count'`. The Q6 no-synthesis invariant is the most load-bearing auditability guarantee in the plan — the service guards six required fields: `llm_call_count`, `source_data_hash`, `run_started_at`, `plugin_versions`, `seeded_from_cache`, and `cache_key`. A single test case covers 1 of 6 guards. A regression that drops the guard for `source_data_hash` or `run_started_at` — the fields most directly tied to auditability — would be completely invisible. The complete-vs-skip distinction also depends on `seeded_from_cache`; a regression there would incorrectly report synthesised stories as live runs.",
+      "recommendation": "Parametrize `test_get_audit_story_synthesis_forbidden` over all six required fields, or add five additional single-field omission tests. Each test should assert `CorruptAuditRowError` is raised and that the exception message identifies the missing field by name. At minimum, `source_data_hash` and `run_started_at` must each have a dedicated test case because they carry the direct auditability lineage the Q6 invariant exists to protect."
+    },
+    {
+      "id": "R2-M3",
+      "severity": "MAJOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 7 (P18) — _force_one_row_to_error / _force_one_row_to_have_null_rating fixtures",
+      "evidence": "The P18 integration tests `test_cache_write_skipped_when_any_row_errors` and `test_cache_write_skipped_when_any_row_missing_rating` call context managers `_force_one_row_to_error(app_with_cache)` and `_force_one_row_to_have_null_rating(app_with_cache)` respectively. Neither context manager is defined anywhere in the plan. The plan explicitly marks the implementation as 'recon-dependent'. TDD requires a failing test first — these tests cannot be written, let alone made to fail informatively, without knowing the concrete patch point in the engine or plugin that causes a row to carry a rating error or a null rating. Deferring the fixture definition to task-execution time breaks the TDD contract at the plan level and means the P18 invariant has no verifiable test specification.",
+      "recommendation": "Before merging Task 7, identify the exact code path that causes a row to have `rating_error` set or `rating` null after a tutorial run (e.g., mock the LLM call to return an error response, or inject a known-bad input row). Define `_force_one_row_to_error` and `_force_one_row_to_have_null_rating` as concrete `@contextmanager` functions with documented patch targets. The P18 gate is safety-critical — cache poisoning with a partially-errored run would silently serve bad tutorial content; the test must be concrete before implementation."
+    },
+    {
+      "id": "R2-M4",
+      "severity": "MAJOR",
+      "category": "defensive-programming",
+      "file": "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+      "task_or_section": "Task 5 (P17) — InterpretationContract.test.tsx field coverage",
+      "evidence": "The Phase 5b contract test (`InterpretationContract.test.tsx`) asserts a `toMatchObject` against 6 fields from `InterpretationEvent`. The plan's Step 7 states the field inventory is 'confirmed against the live InterpretationReviewTurn.tsx'. A grep of the live component shows `event.user_term ?? 'this term'` (line 135) and `event.llm_draft ?? ''` (line 136) — both uses employ defensive `??` fallback operators, meaning those fields can be absent or undefined without causing a component crash. The contract test asserts these fields exist in a fixture object, but the component's own defensive access means the test would still pass if those fields were renamed or removed from the event type — the `??` fallback would silently mask the missing field in rendering. Additionally, the full `InterpretationEvent` TypeScript type includes many fields beyond the 6 asserted (e.g., `composition_state_id`, `affected_node_id`, `tool_call_id`, `accepted_value`, `actor`, `interpretation_source`, `model_identifier`, `model_version`, `provider`) that are not pinned by the contract test, leaving them unguarded against phase-5b schema changes.",
+      "recommendation": "Remove the `??` fallback operators on `event.user_term` and `event.llm_draft` in `InterpretationReviewTurn.tsx` (per CLAUDE.md no-defensive-programming rule) so the component throws visibly when these fields are absent — making the contract test a genuine gate rather than a check on inert fixture data. Extend the contract test to assert all fields the component reads directly, not just the 6 currently listed. The test fixture should be exhaustive over the component's actual field accesses."
+    },
+    {
+      "id": "R2-M5",
+      "severity": "MAJOR",
+      "category": "operator-action",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 7.0 — commit message",
+      "evidence": "Task 7.0 Step 7 specifies commit message: `feat(landscape): add audit-story columns to runs_table (Phase 4A.7.0)`. Task 1 Step 5 sets a precedent by explicitly including 'OPERATOR ACTION: delete the sessions DB' in the commit body. Task 7.0 introduces the SQLITE_SCHEMA_EPOCH bump (a separate startup-abort guard for the Landscape audit DB), which requires the operator to delete the Landscape DB at deploy time. Task 7.0 Step 6 contains operator-gate prose inside the plan document, but the commit message and PR description — the only artefacts visible to CI reviewers and deploy engineers who never read the plan doc — contain no warning. This is asymmetric with Task 1 and creates a failure mode where a deploy engineer follows the Task 1 commit body (deletes sessions DB only) and misses the Landscape DB delete required by Task 7.0.",
+      "recommendation": "Add an OPERATOR ACTION footer to the Task 7.0 commit message body: 'OPERATOR ACTION: after merging, delete the Landscape audit DB at <data_dir>/runs/audit.db before service restart. SQLITE_SCHEMA_EPOCH bumped; service will abort on startup if old DB is present.' This makes the deploy requirement discoverable from git log without consulting the plan document."
+    },
+    {
+      "id": "R2-m1",
+      "severity": "MINOR",
+      "category": "missing-test",
+      "file": "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+      "task_or_section": "Task 15 — staging smoke runbook, Step 3 (cache-warm)",
+      "evidence": "Task 15 Step 3 instructs 'run the canonical seed pipeline to warm the cache' and then immediately proceeds to Step 4 Playwright execution. There is no verification step between warm and test. A silent cache-warm failure (LLM timeout, wrong model configuration, network error) leaves the cache empty. Scenario A of the Playwright suite then takes ~30s (live run) instead of the cached ~2s — the test passes but the cache is not exercised. The runbook's goal is to verify the cache works on staging; a warm-failure makes that goal unachievable without making it visible.",
+      "recommendation": "Add a verification sub-step after Step 3: `ls -1 <data_dir>/tutorial_cache/*.json | wc -l` and assert count >= 1. If the count is 0, the warm failed and Step 4 must not proceed. Also record the wall-clock time of the Scenario A run (from Playwright's own output) and assert it is under 5 seconds — a cache hit should be visibly faster than a live run."
+    },
+    {
+      "id": "R2-m2",
+      "severity": "MINOR",
+      "category": "defensive-programming",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 7 Step 4 — _all_rows_succeeded example code",
+      "evidence": "The `_all_rows_succeeded` helper in the plan's Step 4 code example uses `row.get('rating_error')` and `row.get('rating')` (or equivalent `.get()` calls on the row dict). CLAUDE.md explicitly forbids `.get()` on non-trust-boundary data: 'Do not use .get(), getattr(), isinstance(), or silent exception handling to suppress errors from nonexistent attributes.' Post-source pipeline row data is Tier-2 — types are trustworthy and field access should be direct. Using `.get()` here means a row missing `rating` entirely (a plugin contract violation) silently evaluates to `None is None`, which the function treats as 'no rating error' — the inverse of the intended P18 safety gate. The plan defers the live binding to recon, but the example code normalises the forbidden pattern.",
+      "recommendation": "Rewrite the example to use direct field access: `row['rating_error']` and `row['rating']`. Add a comment: 'Direct access per Tier-2 semantics — a KeyError here means an upstream plugin violated its output schema; crash immediately.' If the row type is a typed dataclass or TypedDict, use attribute access (`row.rating_error`, `row.rating`) rather than dict subscript. This ensures the P18 gate fails loudly on a plugin contract violation rather than silently treating it as a passing row."
+    }
+  ],
+  "verified_fixes": [
+    "Q1 (BLOCKING) — POST /api/tutorial/run and GET audit-story endpoints now have explicit backend implementation tasks (Tasks 7 and 7.2). Both endpoints have test suites specified.",
+    "Q2 (BLOCKING) — Task 3 code example rewritten to extend the shipped service incrementally, not replace it. Existing Panel guards (C2, U1, S1, CorruptPreferencesError) are explicitly preserved.",
+    "Q3 (BLOCKING) — _row_to_prefs guard now raises CorruptPreferencesError(user_id=user_id, bad_value=row.tutorial_completed_at) matching the named exception pattern.",
+    "Q4 (BLOCKING) — Task 2 model example corrected to ConfigDict(strict=True, extra='forbid') and updated_at: datetime | None, tutorial_completed_at: datetime | None.",
+    "Q5 (MAJOR) — Refresh contradiction resolved: restart-at-turn-1 is the specified behaviour; sessionStorage scaffolding removed; risk table entry updated; a Playwright test for refresh-to-restart added in Scenario D.",
+    "Q6 (MAJOR) — audit-story endpoint fully specified: queries runs_table + Landscape audit records, no synthesis; Q6 no-synthesis invariant enforced by CorruptAuditRowError on any missing required field; _replay_cached_content_to_landscape adds seeded_from_cache marker.",
+    "Q7 (MAJOR) — Telemetry not deferred to Phase 8: Task 8 added three OTel counters (composer.tutorial.complete_total, .skip_total, .abandon_total) with discrimination predicate and six named test cases.",
+    "Q8 (MAJOR) — Defensive optional-chaining on Tier-2 snapshot data removed from Turn 2b and Turn 3 code examples; direct field access now specified.",
+    "Q9 (MAJOR) — tutorialReducer default case now throws on unrecognised action types (P15). Test added: dispatching unknown action type throws.",
+    "Q10 (MAJOR) — test_tutorial_cache_raises_on_unwritable_dir added to Task 6 test list with chmod 0o444 pattern and error-message content assertion.",
+    "Q11 (MAJOR) — test_tutorial_cache_not_used_for_freeform_user and test_tutorial_cache_not_used_after_completion added to Task 7 tests.",
+    "Q12 (MINOR) — Task 1 commit message body now includes OPERATOR ACTION note for sessions DB delete.",
+    "Q13 (MINOR) — tutorial_cache_dir moved into WebSettings as Path field deriving from settings.data_dir / 'tutorial_cache'; standalone ELSPETH_DATA_DIR lookup removed.",
+    "Q14 (MINOR) — test_store_is_atomic renamed and expanded; plan now specifies verification of .tmp file absence after successful write.",
+    "Q15 (MINOR) — Turn 6 Vitest spy approach corrected to avoid getState() snapshot instability."
+  ],
+  "summary_for_synthesizer": "The Phase 4 r2 quality review found 2 BLOCKING issues, 5 MAJOR issues, and 2 MINOR issues in the post-fix plan. All 23 r1 punch-list items are confirmed addressed. The new findings are: (B1) Task 15 runbook Step 1 lists only the sessions DB delete — the Landscape audit DB delete required by the Task 7.0 SQLITE_SCHEMA_EPOCH bump is absent, leaving staging broken if the runbook is followed literally; (B2) Task 8's complete-vs-skip discrimination predicate references `existing.tutorial_completed_at` but `existing` is not defined in the new tutorial-completed code path — confirmed by live grep of service.py, which uses `existing_raw` only for `default_composer_mode`; this makes the five counter discrimination tests un-implementable from the plan. The five MAJOR findings are: (M1) Task 8 tutorial telemetry test fixture infrastructure is incompletely specified — no conftest extension for the tutorial_telemetry.py meter, no rebind contract; (M2) synthesis-forbidden test covers only 1 of 6 required fields — a regression on source_data_hash or run_started_at is invisible; (M3) P18 cache-gate tests reference undefined fixture helpers `_force_one_row_to_error` and `_force_one_row_to_have_null_rating` with no patch-point specification; (M4) Phase 5b contract test field list is undermined by the live component's defensive ?? fallbacks on user_term and llm_draft — the component access pattern violates CLAUDE.md no-defensive-programming and the contract test cannot be a genuine gate while those fallbacks exist; (M5) Task 7.0 commit message lacks an OPERATOR ACTION footer for the Landscape DB delete, asymmetric with Task 1's established precedent. The two MINOR findings are procedural: the runbook has no cache-warm verification step before Playwright, and the _all_rows_succeeded example uses .get() on Tier-2 data. The plan is implementable after resolving B1 and B2; M1-M5 should be resolved before the first test is written."
+}

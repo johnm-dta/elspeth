@@ -1,0 +1,295 @@
+{
+  "review_type": "architecture",
+  "reviewer": "architecture-review-agent",
+  "date": "2026-05-19",
+  "review_pass": "R2",
+  "review_context": "Post-fix review. R1 identified 23 punch-list items; all 23 were addressed by a series of writer/reviewer alternation cycles. This review treats the patched plan as if seen for the first time, focusing on new concerns introduced or exposed by the fixes. R1 findings A1-A10 are each verified as addressed (see r1_finding_verification section).",
+  "plan_files": [
+    "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+    "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+    "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+    "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md"
+  ],
+  "verdict": "CHANGES_REQUESTED",
+  "confidence": "high",
+  "blast_radius": {
+    "files_touched_raw": 38,
+    "weighted_score": 34,
+    "risk_level": "VERY_HIGH",
+    "weighting_notes": [
+      "Plan grew from 1,487 lines (21a at R1) to 4,744 lines at R2 — 220% growth; 6 new tasks (7.0, 7.1, 7.2, 7.3, 8, P14-telemetry) introduced after R1.",
+      "src/elspeth/core/landscape/schema.py — schema file (3x): runs_table gets 6 new columns; highest-risk single file in the plan.",
+      "src/elspeth/web/sessions/models.py — schema file (3x): SESSION_SCHEMA_EPOCH bump from 5→6 + user_preferences_table column.",
+      "src/elspeth/web/composer/tutorial_service.py (new) — core business logic (2x): new module; run-path integration, cache hit/miss logic, Landscape interaction.",
+      "src/elspeth/web/composer/tutorial_run_routes.py (new) — core business logic (2x): new FastAPI router; response model definitions shared with tutorial_service.",
+      "src/elspeth/web/composer/tutorial_cache.py — core business logic (2x): SHA-256-keyed flat-file cache; TutorialCacheEntry frozen model; crash-on-corrupt semantics.",
+      "src/elspeth/web/preferences/service.py — core business logic (2x): three-state PATCH handler extended for tutorial_completed_at.",
+      "src/elspeth/core/landscape/run_lifecycle_repository.py — core business logic (2x): new read surface used by audit-story service.",
+      "src/elspeth/web/frontend/src/components/tutorial/HelloWorldTutorial.tsx (new) — application layer (1x): React container with useReducer state machine.",
+      "src/elspeth/web/frontend/src/api/client.ts — frontend integration (1x): new API surface functions; Task 7.3 modifies this in the backend plan.",
+      "Configuration, standalone test, and Playwright fixture files counted at 0.5x."
+    ],
+    "recommendation": "Strongly recommend splitting into PR-21a (backend: Tasks 0 through 7 of 21a) and PR-21b (frontend: 21b1 and 21b2), with PR-21b depending on PR-21a merged. The plan already has this structure; the PR boundary just needs to be enforced. NOTE: Task 7.3 (client.ts changes) must migrate to PR-21b or be extracted from PR-21a to maintain the clean boundary."
+  },
+  "one_way_doors": [
+    {
+      "id": "OWD-1",
+      "change": "ADD COLUMN tutorial_completed_at to user_preferences_table (SESSION_SCHEMA_EPOCH 5→6)",
+      "risk": "LOW",
+      "rationale": "Per project DB migration policy: migration = delete the old DB. Column add forces a DB delete on upgrade. Epoch bump triggers the startup validator correctly. This is now a clean one-way door with a well-understood recovery path (delete DB, re-run). R1's OWD-1 remains, now with the epoch bump present.",
+      "mitigation_in_plan": "YES — Task 1 Steps 0a/0b/0c explicitly bump SESSION_SCHEMA_EPOCH 5→6 with epoch-history comment before the column add. Operator-gate DB-delete is the documented recovery path."
+    },
+    {
+      "id": "OWD-2",
+      "change": "ADD 6 COLUMNS to runs_table in src/elspeth/core/landscape/schema.py (Task 7.0)",
+      "risk": "HIGH",
+      "rationale": "Runs_table is the Landscape audit backbone — Tier-1 data. Adding 6 columns (llm_call_count, source_data_hash, run_started_at, plugin_versions, seeded_from_cache, cache_key) requires SQLITE_SCHEMA_EPOCH or equivalent startup validator bump. These columns are NOT in user_preferences_table — they are in the core Landscape schema, which may have its own epoch mechanism separate from SESSION_SCHEMA_EPOCH. If the Landscape schema has no epoch validator, old DBs will silently miss these columns. The plan does not address which epoch covers the Landscape runs_table.",
+      "mitigation_in_plan": "PARTIAL — Task 7.0 adds the columns but does not reference a Landscape schema epoch or SQLITE_SCHEMA_EPOCH bump. The plan only discusses SESSION_SCHEMA_EPOCH (which governs user_preferences_table, not runs_table). If the Landscape has a separate epoch mechanism, it must also be bumped."
+    },
+    {
+      "id": "OWD-3",
+      "change": "Tutorial cache flat-file store (SHA-256-keyed JSON, crash-on-corrupt semantics)",
+      "risk": "MEDIUM",
+      "rationale": "Cache is unversioned. When the canonical seed prompt or compound model_id format changes, existing cache entries are silently invalid (wrong key) or stale (old content). No purge mechanism is described. Crash-on-corrupt semantics are correct for integrity but mean any format change requires a manual cache delete. Operational runbook is absent.",
+      "mitigation_in_plan": "NONE — No version field in TutorialCacheEntry. No cache purge mechanism or CLI command. No documentation of when to purge. The plan acknowledges 'cache is invalidated by key change' implicitly (new key = miss) but does not address format changes."
+    },
+    {
+      "id": "OWD-4",
+      "change": "Three-state PATCH semantics for tutorial_completed_at published as API contract",
+      "risk": "MEDIUM",
+      "rationale": "The absent/datetime/null three-state PATCH is the described API contract across all four plan files plus Phase 8. Once frontend code is deployed using this contract, changing the wire format requires coordinated frontend + backend deployment. Versioning strategy is absent but acceptable given internal co-deployment.",
+      "mitigation_in_plan": "ACCEPTABLE — no external API consumers at this stage; internal co-deployment makes this manageable."
+    }
+  ],
+  "r1_finding_verification": [
+    {
+      "id": "A1",
+      "title": "SESSION_SCHEMA_EPOCH not bumped",
+      "status": "RESOLVED",
+      "evidence": "Task 1 Steps 0a/0b/0c explicitly bump SESSION_SCHEMA_EPOCH 5→6 with epoch-history comment before the column add."
+    },
+    {
+      "id": "A2",
+      "title": "Cache-hit run attribution violates CLAUDE.md attributability test",
+      "status": "RESOLVED",
+      "evidence": "_replay_cached_content_to_landscape creates a new run_id owned by current session. Content-not-identity invariant is maintained. Overview doc §'Auditability boundary' explicitly documents this. However, R2 finding B-R2-2 shows the implementation has a plan-internal contradiction in how this function accesses app state."
+    },
+    {
+      "id": "A3",
+      "title": "Plan service snippet diverges — Panel C2 guard and telemetry counter at risk",
+      "status": "RESOLVED",
+      "evidence": "Task 3 now explicitly marked 'ADDITIVE DIFF, NOT REWRITE' with a preservation checklist of 6 Phase 1A guards including Panel C2 and telemetry counter."
+    },
+    {
+      "id": "A4",
+      "title": "CorruptPreferencesError pattern not applied to tutorial_completed_at read guard",
+      "status": "RESOLVED",
+      "evidence": "Task 3 snippet now uses CorruptPreferencesError(user_id=user_id, bad_value={'tutorial_completed_at': raw_tutorial})."
+    },
+    {
+      "id": "A5",
+      "title": "Plan snippet shows updated_at as non-nullable",
+      "status": "RESOLVED",
+      "evidence": "Task 2 model now shows updated_at: datetime | None with docstring explaining Panel U1 nullable contract."
+    },
+    {
+      "id": "A6",
+      "title": "Run-path integration point unresolved at plan-writing time",
+      "status": "PARTIALLY_ADDRESSED",
+      "evidence": "Task 7 still requires reconnaissance (Step 1) but now includes extensive notes on what to look for and what not to use. However, Task 7's _replay_cached_content_to_landscape snippet references app.state.landscape which Task 7.2 Step 1 explicitly says does not exist — a new contradiction introduced by the fix (see B-R2-2)."
+    },
+    {
+      "id": "A7",
+      "title": "Skip writes irreversible state with no retake path",
+      "status": "RESOLVED",
+      "evidence": "Open Question C3 now ships in-Phase-4: wire contract for null PATCH ships in Phase 4. P20 provides the three-state PATCH semantics enabling retake. UI toggle deferred to sibling settings-panel plan."
+    },
+    {
+      "id": "A8",
+      "title": "No phasing plan despite natural 21a/21b split",
+      "status": "RESOLVED",
+      "evidence": "PR-21a/PR-21b split explicitly specified across all four plan documents. However, R2 finding M-R2-2 notes that Task 7.3 (client.ts changes) contaminates PR-21a with frontend code."
+    },
+    {
+      "id": "A9",
+      "title": "Defensive ?? [] on inline_blob URLs",
+      "status": "RESOLVED",
+      "evidence": "TutorialTurn2bShowBuilt.tsx now uses direct source.urls access without defensive fallback. Direct cast pattern applied correctly."
+    },
+    {
+      "id": "A10",
+      "title": "Cache Tier-1 classification establishes imprecise precedent for LLM output",
+      "status": "RESOLVED",
+      "evidence": "Cache is now classified as 'server-generated content cache' with explicit note that it is operationally Tier-1 but conceptually LLM-derived. Distinction is documented."
+    }
+  ],
+  "findings": [
+    {
+      "id": "B-R2-1",
+      "severity": "BLOCKING",
+      "category": "api-contract-mismatch",
+      "title": "TutorialTurn4Run accesses response fields at wrong nesting level — real API calls return undefined; tests mask the bug",
+      "detail": "Task 7.1 defines TutorialRunResponse as: { run_id: string; output: TutorialRunOutput; seeded_from_cache: boolean; cache_key: string | null } where TutorialRunOutput = { rows: Array<Record<string, unknown>>; source_data_hash: string }. The output fields (rows, source_data_hash) are nested one level deep under response.output. Task 8's TutorialTurn4Run.tsx implementation accesses these at the wrong level: response.source_data_hash (undefined — correct path is response.output.source_data_hash) and response.rows (undefined — correct path is response.output.rows). The component would set state to { rows: undefined, sourceDataHash: undefined }. Turn 5 audit story fetch then fires with this bad state. The critical failure mode: Task 8's Vitest unit test mocks the API call with the flat shape ({ run_id, source_data_hash, rows }) — mirroring the component's wrong expectation — so tests pass while real API calls silently produce undefined values rendered in the UI. The mock and the component are in sync with each other and both wrong relative to the backend schema.",
+      "evidence": "21a-phase-4-backend.md Task 7.1: TutorialRunOutput model with nested rows and source_data_hash under output. 21b2-phase-4-frontend-part-2.md Task 8: component .then((response) => setResult({ runId: response.run_id, sourceDataHash: response.source_data_hash, rows: response.rows })) — flat access. Task 8 test mock: { run_id: 'r1', source_data_hash: 'a7f3e2', rows: [...] } — flat mock confirming the mismatch. The mock validates the component shape, not the API shape.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 7.1 — TutorialRunResponse definition)",
+        "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md (Task 8 — TutorialTurn4Run.tsx implementation and test mock)"
+      ],
+      "recommendation": "Fix the component to use response.output.source_data_hash and response.output.rows. Fix the test mock to match the real API shape: { run_id: 'r1', output: { source_data_hash: 'a7f3e2', rows: [...] }, seeded_from_cache: false, cache_key: null }. Consider defining a shared TypeScript interface in a types file imported by both the API client and the component to prevent this class of mismatch in the future."
+    },
+    {
+      "id": "B-R2-2",
+      "severity": "BLOCKING",
+      "category": "plan-internal-contradiction",
+      "title": "_replay_cached_content_to_landscape calls app.state.landscape which Task 7.2 Step 1 explicitly states does not exist",
+      "detail": "Task 7's _replay_cached_content_to_landscape function contains: new_run_id = await request.app.state.landscape.record_synthesised_run(session_id=session_id, ...). This requires app.state.landscape to be an attribute on the FastAPI application state. Task 7.2 Step 1 of the same plan explicitly contradicts this: 'There is no app.state.landscape.read_run(session_id, run_id) shortcut and no app.state.landscape attribute on the app state.' Task 7.2 describes the correct access path as going through RunLifecycleRepository, not through app state. This is a plan-internal contradiction: two tasks in the same plan specify incompatible access patterns for the same resource. The implementation in _replay_cached_content_to_landscape would cause an AttributeError at runtime on the first cache hit. This was not present in R1 — it was introduced when the fix for A2 (cross-session attribution) added the _replay_cached_content_to_landscape function using an app.state access pattern that does not exist.",
+      "evidence": "21a-phase-4-backend.md Task 7: _replay_cached_content_to_landscape snippet — request.app.state.landscape.record_synthesised_run(...). 21a-phase-4-backend.md Task 7.2 Step 1: 'There is no app.state.landscape.read_run(session_id, run_id) shortcut and no app.state.landscape attribute on the app state.' Same plan file, two tasks, direct contradiction.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 7 — _replay_cached_content_to_landscape snippet vs. Task 7.2 Step 1 — explicit statement that app.state.landscape does not exist)"
+      ],
+      "recommendation": "Resolve the contradiction before implementation: determine the correct access pattern for Landscape write operations from a FastAPI route handler and use it consistently in both Task 7 and Task 7.2. Based on Task 7.2's guidance, the correct path is likely dependency injection via a repository (e.g., a LandscapeWriteRepository injected as a FastAPI dependency), not app.state direct access. Update _replay_cached_content_to_landscape to use the repository pattern. Add a stub test in Task 7.2's test suite for the replay path."
+    },
+    {
+      "id": "M-R2-1",
+      "severity": "MAJOR",
+      "category": "pattern-alignment",
+      "title": "Circular import between tutorial_run_routes.py and tutorial_service.py resolved by two forbidden lazy imports",
+      "detail": "Task 7.1 creates a circular dependency: tutorial_run_routes.py defines TutorialRunOutput and TutorialRunResponse; tutorial_service.py imports these models from tutorial_run_routes.py (service importing from routes module). To break the circle, tutorial_run_routes.py lazy-imports run_tutorial_pipeline from tutorial_service.py inside the route handler function body. Additionally, tutorial_service.py lazy-imports execute_pipeline_run from elspeth.web.composer.run_path inside the run_tutorial_pipeline function body. Both lazy imports are inside function bodies — exactly the 'Shifting the Burden' pattern CLAUDE.md unconditionally prohibits: 'NEVER: Add a lazy import with an apologetic comment. This is the Shifting the Burden archetype — it defers the structural fix and the pattern will recur.' The root cause is placing response models in the route module rather than in a shared types module.",
+      "evidence": "21a-phase-4-backend.md Task 7.1: tutorial_service.py imports 'from elspeth.web.composer.tutorial_run_routes import TutorialRunOutput, TutorialRunResponse'. Route handler: 'from elspeth.web.composer.tutorial_service import run_tutorial_pipeline  # lazy import'. Service function body: 'from elspeth.web.composer.run_path import execute_pipeline_run  # recon-confirmed'. CLAUDE.md: 'NEVER: Add a lazy import with an apologetic comment. This is the Shifting the Burden archetype.'",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 7.1 — tutorial_run_routes.py and tutorial_service.py module design)"
+      ],
+      "recommendation": "Extract TutorialRunOutput, TutorialRunResponse, and related request/response models into a dedicated tutorial_models.py (or tutorial_types.py) module. Both tutorial_run_routes.py and tutorial_service.py import from this shared types module. The lazy imports are then unnecessary and should be replaced with top-level imports. The execute_pipeline_run import in tutorial_service.py should also be a top-level import once the circular dependency is resolved."
+    },
+    {
+      "id": "M-R2-2",
+      "severity": "MAJOR",
+      "category": "blast-radius",
+      "title": "PR-21a (labeled backend) contains Task 7.3 TypeScript client.ts changes — cross-contaminates the PR boundary",
+      "detail": "The plan's PR-split rationale (21a = backend, 21b = frontend, independently revertable) is undermined by Task 7.3, which resides in 21a-phase-4-backend.md and modifies src/elspeth/web/frontend/src/api/client.ts — a TypeScript frontend file. The changes include renaming updateSessionTitle to renameSession, adding runTutorialPipeline, and adding getRunAuditSummary. These API client functions are consumed by 21b's components. Landing client.ts changes in PR-21a means PR-21b depends on PR-21a's frontend code, not just its backend contract. If PR-21a is reverted (e.g., due to backend issue), the frontend API client also reverts, breaking any PR-21b development in flight. The PR boundary claim ('backend' vs 'frontend') is also misleading for reviewers.",
+      "evidence": "21a-phase-4-backend.md Task 7.3: modifies src/elspeth/web/frontend/src/api/client.ts with TypeScript code. The plan document is titled '21a-phase-4-backend.md'. PR-21a description in all plan files: 'backend changes only.'",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 7.3 — client.ts modifications in a document labeled 'backend')"
+      ],
+      "recommendation": "Move Task 7.3 (client.ts changes) to PR-21b. PR-21a should contain only files under src/elspeth/ Python directories and configuration. PR-21b picks up client.ts alongside the component implementations that consume these API functions. This restores the independent revertability the PR split is intended to provide."
+    },
+    {
+      "id": "M-R2-3",
+      "severity": "MAJOR",
+      "category": "plan-internal-consistency",
+      "title": "Sibling plan reference in 21 and 21a points to non-existent 21b-phase-4-frontend.md",
+      "detail": "Both 21-phase-4-hello-world-tutorial.md (§'Sibling plans') and 21a-phase-4-backend.md (§'Sibling plan') reference '[21b-phase-4-frontend.md]' as the companion frontend plan. This file does not exist. The actual frontend plan files are 21b1-phase-4-frontend-part-1.md and 21b2-phase-4-frontend-part-2.md. A implementer following the plan's cross-references would look for a file that doesn't exist. This is a stale reference likely introduced when the frontend plan was split from one file into two during a revision cycle.",
+      "evidence": "21-phase-4-hello-world-tutorial.md §'Sibling plans': reference to '[21b-phase-4-frontend.md]'. 21a-phase-4-backend.md §'Sibling plan': same reference. Actual files on disk: 21b1-phase-4-frontend-part-1.md (1,840 lines) and 21b2-phase-4-frontend-part-2.md (1,756 lines). No 21b-phase-4-frontend.md file exists.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md (§'Sibling plans')",
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (§'Sibling plan')"
+      ],
+      "recommendation": "Update both references to point to the two actual files: 21b1-phase-4-frontend-part-1.md and 21b2-phase-4-frontend-part-2.md. Also update 21b1 and 21b2's own sibling-plan cross-references to match."
+    },
+    {
+      "id": "M-R2-4",
+      "severity": "MAJOR",
+      "category": "plan-internal-consistency",
+      "title": "P20 scope described inconsistently — overview claims Phase 4 ships in-settings toggle; file inventory shows no settings panel file",
+      "detail": "The overview plan (21-phase-4-hello-world-tutorial.md) contains two contradictory statements about the Phase 4 scope for the retake affordance. Open Question C3 row states: 'Phase 4 ships an in-settings Reset tutorial toggle.' A separate statement in the plan says: 'Phase 4 ships the wire contract only; the toggle UI is owned by a sibling settings-panel plan.' The file inventory across all four plan documents contains no settings panel file. P20 in 21a is described as 'wire contract only' — a null PATCH to tutorial_completed_at enables programmatic retake, but no UI surface for it lands in Phase 4. A future implementer reading the C3 row would budget for a settings panel that is not actually in scope, or would expect to find it and be confused by its absence.",
+      "evidence": "21-phase-4-hello-world-tutorial.md Open Questions table row C3: 'Phase 4 ships an in-settings Reset tutorial toggle.' Same document, separate paragraph: 'Phase 4 ships the wire contract only; the toggle UI is owned by a sibling settings-panel plan.' File inventories in all four plan files: no settings panel component or route listed.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md (Open Questions C3 vs. P20 scope description)"
+      ],
+      "recommendation": "Resolve the contradiction in the overview. The correct scope (per the consistent P20 description across 21a/21b1/21b2) is: Phase 4 ships the wire contract only (null PATCH to tutorial_completed_at). The settings toggle UI is deferred to the sibling settings-panel plan. Remove or correct the C3 row to match this scope. This prevents implementer budget/expectation mismatch."
+    },
+    {
+      "id": "M-R2-5",
+      "severity": "MAJOR",
+      "category": "pattern-alignment",
+      "title": "_all_rows_succeeded uses .get() on Tier-2 pipeline data — defensive programming on system-owned post-pipeline output",
+      "detail": "The _all_rows_succeeded helper in 21a Task 7 contains: for row in result['rows']: if row.get('rating_error') is not None: return False; if row.get('rating') is None: return False. The .get() calls are defensive programming on post-pipeline row data (Tier-2 in CLAUDE.md's three-tier trust model). Per CLAUDE.md: 'Do not use .get(), getattr(), isinstance(), or silent exception handling to suppress errors from nonexistent attributes, malformed data, or incorrect types.' Post-pipeline row data should have contractually known schema fields. If rating or rating_error is absent from a row dict at this point in the pipeline, that is a bug in an upstream transform — the correct response is to crash (AttributeError or KeyError), not silently default to the None branch. Using .get() here would cause a cache write to proceed on rows that are missing the rating field entirely, producing silently corrupt cache entries.",
+      "evidence": "21a-phase-4-backend.md Task 7: _all_rows_succeeded function body — row.get('rating_error') and row.get('rating'). CLAUDE.md: 'Do not use .get(), getattr(), isinstance(), or silent exception handling to suppress errors from nonexistent attributes, malformed data, or incorrect types. Access typed dataclass fields directly (obj.field), not defensively (obj.get(\"field\")).'",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 7 — _all_rows_succeeded function)"
+      ],
+      "recommendation": "Replace both .get() calls with direct dict access: row['rating_error'] and row['rating']. This will raise KeyError if the field is absent, which is the correct behavior — it surfaces the upstream transform bug rather than silently producing a corrupt cache entry. If these fields can legitimately be absent in some pipeline configurations (e.g., non-LLM transforms), document the contract explicitly and handle the absence at the source transform level, not via defensive .get() here."
+    },
+    {
+      "id": "N-R2-1",
+      "severity": "MINOR",
+      "category": "test-accuracy",
+      "title": "Cache unit tests use simple model_id strings instead of production compound format — do not exercise real key composition",
+      "detail": "The plan's P19 fix established that cache keys use a compound model_id of the form '{composer_model}:{transform_model}' (e.g., 'claude-opus-4-7:claude-3-5-sonnet'). Task 6's unit tests use simple model_id fixture values like 'claude-opus-4-7' without the colon separator. This means the tests do not validate the SHA-256 key composition for the actual production format. A bug in compound model_id construction (e.g., swapping the two model identifiers, missing the separator) would not be caught by these tests. The tests pass for wrong reasons — they exercise the hashing logic but not the key format that production uses.",
+      "evidence": "21a-phase-4-backend.md Task 6 test fixtures: model_id='claude-opus-4-7' (simple, no colon). P19 description: 'compound model_id: {composer_model}:{transform_model}'. The key composition function takes two separate model strings and joins them — none of the test cases exercise the join path with two distinct components.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 6 — unit test fixtures)"
+      ],
+      "recommendation": "Update Task 6 test fixtures to use compound model_id values: 'claude-opus-4-7:claude-3-5-sonnet-20241022'. Add a test case specifically for key stability: given the same (composer_model, transform_model) tuple in both orders, verify the keys differ (no key collision from swapped components). Add a test case for model_id with a colon in one component name to verify the separator choice is unambiguous."
+    },
+    {
+      "id": "N-R2-2",
+      "severity": "MINOR",
+      "category": "pattern-alignment",
+      "title": "TutorialCache.store() contains silent except OSError: pass for tempfile cleanup",
+      "detail": "The cache store() function uses the tempfile + atomic rename pattern. The cleanup path contains: except OSError: pass — a silent exception swallow on the temp file unlink. CLAUDE.md prohibits silent exception handling: 'Do not use ... or silent exception handling to suppress errors from nonexistent attributes, malformed data, or incorrect types.' The outer exception is re-raised in the broader try/except block, so the primary error path is not affected. However, an OSError during cleanup could indicate a file system issue (disk full, permissions change) that would be valuable to surface, not swallow. The pattern 'bare except + pass' in any form is discouraged.",
+      "evidence": "21a-phase-4-backend.md Task 6: TutorialCache.store() method — except OSError: pass in the finally/cleanup block for temp file removal.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 6 — TutorialCache.store() cleanup path)"
+      ],
+      "recommendation": "Replace 'except OSError: pass' with an attempt to log the cleanup failure at debug level or surface it via telemetry. If the outer exception already propagates, the cleanup OSError should be chained: 'except OSError as cleanup_err: raise RuntimeError(f\"atomic write failed and temp cleanup failed: {tmp_path}\") from cleanup_err' — or at minimum do not suppress it silently. The no-legacy-code principle applies: clean up correctly or crash informatively."
+    },
+    {
+      "id": "N-R2-3",
+      "severity": "MINOR",
+      "category": "pattern-alignment",
+      "title": "App.tsx bootstrap failure swallowed to console.error — contradicts plan's own Panel C2 error-surface documentation",
+      "detail": "Task 12 (21b2-phase-4-frontend-part-2.md) adds a useEffect hook for preferences bootstrap: bootstrap().catch((err) => { console.error('[preferences] bootstrap failed:', err); }). This swallows the error to the browser console and does not surface it in the UI. The plan's own Panel C2 documentation in Task 12 states: 'errors are surfaced via the existing prefs writeError surface rather than swallowed.' The implementation contradicts the documentation within the same task. A user whose preferences bootstrap silently fails sees no indication — the app continues with stale or default state. This is an error-swallowing pattern that CLAUDE.md's no-silent-exception rule applies to at the application architecture level.",
+      "evidence": "21b2-phase-4-frontend-part-2.md Task 12: bootstrap().catch((err) => { console.error('[preferences] bootstrap failed:', err); }). Same task's Panel C2 note: 'errors are surfaced via the existing prefs writeError surface rather than swallowed.'",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md (Task 12 — App.tsx bootstrap useEffect)"
+      ],
+      "recommendation": "Replace the console.error catch with writeError dispatch: bootstrap().catch((err) => { dispatch(writeError('[preferences] bootstrap failed: ' + String(err))); }). This matches the plan's own stated behavior and ensures the user sees a visible error rather than a silent failure. Update the corresponding Vitest test to assert writeError is called on bootstrap rejection."
+    },
+    {
+      "id": "N-R2-4",
+      "severity": "MINOR",
+      "category": "plan-internal-consistency",
+      "title": "Task 7.0 runs_table columns use Python-side default=False only — nullable=False without server_default will fail on INSERT omission",
+      "detail": "Task 7.0 defines: Column('seeded_from_cache', Boolean, nullable=False, default=False). The default=False is a Python-side SQLAlchemy Column default, not a server_default. This means the column has a Python-side default but no database-level DEFAULT clause. If any INSERT into runs_table omits the seeded_from_cache column (e.g., an existing code path that doesn't know about this new column), the DB will raise a NOT NULL constraint violation rather than applying the default. Existing run-path code that inserts into runs_table before Task 7's integration would fail silently or loudly depending on whether SQLAlchemy Core propagates the column default on all insert paths. The plan does not audit existing run-path INSERT sites for this column.",
+      "evidence": "21a-phase-4-backend.md Task 7.0: Column('seeded_from_cache', Boolean, nullable=False, default=False) — Python-side default only. No server_default='0' or server_default='false'. The plan adds 6 new nullable=False columns without auditing existing INSERT paths in the run lifecycle.",
+      "affected_files": [
+        "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md (Task 7.0 — runs_table column definitions)"
+      ],
+      "recommendation": "For columns that should default to a fixed value (seeded_from_cache=False, llm_call_count=0), add server_default to the Column definition: Column('seeded_from_cache', Boolean, nullable=False, server_default='0'). This ensures the DB applies the default regardless of which code path performs the INSERT. Audit existing runs_table INSERT sites in the live codebase before landing Task 7.0 to confirm all INSERT paths either supply these columns or rely on server_default."
+    }
+  ],
+  "summary": {
+    "architectural_concerns": 10,
+    "blocking_issues": 2,
+    "major_issues": 5,
+    "minor_issues": 3,
+    "r1_findings_resolved": 10,
+    "r1_findings_partially_resolved": 0,
+    "new_one_way_doors": 1,
+    "one_way_doors_without_mitigation": 1,
+    "pattern_violations": 4,
+    "blocking_summary": [
+      "B-R2-1: TutorialTurn4Run accesses response.source_data_hash and response.rows at wrong nesting level — should be response.output.source_data_hash and response.output.rows. Test mock mirrors wrong expectation, masking the bug.",
+      "B-R2-2: _replay_cached_content_to_landscape calls request.app.state.landscape.record_synthesised_run(...) but Task 7.2 Step 1 explicitly states app.state.landscape does not exist on app state — guaranteed AttributeError on first cache hit."
+    ],
+    "must_fix_before_implementation": [
+      "B-R2-1: Fix TutorialTurn4Run to access response.output.source_data_hash and response.output.rows; fix test mock to match real API shape",
+      "B-R2-2: Resolve app.state.landscape contradiction — determine correct Landscape write access pattern from FastAPI route handler and apply consistently in Task 7 and Task 7.2",
+      "M-R2-1: Extract TutorialRunOutput/TutorialRunResponse to shared tutorial_models.py; remove both lazy imports"
+    ],
+    "should_fix_before_implementation": [
+      "M-R2-2: Move Task 7.3 (client.ts) to PR-21b; PR-21a should contain Python files only",
+      "M-R2-3: Update sibling plan references in 21 and 21a to point to actual 21b1 and 21b2 files",
+      "M-R2-4: Resolve C3 row vs P20 scope contradiction in overview — one statement about Phase 4 retake scope",
+      "M-R2-5: Replace row.get('rating_error') and row.get('rating') with direct access row['rating_error'] and row['rating'] in _all_rows_succeeded",
+      "OWD-2: Confirm whether Landscape runs_table has its own schema epoch validator and bump it, or document that it does not and explain why the startup check is sufficient"
+    ],
+    "can_fix_during_implementation": [
+      "N-R2-1: Update cache unit test fixtures to compound model_id format and add key-stability test cases",
+      "N-R2-2: Replace except OSError: pass with informative error handling in TutorialCache.store() cleanup path",
+      "N-R2-3: Replace console.error catch with writeError dispatch in App.tsx bootstrap useEffect",
+      "N-R2-4: Add server_default to seeded_from_cache and llm_call_count Column definitions in Task 7.0"
+    ]
+  }
+}

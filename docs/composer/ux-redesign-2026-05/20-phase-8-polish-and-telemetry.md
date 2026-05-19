@@ -209,7 +209,7 @@ tutorial-replay is a **user-write-intent** — the user clicked
 "Replay hello-world tutorial" deliberately, the PATCH body says
 `{"tutorial_completed_at": null}` (clearing Phase 4's
 `tutorial_completed_at` column — see §"Cross-plan contract" in
-[21a-phase-4-backend.md](21a-phase-4-backend.md)), and the
+[21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md)), and the
 audit-relevant fact is the user's explicit intent to re-onboard.
 
 CLAUDE.md's superset exception is named for non-decision **reads**
@@ -280,7 +280,7 @@ see commit history for the cohort.
   `{"tutorial_completed_at": null}` (Task 6). **Conditional** on Phase 4
   having shipped the column. The PATCH contract is co-owned with Phase 4 —
   see §"Cross-plan contract — `tutorial_completed_at` PATCH semantics" in
-  [21a-phase-4-backend.md](21a-phase-4-backend.md).
+  [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md).
 - Run axe-core against every new component from Phases 1-7; fix
   high-severity findings; file medium-severity findings as follow-ups
   (Task 7).
@@ -348,7 +348,7 @@ tier its inputs and outputs live in. Summary up front:
   bootstrap; cleared on retake): crash-on-anomaly per Phase 4's Tier-1
   read-side guard (`_row_to_prefs`). A non-NULL value that is not a
   `datetime` → `RuntimeError`. Defined and tested in
-  [21a-phase-4-backend.md](21a-phase-4-backend.md) Task 3.
+  [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md) Task 3.
 
 **Tier 3 — External data (source input):**
 
@@ -399,8 +399,21 @@ What this phase sends to the OTel meter:
   different concepts (per-session trust-tier override vs. account-
   level default UX gesture); cross-vocabulary leakage is the B1-r2
   defect class — see §"Vocabulary discipline (B1-r2 — load-bearing)".
-- `composer.tutorial.started_total` — counter (Task 6, conditional).
-- `composer.tutorial.completed_total` — counter (Task 6, conditional).
+- `composer.tutorial.started_total` — counter slot declared in Phase 8
+  (`sessions/telemetry.py`); emit site filled by Phase 4
+  (`21a2-phase-4-backend-part-2.md` Task 8, when Phase 4 ships).
+- `composer.tutorial.completed_total` — counter slot declared in Phase 8
+  (`sessions/telemetry.py:317-323`); emit site filled by Phase 4
+  (`21a2-phase-4-backend-part-2.md` Task 8, when Phase 4 ships) with a
+  `completion_path` attribute taking values
+  `first_time | skip | retake | repeat`. Phase 8's
+  `record_tutorial_completed` helper (`telemetry_phase8.py:255-265`)
+  is the attribute-free fallback; Phase 4 calls the counter directly
+  with the `completion_path` attribute, so the helper is reserved for
+  any Phase 8-internal use that does not want to set the attribute.
+  (Phase 4 was originally specified with `complete_total` (no 'd');
+  CR-1 — 2026-05-19 — realigned Phase 4 onto the already-shipped
+  Phase 8 name to avoid a parallel namespace.)
 - `composer.tutorial.replayed_total` — **DEFERRED to Phase 9** per
   the Decision 2 resolution above (Option C). The replay button
   ships in Task 6 8c; the counter does not. See
@@ -3037,7 +3050,7 @@ If you reach Case B, **stop and surface to operator**.
 Phase 4 ships `tutorial_completed_at: datetime | None` on the
 `user_preferences` row and exposes it on GET/PATCH
 `/api/composer-preferences`. See
-[21a-phase-4-backend.md](21a-phase-4-backend.md) §"Cross-plan
+[21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md) §"Cross-plan
 contract — `tutorial_completed_at` PATCH semantics" for the
 canonical statement of the contract Task 6 relies on. Confirm:
 
@@ -3072,7 +3085,7 @@ fixture pattern):
 
 **(Q5 — Pydantic boundary tests for `tutorial_completed_at`):** the
 Tier-3 boundary tests for the field live in Phase 4 (see
-[21a-phase-4-backend.md](21a-phase-4-backend.md) Task 2 and Task 4):
+[21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md) Task 2 and Task 4):
 `tutorial_completed_at` is `datetime | None`; the model rejects
 non-datetime, non-null values at the boundary with 422. Phase 8
 Task 6 adds **two** retake-specific boundary tests on top of
@@ -3124,12 +3137,12 @@ then re-invokes `get().bootstrap()` so the cached row reflects the
 freshly-cleared column without a race. Phase 4's PATCH contract
 treats explicit `null` as "write NULL to the column" (the retake
 state); see §"Cross-plan contract" in
-[21a-phase-4-backend.md](21a-phase-4-backend.md).
+[21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md).
 
 In `api/client.ts` (where `updateComposerPreferences` actually lives — no separate `api/preferences.ts` module exists), verify
 `updateComposerPreferences`'s body type still includes
 `tutorial_completed_at: string | null` as Phase 4 ships it (see
-[21a-phase-4-backend.md](21a-phase-4-backend.md) §"Cross-plan
+[21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md) §"Cross-plan
 contract — `tutorial_completed_at` PATCH semantics"). If the type
 union has regressed, fix Phase 4 — do not patch around it in Phase
 8. Ownership stays with Phase 4; Phase 8 verifies.

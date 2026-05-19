@@ -132,7 +132,7 @@ Implementation-readiness legend: **READY** — reviewed plan, no upstream blocke
 | 2 | Audit-readiness panel | [14](14-phase-2-audit-readiness-panel.md) · [14a](14a-phase-2a-backend.md) · [14b](14b-phase-2b-frontend.md) · [14c](14c-phase-2c-frontend-integration.md) | REVIEWED + FIXED | BLOCKED (1B ship) |
 | 3A | IA cleanup — removals | [15a1](15a1-phase-3a-removals-part-1.md) · [15a2](15a2-phase-3a-removals-part-2.md) | REVIEWED + FIXED | BLOCKED (1B ship) |
 | 3B | IA cleanup — side-rail additions | [15b1](15b1-phase-3b-side-rail-part-1.md) · [15b2](15b2-phase-3b-side-rail-part-2.md) | REVIEWED + FIXED | BLOCKED (1B ship) |
-| 4 | Hello-world tutorial | [21](21-phase-4-hello-world-tutorial.md) · [21a](21a-phase-4-backend.md) · [21b1](21b1-phase-4-frontend-part-1.md) · [21b2](21b2-phase-4-frontend-part-2.md) | REVIEWED + FIXED | BLOCKED (1/5a/5b ship) |
+| 4 | Hello-world tutorial | [21](21-phase-4-hello-world-tutorial.md) · [21a1](21a1-phase-4-backend-part-1.md) · [21a2](21a2-phase-4-backend-part-2.md) · [21b1](21b1-phase-4-frontend-part-1.md) · [21b2](21b2-phase-4-frontend-part-2.md) | REVIEWED + FIXED | BLOCKED (1/5a/5b ship) |
 | 5a | Dynamic-source-from-chat | [17](17-phase-5a-dynamic-source-from-chat.md) | REVIEWED + FIXED | BLOCKED (1B ship) |
 | 5b | Surface-the-LLM's-interpretation | [18](18-phase-5b-surface-llm-interpretation.md) · [18a](18a-phase-5b-backend.md) · [18b](18b-phase-5b-frontend.md) | REVIEWED + FIXED | BLOCKED (5a ship) |
 | 6 | Completion gestures | [19a](19a-phase-6a-backend.md) · [19b](19b-phase-6b-frontend.md) | REVIEWED + FIXED | BLOCKED (3/5b ship) |
@@ -289,7 +289,7 @@ All seven composer-design memory entries from the README plus, for this roadmap 
 **REVIEWED + FIXED** (added 2026-05-15, full review panel applied):
 - Phase 2 — [14a](14a-phase-2a-backend.md), [14b](14b-phase-2b-frontend.md), [14c](14c-phase-2c-frontend-integration.md)
 - Phase 3 — [15a1](15a1-phase-3a-removals-part-1.md), [15a2](15a2-phase-3a-removals-part-2.md), [15b1](15b1-phase-3b-side-rail-part-1.md), [15b2](15b2-phase-3b-side-rail-part-2.md)
-- Phase 4 — [21a](21a-phase-4-backend.md), [21b1](21b1-phase-4-frontend-part-1.md), [21b2](21b2-phase-4-frontend-part-2.md)
+- Phase 4 — [21a1](21a1-phase-4-backend-part-1.md), [21a2](21a2-phase-4-backend-part-2.md), [21b1](21b1-phase-4-frontend-part-1.md), [21b2](21b2-phase-4-frontend-part-2.md)
 - Phase 5a — [17](17-phase-5a-dynamic-source-from-chat.md)
 - Phase 5b — [18a](18a-phase-5b-backend.md), [18b](18b-phase-5b-frontend.md)
 - Phase 6 — [19a](19a-phase-6a-backend.md), [19b](19b-phase-6b-frontend.md)

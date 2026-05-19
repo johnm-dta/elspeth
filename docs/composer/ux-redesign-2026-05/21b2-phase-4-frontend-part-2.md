@@ -12,12 +12,18 @@ staging smoke deploy at `elspeth.foundryside.dev`.
 must have landed first (Tasks 1–7: store, state machine, copy, turns 1/2/2b/3).
 
 **Sibling plans:**
-- [21a-phase-4-backend.md](21a-phase-4-backend.md) — schema column, service
+- [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md) — backend infrastructure: schema column, service
   extension, route extension, tutorial cache, run-path integration.
+- [21a2-phase-4-backend-part-2.md](21a2-phase-4-backend-part-2.md) — backend endpoints + telemetry: tutorial-run endpoint, audit-story endpoint, frontend API client, launch telemetry counters.
 - [21b1-phase-4-frontend-part-1.md](21b1-phase-4-frontend-part-1.md) — store,
   state machine, copy, turns 1/2/2b/3.
 
 **Overview document:** [21-phase-4-hello-world-tutorial.md](21-phase-4-hello-world-tutorial.md).
+
+**PR mapping:** This plan is the second half of **PR-21b** (frontend);
+PR-21b combines Tasks 1–7 in 21b1 with Tasks 8–15 here and merges to
+`RC5.2` **only after** PR-21a (backend) has landed — see overview §"PR
+strategy" for rationale.
 
 **Roadmap reference:** [00-implementation-roadmap.md](00-implementation-roadmap.md).
 
@@ -27,6 +33,9 @@ must have landed first (Tasks 1–7: store, state machine, copy, turns 1/2/2b/3)
 
 **In scope (this part):**
 
+- Frontend API client surface (Task 7.5, relocated from 21a2 Task 7.3):
+  `runTutorialPipeline`, `getRunAuditSummary`, `deleteTutorialOrphans`,
+  and the `updateSessionTitle` → `renameSession` rename.
 - `TutorialTurn4Run.tsx` — kicks off the run via the standard run API,
   shows progress, renders the result table (including per-row failures as
   teaching moments).
@@ -37,18 +46,24 @@ must have landed first (Tasks 1–7: store, state machine, copy, turns 1/2/2b/3)
   finalisation PATCH + session rename.
 - `HelloWorldTutorial.tsx` — container that owns
   `useReducer(tutorialReducer, initialState)` and dispatches the correct
-  leaf component per step.
+  leaf component per step. Mount-time `DELETE /api/tutorial/orphans` call
+  handles refresh-during-tutorial orphan cleanup (Systems R2-S5).
 - `App.tsx` — wire tutorial detection so first-session users see
-  `HelloWorldTutorial` instead of the normal composer surface.
+  `HelloWorldTutorial` instead of the normal composer surface. Drop the
+  prior `.catch((err) => console.error(...))` from the bootstrap effect —
+  errors flow through the prefs `writeError` surface (Architecture
+  N-R2-3 / Panel C2).
 - Vitest full-flow integration test exercising all 6 turns with mocked APIs.
 - Playwright E2E for a brand-new user end-to-end on staging.
+- "Reset tutorial" link in `ComposerPreferencesPanel` (Task 14.5;
+  closes Open Question C3 in-phase per Systems R2-S7 — no sibling-plan
+  deferral).
 - Staging smoke deploy + manual click-through verification.
 
 **Out of scope:**
 
 - Anything in Part 1 (already landed).
 - Anything in 21a (backend).
-- Re-take from settings (Open Question C3 — post-launch).
 - Localisation.
 
 ## Trust tier check (per CLAUDE.md)
@@ -75,6 +90,394 @@ Each task remains TDD-shaped at the Vitest level. The Playwright E2E
 (Task 14) runs against a fully wired backend (Phase 4A merged + DB-deleted +
 service restarted). The staging smoke (Task 15) is a manual operator
 click-through recorded in the merge PR.
+
+---
+
+## Task 7.5: Frontend API client surface — `runTutorialPipeline`, `getRunAuditSummary`, `renameSession`, `deleteTutorialOrphans`
+
+**Files:**
+
+- Modify: `src/elspeth/web/frontend/src/api/client.ts` — four function additions / one rename.
+- Create: `src/elspeth/web/frontend/src/api/client.tutorial.test.ts` — tests for the new functions (matches the per-feature test-file convention live in the repo — see `client.preferences.test.ts`, `client.recovery.test.ts`).
+
+This task lands the frontend API client symbols that downstream Tasks 8,
+9, 10, and 11 consume. **Relocated from 21a2 Task 7.3** (Architecture
+r2 M-R2-2): these are frontend `client.ts` symbols and belong with the
+frontend plan, not the backend plan. Backend endpoints behind them are
+all defined in PR-21a (Tasks 7.1, 7.2, 7.4 + the pre-existing
+`PATCH /api/sessions/{id}`), so PR-21a must merge first per the
+overview's §"PR strategy".
+
+**Pre-existing surface (confirmed by 21a recon, 2026-05-19):**
+
+- The backend already exposes `PATCH /api/sessions/{id}` with body
+  `{title: str}`. The current `client.ts` exports `updateSessionTitle`
+  (line 328 at recon time) which calls this endpoint. 21b2 Task 10 uses
+  the name `renameSession` for the same wire endpoint. **No backend
+  route change is needed.** Per CLAUDE.md no-legacy-code: rename
+  `updateSessionTitle` → `renameSession` (single rename, all call sites
+  updated in the same commit; no shim).
+
+- `runTutorialPipeline` and `getRunAuditSummary` are new functions
+  consuming the newly-defined backend routes (PR-21a Tasks 7.1 and 7.2).
+
+- `deleteTutorialOrphans` is a new function consuming the orphan-cleanup
+  endpoint (PR-21a Task 7.4 — see 21a2 §"Task 7.4: orphan-session
+  cleanup endpoint" for the wire contract). The endpoint is
+  `DELETE /api/tutorial/orphans`; it is user-scoped via the auth header
+  and returns `{deleted_count: int}`. The frontend call fires from the
+  tutorial container on mount (21b2 §"Task 11" Step 3) to clean up any
+  sessions a refresh-during-tutorial event orphaned.
+
+- [ ] **Step 1: Reconnaissance — confirm current client.ts surface and call sites.**
+
+```bash
+grep -n "updateSessionTitle\|runTutorialPipeline\|getRunAuditSummary\|renameSession\|deleteTutorialOrphans" \
+  src/elspeth/web/frontend/src/ -r
+```
+
+Catalogue every call site of `updateSessionTitle` (these are the
+rename-target files Task 7.5 will edit). Confirm that no other consumer
+relies on the name `updateSessionTitle`.
+
+- [ ] **Step 2: Write the failing test.**
+
+Create `src/elspeth/web/frontend/src/api/client.tutorial.test.ts`:
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  runTutorialPipeline,
+  getRunAuditSummary,
+  renameSession,
+  deleteTutorialOrphans,
+} from './client';
+
+describe('client.tutorial — runTutorialPipeline', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('POSTs to /api/tutorial/run with session_id + prompt', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run_id: 'r1',
+          output: {
+            rows: [{ url: 'a', score: 5 }],
+            source_data_hash: 'a7f3e2',
+          },
+          seeded_from_cache: false,
+          cache_key: null,
+        }),
+        { status: 200 },
+      ),
+    );
+    const result = await runTutorialPipeline({
+      session_id: 'sess-1',
+      prompt: 'rate these',
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/tutorial/run',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ session_id: 'sess-1', prompt: 'rate these' }),
+      }),
+    );
+    expect(result.run_id).toBe('r1');
+    expect(result.seeded_from_cache).toBe(false);
+  });
+
+  it('surfaces backend error status as a thrown error', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response('{"detail":"unknown session"}', { status: 404 }),
+    );
+    await expect(
+      runTutorialPipeline({ session_id: 'bad', prompt: 'x' }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('client.tutorial — getRunAuditSummary', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('GETs /api/sessions/{id}/runs/{run_id}/audit-story', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          run_id: 'r1',
+          session_id: 'sess-1',
+          llm_call_count: 5,
+          output_file_hash: 'cafe',
+          started_at: '2026-05-15T12:00:00Z',
+          plugin_versions: { web_scrape: '1.0.0' },
+          seeded_from_cache: false,
+          cache_key: null,
+        }),
+        { status: 200 },
+      ),
+    );
+    const summary = await getRunAuditSummary('sess-1', 'r1');
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/sessions/sess-1/runs/r1/audit-story',
+      expect.objectContaining({ headers: expect.anything() }),
+    );
+    expect(summary.llm_call_count).toBe(5);
+  });
+
+  it('surfaces 500 (corrupt audit row) as a thrown error', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response('{"detail":"missing llm_call_count"}', { status: 500 }),
+    );
+    await expect(getRunAuditSummary('s', 'r')).rejects.toThrow();
+  });
+});
+
+describe('client.tutorial — renameSession', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('PATCHes /api/sessions/{id} with {title}', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({ id: 'sess-1', title: 'hello-world (cool government pages)' }),
+        { status: 200 },
+      ),
+    );
+    const result = await renameSession(
+      'sess-1',
+      'hello-world (cool government pages)',
+    );
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/sessions/sess-1',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ title: 'hello-world (cool government pages)' }),
+      }),
+    );
+    expect(result.title).toBe('hello-world (cool government pages)');
+  });
+});
+
+describe('client.tutorial — deleteTutorialOrphans', () => {
+  beforeEach(() => {
+    global.fetch = vi.fn();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('DELETEs /api/tutorial/orphans and returns deleted_count', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify({ deleted_count: 2 }), { status: 200 }),
+    );
+    const result = await deleteTutorialOrphans();
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/tutorial/orphans',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+    expect(result.deleted_count).toBe(2);
+  });
+
+  it('surfaces backend error status as a thrown error', async () => {
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response('{"detail":"server fault"}', { status: 500 }),
+    );
+    await expect(deleteTutorialOrphans()).rejects.toThrow();
+  });
+});
+```
+
+- [ ] **Step 3: Run test to verify it fails.**
+
+```bash
+cd src/elspeth/web/frontend && npm test -- client.tutorial.test.ts
+```
+
+Expected: FAIL — `runTutorialPipeline`, `getRunAuditSummary`,
+`renameSession`, `deleteTutorialOrphans` not exported.
+
+- [ ] **Step 4: Implement.**
+
+In `src/elspeth/web/frontend/src/api/client.ts`:
+
+1. **Add new types** alongside the existing type declarations:
+
+   ```typescript
+   export interface TutorialRunRequest {
+     session_id: string;
+     prompt: string;
+   }
+
+   export interface TutorialRunOutput {
+     rows: Array<Record<string, unknown>>;
+     source_data_hash: string;
+   }
+
+   export interface TutorialRunResponse {
+     run_id: string;
+     output: TutorialRunOutput;
+     seeded_from_cache: boolean;
+     cache_key: string | null;
+   }
+
+   export interface RunAuditStoryResponse {
+     run_id: string;
+     session_id: string;
+     llm_call_count: number;
+     output_file_hash: string;
+     started_at: string;
+     plugin_versions: Record<string, string>;
+     seeded_from_cache: boolean;
+     cache_key: string | null;
+   }
+
+   export interface TutorialOrphanCleanupResponse {
+     deleted_count: number;
+   }
+   ```
+
+2. **Add `runTutorialPipeline`**:
+
+   ```typescript
+   /** Run the tutorial pipeline. Backend may serve a cached replay; the
+    * returned run_id is ALWAYS owned by the current session — see 21a
+    * §"New endpoints" for the cache-replay contract.
+    */
+   export async function runTutorialPipeline(
+     body: TutorialRunRequest,
+   ): Promise<TutorialRunResponse> {
+     const response = await fetch('/api/tutorial/run', {
+       method: 'POST',
+       headers: authHeaders('application/json'),
+       body: JSON.stringify(body),
+     });
+     return parseResponse<TutorialRunResponse>(response);
+   }
+   ```
+
+3. **Add `getRunAuditSummary`**:
+
+   ```typescript
+   /** Read the audit-story for a (session_id, run_id) pair.
+    *
+    * All fields are real audit data — no synthesis. A 500 response means
+    * the audit row is Tier-1 corrupt; surface the error rather than
+    * fabricating defaults (per CLAUDE.md no-defensive-programming).
+    */
+   export async function getRunAuditSummary(
+     sessionId: string,
+     runId: string,
+   ): Promise<RunAuditStoryResponse> {
+     const response = await fetch(
+       `/api/sessions/${sessionId}/runs/${runId}/audit-story`,
+       { headers: authHeaders() },
+     );
+     return parseResponse<RunAuditStoryResponse>(response);
+   }
+   ```
+
+4. **Rename `updateSessionTitle` → `renameSession`.** Per CLAUDE.md "No
+   Legacy Code Policy", do not leave an alias. The existing function body
+   (PATCH `/api/sessions/${sessionId}` with `{title}`) is structurally
+   correct — just rename. Update every call site discovered in Step 1's
+   `grep`. Atomic single commit.
+
+   ```typescript
+   /** Update the user-visible title for a session.
+    *
+    * Used by the tutorial finalisation flow (21b2 Task 10) and by any
+    * other UI that lets a user rename a session. Wire endpoint:
+    * PATCH /api/sessions/{id} with body {title}.
+    */
+   export async function renameSession(
+     sessionId: string,
+     title: string,
+   ): Promise<Session> {
+     const response = await fetch(`/api/sessions/${sessionId}`, {
+       method: 'PATCH',
+       headers: authHeaders('application/json'),
+       body: JSON.stringify({ title }),
+     });
+     return parseResponse<Session>(response);
+   }
+   ```
+
+5. **Add `deleteTutorialOrphans`**:
+
+   ```typescript
+   /** Clean up orphaned tutorial sessions for the authenticated user.
+    *
+    * Called from the tutorial container on mount (21b2 §"Task 11") to
+    * handle the Systems R2-S5 refresh-during-tutorial case: refresh
+    * restarts the tutorial at turn 1, but a session created during the
+    * pre-refresh turn 2 would otherwise orphan in the user's session
+    * list. Backend owns the orphan-identification predicate; see
+    * 21a2 §"Task 7.4" for the wire contract.
+    *
+    * Tier-1 write (our data). A 5xx response means cleanup failed;
+    * surface the error rather than swallowing — the caller in the
+    * container fires-and-(implicitly)-forgets but the rejection still
+    * propagates to the React error boundary if it bubbles.
+    */
+   export async function deleteTutorialOrphans(): Promise<TutorialOrphanCleanupResponse> {
+     const response = await fetch('/api/tutorial/orphans', {
+       method: 'DELETE',
+       headers: authHeaders(),
+     });
+     return parseResponse<TutorialOrphanCleanupResponse>(response);
+   }
+   ```
+
+- [ ] **Step 5: Update all call sites of the renamed function.**
+
+```bash
+grep -rn "updateSessionTitle" src/elspeth/web/frontend/src/ --include="*.ts" --include="*.tsx"
+```
+
+Replace every hit with `renameSession`. Run TypeScript compile to confirm
+no stragglers:
+
+```bash
+cd src/elspeth/web/frontend && npx tsc --noEmit
+```
+
+- [ ] **Step 6: Run test to verify it passes.**
+
+```bash
+cd src/elspeth/web/frontend && npm test -- client.tutorial.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Run the full frontend test suite to catch regressions.**
+
+```bash
+cd src/elspeth/web/frontend && npm test
+```
+
+Expected: PASS — the rename's call-site updates do not break existing tests.
+
+- [ ] **Step 8: Commit.**
+
+```bash
+git add src/elspeth/web/frontend/src/api/client.ts \
+        src/elspeth/web/frontend/src/api/client.tutorial.test.ts \
+        <renamed-call-sites>
+git commit -m "feat(frontend): runTutorialPipeline + getRunAuditSummary + deleteTutorialOrphans + rename updateSessionTitle (Phase 4B.7.5)"
+```
 
 ---
 
@@ -117,13 +520,21 @@ describe('TutorialTurn4Run', () => {
   });
 
   it('renders the result table after run completes', async () => {
+    // Mock shape mirrors the live TutorialRunResponse Pydantic model
+    // (21a Task 7.1): rows + source_data_hash + llm_call_count are nested
+    // under `output`; run_id, seeded_from_cache, cache_key are top-level.
     vi.spyOn(api, 'runTutorialPipeline').mockResolvedValue({
       run_id: 'r1',
-      source_data_hash: 'a7f3e2',
-      rows: [
-        { url: 'australia.gov.au', score: 6, rationale: 'dated' },
-        { url: 'dta.gov.au', score: 9, rationale: 'bold' },
-      ],
+      seeded_from_cache: false,
+      cache_key: null,
+      output: {
+        rows: [
+          { url: 'australia.gov.au', score: 6, rationale: 'dated' },
+          { url: 'dta.gov.au', score: 9, rationale: 'bold' },
+        ],
+        source_data_hash: 'a7f3e2',
+        llm_call_count: 5,
+      },
     });
     render(<TutorialTurn4Run sessionId="sess-1" onCompleted={() => {}} />);
     await waitFor(() =>
@@ -141,8 +552,13 @@ describe('TutorialTurn4Run', () => {
   it('fires onCompleted with run details on continue', async () => {
     vi.spyOn(api, 'runTutorialPipeline').mockResolvedValue({
       run_id: 'r1',
-      source_data_hash: 'a7f3e2',
-      rows: [{ url: 'a', score: 5 }],
+      seeded_from_cache: false,
+      cache_key: null,
+      output: {
+        rows: [{ url: 'a', score: 5 }],
+        source_data_hash: 'a7f3e2',
+        llm_call_count: 1,
+      },
     });
     const onCompleted = vi.fn();
     render(<TutorialTurn4Run sessionId="sess-1" onCompleted={onCompleted} />);
@@ -158,11 +574,16 @@ describe('TutorialTurn4Run', () => {
   it('shows per-row failures inline as a teaching moment', async () => {
     vi.spyOn(api, 'runTutorialPipeline').mockResolvedValue({
       run_id: 'r1',
-      source_data_hash: 'a7f3e2',
-      rows: [
-        { url: 'a', score: 5 },
-        { url: 'broken.gov.au', error: 'HTTP 503' },
-      ],
+      seeded_from_cache: false,
+      cache_key: null,
+      output: {
+        rows: [
+          { url: 'a', score: 5 },
+          { url: 'broken.gov.au', error: 'HTTP 503' },
+        ],
+        source_data_hash: 'a7f3e2',
+        llm_call_count: 2,
+      },
     });
     render(<TutorialTurn4Run sessionId="sess-1" onCompleted={() => {}} />);
     await waitFor(() =>
@@ -203,12 +624,15 @@ export function TutorialTurn4Run({ sessionId, onCompleted }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Access shape mirrors the TutorialRunResponse Pydantic model
+    // (21a Task 7.1): rows + source_data_hash live under `output`;
+    // run_id is top-level.
     runTutorialPipeline({ session_id: sessionId })
       .then((response) =>
         setResult({
           runId: response.run_id,
-          sourceDataHash: response.source_data_hash,
-          rows: response.rows,
+          sourceDataHash: response.output.source_data_hash,
+          rows: response.output.rows,
         }),
       )
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -366,7 +790,7 @@ describe('TutorialTurn5AuditStory', () => {
     vi.spyOn(api, 'getRunAuditSummary').mockResolvedValue({
       llm_call_count: 5,
       output_file_hash: 'cafebabe',
-      run_started_at: '2026-05-15T12:00:00Z',
+      started_at: '2026-05-15T12:00:00Z',
       plugin_versions: { web_scrape: '1.0.0', llm_rate: '1.0.0' },
       seeded_from_cache: false,
       cache_key: null,
@@ -424,7 +848,7 @@ describe('TutorialTurn5AuditStory', () => {
     vi.spyOn(api, 'getRunAuditSummary').mockResolvedValue({
       llm_call_count: 0,
       output_file_hash: 'cafebabe',
-      run_started_at: '2026-05-15T12:00:00Z',
+      started_at: '2026-05-15T12:00:00Z',
       plugin_versions: { web_scrape: '1.0.0', llm_rate: '1.0.0' },
       seeded_from_cache: true,
       cache_key: 'a'.repeat(64),
@@ -504,7 +928,7 @@ interface Props {
 interface AuditSummary {
   llm_call_count: number;
   output_file_hash: string;
-  run_started_at: string;
+  started_at: string;  // reused from Landscape runs_table; see 21a Task 7.0
   plugin_versions: Record<string, string>;
   seeded_from_cache: boolean;
   cache_key: string | null;
@@ -689,10 +1113,12 @@ describe('TutorialTurn6ModeChoice', () => {
   });
 
   it('marks tutorial complete with chosen mode on submit', async () => {
-    const markSpy = vi.spyOn(
-      usePreferencesStore.getState(),
-      'markTutorialCompleted',
-    );
+    // Use setState to replace the live action — matches the project's
+    // existing Zustand test convention (see stores/preferencesStore.test.ts,
+    // stores/authStore.test.ts). vi.spyOn(getState(), ...) spies a snapshot,
+    // not the live store, so re-renders or action re-binds escape the spy.
+    const markSpy = vi.fn().mockResolvedValue(undefined);
+    usePreferencesStore.setState({ markTutorialCompleted: markSpy });
     render(<TutorialTurn6ModeChoice sessionId="sess-1" onDone={() => {}} />);
     fireEvent.click(
       screen.getByRole('button', { name: TURN_6_GUIDED_BUTTON }),
@@ -701,10 +1127,8 @@ describe('TutorialTurn6ModeChoice', () => {
   });
 
   it('marks tutorial complete with freeform when freeform clicked', async () => {
-    const markSpy = vi.spyOn(
-      usePreferencesStore.getState(),
-      'markTutorialCompleted',
-    );
+    const markSpy = vi.fn().mockResolvedValue(undefined);
+    usePreferencesStore.setState({ markTutorialCompleted: markSpy });
     render(<TutorialTurn6ModeChoice sessionId="sess-1" onDone={() => {}} />);
     fireEvent.click(
       screen.getByLabelText(/Freeform/i),
@@ -719,8 +1143,9 @@ describe('TutorialTurn6ModeChoice', () => {
     const renameSpy = vi
       .spyOn(sessionApi, 'renameSession')
       .mockResolvedValue({ id: 'sess-1', title: TUTORIAL_SESSION_NAME });
-    vi.spyOn(usePreferencesStore.getState(), 'markTutorialCompleted')
-      .mockResolvedValue();
+    usePreferencesStore.setState({
+      markTutorialCompleted: vi.fn().mockResolvedValue(undefined),
+    });
     render(<TutorialTurn6ModeChoice sessionId="sess-1" onDone={() => {}} />);
     fireEvent.click(
       screen.getByRole('button', { name: TURN_6_GUIDED_BUTTON }),
@@ -731,8 +1156,9 @@ describe('TutorialTurn6ModeChoice', () => {
   });
 
   it('fires onDone after both PATCH and rename complete', async () => {
-    vi.spyOn(usePreferencesStore.getState(), 'markTutorialCompleted')
-      .mockResolvedValue();
+    usePreferencesStore.setState({
+      markTutorialCompleted: vi.fn().mockResolvedValue(undefined),
+    });
     vi.spyOn(sessionApi, 'renameSession').mockResolvedValue({
       id: 'sess-1',
       title: TUTORIAL_SESSION_NAME,
@@ -747,10 +1173,11 @@ describe('TutorialTurn6ModeChoice', () => {
 
   it('disables buttons while the finalisation calls are in flight', async () => {
     let resolveMark: () => void = () => {};
-    vi.spyOn(usePreferencesStore.getState(), 'markTutorialCompleted')
-      .mockImplementation(
+    usePreferencesStore.setState({
+      markTutorialCompleted: vi.fn().mockImplementation(
         () => new Promise<void>((res) => { resolveMark = res; }),
-      );
+      ),
+    });
     render(<TutorialTurn6ModeChoice sessionId="sess-1" onDone={() => {}} />);
     fireEvent.click(
       screen.getByRole('button', { name: TURN_6_GUIDED_BUTTON }),
@@ -918,14 +1345,19 @@ describe('HelloWorldTutorial', () => {
   });
 
   it('skip from turn 1 fast-forwards to turn 6 without building or running', async () => {
-    const composeSpy = vi.spyOn(api, 'composePipelineFromPrompt');
+    // R2-10, 2026-05-19: the live compose path is createSession + sendMessage,
+    // not a fictional composePipelineFromPrompt. Spy on both so the
+    // skip-path assertion ("compose-API never called") covers the real surface.
+    const createSpy = vi.spyOn(api, 'createSession');
+    const sendSpy = vi.spyOn(api, 'sendMessage');
     const runSpy = vi.spyOn(api, 'runTutorialPipeline');
     render(<HelloWorldTutorial onDone={() => {}} />);
     fireEvent.click(screen.getByText(/skip this/i));
     await waitFor(() =>
       expect(screen.getByLabelText(/Guided/i)).toBeInTheDocument(),
     );
-    expect(composeSpy).not.toHaveBeenCalled();
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
     expect(runSpy).not.toHaveBeenCalled();
   });
 
@@ -933,6 +1365,14 @@ describe('HelloWorldTutorial', () => {
     // Full integration: walk through all 6 turns with mocked APIs.
     // (Detailed mock setup omitted here; see Task 12's integration test for
     // the full end-to-end variant.)
+  });
+
+  it('calls DELETE /api/tutorial/orphans on mount (Systems R2-S5)', async () => {
+    const orphanSpy = vi
+      .spyOn(api, 'deleteTutorialOrphans')
+      .mockResolvedValue({ deleted_count: 0 });
+    render(<HelloWorldTutorial onDone={() => {}} />);
+    await waitFor(() => expect(orphanSpy).toHaveBeenCalledTimes(1));
   });
 });
 ```
@@ -944,7 +1384,7 @@ Expected: FAIL.
 - [ ] **Step 3: Implement.**
 
 ```typescript
-import { useReducer } from 'react';
+import { useEffect, useReducer } from 'react';
 import { initialState, tutorialReducer } from './tutorialMachine';
 import { TutorialTurn1Welcome } from './TutorialTurn1Welcome';
 import { TutorialTurn2Describe } from './TutorialTurn2Describe';
@@ -953,6 +1393,7 @@ import { TutorialTurn3Graph } from './TutorialTurn3Graph';
 import { TutorialTurn4Run } from './TutorialTurn4Run';
 import { TutorialTurn5AuditStory } from './TutorialTurn5AuditStory';
 import { TutorialTurn6ModeChoice } from './TutorialTurn6ModeChoice';
+import { deleteTutorialOrphans } from '../../api/client';
 
 interface Props {
   onDone: (mode: 'guided' | 'freeform') => void;
@@ -960,6 +1401,28 @@ interface Props {
 
 export function HelloWorldTutorial({ onDone }: Props) {
   const [state, dispatch] = useReducer(tutorialReducer, initialState);
+
+  // Systems R2-S5: refresh during the tutorial restarts at turn 1 (per
+  // plan-fix P10), but a backend session may have been created in turn 2
+  // before the refresh — that session orphans (the user's session list
+  // grows with abandoned tutorial sessions). On container mount (= turn 1
+  // entry, either genuine first-load or post-refresh re-entry), invoke
+  // the backend cleanup endpoint to delete orphaned tutorial sessions
+  // for this user. Backend owns the cleanup logic (a single source of
+  // truth — see 21a2 §"Task 7.4: orphan-session cleanup endpoint" for
+  // the wire contract and the orphan-identification predicate). The
+  // frontend just fires the DELETE on mount.
+  //
+  // Tier-1 write (our data, our cleanup). Failure is non-fatal — log the
+  // error via the standard error-boundary path and continue with the
+  // tutorial (the orphans are still ignorable on the user's side; a
+  // future mount will retry). Do NOT swallow silently to console; the
+  // store/error-boundary path is the channel.
+  useEffect(() => {
+    void deleteTutorialOrphans();
+    // No dependency on session id — the endpoint is user-scoped via the
+    // auth header. Fires exactly once per container mount.
+  }, []);
 
   switch (state.step) {
     case 'welcome':
@@ -1138,19 +1601,25 @@ Expected: FAIL.
 
 - [ ] **Step 4: Modify App.tsx.**
 
-Pattern (adapt to App.tsx's actual structure). Include sessionStorage-resume
-(per 21b1 §"Navigation resilience"). **No separate DB-delete banner** — per
-21b1 §"Navigation resilience", all tutorial-mode users (genuine first-timers
-and DB-delete-resets) see the same Turn 1 welcome copy. CLAUDE.md No Legacy
-Code Policy: we have no users yet, the operator deletes the DB freely, and a
-bifurcated banner would detect a state we can't reliably distinguish. One
-copy, treated identically.
+Pattern (adapt to App.tsx's actual structure). **No sessionStorage
+scaffolding.** Refresh during the tutorial restarts at turn 1 — no
+sessionStorage state. The tutorial is short enough (~5 minutes) that
+restart cost is acceptable; sessionStorage adds cross-user contamination
+risk on shared workstations (a flat `elspeth_tutorial_progress` key is
+not user-scoped, and per-user keying adds Vitest+Playwright surface area
+that doesn't materially improve UX). The canonical seed produces a fresh
+pipeline each time, and the cache makes that fast.
+
+**No separate DB-delete banner** — per 21b1 §"Navigation resilience", all
+tutorial-mode users (genuine first-timers and DB-delete-resets) see the
+same Turn 1 welcome copy. CLAUDE.md No Legacy Code Policy: we have no
+users yet, the operator deletes the DB freely, and a bifurcated banner
+would detect a state we can't reliably distinguish. One copy, treated
+identically.
 
 ```typescript
 import { HelloWorldTutorial } from './components/tutorial';
 import { usePreferencesStore } from './stores/preferencesStore';
-
-const PROGRESS_KEY = 'elspeth_tutorial_progress';
 
 export function App() {
   // Derive tutorialCompleted at the call site via inline selector. The
@@ -1163,39 +1632,189 @@ export function App() {
   const bootstrap = usePreferencesStore((s) => s.bootstrap);
 
   // Phase 1B Panel C2: bootstrap may fail (no-row 5xx, network); errors
-  // are surfaced via the existing prefs writeError surface rather than
-  // swallowed. The existing App.tsx bootstrap effect already has this
-  // shape — preserve it.
+  // are surfaced via the existing prefs `writeError` surface rather than
+  // swallowed to console. The store's `bootstrap` action must capture
+  // any thrown error onto `writeError` (matching the `setDefaultMode` /
+  // `dismissDefaultChangedBanner` pattern in `preferencesStore.ts` lines
+  // 124–142). Per CLAUDE.md no-defensive-programming: do NOT silently
+  // swallow rejections with `console.error` — the role="alert" region
+  // in `ComposerPreferencesForm` (lines 70–82 of
+  // `ComposerPreferencesPanel.tsx`) is the user-visible channel and the
+  // bootstrap path MUST feed into it. The bootstrap effect therefore
+  // does not need its own `.catch` — the store has captured the error,
+  // `loaded` stays false, and the "Loading…" branch below renders
+  // followed by the existing `writeError` alert region once the user
+  // opens the preferences panel. If bootstrap-failure UX needs a
+  // dedicated banner above the composer surface, that's a separate task
+  // (file at Phase 4 follow-up time, not here).
   useEffect(() => {
-    bootstrap().catch((err) => {
-      console.error("[preferences] bootstrap failed:", err);
-    });
+    // Bootstrap rejection is captured by the store onto `writeError`.
+    // Do not add a `.catch` here — that would re-surface the rejection
+    // to the console and break the writeError contract by suppressing
+    // the rejection before the store sees it. The store action MUST
+    // be implemented to set `writeError` and resolve (not reject) so
+    // this effect's promise is harmless. If the store's `bootstrap`
+    // still throws (it should not), the React error boundary in
+    // `App.tsx` (or wherever the global boundary lives) catches it.
+    void bootstrap();
   }, [bootstrap]);
 
   if (!loaded) return <div>Loading…</div>;
 
   if (!tutorialCompleted) {
-    const saved = sessionStorage.getItem(PROGRESS_KEY);
-    const initialStep = saved ? JSON.parse(saved) : undefined;
-    return (
-      <HelloWorldTutorial
-        initialStep={initialStep}
-        onStepChange={(s) => sessionStorage.setItem(PROGRESS_KEY, JSON.stringify(s))}
-        onDone={() => sessionStorage.removeItem(PROGRESS_KEY)}
-      />
-    );
+    // Refresh restarts at turn 1 — no sessionStorage / persisted progress.
+    // `onDone` is required by HelloWorldTutorial's signature (21b1 Task 1);
+    // re-bootstrap preferences after the tutorial flushes so the post-
+    // tutorial state (tutorial_completed_at populated) is reflected in the
+    // store without a page reload. The HelloWorldTutorial flow PATCHes
+    // tutorial_completed_at itself in turn 6 / on skip — `onDone` here is
+    // the local-cache refresh, not the persistence side.
+    return <HelloWorldTutorial onDone={() => bootstrap()} />;
   }
   return <NormalComposerSurface />;
 }
 ```
 
-Wire `initialStep` / `onStepChange` props through `HelloWorldTutorial` to `useReducer`; call `onStepChange` after every `dispatch` in the container.
+No `initialStep` / `onStepChange` props — `HelloWorldTutorial` always
+mounts at the reducer's initial state on every render of this branch.
+`onDone` is required (the component's signature in 21b1 Task 1 declares it
+as a non-optional prop), so the mount site supplies a `bootstrap()`
+re-fetch callback.
+
+**Orphan-cleanup on Turn-1 entry (Systems finding R2-S5, 2026-05-19).**
+Turn 2 of the tutorial creates a backend session via `createSession()`
+(21b1 Task 5 — R2-10 live compose shape). A refresh after Turn 2
+restarts the tutorial at Turn 1 (per P10), but the session the user
+created in their previous Turn 2 attempt is now orphaned — it lives
+forever under the canonical `hello-world (...)` name with no further
+edits, polluting the session list. The App must reconcile this on
+Turn-1 entry.
+
+The reconciliation strategy is **soft-delete-via-rename** (operator
+decision 2026-05-19): the App lists the user's sessions, finds any
+that match the canonical tutorial name prefix AND whose
+`tutorial_completed_at` is still NULL, and renames them to
+`abandoned-hello-world-<timestamp>` via the existing `renameSession`
+function (21b2 Task 7.5). Audit history is preserved (the renamed
+session still exists and its compose/run records remain queryable for
+post-hoc analysis); the session-list UI filters out the `abandoned-*`
+prefix so the user sees a clean list.
+
+Wire the cleanup as a one-shot effect inside the tutorial-mode branch:
+
+```typescript
+import { listSessions, renameSession } from '../../api/client';
+
+function useOrphanedTutorialSessionCleanup(
+  tutorialCompleted: boolean,
+): void {
+  useEffect(() => {
+    if (tutorialCompleted) return;  // user already finished — no cleanup needed
+    let cancelled = false;
+    (async () => {
+      try {
+        const sessions = await listSessions();
+        if (cancelled) return;
+        const orphans = sessions.filter(
+          (s) => s.title.startsWith('hello-world (') && !s.title.startsWith('abandoned-'),
+        );
+        for (const orphan of orphans) {
+          if (cancelled) return;
+          await renameSession(
+            orphan.id,
+            `abandoned-${orphan.title}-${Date.now()}`,
+          );
+        }
+      } catch {
+        // Cleanup is best-effort. A failure here leaves the orphan in
+        // place; the next Turn-1 entry retries. We deliberately do NOT
+        // surface this to `writeError` because the user did not
+        // initiate the cleanup and shouldn't see a banner.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tutorialCompleted]);
+}
+```
+
+The hook fires once per tutorial-mode entry. Add a Vitest test under
+`App.tutorial.test.tsx` asserting that when `listSessions` returns a
+canonical-prefix session AND `tutorialCompleted=false`, `renameSession`
+is called exactly once with an `abandoned-hello-world-…` payload.
+Add a second test asserting that when `tutorialCompleted=true`,
+`renameSession` is NOT called.
 
 - [ ] **Step 5: Run test to verify it passes.**
 
 Expected: PASS.
 
-- [ ] **Step 6: Run the full frontend test suite to catch regressions.**
+- [ ] **Step 6: Audit and tighten `preferencesStore.bootstrap` to capture errors onto `writeError` (Architecture r2 / N-R2-3).**
+
+The Step 4 bootstrap effect drops its prior `.catch((err) => console.error(...))`
+to comply with Panel C2's "errors surfaced via the existing prefs
+writeError surface rather than swallowed." Verify the live
+`preferencesStore.bootstrap` action (`src/elspeth/web/frontend/src/stores/preferencesStore.ts`
+lines 79–86 at recon time) captures any thrown error onto `writeError`
+and resolves cleanly — matching `setDefaultMode`'s try/catch pattern
+on lines 123–141 of that file. The current `bootstrap` action does
+NOT catch; it lets the rejection escape. Add a try/catch around the
+`fetchUserComposerPreferences()` call that sets `writeError` to the
+chained error message and leaves `loaded` false:
+
+```typescript
+bootstrap: async () => {
+  try {
+    const payload = await fetchUserComposerPreferences();
+    set({
+      defaultMode: payload.default_mode,
+      bannerDismissedAt: payload.banner_dismissed_at,
+      tutorialCompletedAt: payload.tutorial_completed_at,
+      loaded: true,
+      writeError: null,
+    });
+  } catch (err) {
+    set({
+      writeError:
+        err instanceof Error
+          ? `Couldn't load preferences: ${err.message}`
+          : "Couldn't load preferences.",
+    });
+    throw err; // Re-throw so the React error boundary catches catastrophic
+               // failures (preserve current behaviour for tests asserting
+               // rejection). The role="alert" region still surfaces the
+               // error via the captured writeError.
+  }
+},
+```
+
+Add a Vitest case to `preferencesStore.test.ts`:
+
+```typescript
+it('bootstrap sets writeError when fetch throws', async () => {
+  vi.spyOn(api, 'fetchUserComposerPreferences').mockRejectedValue(
+    new Error('network down'),
+  );
+  await expect(
+    usePreferencesStore.getState().bootstrap(),
+  ).rejects.toThrow('network down');
+  expect(usePreferencesStore.getState().writeError).toContain(
+    'network down',
+  );
+});
+```
+
+Run:
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run \
+  src/stores/preferencesStore.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Run the full frontend test suite to catch regressions.**
 
 ```bash
 cd src/elspeth/web/frontend && npx vitest run
@@ -1205,11 +1824,13 @@ Expected: PASS. If existing App.tsx tests broke, the bootstrap path
 changed under them; fix the tests or the implementation depending on
 intent.
 
-- [ ] **Step 7: Commit.**
+- [ ] **Step 8: Commit.**
 
 ```bash
 git add src/elspeth/web/frontend/src/App.tsx \
-  src/elspeth/web/frontend/src/App.test.tsx
+  src/elspeth/web/frontend/src/App.test.tsx \
+  src/elspeth/web/frontend/src/stores/preferencesStore.ts \
+  src/elspeth/web/frontend/src/stores/preferencesStore.test.ts
 git commit -m "feat(frontend): route first-session users to tutorial container (Phase 4B.12)"
 ```
 
@@ -1248,9 +1869,11 @@ const PENDING_EVENT: InterpretationEvent = {
 
 describe('HelloWorldTutorial — full 6-turn integration', () => {
   it('walks from welcome to done with cached run', async () => {
-    vi.spyOn(api, 'composePipelineFromPrompt').mockResolvedValue({
-      session_id: 'sess-1',
-      pipeline_snapshot: {
+    // R2-10, 2026-05-19: live compose path is createSession + sendMessage.
+    vi.spyOn(api, 'createSession').mockResolvedValue({ id: 'sess-1' });
+    vi.spyOn(api, 'sendMessage').mockResolvedValue({
+      message: { role: 'assistant', content: 'pipeline built' },
+      state: {
         source: { type: 'inline_blob', urls: ['a.gov.au'] },
         transforms: [{ type: 'web_scrape' }, { type: 'llm_rate' }],
         sinks: [{ type: 'jsonl' }],
@@ -1273,7 +1896,7 @@ describe('HelloWorldTutorial — full 6-turn integration', () => {
     vi.spyOn(api, 'getRunAuditSummary').mockResolvedValue({
       llm_call_count: 1,
       output_file_hash: 'cafebabe',
-      run_started_at: '2026-05-15T12:00:00Z',
+      started_at: '2026-05-15T12:00:00Z',
       plugin_versions: {},
       seeded_from_cache: false,
       cache_key: null,
@@ -1348,7 +1971,10 @@ git commit -m "test(frontend): add full 6-turn integration test (Phase 4B.13)"
 ## Task 14: Playwright E2E — brand-new user end-to-end
 
 **Files:**
-- Create: `tests/e2e/tutorial.e2e.spec.ts` (or per project Playwright location).
+- Create: `src/elspeth/web/frontend/tests/e2e/tutorial.spec.ts`. (Path is fixed
+  by the project's `playwright.config.ts`, which sets `testDir: './tests/e2e'`
+  relative to the frontend package. Spec files in this project use `.spec.ts`,
+  not `.e2e.spec.ts`.)
 
 This is the highest-value test in the plan. It walks a brand-new user
 through the tutorial against a real backend. The DB-delete is performed
@@ -1373,101 +1999,211 @@ project has no Playwright setup. Should I add one?"
 
 - [ ] **Step 2: Write the test.**
 
+**Fresh-user provisioning (plan-fix P22, 2026-05-19).** Per scenario,
+provision a brand-new user — `DELETE` any existing `user_preferences`
+row for the user, then recreate via the standard provisioning helper.
+This makes Scenario A's "tutorial_completed_at IS NULL" precondition
+explicit (rather than implicit-on-DB-delete) and gives Scenario C an
+independent way to set "tutorial_completed_at IS NOT NULL" without
+walking the tutorial first.
+
+Recon prerequisite: confirm whether the codebase already exposes a
+test-provisioning endpoint. As of 2026-05-19 a `grep -rn "provision"
+src/elspeth/web --include="*.py"` returns no such surface — the
+endpoint below must be added as part of this task, gated by an env
+flag (`WEBUI_TEST_PROVISION_ENABLED=true`) so it cannot mount in
+production. If an equivalent surface lands before this task executes,
+reuse it rather than adding a parallel endpoint.
+
+Create the fixture file
+`src/elspeth/web/frontend/tests/e2e/fixtures.ts`:
+
 ```typescript
-import { test, expect } from '@playwright/test';
+import { test as base } from '@playwright/test';
 
-test.describe('Hello-world tutorial — brand-new user', () => {
-  test.beforeAll(async () => {
-    // Delete the sessions DB and restart the service.
-    // The operator's standard staging-deploy invocation for this is:
-    //   systemctl stop elspeth-web.service
-    //   rm /var/lib/elspeth/sessions.db
-    //   systemctl start elspeth-web.service
-    // The Playwright test runner orchestrates this via a pytest fixture or
-    // a global setup hook — pattern confirmed during Task 14 Step 1 recon.
-  });
+type FreshUserFixture = {
+  freshUser: { user_id: string };
+};
 
-  test('first-session user sees the tutorial and completes it', async ({ page }) => {
-    // 1. Log in as a brand-new user.
-    await page.goto('https://elspeth.foundryside.dev');
-    await page.fill('[data-testid="login-username"]', 'tutorial-tester');
-    await page.fill('[data-testid="login-password"]', 'redacted');
-    await page.click('[data-testid="login-submit"]');
+export const test = base.extend<FreshUserFixture>({
+  freshUser: async ({ request }, use) => {
+    // Provision a brand-new user. The test-only endpoint
+    // `POST /api/test/provision-fresh-user` is mounted ONLY when
+    // WEBUI_TEST_PROVISION_ENABLED=true on the deployment. Behaviour:
+    //   - DELETE FROM user_preferences WHERE user_id = :user_id
+    //   - Re-insert via the standard provisioning helper with
+    //     tutorial_completed_at = NULL.
+    // Adding this endpoint is part of this task — see the recon note
+    // above. If reuse of an existing surface is possible, prefer it.
+    const user_id = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const resp = await request.post('/api/test/provision-fresh-user', {
+      data: { user_id },
+    });
+    if (!resp.ok()) {
+      throw new Error(
+        `freshUser fixture: provisioning failed (${resp.status()}). ` +
+          `Confirm WEBUI_TEST_PROVISION_ENABLED=true on staging.`,
+      );
+    }
+    await use({ user_id });
+    // Teardown is optional; each test gets its own user_id, so no
+    // cross-test leakage. If a regression makes teardown necessary,
+    // add a DELETE to the same endpoint.
+  },
+});
 
-    // 2. Tutorial turn 1 renders.
+export { expect } from '@playwright/test';
+```
+
+```typescript
+// tests/e2e/tutorial.spec.ts
+import { test, expect } from './fixtures';
+
+// Helper: log in as the provisioned fresh user.
+async function loginAs(page, userId: string) {
+  await page.goto('https://elspeth.foundryside.dev');
+  await page.fill('[data-testid="login-username"]', userId);
+  await page.fill('[data-testid="login-password"]', 'redacted');
+  await page.click('[data-testid="login-submit"]');
+}
+
+test.describe('Hello-world tutorial — brand-new user (P22 scenarios)', () => {
+  // Scenario A: complete flow — fresh user walks all 6 turns and finishes.
+  test('Scenario A — first-session user sees the tutorial and completes it', async ({ page, freshUser, request }) => {
+    await loginAs(page, freshUser.user_id);
+
+    // Tutorial turn 1 renders (tutorial_completed_at IS NULL).
     await expect(page.getByText('Welcome to ELSPETH.')).toBeVisible();
-
-    // 3. Click through to turn 2.
     await page.click('button:has-text("Let\'s go")');
 
-    // 4. Confirm the prompt is pre-filled.
+    // Turn 2 — confirm the prompt is pre-filled.
     const textarea = page.locator('textarea').first();
     await expect(textarea).toHaveValue(
       /create a list of 5 government web pages and use an LLM to rate how cool they are/,
     );
-
-    // 5. Click "Build it" — this consults the cache or runs live.
     await page.click('button:has-text("Build it")');
 
-    // 6. Turn 2b: the LLM's interpretation surface renders.
+    // Turn 2b — the LLM's interpretation surface renders.
     await expect(page.getByText(/Got it/)).toBeVisible({ timeout: 30000 });
-
-    // 7. Accept the LLM's interpretation.
     await page.click('button:has-text("Use my interpretation")');
 
-    // 8. Turn 3: the graph renders.
+    // Turn 3 — graph renders.
     await expect(page.getByText(/Three layers, four steps/)).toBeVisible();
     await page.click('button:has-text("Looks good, run it")');
 
-    // 9. Turn 4: run completes (cached, so fast).
+    // Turn 4 — run completes (cached → fast).
     await expect(page.locator('table')).toBeVisible({ timeout: 30000 });
-
-    // 10. Continue to turn 5.
     await page.click('button:has-text("Continue")');
 
-    // 11. Turn 5: audit story renders with real hashes.
+    // Turn 5 — audit story renders with real hashes.
     await expect(page.locator('code').first()).toBeVisible();
     await page.click('button:has-text("Continue")');
 
-    // 12. Turn 6: mode choice. Pick guided.
+    // Turn 6 — mode choice.
     await expect(page.getByText(/What should new sessions default to/)).toBeVisible();
     await page.click('button:has-text("Guided (recommended)")');
 
-    // 13. Tutorial is done; the normal composer renders.
+    // Tutorial is done; the normal composer renders.
     await expect(page.getByText('Welcome to ELSPETH.')).not.toBeVisible();
     await expect(page.getByText(/hello-world \(cool government pages\)/)).toBeVisible();
+
+    // Assert the PATCH wrote tutorial_completed_at (server-side check).
+    // Live route is `/api/composer-preferences` (the request is authenticated
+    // as `freshUser` via the loginAs/cookie setup, so the server scopes the
+    // read to that user — no `{user_id}` path segment exists).
+    const prefs = await request.get(`/api/composer-preferences`);
+    const body = await prefs.json();
+    expect(body.tutorial_completed_at).toEqual(expect.any(String));
   });
 
-  test('second login does not re-fire the tutorial', async ({ page }) => {
-    // Continuing from the previous test's state: tutorial-tester has
-    // tutorial_completed_at set.
-    await page.goto('https://elspeth.foundryside.dev');
-    await page.fill('[data-testid="login-username"]', 'tutorial-tester');
-    await page.fill('[data-testid="login-password"]', 'redacted');
-    await page.click('[data-testid="login-submit"]');
-
-    await expect(page.getByText('Welcome to ELSPETH.')).not.toBeVisible({
-      timeout: 5000,
-    });
-  });
-
-  test('skip path fast-forwards to turn 6 without building', async ({ page }) => {
-    // A different brand-new user for this test.
-    await page.goto('https://elspeth.foundryside.dev');
-    await page.fill('[data-testid="login-username"]', 'skip-tester');
-    await page.fill('[data-testid="login-password"]', 'redacted');
-    await page.click('[data-testid="login-submit"]');
+  // Scenario B: skip flow — fresh user clicks skip in turn 1, lands on
+  // turn 6 directly, PATCH writes tutorial_completed_at, no pipeline
+  // session is created (skip is fast-forward only).
+  test('Scenario B — skip fast-forwards to turn 6, writes tutorial_completed_at, creates no session', async ({ page, freshUser, request }) => {
+    await loginAs(page, freshUser.user_id);
 
     await expect(page.getByText('Welcome to ELSPETH.')).toBeVisible();
     await page.click('text=I\'ve used ELSPETH before, skip this');
 
-    // Should land directly on the mode-choice screen.
+    // Lands directly on the mode-choice screen.
     await expect(
       page.getByText(/What should new sessions default to/),
     ).toBeVisible();
-    // No tutorial session was created.
     await page.click('button:has-text("Guided (recommended)")');
-    await expect(page.getByText(/hello-world \(cool government pages\)/)).not.toBeVisible();
+
+    // PATCH wrote tutorial_completed_at.
+    const prefs = await request.get(`/api/composer-preferences`);
+    const body = await prefs.json();
+    expect(body.tutorial_completed_at).toEqual(expect.any(String));
+
+    // INVARIANT (per design doc 04 — skip is fast-forward only): no
+    // tutorial session was created during skip. The sessions list is
+    // user-scoped server-side via the auth cookie; the live route is the
+    // sessions endpoint without a `{user_id}` path segment — confirm
+    // exact path during Step 1 recon (likely `/api/sessions`).
+    const sessions = await request.get(`/api/sessions`);
+    const sessionsBody = await sessions.json();
+    const tutorialSessions = (sessionsBody.sessions ?? []).filter(
+      (s: { title: string }) =>
+        /hello-world \(cool government pages\)/.test(s.title),
+    );
+    expect(tutorialSessions).toHaveLength(0);
+  });
+
+  // Scenario C: second-login (tutorial already completed) — fresh user,
+  // then explicit PATCH to set tutorial_completed_at; load composer;
+  // tutorial container does NOT render.
+  test('Scenario C — second-login (tutorial completed) shows normal composer, not tutorial', async ({ page, freshUser, request }) => {
+    // Explicitly set tutorial_completed_at via PATCH before login.
+    // Live route is `/api/composer-preferences`; the fresh-user provisioning
+    // fixture is responsible for establishing an auth context under which
+    // this PATCH targets `freshUser`'s preferences row (the server scopes
+    // the write to the authenticated principal — there is no
+    // `{user_id}` path segment on the live route).
+    const patchResp = await request.patch(
+      `/api/composer-preferences`,
+      {
+        data: { tutorial_completed_at: '2026-05-19T00:00:00Z' },
+      },
+    );
+    expect(patchResp.ok()).toBe(true);
+
+    await loginAs(page, freshUser.user_id);
+
+    // Tutorial container must NOT render.
+    await expect(page.getByText('Welcome to ELSPETH.')).not.toBeVisible({
+      timeout: 5000,
+    });
+    // Normal composer surface DOES render — assert against a known
+    // composer landmark (adjust selector during Step 1 recon).
+    await expect(page.locator('[data-testid="composer-root"]')).toBeVisible();
+  });
+
+  // Refresh-restart scenario (P10) — fresh user, walk partway, refresh,
+  // assert turn 1 and null sessionStorage.
+  test('refresh mid-tutorial restarts at turn 1 (no sessionStorage)', async ({ page, freshUser }) => {
+    await loginAs(page, freshUser.user_id);
+
+    // Walk to turn 3.
+    await expect(page.getByText('Welcome to ELSPETH.')).toBeVisible();
+    await page.click('button:has-text("Let\'s go")');
+    await page.click('button:has-text("Build it")');
+    await expect(page.getByText(/Got it/)).toBeVisible({ timeout: 30000 });
+    await page.click('button:has-text("Use my interpretation")');
+    await expect(page.getByText(/Three layers, four steps/)).toBeVisible();
+
+    // Refresh.
+    await page.reload();
+
+    // Assert turn 1 is visible (not turn 3).
+    await expect(page.getByText('Welcome to ELSPETH.')).toBeVisible();
+    await expect(page.getByText(/Three layers, four steps/)).not.toBeVisible();
+
+    // Assert no sessionStorage key exists (no scaffolding remains).
+    const progressKey = await page.evaluate(() =>
+      sessionStorage.getItem('elspeth_tutorial_progress'),
+    );
+    expect(progressKey).toBeNull();
   });
 });
 ```
@@ -1475,7 +2211,8 @@ test.describe('Hello-world tutorial — brand-new user', () => {
 - [ ] **Step 3: Run test against staging.**
 
 ```bash
-npx playwright test tests/e2e/tutorial.e2e.spec.ts --headed
+cd src/elspeth/web/frontend
+npx playwright test tests/e2e/tutorial.spec.ts --headed
 ```
 
 Expected: PASS — all three scenarios green. If any fail, diagnose against
@@ -1487,40 +2224,459 @@ CLAUDE.md `feedback_fix_errors_you_encounter`).
 Open `playwright.config.ts` (or the GitHub Actions Playwright workflow — confirm during Step 1 recon). Add the new spec to `testMatch` or the workflow's spec list:
 
 ```typescript
-testMatch: [/* existing... */ 'tests/e2e/tutorial.e2e.spec.ts']
+testMatch: [/* existing... */ 'tests/e2e/tutorial.spec.ts']
 ```
 
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add tests/e2e/tutorial.e2e.spec.ts playwright.config.ts
-git commit -m "test(e2e): add tutorial brand-new-user end-to-end + CI matrix (Phase 4B.14)"
+git add src/elspeth/web/frontend/tests/e2e/tutorial.spec.ts \
+  src/elspeth/web/frontend/tests/e2e/fixtures.ts \
+  src/elspeth/web/frontend/playwright.config.ts
+git commit -m "test(e2e): add tutorial brand-new-user end-to-end with freshUser fixture + CI matrix (Phase 4B.14)"
+```
+
+## Task 14.5: Reset-tutorial link in `ComposerPreferencesPanel.tsx`
+
+**Files:**
+- Modify: `src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.tsx`.
+- Modify: `src/elspeth/web/frontend/src/stores/preferencesStore.ts` (add `resetTutorial` action).
+- Modify: `src/elspeth/web/frontend/src/stores/preferencesStore.test.ts`.
+- Create: `src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.reset.test.tsx`
+  (or extend the existing `ComposerPreferencesPanel.test.tsx` if test-file
+  conventions favour append — recon decides).
+
+This task resolves Open Question C3 **in-phase**. Per Systems R2-S7
+(2026-05-19): the prior draft deferred the retake UI to a "sibling
+settings-panel plan" that does not exist in the roadmap. Per the user's
+correction — *no more deferrals to sibling plans that don't exist* —
+the Reset link lands here, inside the existing `ComposerPreferencesPanel`
+modal that Phase 1B already shipped. The wire contract
+(`PATCH {tutorial_completed_at: null}`) is unchanged; this task adds the
+UI that fires it.
+
+**Wire contract recap** (already shipped by Task 1 of 21b1 and by
+PR-21a):
+
+- The preferences PATCH endpoint accepts `tutorial_completed_at: null` —
+  see 21a §"Cross-plan contract — `tutorial_completed_at` PATCH semantics".
+- The TypeScript request type already permits `null` (not just
+  `undefined`) — 21b1 Task 1 §"Notes" enforces this.
+
+- [ ] **Step 1: Recon — confirm the live `ComposerPreferencesPanel` shape.**
+
+```bash
+cat src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.tsx
+```
+
+Expect:
+- `ComposerPreferencesForm` (lines ~19–85 at recon time) — the inner
+  form with the default-mode radio group and the `role="alert"`
+  `writeError` region. This is where the Reset link mounts.
+- `ComposerPreferencesPanel` — modal wrapper around the form. No
+  change here.
+
+The Reset link goes inside `ComposerPreferencesForm`, below the
+`fieldset` and above (or beside) the `writeError` alert region. The
+link is enabled only when the tutorial has been completed (i.e.,
+`tutorialCompletedAt !== null` in the store) — for a user who hasn't
+yet completed the tutorial, the link is hidden entirely (showing a
+disabled "Reset tutorial" link for a user who's never taken the
+tutorial is noise).
+
+- [ ] **Step 2: Add the `resetTutorial` store action.**
+
+In `src/elspeth/web/frontend/src/stores/preferencesStore.ts`, extend
+the `PreferencesState` interface and the store implementation:
+
+```typescript
+interface PreferencesState {
+  // ... existing fields ...
+  tutorialCompletedAt: string | null;
+  // ... existing fields ...
+
+  resetTutorial: () => Promise<void>;
+}
+
+// In the create<PreferencesState>(...) body:
+resetTutorial: async () => {
+  if (get().writing) return;
+  const previous = get().tutorialCompletedAt;
+  set({ tutorialCompletedAt: null, writing: true, writeError: null });
+  try {
+    const payload = await updateUserComposerPreferences({
+      tutorial_completed_at: null,
+    });
+    set({
+      tutorialCompletedAt: payload.tutorial_completed_at,
+      writing: false,
+    });
+  } catch (err) {
+    set({
+      tutorialCompletedAt: previous,
+      writing: false,
+      writeError:
+        err instanceof Error
+          ? `Couldn't reset the tutorial: ${err.message}`
+          : "Couldn't reset the tutorial.",
+    });
+    throw err;
+  }
+},
+```
+
+The action mirrors `setDefaultMode`'s shape exactly — optimistic
+update, revert-on-error, `writeError` surfaced through the existing
+`role="alert"` region. No new error-display UI required.
+
+Add a Vitest case to `preferencesStore.test.ts`:
+
+```typescript
+it('resetTutorial PATCHes tutorial_completed_at: null and clears the field', async () => {
+  vi.spyOn(api, 'updateUserComposerPreferences').mockResolvedValue({
+    default_mode: 'guided',
+    banner_dismissed_at: null,
+    tutorial_completed_at: null,
+    updated_at: '2026-05-15T12:00:00Z',
+  });
+  usePreferencesStore.setState({
+    tutorialCompletedAt: '2026-05-14T12:00:00Z',
+  });
+  await usePreferencesStore.getState().resetTutorial();
+  expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+    tutorial_completed_at: null,
+  });
+  expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull();
+});
+
+it('resetTutorial reverts on error and sets writeError', async () => {
+  vi.spyOn(api, 'updateUserComposerPreferences').mockRejectedValue(
+    new Error('server down'),
+  );
+  usePreferencesStore.setState({
+    tutorialCompletedAt: '2026-05-14T12:00:00Z',
+  });
+  await expect(
+    usePreferencesStore.getState().resetTutorial(),
+  ).rejects.toThrow('server down');
+  expect(usePreferencesStore.getState().tutorialCompletedAt).toBe(
+    '2026-05-14T12:00:00Z',
+  );
+  expect(usePreferencesStore.getState().writeError).toContain('server down');
+});
+```
+
+- [ ] **Step 3: Write the failing component test.**
+
+Create
+`src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.reset.test.tsx`:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { ComposerPreferencesForm } from './ComposerPreferencesPanel';
+import { usePreferencesStore } from '@/stores/preferencesStore';
+import * as api from '@/api/client';
+
+describe('ComposerPreferencesForm — Reset tutorial link', () => {
+  beforeEach(() => {
+    usePreferencesStore.setState({
+      defaultMode: 'guided',
+      loaded: true,
+      writing: false,
+      writeError: null,
+      tutorialCompletedAt: null,
+    });
+  });
+
+  it('does not render the Reset link when tutorial has not been completed', () => {
+    usePreferencesStore.setState({ tutorialCompletedAt: null });
+    render(<ComposerPreferencesForm />);
+    expect(screen.queryByRole('button', { name: /reset tutorial/i })).toBeNull();
+  });
+
+  it('renders the Reset link when tutorial has been completed', () => {
+    usePreferencesStore.setState({
+      tutorialCompletedAt: '2026-05-14T12:00:00Z',
+    });
+    render(<ComposerPreferencesForm />);
+    expect(
+      screen.getByRole('button', { name: /reset tutorial/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('click → PATCHes tutorial_completed_at: null → tutorialCompletedAt becomes null', async () => {
+    usePreferencesStore.setState({
+      tutorialCompletedAt: '2026-05-14T12:00:00Z',
+    });
+    vi.spyOn(api, 'updateUserComposerPreferences').mockResolvedValue({
+      default_mode: 'guided',
+      banner_dismissed_at: null,
+      tutorial_completed_at: null,
+      updated_at: '2026-05-15T12:00:00Z',
+    });
+    render(<ComposerPreferencesForm />);
+    fireEvent.click(screen.getByRole('button', { name: /reset tutorial/i }));
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_completed_at: null,
+      }),
+    );
+    await waitFor(() =>
+      expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull(),
+    );
+  });
+
+  it('surfaces failure via the existing writeError role="alert" region', async () => {
+    usePreferencesStore.setState({
+      tutorialCompletedAt: '2026-05-14T12:00:00Z',
+    });
+    vi.spyOn(api, 'updateUserComposerPreferences').mockRejectedValue(
+      new Error('server down'),
+    );
+    render(<ComposerPreferencesForm />);
+    fireEvent.click(screen.getByRole('button', { name: /reset tutorial/i }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/server down/i),
+    );
+  });
+});
+```
+
+Run:
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run \
+  src/components/settings/ComposerPreferencesPanel.reset.test.tsx
+```
+
+Expected: FAIL — the Reset link does not yet exist in
+`ComposerPreferencesForm`.
+
+- [ ] **Step 4: Implement the Reset link in `ComposerPreferencesForm`.**
+
+Edit `src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.tsx`.
+Extend `ComposerPreferencesForm`:
+
+```typescript
+export function ComposerPreferencesForm(): JSX.Element | null {
+  const defaultMode = usePreferencesStore((s) => s.defaultMode);
+  const loaded = usePreferencesStore((s) => s.loaded);
+  const writing = usePreferencesStore((s) => s.writing);
+  const writeError = usePreferencesStore((s) => s.writeError);
+  const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
+  const tutorialCompletedAt = usePreferencesStore(
+    (s) => s.tutorialCompletedAt,
+  );
+  const resetTutorial = usePreferencesStore((s) => s.resetTutorial);
+
+  const onChange = useCallback(
+    async (mode: ComposerMode) => {
+      const activeSessionId = useSessionStore.getState().activeSessionId;
+      // writeError now carries any setDefaultMode failure — no console.error
+      // needed (CLAUDE.md no-defensive-programming; the role="alert"
+      // region is the user-visible channel).
+      await setDefaultMode(mode, activeSessionId);
+    },
+    [setDefaultMode],
+  );
+
+  const onResetClick = useCallback(async () => {
+    // Same shape as onChange — writeError captures failure, no console.
+    await resetTutorial();
+  }, [resetTutorial]);
+
+  if (!loaded || defaultMode === null) return null;
+
+  return (
+    <>
+      <fieldset disabled={writing} aria-busy={writing}>
+        <legend>Default mode for new sessions</legend>
+        {/* ... existing radio inputs ... */}
+      </fieldset>
+
+      {tutorialCompletedAt !== null && (
+        <div style={{ marginTop: 16 }}>
+          <button
+            type="button"
+            disabled={writing}
+            onClick={() => void onResetClick()}
+            aria-describedby="composer-preferences-reset-help"
+            // Style as a link, not a primary button — the action is
+            // reversible (the user just retakes the tutorial); no
+            // confirmation modal needed per the brief.
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              color: 'var(--color-link, #0070d2)',
+              textDecoration: 'underline',
+              cursor: writing ? 'default' : 'pointer',
+              fontSize: 13,
+            }}
+          >
+            Reset tutorial
+          </button>
+          <p
+            id="composer-preferences-reset-help"
+            style={{ fontSize: 12, marginTop: 4, color: 'var(--color-text-muted, #666)' }}
+          >
+            Re-takes the hello-world tutorial on your next composer load.
+            You can stop the tutorial at any point with the skip link in Turn 1.
+          </p>
+        </div>
+      )}
+
+      {writeError !== null && (
+        <div
+          role="alert"
+          className="composer-preferences-error"
+          style={{
+            marginTop: 8,
+            color: "var(--color-danger, #b00020)",
+            fontSize: 13,
+          }}
+        >
+          {writeError}
+        </div>
+      )}
+    </>
+  );
+}
+```
+
+Note: the `onChange` handler in the snippet above also drops its
+prior `console.error` — Step 4/6 of Task 12 already amends the
+preferences-bootstrap path to route errors through `writeError`; the
+same principle applies here. The pre-existing `setDefaultMode` action
+captures failures onto `writeError`, so the inline `try/catch +
+console.error` is dead defence and should go in this commit.
+
+- [ ] **Step 5: Run the test to verify it passes.**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run \
+  src/components/settings/ComposerPreferencesPanel.reset.test.tsx \
+  src/stores/preferencesStore.test.ts
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Run the full frontend test suite to catch regressions.**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run
+```
+
+Expected: PASS. If any existing `ComposerPreferencesPanel.test.tsx`
+case asserts on the absence of additional content, fix the assertion —
+the Reset link's presence is now a feature, and the test must reflect
+the new shape.
+
+- [ ] **Step 7: Commit.**
+
+```bash
+git add src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.tsx \
+  src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.reset.test.tsx \
+  src/elspeth/web/frontend/src/stores/preferencesStore.ts \
+  src/elspeth/web/frontend/src/stores/preferencesStore.test.ts
+git commit -m "feat(frontend): Reset-tutorial link in ComposerPreferencesPanel (Phase 4B.14.5; closes Open Question C3)"
 ```
 
 ## Task 15: Staging smoke deploy
 
 **Files:** none modified. Operator-led manual verification.
 
-This is the final go-live step. The operator (or the implementing agent
-with operator assistance, per `project_staging_deployment`):
+This is the final go-live step. The runbook below is the
+operator-gated sequence per plan-fix P22 (2026-05-19) — destructive
+steps are surfaced BEFORE downstream steps need them (per project
+memory `feedback_operator_gate_destructive_actions`).
 
-1. Merges the umbrella branch to the deployment branch.
-2. Stops `elspeth-web.service`.
-3. **Deletes the sessions DB** (the second DB-delete since Phase 1A —
-   plan 21 explicitly acknowledges this).
-4. Runs the frontend build (`npm run build` in
-   `src/elspeth/web/frontend/`).
-5. Starts `elspeth-web.service`.
-6. Clicks through the tutorial in a brand-new browser session.
+**Runbook (operator-gated):**
 
-- [ ] **Step 1: Operator-led deploy.**
+1. **DB-delete (TWO databases — both required).** Phase 4 ships TWO
+   independent schema additions, each backed by an independent
+   SQLite database; BOTH must be deleted before service restart or
+   the caretaker-rebootstrapped schemas will refuse to load against
+   pre-existing tables.
+
+   1a. **Sessions DB delete** (per Task 1's OPERATOR ACTION note —
+   SESSION_SCHEMA_EPOCH bumped 5 → 6 to add
+   `user_preferences_table.tutorial_completed_at`):
+   ```bash
+   systemctl stop elspeth-web.service
+   rm -f <data_dir>/sessions/sessions.db
+   ```
+   The exact path depends on the deployment's configured
+   `ELSPETH_WEB__DATA_DIR`; on the staging source-checkout this is
+   typically `data/sessions/sessions.db` relative to the repo root.
+
+   1b. **Landscape audit DB delete** (per Task 7.0's OPERATOR ACTION
+   note — five new audit-story columns added to `runs_table`):
+   ```bash
+   rm -f <data_dir>/runs/audit.db
+   # Path convention verified 2026-05-19 against `src/elspeth/web/
+   # config.py:493`: the Landscape SQLite DB lives at
+   # `<data_dir>/runs/audit.db`, NOT `<data_dir>/landscape/audit.db`.
+   # The live staging deployment uses `data/runs/audit.db` relative
+   # to the repo root.
+   ```
+
+   1c. **Verification check** (between step 1 and step 2):
+   ```bash
+   ls <data_dir>/sessions/ <data_dir>/runs/ 2>/dev/null
+   ```
+   Neither `sessions.db` nor `audit.db` should appear in the listing
+   before service restart. If either remains, abort the runbook and
+   re-investigate — proceeding with a partial delete leaves staging
+   in a broken state (one schema fresh, one stale).
+
+   This is the second DB-delete event since Phase 1A — both DB
+   deletes for Phase 4 are unavoidable. Surface to the operator
+   BEFORE step 2; downstream steps assume both DBs are clean.
+2. **Service restart.** `systemctl restart elspeth-web.service` (per
+   project memory `project_staging_deployment` —
+   elspeth.foundryside.dev is a source-checkout systemd/Caddy
+   deploy). Frontend build (`npm run build` in
+   `src/elspeth/web/frontend/`) precedes this if the umbrella branch
+   was merged in step 0.
+3. **Cache-warm.** Per the P13 deployment runbook step, run
+   `elspeth tutorial warm-cache` against the deployed model config.
+   Verifies the canonical pipeline cache entry exists before the
+   first user hits the tutorial — otherwise the first Scenario A
+   click-through runs an uncached ~30s pipeline rather than the
+   designed sub-second cache hit.
+4. **Playwright smoke.**
+   ```bash
+   cd src/elspeth/web/frontend
+   WEBUI_TEST_PROVISION_ENABLED=true \
+     npx playwright test tests/e2e/tutorial.spec.ts --project=chromium
+   ```
+   Assert all three P22 scenarios (A complete-flow, B skip-flow,
+   C second-login) plus the refresh-restart case pass. If any fail,
+   diagnose against the real backend — the failure is real, not a
+   test-environment artifact (CLAUDE.md
+   `feedback_fix_errors_you_encounter`). Do **not** silently swallow
+   smoke failures with retries.
+5. **Rollback recipe.** If smoke fails after any user rows have
+   `tutorial_completed_at` set, rollback is:
+   (a) operator DB-delete — BOTH databases (back to step 1a AND 1b:
+   sessions DB AND Landscape audit DB); plus
+   (b) cache-clear: `rm -rf <data_dir>/tutorial_cache/` to discard
+   any stale cache entries written under the broken build. Surface
+   this rollback to the operator the moment a smoke step fails;
+   neither (a) nor (b) is reversible.
+
+- [ ] **Step 1: Operator-led deploy (runbook steps 1–3).**
 
 (Per `project_staging_deployment`: elspeth.foundryside.dev is a
 source-checkout systemd/Caddy deploy; deploy steps follow that memory.)
 
-- [ ] **Step 2: Manual click-through verification.**
+- [ ] **Step 2: Manual click-through verification (complement to runbook step 4's Playwright smoke).**
 
-Confirm each design-doc-04 promise visually:
+Confirm each design-doc-04 promise visually. (Playwright covers the
+machine-verifiable assertions; this step catches visual-only issues —
+typography, copy nuance, link styling.)
 
 - [ ] Turn 1 renders correctly. Skip link is visible but subtle.
 - [ ] Turn 2 has the canonical seed pre-filled. Editing works. Restore-canonical
@@ -1539,6 +2695,18 @@ Confirm each design-doc-04 promise visually:
 - [ ] Second login of the same user does NOT re-fire the tutorial.
 - [ ] A different brand-new user DOES see the tutorial (verifying
   per-user `tutorial_completed_at`).
+- [ ] **Tutorial cache directory** is created under the deployment's
+  configured `data_dir` on first tutorial hit. With no
+  `ELSPETH_WEB__TUTORIAL_CACHE_DIR` override set, the resolved path is
+  `<ELSPETH_WEB__DATA_DIR>/tutorial_cache/` (which for a dev/staging
+  source-checkout falls under the relative `data/` directory, since
+  `WebSettings.data_dir` defaults to `Path("data")`). Verify the
+  directory exists and contains a `<sha256>.json` file after the
+  click-through; this confirms the P8 fix — no `ELSPETH_DATA_DIR` env
+  var and no `/var/lib/elspeth` hardcoded path are required. (Detailed
+  defaults-resolution coverage lives in
+  `test_tutorial_cache_dir_defaults_to_data_dir_subdir`; this smoke
+  check is the end-to-end confirmation.)
 
 - [ ] **Step 3: Record verification in the merge PR.**
 
@@ -1553,7 +2721,7 @@ If the project tags release commits, tag the merge.
 
 ## What Phase 4B leaves the system in
 
-After Tasks 1–15: brand-new users see the tutorial; returning users see the normal composer. Skip fast-forwards to turn 6. Finalisation PATCHes both fields atomically; session renamed. Tutorial progress persists across refresh via `sessionStorage`. Vitest + Playwright pass.
+After Tasks 7.5, 8–14, 14.5, 15–16: brand-new users see the tutorial; returning users see the normal composer. Skip fast-forwards to turn 6. Finalisation PATCHes both fields atomically; session renamed. Refresh during the tutorial restarts at turn 1, and the tutorial container's mount-time `DELETE /api/tutorial/orphans` call cleans up any session a refresh orphaned (Systems R2-S5; no `sessionStorage` scaffolding). A completed-tutorial user can retake via the "Reset tutorial" link in `ComposerPreferencesPanel` (Task 14.5; closes Open Question C3 in-phase — no sibling-plan deferral). Vitest + Playwright pass.
 
 ## Risks and mitigations
 
@@ -1585,5 +2753,25 @@ Phase 8 schema additions wipe `tutorial_completed_at` via DB-delete — users re
 | 4B2-F1 | CRITICAL (Quality) | Applied | `runTutorialPipeline` spy confirmed against `POST /api/tutorial/run` added to 21a; Task 8 updated |
 | 4B2-F2 | IMPORTANT (Quality) | Applied | Playwright CI matrix task (Task 15b) added |
 | 4B2-F3 | IMPORTANT (Quality) | Applied | Turn 5 `getRunAuditSummary` cross-referenced to 21a `GET /api/sessions/{id}/runs/{run_id}/audit-story` |
-| 4B2-F4 | CRITICAL (Systems) | Applied | Task 12 updated: sessionStorage-resume pattern (from 21b1-F1); implementation lives here |
+| 4B2-F4 | CRITICAL (Systems) | Superseded | Task 12's sessionStorage-resume pattern (originally applied per 21b1-F1) was deleted per Phase 4 plan-fix P10 (2026-05-19): flat `elspeth_tutorial_progress` key isn't user-scoped, so it risks cross-user contamination on shared workstations (systems S6). Restart-at-turn-1 is the documented contract; the ~5-minute tutorial plus canonical-seed cache make restart cost acceptable. |
 | 4B2-F5 | BLOCKER (Coherence) | Applied | Task 12 banner code dropped per 2026-05-16 review (No Legacy Code Policy — Turn 1 welcome is the single entry surface for all tutorial-mode users) |
+
+### 2026-05-19 — Phase 4 plan-fixes (P10 / P22)
+
+| ID | Severity | Status | Summary |
+|---|---|---|---|
+| P10 | CRITICAL (Systems) | Applied | Task 12 sessionStorage scaffolding deleted (`PROGRESS_KEY`, `initialStep`, `onStepChange`). Refresh restarts at turn 1; Playwright case added to Task 14 asserting the contract (`refresh mid-tutorial restarts at turn 1`). Risk-table row in plan 21 updated. |
+| P22 | IMPORTANT (Quality) | Applied | Task 14 restructured around a `freshUser` Playwright fixture; three named scenarios (A complete-flow, B skip-flow with no-pipeline-creation invariant, C second-login). Task 15 staging-smoke replaced with the 5-step operator-gated runbook (DB-delete → restart → cache-warm → Playwright → rollback). Test-only `POST /api/test/provision-fresh-user` endpoint specified (gated by `WEBUI_TEST_PROVISION_ENABLED=true`); recon flagged no existing surface to reuse as of 2026-05-19. |
+
+### 2026-05-19 — frontend r2 review closure (Architecture / Systems / Quality)
+
+| ID | Severity | Status | Summary |
+|---|---|---|---|
+| M-R2-2 | MAJOR (Architecture) | Applied | Task 7.3 (frontend client functions) relocated from 21a2 to a new **Task 7.5** in this plan — these are frontend `client.ts` symbols and belong with the frontend plan. `deleteTutorialOrphans` added as a fourth function in the same task. |
+| M-R2-3 | MAJOR (Architecture) | Applied | Stale `21b-phase-4-frontend.md` cross-reference in the overview replaced with explicit `21b1` and `21b2` links. |
+| M-R2-4 | MAJOR (Architecture) | Applied | Overview C3 row + Risks-table "skip but wants to come back" row rewritten to reference the in-phase Reset link (Task 14.5) instead of the non-existent sibling settings-panel plan. |
+| N-R2-3 | MINOR (Architecture) | Applied | Task 12's bootstrap effect drops its `.catch((err) => console.error(...))`. Step 6 added to ensure `preferencesStore.bootstrap` captures errors onto `writeError` and re-throws so the React error boundary catches catastrophic failures. |
+| R2-15 | MAJOR (Reality) | N/A (frontend) | Hallucinated `PipelineState` type — confirmed zero hits in 21b1/21b2. Backend half of the fix (live type is `CompositionState`) is owned by Writer C in 21a1. |
+| R2-M4 | MAJOR (Quality) | Applied | Task 6 Step 7 contract test reads `pendingBySession[sid][eventId]` directly from the store — bypassing the live `InterpretationReviewTurn`'s `?? ""` defensive fallbacks (lines 135–136 of `chat/guided/InterpretationReviewTurn.tsx`). Follow-up note added: the live component's defensive fallbacks should be tightened to match the contract; the `?? ""` masks the very regressions this contract test exists to catch. Filed as a Phase-4-followup ticket scope (component cleanup is out-of-scope for this plan, but the test now pins the contract correctly). |
+| R2-S5 | CRITICAL (Systems) | Applied | Orphan-session cleanup wired in Task 11 (container mount-time `DELETE /api/tutorial/orphans`) plus the new `deleteTutorialOrphans` client function in Task 7.5. Backend half (the endpoint itself) is owned by Writer C as 21a2 Task 7.4. |
+| R2-S7 | CRITICAL (Systems) | Applied | New **Task 14.5** ships the Reset-tutorial link in `ComposerPreferencesPanel.tsx` plus a `resetTutorial` action on `preferencesStore`. Closes Open Question C3 in-phase — no sibling-plan deferral. |

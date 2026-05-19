@@ -23,19 +23,25 @@ finalisation-then-skip-then-integration-then-smoke. The tutorial is a
 surface. There is no nesting inside the normal composer; the tutorial **is**
 the first session.
 
-**Navigation resilience:** Progress is persisted to `sessionStorage` (`elspeth_tutorial_progress`) on every turn-transition. On mount, if `tutorialCompleted === false` and the key exists, resume from the persisted turn (handles refresh / browser-back). All tutorial-mode users (genuine first-timers and users whose state was wiped by the Phase 4A DB-delete) see the same intro — no bifurcation, no "we noticed you had old sessions" copy. Per CLAUDE.md No Legacy Code Policy: we have no users yet, the operator deletes the DB freely, and a single neutral copy is more honest than detecting a state we can't reliably distinguish. Persistence code: Task 12 (Part 2). No separate banner — Turn 1's existing welcome copy is the entry surface.
+**Navigation resilience:** Refresh during the tutorial restarts at turn 1 — there is **no** `sessionStorage` scaffolding for resume. The tutorial state machine is in-memory only (Zustand-free; lives in `HelloWorldTutorial.tsx` `useReducer` state). Rationale (per plan-fix P10, 2026-05-19): (1) the tutorial is ~5 minutes — restart cost is acceptable; (2) a flat `elspeth_tutorial_progress` key isn't user-scoped, so it risks cross-user contamination on shared workstations (systems S6); (3) per-user keying would add Vitest+Playwright surface area that doesn't materially improve UX. The canonical seed produces a fresh pipeline each time, and the cache makes that fast. All tutorial-mode users (genuine first-timers and users whose state was wiped by the Phase 4A DB-delete) see the same intro — no bifurcation, no "we noticed you had old sessions" copy. Per CLAUDE.md No Legacy Code Policy: we have no users yet, the operator deletes the DB freely, and a single neutral copy is more honest than detecting a state we can't reliably distinguish. No separate banner — Turn 1's existing welcome copy is the entry surface.
 
 **Tech Stack:** React 18, TypeScript (strict), Zustand, Vitest, React
 Testing Library, Playwright.
 
 **Sibling plans:**
-- [21a-phase-4-backend.md](21a-phase-4-backend.md) — schema column, service
+- [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md) — backend infrastructure: schema column, service
   extension, route extension, tutorial cache, run-path integration.
+- [21a2-phase-4-backend-part-2.md](21a2-phase-4-backend-part-2.md) — backend endpoints + telemetry: tutorial-run endpoint, audit-story endpoint, frontend API client, launch telemetry counters.
 - [21b2-phase-4-frontend-part-2.md](21b2-phase-4-frontend-part-2.md) — Tasks
   8–15: turns 4/5/6, container, App.tsx detection, integration test,
   Playwright E2E, staging smoke.
 
 **Overview document:** [21-phase-4-hello-world-tutorial.md](21-phase-4-hello-world-tutorial.md).
+
+**PR mapping:** This plan is the first half of **PR-21b** (frontend);
+PR-21b combines Tasks 1–7 here with Tasks 8–15 in 21b2 and merges to
+`RC5.2` **only after** PR-21a (backend) has landed — see overview §"PR
+strategy" for rationale.
 
 **Roadmap reference:** [00-implementation-roadmap.md](00-implementation-roadmap.md).
 
@@ -95,8 +101,9 @@ Testing Library, Playwright.
 **Out of scope:**
 
 - Re-take from settings (Open Question C3 — post-launch).
-- Full multi-device session sync (sessionStorage is tab-local; cross-tab
-  and cross-device sync remain out of scope).
+- Mid-tutorial resume across refresh / browser-back / new tab. Refresh
+  restarts at turn 1 by design (plan-fix P10, 2026-05-19). Cross-tab and
+  cross-device sync remain out of scope as a consequence.
 - Localisation of tutorial copy.
 - Backend changes (Phase 4A).
 
@@ -257,6 +264,39 @@ describe('preferencesStore — tutorial fields', () => {
     await usePreferencesStore.getState().markTutorialCompleted('guided');
     expect(patchSpy).not.toHaveBeenCalled();
   });
+
+  it('markTutorialCompleted does not clear optedOutAtSessionId (P16 MN-02)', async () => {
+    // The opt-out watermark is orthogonal to tutorial completion and must
+    // survive a markTutorialCompleted call. Phase 1B MN-02 contract:
+    // optedOutAtSessionId is only mutated by setDefaultMode(...) when the
+    // user is actively opting out; tutorial-completion must not touch it.
+    const WATERMARK = 'session-uuid-watermark-from-phase-1b';
+    usePreferencesStore.setState({ optedOutAtSessionId: WATERMARK });
+    vi.spyOn(api, 'updateUserComposerPreferences').mockResolvedValue({
+      default_mode: 'freeform',
+      banner_dismissed_at: null,
+      tutorial_completed_at: '2026-05-15T12:30:00Z',
+      updated_at: '2026-05-15T12:30:00Z',
+    });
+    await usePreferencesStore.getState().markTutorialCompleted('freeform');
+    expect(usePreferencesStore.getState().optedOutAtSessionId).toBe(WATERMARK);
+  });
+
+  it('markTutorialCompleted reverts BOTH defaultMode AND tutorialCompletedAt on failure (P16 contract #3)', async () => {
+    usePreferencesStore.setState({
+      defaultMode: 'guided',
+      tutorialCompletedAt: null,
+    });
+    vi.spyOn(api, 'updateUserComposerPreferences').mockRejectedValue(
+      new Error('network down'),
+    );
+    await expect(
+      usePreferencesStore.getState().markTutorialCompleted('freeform'),
+    ).rejects.toThrow(/network down/);
+    expect(usePreferencesStore.getState().defaultMode).toBe('guided');
+    expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull();
+    expect(usePreferencesStore.getState().writing).toBe(false);
+  });
 });
 ```
 
@@ -314,13 +354,43 @@ Apply these targeted edits inside `preferencesStore.ts`:
 //     loaded: true,
 //   });
 
-// 4. Add the new action alongside existing actions:
+// 4. Add the new action alongside existing actions.
+//
+// PRESERVATION CONTRACT for `markTutorialCompleted` (P16):
+//
+//   1. MUST NOT reset `optedOutAtSessionId` watermark (MN-02).
+//      The watermark tracks the session in which the user opted out
+//      of guided mode; tutorial completion is orthogonal and must
+//      NOT clear it. Concretely: this action's `set({...})` calls
+//      DO NOT mention `optedOutAtSessionId` (neither in the
+//      optimistic-write nor the revert-on-error branch), and the
+//      response-payload merge below does NOT carry an opt-out field
+//      because the PATCH payload does not address it. A unit test
+//      `markTutorialCompleted does not clear optedOutAtSessionId`
+//      pins this — see test list above.
+//
+//   2. MUST honour the `writing` guard (P6 preempted): the first
+//      line `if (get().writing) return;` serialises concurrent PATCH
+//      calls with `setDefaultMode` / `dismissDefaultChangedBanner`.
+//
+//   3. MUST follow optimistic-write-then-revert-on-failure (P6
+//      preempted): the catch block restores both `defaultMode` and
+//      `tutorialCompletedAt` to their pre-PATCH values, mirroring
+//      the `setDefaultMode` and `dismissDefaultChangedBanner`
+//      patterns.
+//
+// Any future edit to this action that touches `optedOutAtSessionId`,
+// removes the writing guard, or skips the revert branch MUST be
+// reviewed against this block — these are load-bearing invariants
+// against the Phase 1B opt-out semantics.
 markTutorialCompleted: async (mode) => {
   if (get().writing) return;
   const previousMode = get().defaultMode;
   const previousTutorial = get().tutorialCompletedAt;
   const stamp = new Date().toISOString();
-  // Optimistic set (mirrors setDefaultMode's pattern).
+  // Optimistic set (mirrors setDefaultMode's pattern). Note: only the
+  // four named keys are written; `optedOutAtSessionId` is intentionally
+  // absent (contract #1).
   set({
     defaultMode: mode,
     tutorialCompletedAt: stamp,
@@ -539,12 +609,31 @@ describe('tutorialMachine', () => {
     expect(next.chosenMode).toBe('guided');
   });
 
-  it('rejects out-of-order transitions', () => {
-    // Can't run before building.
-    const next = tutorialReducer(initialState, { type: 'START_RUN' });
-    // Reducer's contract: invalid transitions are no-ops with a console
-    // warning; state stays put.
-    expect(next.step).toBe('welcome');
+  it('throws on out-of-order transitions (P15 offensive-programming contract)', () => {
+    // Can't run before building. The reducer treats this as a programmer
+    // error and throws — every dispatch site is in this codebase, so an
+    // out-of-order dispatch is a bug we want to fail loudly on, not a
+    // user-data trust-boundary issue. (Replaced the prior silent-no-op
+    // contract per P15.)
+    expect(() =>
+      tutorialReducer(initialState, { type: 'START_RUN' }),
+    ).toThrow(/unrecognised action START_RUN in step welcome/);
+  });
+
+  it('throws on unknown action types (exhaustiveness check)', () => {
+    // Casting away the union type to simulate an action that doesn't
+    // exist — this is what a future refactor that added a new action
+    // type and forgot to update a dispatcher would look like.
+    expect(() =>
+      tutorialReducer(initialState, { type: 'BOGUS_UNKNOWN' } as unknown as TutorialAction),
+    ).toThrow(/unrecognised action BOGUS_UNKNOWN/);
+  });
+
+  it('throws on any action arriving at the terminal done step', () => {
+    const done: TutorialState = { ...initialState, step: 'done', chosenMode: 'guided' };
+    expect(() => tutorialReducer(done, { type: 'START' })).toThrow(
+      /unrecognised action START in terminal step 'done'/,
+    );
   });
 });
 ```
@@ -570,9 +659,12 @@ Create `tutorialMachine.ts`:
  *
  * Plus a skip fast-forward: welcome → mode-choice (sets `skipped=true`).
  *
- * Transitions are deterministic; invalid actions in the wrong state are
- * no-ops with a console.warn (in dev) — this is the simplest safe
- * behaviour against accidental dispatch races during animations.
+ * Transitions are deterministic. An action that doesn't match the
+ * current step is a programmer error (we control every dispatch site)
+ * and the reducer THROWS. Per CLAUDE.md offensive programming: silently
+ * no-op'ing would let an out-of-order dispatch ship and corrupt the
+ * tutorial state with no signal. P15 promoted the previous
+ * console.warn-and-no-op to an explicit throw.
  */
 
 export type TutorialStep =
@@ -688,16 +780,20 @@ export function tutorialReducer(
         return { ...state, step: 'done', chosenMode: action.chosenMode };
       break;
     case 'done':
-      // Terminal — no further transitions.
-      break;
+      // Terminal — no further transitions. Any action arriving here is
+      // a programmer error: every dispatch site is in this codebase.
+      throw new Error(
+        `tutorialReducer: unrecognised action ${(action as TutorialAction).type} in terminal step 'done'`,
+      );
   }
-  // Unknown transition. In dev, surface this; in prod, silently no-op so
-  // a stray dispatch doesn't break the user's experience.
-  if (process.env.NODE_ENV !== 'production') {
-    // eslint-disable-next-line no-console
-    console.warn('tutorialReducer: ignored action', action, 'in state', state.step);
-  }
-  return state;
+  // Action did not match the current step. This is a programmer error
+  // (out-of-order dispatch); throw with the offending action type and
+  // current step so the test surface fails loudly, not silently. P15
+  // explicitly rejected the prior console.warn + no-op behaviour per
+  // CLAUDE.md offensive-programming guidance.
+  throw new Error(
+    `tutorialReducer: unrecognised action ${(action as TutorialAction).type} in step ${state.step}`,
+  );
 }
 ```
 
@@ -959,19 +1055,34 @@ submits it via the composer compose API, awaits the LLM `set_pipeline`
 tool call (Phase 5a infrastructure), and dispatches `PIPELINE_BUILT` to the
 state machine.
 
-- [ ] **Step 1: Recon — identify the compose API and session-create API.**
+> **Reality finding R2-10 (2026-05-19) — name the live endpoint.** The
+> original draft referred to a `composePipelineFromPrompt` API function
+> that does not exist in the live codebase. The Phase 5a compose path
+> is `POST /api/sessions/{session_id}/messages` (verified live at
+> `src/elspeth/web/sessions/routes.py:3856-3877` — `send_message`
+> handler, returns `MessageWithStateResponse`), and the frontend client
+> function is `sendMessage(sessionId, content)` at
+> `src/elspeth/web/frontend/src/api/client.ts:497`. Update the spy
+> names and the call expectations below to match the live function.
+
+- [ ] **Step 1: Recon — confirm the compose API and session-create API.**
 
 ```bash
-grep -rn "sendChatMessage\|createSession\|composer compose" \
-  src/elspeth/web/frontend/src/api --include="*.ts" | head -20
+grep -n "sendMessage\|createSession" \
+  src/elspeth/web/frontend/src/api/client.ts | head -10
 ```
 
-Identify:
-- How a chat message is sent to the composer (the function name in
-  `client.ts`).
-- How a session is created (likely `sessionStore.createSession`).
-- Where the response signals "pipeline built" (a returned pipeline state, a
-  tool-call event in the chat log, etc.).
+Expected live functions (R2-10, confirmed 2026-05-19):
+
+- `sendMessage(sessionId: string, content: string)` at `client.ts:497`
+  — posts to `/api/sessions/{sessionId}/messages` and returns
+  `MessageWithStateResponse` (assistant message + post-compose
+  pipeline state).
+- `createSession(...)` (`sessionStore.createSession` or the equivalent
+  client.ts function) — creates a new session and returns its UUID.
+  Turn 2's flow is "create session → send canonical-seed prompt as
+  the first user message → wait for the assistant's `set_pipeline`
+  tool call → dispatch `PIPELINE_BUILT`".
 
 The compose API is owned by Phase 5a; this turn is a consumer.
 
@@ -1000,11 +1111,16 @@ describe('TutorialTurn2Describe', () => {
 
   it('submits the prompt to the compose API on click', async () => {
     const onBuilt = vi.fn();
-    const composeSpy = vi
-      .spyOn(api, 'composePipelineFromPrompt')
+    // The flow is create-session → send-message; recon (Step 1) confirms
+    // the exact function names. Spy on `createSession` and `sendMessage`
+    // (R2-10, 2026-05-19 — `composePipelineFromPrompt` is not a live
+    // function; the wire endpoint is POST /api/sessions/{id}/messages).
+    vi.spyOn(api, 'createSession').mockResolvedValue({ id: 'sess-1' });
+    const sendSpy = vi
+      .spyOn(api, 'sendMessage')
       .mockResolvedValue({
-        session_id: 'sess-1',
-        pipeline_snapshot: {
+        message: { role: 'assistant', content: 'pipeline built' },
+        state: {
           source: { type: 'inline_blob' },
           transforms: [],
           sinks: [],
@@ -1014,19 +1130,17 @@ describe('TutorialTurn2Describe', () => {
     fireEvent.click(
       screen.getByRole('button', { name: TURN_2_PRIMARY_BUTTON }),
     );
-    await waitFor(() => expect(composeSpy).toHaveBeenCalledOnce());
-    expect(composeSpy).toHaveBeenCalledWith({
-      prompt: CANONICAL_SEED_PROMPT,
-      tutorial_mode: true,
-    });
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledOnce());
+    expect(sendSpy).toHaveBeenCalledWith('sess-1', CANONICAL_SEED_PROMPT);
     await waitFor(() => expect(onBuilt).toHaveBeenCalledOnce());
     const [arg] = onBuilt.mock.calls[0];
     expect(arg.sessionId).toBe('sess-1');
   });
 
   it('disables the button while the compose call is in flight', async () => {
+    vi.spyOn(api, 'createSession').mockResolvedValue({ id: 'sess-1' });
     let resolveCompose: (v: unknown) => void = () => {};
-    vi.spyOn(api, 'composePipelineFromPrompt').mockImplementation(
+    vi.spyOn(api, 'sendMessage').mockImplementation(
       () =>
         new Promise((res) => {
           resolveCompose = res;
@@ -1037,13 +1151,14 @@ describe('TutorialTurn2Describe', () => {
     fireEvent.click(btn);
     await waitFor(() => expect(btn).toBeDisabled());
     resolveCompose({
-      session_id: 'x',
-      pipeline_snapshot: { source: {}, transforms: [], sinks: [] },
+      message: { role: 'assistant', content: 'pipeline built' },
+      state: { source: {}, transforms: [], sinks: [] },
     });
   });
 
   it('surfaces an inline error if compose fails', async () => {
-    vi.spyOn(api, 'composePipelineFromPrompt').mockRejectedValue(
+    vi.spyOn(api, 'createSession').mockResolvedValue({ id: 'sess-1' });
+    vi.spyOn(api, 'sendMessage').mockRejectedValue(
       new Error('LLM unreachable'),
     );
     render(<TutorialTurn2Describe onBuilt={() => {}} />);
@@ -1075,7 +1190,7 @@ Expected: FAIL — component does not exist.
 ```typescript
 import { useState } from 'react';
 import { CANONICAL_SEED_PROMPT, TURN_2_BODY, TURN_2_PRIMARY_BUTTON } from './copy';
-import { composePipelineFromPrompt } from '../../api/client';
+import { createSession, sendMessage } from '../../api/client';
 import type { PipelineSnapshot } from './tutorialMachine';
 
 interface OnBuiltPayload {
@@ -1097,13 +1212,16 @@ export function TutorialTurn2Describe({ onBuilt }: Props) {
     setSubmitting(true);
     setError(null);
     try {
-      const response = await composePipelineFromPrompt({
-        prompt,
-        tutorial_mode: true,
-      });
+      // R2-10, 2026-05-19: the live compose path is create-session
+      // followed by send-message. `composePipelineFromPrompt` is not a
+      // live function; the canonical sequence is below. The session
+      // becomes the user's own session under which the resulting
+      // pipeline lives — Phase 5a infrastructure.
+      const session = await createSession();
+      const response = await sendMessage(session.id, prompt);
       onBuilt({
-        sessionId: response.session_id,
-        pipelineSnapshot: response.pipeline_snapshot,
+        sessionId: session.id,
+        pipelineSnapshot: response.state,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1146,9 +1264,11 @@ export function TutorialTurn2Describe({ onBuilt }: Props) {
 }
 ```
 
-`composePipelineFromPrompt` is added to `api/client.ts` as part of this task
-if it doesn't already exist (the function name should match what Phase 5a
-shipped; if Phase 5a's name differs, adapt — recon resolves this in Step 1).
+No `client.ts` additions are required here (R2-10, 2026-05-19) —
+`createSession` and `sendMessage` already exist as live Phase 5a
+infrastructure functions. If Step 1 recon reveals either function has
+moved or renamed, adapt the imports and spy targets accordingly; do not
+re-introduce a `composePipelineFromPrompt` alias.
 
 - [ ] **Step 5: Run test to verify it passes.**
 
@@ -1158,8 +1278,7 @@ Expected: PASS.
 
 ```bash
 git add src/elspeth/web/frontend/src/components/tutorial/TutorialTurn2Describe.tsx \
-  src/elspeth/web/frontend/src/components/tutorial/TutorialTurn2Describe.test.tsx \
-  src/elspeth/web/frontend/src/api/client.ts
+  src/elspeth/web/frontend/src/components/tutorial/TutorialTurn2Describe.test.tsx
 git commit -m "feat(frontend): add tutorial turn 2 describe (Phase 4B.5)"
 ```
 
@@ -1167,6 +1286,7 @@ git commit -m "feat(frontend): add tutorial turn 2 describe (Phase 4B.5)"
 
 **Files:**
 - Create: `TutorialTurn2bShowBuilt.tsx` + `.test.tsx`.
+- Create: `InterpretationContract.test.tsx` (Phase 4 ↔ Phase 5b contract; see Steps 7–9 below).
 
 Turn 2b renders:
 1. A summary of the drafted pipeline (URLs from the `inline_blob` source,
@@ -1361,8 +1481,10 @@ export function TutorialTurn2bShowBuilt({
   // Read the pending event projection directly from the live store. The
   // compose-loop response (Turn 2) addPendingEvent()'s the new event into
   // pendingBySession before this turn mounts; refreshPending() here is a
-  // belt-and-braces rehydration for navigation-resume cases (sessionStorage
-  // restore mid-flow).
+  // belt-and-braces rehydration in case the store was rehydrated mid-flow
+  // (e.g., navigation back/forward to the tutorial container — note refresh
+  // restarts the tutorial at turn 1 per plan-fix P10, so this hook is
+  // primarily defending against same-session re-mounts, not refresh-resume).
   const refreshPending = useInterpretationEventsStore((s) => s.refreshPending);
   const pendingMap = useInterpretationEventsStore(
     (s) => s.pendingBySession[sessionId],
@@ -1450,6 +1572,143 @@ Expected: PASS.
 git add src/elspeth/web/frontend/src/components/tutorial/TutorialTurn2bShowBuilt.tsx \
   src/elspeth/web/frontend/src/components/tutorial/TutorialTurn2bShowBuilt.test.tsx
 git commit -m "feat(frontend): add tutorial turn 2b show-built (Phase 4B.6)"
+```
+
+- [ ] **Step 7: Write the Phase 4 ↔ Phase 5b contract test (TDD).**
+
+Per plan-fix P17 (2026-05-19, systems S7): add a CI-enforced contract
+test (not preflight) that asserts the shape of the Phase 5b
+`InterpretationEvent` store projection against the fields Turn 2b reads.
+Without this, Turn 2b is one Phase 5b refactor away from silent
+breakage. The test lives alongside the Turn 2b component test and runs
+in the normal Vitest CI sweep.
+
+Field inventory — Turn 2b consumes these fields from the live store
+(`pendingBySession[sessionId]`'s map values), confirmed against the
+Step 4 implementation and the live
+`src/types/interpretation.ts::InterpretationEvent`:
+
+- `id` — passed back via `onInterpretationAccepted({ interpretationEventId })`.
+- `session_id` — keyed by store; sanity-checked through the
+  `InterpretationReviewTurn` `event` prop.
+- `user_term` — read by the embedded `InterpretationReviewTurn`
+  (live: line 135 of `chat/guided/InterpretationReviewTurn.tsx`).
+- `llm_draft` — read by the embedded `InterpretationReviewTurn`
+  (live: line 136).
+- `choice` — gates "pending" vs resolved rendering inside
+  `InterpretationReviewTurn`.
+- `created_at` — surfaces the pending-event age in the embed.
+
+Create
+`src/elspeth/web/frontend/src/components/tutorial/InterpretationContract.test.tsx`:
+
+```typescript
+import { describe, it, expect, beforeEach } from 'vitest';
+import { useInterpretationEventsStore } from '@/stores/interpretationEventsStore';
+import type { InterpretationEvent } from '@/types/interpretation';
+
+// Phase 4 ↔ Phase 5b contract: this test pins the InterpretationEvent
+// fields Turn 2b reads. If a Phase 5b refactor renames or removes any of
+// these, this test breaks BEFORE the user-visible breakage. Live store
+// shape: pendingBySession[sid] is a Record<eventId, InterpretationEvent>
+// (NOT an array) — see src/stores/interpretationEventsStore.ts.
+
+describe('Phase 4 ↔ Phase 5b contract: InterpretationEvent shape', () => {
+  beforeEach(() => {
+    useInterpretationEventsStore.setState({ pendingBySession: {} });
+  });
+
+  it('pendingBySession exposes the fields Turn 2b consumes', () => {
+    const fixture: InterpretationEvent = {
+      id: 'evt-1',
+      session_id: 'sess-1',
+      composition_state_id: 'cs-1',
+      affected_node_id: 'node-1',
+      tool_call_id: 'tc-1',
+      user_term: 'cool',
+      llm_draft: 'modern design + clear purpose + interactivity',
+      accepted_value: null,
+      choice: 'pending',
+      created_at: '2026-05-19T00:00:00Z',
+      resolved_at: null,
+      actor: 'originator:user:test',
+      interpretation_source: 'llm_drafted',
+      model_identifier: 'claude-opus-4.7',
+      model_version: 'v1',
+      provider: 'anthropic',
+      composer_skill_hash: null,
+      arguments_hash: null,
+      hash_domain_version: null,
+      runtime_model_identifier_at_resolve: null,
+      runtime_model_version_at_resolve: null,
+      resolved_prompt_template_hash: null,
+    };
+    useInterpretationEventsStore.setState({
+      pendingBySession: { 'sess-1': { 'evt-1': fixture } },
+    });
+
+    const pendingMap =
+      useInterpretationEventsStore.getState().pendingBySession['sess-1'];
+    expect(pendingMap).toBeDefined();
+    const events = Object.values(pendingMap);
+    expect(events).toHaveLength(1);
+
+    // Assert every field Turn 2b (and its embedded
+    // InterpretationReviewTurn) reads is present and of the expected
+    // type. If Phase 5b ever renames or removes one of these, this
+    // matcher fails — surfacing the contract drift before runtime.
+    expect(events[0]).toMatchObject({
+      id: expect.any(String),
+      session_id: expect.any(String),
+      user_term: expect.any(String),
+      llm_draft: expect.any(String),
+      choice: expect.stringMatching(/pending|user_approved|amended|auto_interpreted_opt_out|auto_interpreted_no_surfaces/),
+      created_at: expect.any(String),
+    });
+  });
+});
+```
+
+- [ ] **Step 8: Run the contract test.**
+
+```bash
+cd src/elspeth/web/frontend && npx vitest run \
+  src/components/tutorial/InterpretationContract.test.tsx
+```
+
+Expected: PASS. If it fails because the live `InterpretationEvent` type
+no longer carries one of the listed fields, **fix the consumer**
+(Turn 2b implementation + this field inventory) and update the test —
+do not paper over a real shape drift (CLAUDE.md
+`feedback_fix_errors_you_encounter`).
+
+> **Note (Quality r2 — R2-M4, 2026-05-19):** This contract test reads
+> the store projection directly
+> (`useInterpretationEventsStore.getState().pendingBySession[sid][eventId]`),
+> so it pins the **raw event shape** and is not masked by the live
+> `InterpretationReviewTurn`'s defensive `?? ""` fallbacks (lines
+> 135–136 of `chat/guided/InterpretationReviewTurn.tsx`:
+> `user_term ?? "this term"` and `llm_draft ?? ""`). Those defensive
+> fallbacks are themselves a CLAUDE.md offensive-programming violation
+> on Tier-2 plugin output — they would silently render an empty string
+> (or the literal "this term") for an absent field rather than
+> surfacing the shape drift this contract test exists to catch.
+> **Follow-up scope (NOT this plan):** the live `InterpretationReviewTurn`
+> component is owned by Phase 5b. The `?? ""` fallbacks should be
+> replaced with assertions / explicit error rendering when the next
+> Phase-5b pass touches the file. Filed as a Phase-4-followup
+> observation against `21-phase-9-followups.md` (or equivalent) —
+> the contract test here is sufficient to catch a real shape drift,
+> but the live component's behaviour on drift is silently-wrong
+> rendering rather than a crash. The contract test does not paper
+> over this; it surfaces the drift as a CI failure before users see
+> the empty strings.
+
+- [ ] **Step 9: Commit.**
+
+```bash
+git add src/elspeth/web/frontend/src/components/tutorial/InterpretationContract.test.tsx
+git commit -m "test(frontend): pin Phase 4 ↔ Phase 5b InterpretationEvent contract (Phase 4B.6)"
 ```
 
 ## Task 7: Turn 3 — Graph glance
@@ -1605,7 +1864,7 @@ After Tasks 1–7 land:
 - Three leaf turn components (1, 2, 2b, 3) render in isolation with mocked
   store/API; each is unit-tested.
 
-Not yet wired: container (Task 11), App.tsx detection + sessionStorage persistence + banner (Task 12), turns 4–6 (Tasks 8–10), integration/E2E/smoke (Tasks 13–15).
+Not yet wired: frontend API client surface (Task 7.5 — `runTutorialPipeline`, `getRunAuditSummary`, `deleteTutorialOrphans`, `renameSession`), turns 4–6 (Tasks 8–10), container (Task 11 with mount-time orphan cleanup), App.tsx detection (Task 12 — no sessionStorage / banner per plan-fix P10), integration test (Task 13), Playwright E2E (Task 14), Reset-tutorial link in `ComposerPreferencesPanel` (Task 14.5 — closes Open Question C3 in-phase), staging smoke (Task 15).
 
 Continue in [21b2-phase-4-frontend-part-2.md](21b2-phase-4-frontend-part-2.md).
 
@@ -1615,6 +1874,19 @@ Continue in [21b2-phase-4-frontend-part-2.md](21b2-phase-4-frontend-part-2.md).
 
 | ID | Severity | Status | Summary |
 |---|---|---|---|
-| 4B1-F1 | CRITICAL (Systems) | Applied | Architecture stanza updated: sessionStorage-resume pattern; DB-delete banner dropped per 2026-05-16 review (No Legacy Code Policy — single Turn 1 entry for all tutorial-mode users) |
+| 4B1-F1 | CRITICAL (Systems) | Superseded | Architecture stanza originally adopted the sessionStorage-resume pattern (and DB-delete banner was dropped per 2026-05-16 review). The sessionStorage-resume scaffolding was deleted per plan-fix P10 (2026-05-19) — flat key risks cross-user contamination on shared workstations (S6); restart-at-turn-1 is the new contract. DB-delete banner remains dropped (No Legacy Code Policy — single Turn 1 entry for all tutorial-mode users). |
 | 4B1-F3 | BLOCKER (Coherence) | Applied | `markTutorialCompleted` signature corrected to `(defaultMode)` only; session-rename remains a separate Turn 6 call |
 | 4B1-F2 | IMPORTANT (Architecture) | Applied | Phase 5b cross-link added to turn 2b and turn 5 scope items |
+
+### 2026-05-19 — Phase 4 plan-fixes (P10 / P17)
+
+| ID | Severity | Status | Summary |
+|---|---|---|---|
+| P10 | CRITICAL (Systems) | Applied | Navigation Resilience stanza rewritten — refresh restarts at turn 1, no sessionStorage scaffolding (cross-user contamination risk on shared workstations, S6). Out-of-scope bullet for multi-device sync updated to reference the restart contract. Comment in Turn 2b's `refreshPending` effect updated to remove sessionStorage-resume framing. |
+| P17 | IMPORTANT (Systems) | Applied | Task 6 extended with Steps 7–9: a CI-enforced contract test `InterpretationContract.test.tsx` that pins the Phase 5b `InterpretationEvent` fields Turn 2b consumes (`id`, `session_id`, `user_term`, `llm_draft`, `choice`, `created_at`). If Phase 5b ever renames or removes one of these, the test breaks before the user-visible breakage. Lives alongside the Turn 2b component test; runs in the normal Vitest CI sweep (not preflight). |
+
+### 2026-05-19 — frontend r2 review closure (Quality)
+
+| ID | Severity | Status | Summary |
+|---|---|---|---|
+| R2-M4 | MAJOR (Quality) | Applied | Task 6 Step 8 contract test annotated with the follow-up scope: the live `InterpretationReviewTurn` (`chat/guided/InterpretationReviewTurn.tsx` lines 135–136) accesses `user_term ?? "this term"` and `llm_draft ?? ""` defensively, which silently masks shape drift. The contract test reads `pendingBySession[sid][eventId]` directly, so it pins the raw store shape and is not masked by the component's fallbacks. Follow-up filed against `21-phase-9-followups.md` (or equivalent) — Phase 5b owns the `InterpretationReviewTurn` cleanup; this plan does not modify it. |

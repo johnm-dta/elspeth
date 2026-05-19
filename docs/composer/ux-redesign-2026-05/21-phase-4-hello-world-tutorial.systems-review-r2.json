@@ -1,0 +1,127 @@
+{
+  "reviewer": "systems",
+  "plan": "21-phase-4-hello-world-tutorial",
+  "files_reviewed": [
+    "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+    "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+    "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+    "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+    "docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md",
+    "src/elspeth/core/landscape/schema.py",
+    "src/elspeth/web/sessions/telemetry.py",
+    "src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.tsx"
+  ],
+  "verdict": "BLOCKED — two new systemic ruptures survive the r1 patch round. The Task 15 staging runbook omits the Landscape DB delete that Task 7.0's six new columns require, guaranteeing a broken audit schema on first deploy. The Phase 4 telemetry counter name (complete_total) collides with Phase 8's already-committed forward-fit counter (completed_total), creating an incoherent cross-plan telemetry namespace that neither plan can own without breaking the other. Both must be resolved before Phase 4 is safe to ship. Five additional MAJOR findings cover operational gaps (orphaned sessions, missing CLI implementation, absent retake UI) and a schema denormalization that will propagate incorrect semantics at query time.",
+  "confidence": "HIGH — all findings are grounded in direct file inspection of plan prose, codebase grep results, and live schema files. The two BLOCKING findings are independently verifiable from the plan documents alone without ambiguity.",
+  "findings": [
+    {
+      "id": "R2-S1",
+      "severity": "BLOCKING",
+      "category": "runbook omission — Landscape DB delete missing",
+      "file": "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+      "task_or_section": "Task 15 (staging smoke runbook)",
+      "evidence": "Task 15's staging runbook (21b2-phase-4-frontend-part-2.md) instructs the operator to delete the sessions DB but contains zero mention of the Landscape DB. Task 7.0 (21a-phase-4-backend.md, lines 2057-2246) adds six new columns to runs_table: llm_call_count, source_data_hash, run_started_at, plugin_versions, seeded_from_cache, cache_key. The Landscape DB deletion on schema change is the project's stated policy (CLAUDE.md: 'DB-delete-on-schema-change'). The overview document (21-phase-4-hello-world-tutorial.md) explicitly acknowledges TWO DB-delete events for Phase 4 alone — one for the sessions DB (Task 1) and one for the Landscape DB (Task 7.0). Task 15 Step 1 reads only 'delete sessions DB + restart'. An operator following the runbook verbatim will deploy Task 7.0's new columns against the pre-existing Landscape DB. SQLAlchemy Core's create_all with checkfirst=True will silently skip the new columns on existing tables, leaving the deployed schema without llm_call_count, seeded_from_cache, or cache_key. All cache-hit rows written to runs_table will fail with a NOT NULL constraint violation or silently drop the column data depending on dialect behavior, corrupting the audit trail from the first cache hit forward.",
+      "recommendation": "Add an explicit Landscape DB delete step to Task 15's runbook. The step should appear after the sessions DB delete and before the service restart, with the same level of ceremony as the sessions DB step: state the file path, confirm the delete is irreversible, and note that all prior run audit records are lost. The rollback recipe must also address the Landscape DB: if the operator rolls back the deployment, both DBs need to be recreated from scratch (there is no data to recover since the point of this runbook step is that the Landscape DB is disposable at this stage). The 21-phase-4-hello-world-tutorial.md overview already has this right — the runbook must match it."
+    },
+    {
+      "id": "R2-S2",
+      "severity": "BLOCKING",
+      "category": "cross-plan telemetry name collision — Cross-Plan Implicit Dependency recurrence",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md vs src/elspeth/web/sessions/telemetry.py",
+      "task_or_section": "Task 8 (tutorial_telemetry.py) vs sessions/telemetry.py lines 317-323",
+      "evidence": "Phase 4 Task 8 declares three OTel counters in a new tutorial_telemetry.py module: composer.tutorial.complete_total, composer.tutorial.skip_total, and composer.tutorial.abandon_total. Phase 8 has already committed two forward-fit counters in src/elspeth/web/sessions/telemetry.py (lines 317-323): composer.tutorial.started_total and composer.tutorial.completed_total (with a 'd' suffix). The difference is material: Phase 4 creates composer.tutorial.complete_total (no 'd'); Phase 8's live code uses composer.tutorial.completed_total (with 'd'). These are different metric names. A dashboard or alert rule targeting composer.tutorial.completed_total will never see Phase 4 completions. A dashboard targeting composer.tutorial.complete_total will be orphaned when Phase 8 eventually reconciles the naming. The cross-plan dependency is implicit: Phase 4's plan file never references the Phase 8 forward-fit counters, never acknowledges the name divergence, and creates a parallel counter that cannot be reconciled at query time. This is the same Cross-Plan Implicit Dependency archetype from r1, now surfaced at the telemetry layer rather than the schema layer.",
+      "recommendation": "Phase 4 Task 8 must adopt the counter names that Phase 8 has already committed to in production code: composer.tutorial.started_total and composer.tutorial.completed_total. The Phase 4 plan must be updated to reference these names explicitly, and tutorial_telemetry.py must declare them consistently with sessions/telemetry.py. If Phase 4 needs counters that Phase 8 does not forward-fit (skip_total, abandon_total), those are additive and fine. The collision is only on complete vs completed. A shared telemetry contract section should be added to 21-phase-4-hello-world-tutorial.md naming all six counters (started, completed, skipped, abandoned, and any others) with their canonical names, so future phases can extend the namespace without collision."
+    },
+    {
+      "id": "R2-S3",
+      "severity": "MAJOR",
+      "category": "missing production code — Task 7.0 scope will expand at implementation time",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 7.0 (runs_table schema), Step 1 (llm_call_count accumulator reconnaissance)",
+      "evidence": "Task 7.0 Step 1 explicitly states: 'grep -rn llm_call_count src/elspeth/ — this confirms the field exists (as an accumulator somewhere in engine or orchestrator code) and identifies where to wire it.' A grep of src/elspeth/ for 'llm_call_count' returns zero results. The field does not exist anywhere in production code. Task 7.0 assumes it will be found and instructs the implementer to locate it; the implementer will find nothing. The actual work required is: (1) decide where in the execution pipeline to count LLM calls, (2) plumb the counter through the orchestrator or executor layer, (3) surface it at run completion. This is non-trivial engine work, not a schema-column addition. The plan's scope estimate for Task 7.0 is therefore materially understated, and Step 1's reconnaissance will fail, revealing the gap only at implementation time.",
+      "recommendation": "Before Phase 4 is marked ready for implementation, the llm_call_count plumbing must be scoped. Options: (a) add the accumulator in this phase as additional engine work (requires scope expansion and additional reviewers); (b) defer llm_call_count from runs_table until the accumulator exists, narrowing Task 7.0 to the remaining five columns; (c) populate llm_call_count from the cache entry (the cache already stores llm_call_count from the original run) and accept that non-tutorial runs will have NULL. Option (c) is lowest risk for Phase 4 but requires documenting the NULL-for-non-tutorial semantics explicitly. Whichever is chosen, Step 1's 'grep confirms the field exists' must be corrected — it does not exist."
+    },
+    {
+      "id": "R2-S4",
+      "severity": "MAJOR",
+      "category": "schema denormalization — run-level aggregate fields contradict row-level and node-level records",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md vs src/elspeth/core/landscape/schema.py",
+      "task_or_section": "Task 7.0 (six new columns on runs_table)",
+      "evidence": "Task 7.0 adds source_data_hash and plugin_versions to runs_table as run-level fields. Inspection of src/elspeth/core/landscape/schema.py shows: (1) source_data_hash already exists on rows_table at line 168 as a per-row field; (2) plugin_version already exists on nodes_table at line 120 as a per-node field. Adding these at run level creates semantic ambiguity: does runs_table.source_data_hash mean 'hash of the source configuration' or 'hash of all source rows'? If the former, it duplicates config_hash; if the latter, it's undefined for multi-row runs where individual rows may have different hashes. Similarly, runs_table.plugin_versions (plural) implies a snapshot of all plugin versions at run time, but nodes_table.plugin_version is authoritative per node — if a node's plugin is updated between runs, the run-level aggregate will disagree with the node-level record. Any query that joins these fields against each other will produce silently inconsistent results.",
+      "recommendation": "Do not add source_data_hash or plugin_versions to runs_table. The cache's need to identify a 'matching prior run' should use the cache key (already in Task 7.0) and the existing per-row and per-node fields. If the tutorial UI needs a fast 'was this run seeded from cache' check plus a cache key, the seeded_from_cache (bool) and cache_key columns are sufficient and unambiguous. source_data_hash and plugin_versions at run level should be dropped from Task 7.0's column list unless a clear semantic definition is provided that doesn't conflict with the existing row-level and node-level fields."
+    },
+    {
+      "id": "R2-S5",
+      "severity": "MAJOR",
+      "category": "backend session orphaning — refresh during Turn 2+ accumulates orphaned sessions",
+      "file": "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+      "task_or_section": "Task 2 (tutorialReducer), Task 5 (Turn 2 composePipelineFromPrompt)",
+      "evidence": "21b1 Task 5 states that Turn 2 calls composePipelineFromPrompt, which creates a backend session and dispatches PIPELINE_BUILT carrying session_id into the tutorialReducer. The tutorial state machine is in-memory only (useReducer, no sessionStorage). 21b1 line 26 explicitly confirms: 'Refresh during the tutorial restarts at turn 1 — there is no sessionStorage scaffolding for resume.' A user who progresses to Turn 2 (session created in backend), then refreshes (session_id lost from memory), then completes Turn 2 again (new session created), has now produced two backend sessions with no way to identify or clean up the first. The plan's concurrent-tab analysis focuses on the case of two tabs open simultaneously but does not address the refresh-then-resume case, which is more common. Each refresh after Turn 2 creates one orphaned session. Over the tutorial's lifetime (all users, all retakes), this accumulates unbounded orphaned sessions in the sessions DB.",
+      "recommendation": "Two options: (a) persist session_id to sessionStorage keyed by a tutorial-nonce so refresh resumes the same session rather than creating a new one — this also gives users a partial-resume experience rather than restart-at-turn-1; (b) accept orphaned sessions and add a background cleanup job that expires sessions with no associated run record after N hours. Option (a) is preferable because it fixes the user experience regression (restart at turn 1 is disorienting) and the operational problem simultaneously. If option (b) is chosen, the plan must document the cleanup policy and the maximum session accumulation rate."
+    },
+    {
+      "id": "R2-S6",
+      "severity": "MAJOR",
+      "category": "missing CLI implementation — warm-cache runbook step will fail",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 5 (TutorialCache), Task 15 runbook (Step 3)",
+      "evidence": "The warm-cache CLI command 'elspeth tutorial warm-cache' appears in the plan at 21a lines 222, 240, 244 (cache warming runbook) and in 21b2's Task 15 staging runbook at Step 3. Task 5's implementation steps (Steps 1-5) create the tutorial_cache.py module with TutorialCache class and TutorialCacheEntry Pydantic model. Task 5 prose mentions the CLI as 'owned by Task 5 plus a small CLI entry-point' but no step in Task 5 implements the entry-point. No other task in 21a or 21b1/21b2 implements it either. The CLI entry-point requires: a new Typer subcommand under 'elspeth tutorial', a dependency on WebSettings for the cache_dir and model configuration, and integration with the TutorialCache.warm() method. Task 15 Step 3 instructs the operator to run 'elspeth tutorial warm-cache' immediately after the service restart. This command will not exist. The staging deploy will block at Step 3 with 'command not found'.",
+      "recommendation": "Add a Task 5b (or expand Task 5 Step 6) that implements the CLI entry-point. The implementation is: a new 'tutorial' subcommand group in the CLI, a 'warm-cache' subcommand that loads WebSettings, instantiates TutorialCache, and calls warm(). The implementation is small but the plan must own it explicitly in a numbered step with a deliverable. The runbook in Task 15 must not reference a command that no task creates."
+    },
+    {
+      "id": "R2-S7",
+      "severity": "MAJOR",
+      "category": "retake UI absent — P20 resolution leaves retake unreachable until Phase 8",
+      "file": "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+      "task_or_section": "Open question C3 (retake affordance), Risk table row 'User wants to come back'",
+      "evidence": "The Phase 4 overview document (21-phase-4-hello-world-tutorial.md) states in the C3 row: 'The toggle UI lives wherever the settings panel currently lives (owned by a sibling plan); Phase 4 ships the wire contract only.' The risk table row for 'User explicitly clicks skip but immediately wants to come back' resolves to 'Per the P20 resolution, Phase 4 ships an in-settings Reset tutorial toggle... Phase 8 Task 6's polished Replay hello-world tutorial button is a separate, foregrounded affordance.' Inspection of ComposerPreferencesPanel.tsx confirms it already exists and is rendered in App.tsx. Phase 4 ships NO retake toggle UI to this panel. Phase 8 Task 6 adds TutorialReplayButton.tsx. The 'sibling plan' is not a formal roadmap phase with its own plan document — it names the existing ComposerPreferencesPanel.tsx file, which is not a plan. A user who skips the tutorial after Phase 4 ships has no path to retake it until Phase 8 ships. The plan's own risk table notes 'Phase 8 may slip indefinitely' as an explicit risk with no mitigation other than 'wire contract only'. This is an Optimistic First-User Path: the plan relies on a downstream phase resolving a user-visible gap, with no fallback if that phase slips.",
+      "recommendation": "Phase 4 must ship a minimal retake surface in ComposerPreferencesPanel.tsx. This does not need to be Phase 8's polished TutorialReplayButton — a simple 'Reset tutorial' text link or checkbox that calls PATCH /api/users/me/preferences with { tutorial_completed_at: null } is sufficient. The effort is small (the wire contract is already defined by Phase 4 Task 1 and Task 3), and it closes the gap without depending on Phase 8. If the operator explicitly decides to defer, the decision must be recorded with a concrete fallback (not 'Phase 8 will handle it') and the risk table must be updated to reflect that skipping leaves the user permanently unable to retake."
+    },
+    {
+      "id": "R2-S8",
+      "severity": "MINOR",
+      "category": "multiple tutorial sessions after retake — not addressed",
+      "file": "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+      "task_or_section": "Task 7 (cache-hit replay), cross-plan contract",
+      "evidence": "The plan addresses concurrent-tab tutorial sessions (noting they create independent backend sessions and are acceptable). It does not address the case where a user completes the tutorial (tutorial_completed_at written), exercises the retake affordance (tutorial_completed_at nulled), and then completes the tutorial again. The second completion writes tutorial_completed_at a second time. This is operationally benign but the telemetry counter composer.tutorial.complete_total will increment twice for the same user. Over a population of frequent retakers, this inflates the completion count and makes the skip/complete ratio unreliable. The plan makes no statement about whether the counter is a user-unique count or a raw event count.",
+      "recommendation": "Document in Task 8 whether composer.tutorial.complete_total (or completed_total after the R2-S2 fix) counts unique users or total completion events. If user-unique, the backend must check whether tutorial_completed_at was already set before incrementing. If raw event count, retake completions inflate the total and dashboards must note this. Either is acceptable; the ambiguity is the problem."
+    },
+    {
+      "id": "R2-S9",
+      "severity": "MINOR",
+      "category": "sendBeacon lower-bound semantics — operator visibility",
+      "file": "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md",
+      "task_or_section": "Task 13 (abandon beacon), Task 8 (abandon_total counter)",
+      "evidence": "The plan documents that the abandon beacon uses navigator.sendBeacon(), which is best-effort and may be dropped by the browser if the tab closes before the beacon is queued. The plan acknowledges this in the text but the counter name abandon_total implies a total count. An operator reading a dashboard with abandon_total will not know from the name alone that the number is a lower bound, not a true count. The plan does not specify any dashboard annotation or metric description string that would surface this constraint to the operator post-deploy.",
+      "recommendation": "Add a metric description field to the abandon_total counter declaration in tutorial_telemetry.py that reads 'Lower bound — sendBeacon delivery is best-effort; tab-close abandons may be undercounted.' This is a single-line addition to the counter constructor and makes the floor semantics self-documenting at the source rather than requiring the operator to read the plan prose."
+    }
+  ],
+  "archetypes_detected": [
+    {
+      "name": "Shifting the Burden",
+      "description": "WORSENED relative to r1. R1 identified one DB-delete event per schema addition as a structural debt accumulator. The r1 patch round resolved the identity/content problem in TutorialCacheEntry but added Task 7.0 with six new Landscape DB columns — creating a second DB-delete event for Phase 4 alone (sessions DB for Task 1, Landscape DB for Task 7.0). The cumulative DB-delete surface area doubled within the phase. The Landscape DB delete is now missing from the Task 15 runbook (R2-S1), meaning the burden has been shifted to the operator who will discover the schema mismatch at first deploy. The Shifting the Burden archetype is now expressed as a runbook omission rather than a design pattern.",
+      "findings": ["R2-S1", "R2-S4"]
+    },
+    {
+      "name": "Identity / Content Conflation",
+      "description": "GENUINELY RESOLVED. R1's BLOCKING finding on TutorialCacheEntry storing run_id and interpretation_event_id has been addressed. The patched plan adds test_entry_rejects_identity_fields as a structural guard using ConfigDict(extra='forbid'), and the cache-hit replay model explicitly synthesizes a new Landscape entry under the current user's session with a freshly-minted run_id. The cross-ownership audit problem is architecturally closed. No new identity/content conflation was found in the r2 pass.",
+      "findings": []
+    },
+    {
+      "name": "Cross-Plan Implicit Dependency",
+      "description": "PARTIALLY RESOLVED at schema layer, RECURRED at telemetry layer. R1's schema-level cross-plan contract mismatch (tutorial_completed_at nullification semantics) was resolved by the r1 patch round — Phase 4 now explicitly documents the three-state PATCH and co-owns the contract with Phase 8. However, the archetype has resurfaced at the telemetry layer: Phase 4 Task 8 creates composer.tutorial.complete_total while Phase 8 has already committed composer.tutorial.completed_total as a forward-fit counter in production code (src/elspeth/web/sessions/telemetry.py lines 317-323). Phase 4's plan file never references the Phase 8 forward-fit counters. The implicit dependency is now between two metric names that neither plan acknowledges as shared.",
+      "findings": ["R2-S2"]
+    },
+    {
+      "name": "Optimistic First-User Path",
+      "description": "PARTIALLY RESOLVED. The plan added explicit runbook documentation for the warm-cache step, resolving the r1 concern that cache warming was undocumented. However, two optimistic assumptions remain: (1) the warm-cache CLI command referenced in the runbook does not exist in any task's implementation steps (R2-S6), so the first deploy will fail at Step 3; (2) the retake UI is deferred to Phase 8 with no fallback if Phase 8 slips (R2-S7). The plan's own risk table acknowledges Phase 8 may slip indefinitely. An operator following the r1-patched plan optimistically assumes Phase 8 will ship — but the plan provides no minimum viable retake surface for the gap period.",
+      "findings": ["R2-S6", "R2-S7"]
+    },
+    {
+      "name": "Ambient Key Convention Divergence",
+      "description": "RESOLVED. R1 identified the cache directory path as unanchored from the validated settings model. The r1 patch round added WebSettings.tutorial_cache_dir as a validated config field with a model_validator that defaults to data_dir / 'tutorial_cache', properly anchoring the path to the project's established data_dir convention. No new convention divergences were found in the r2 pass.",
+      "findings": []
+    }
+  ],
+  "summary_for_synthesizer": "The r1 patch round resolved the two BLOCKING r1 findings (identity/content conflation in TutorialCacheEntry, cross-plan API contract mismatch on tutorial_completed_at). It also resolved the Ambient Key Convention Divergence archetype cleanly. However, the patch round introduced or exposed two new BLOCKING findings and five MAJOR findings. The two BLOCKING issues are: (1) the Task 15 staging runbook omits the Landscape DB delete that Task 7.0's six new columns require — an operator following the runbook verbatim will ship a broken audit schema; (2) Phase 4 Task 8 creates composer.tutorial.complete_total while Phase 8 has already committed composer.tutorial.completed_total as a forward-fit counter in production code — a cross-plan telemetry name collision that makes neither plan's dashboard queries coherent. The five MAJOR findings are: (R2-S3) llm_call_count has no production implementation so Task 7.0's scope is understated; (R2-S4) source_data_hash and plugin_versions on runs_table denormalize fields already at row and node level, creating semantically ambiguous queries; (R2-S5) refresh during Turn 2+ orphans backend sessions unboundedly; (R2-S6) the warm-cache CLI command is referenced in the runbook but implemented in no task; (R2-S7) the retake UI is deferred to Phase 8 with no fallback, leaving skipping users with no path to retake until an indefinitely-slippable downstream phase ships. The Cross-Plan Implicit Dependency and Optimistic First-User Path archetypes remain active. Shifting the Burden worsened. Verdict: BLOCKED."
+}

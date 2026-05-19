@@ -39,11 +39,16 @@ TypeScript, Zustand, Vitest, Playwright.
 **Sibling plans:**
 - This document (21) — overview, scope, dependencies, trust-tier check, file
   inventory, and risks.
-- [21a-phase-4-backend.md](21a-phase-4-backend.md) — schema column, service
+- [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md) — backend infrastructure: schema column, service
   extension, route extension, tutorial cache, run-path integration.
-- [21b-phase-4-frontend.md](21b-phase-4-frontend.md) — tutorial detection,
-  container, six turn components, finalisation, skip affordance, integration
-  test, staging smoke.
+- [21a2-phase-4-backend-part-2.md](21a2-phase-4-backend-part-2.md) — backend endpoints + telemetry: tutorial-run endpoint, audit-story endpoint, frontend API client, launch telemetry counters.
+- [21b1-phase-4-frontend-part-1.md](21b1-phase-4-frontend-part-1.md) — store,
+  state machine, copy module, turns 1/2/2b/3 (frontend Tasks 1–7).
+- [21b2-phase-4-frontend-part-2.md](21b2-phase-4-frontend-part-2.md) — turns
+  4/5/6, container, App.tsx detection, frontend API client (`runTutorialPipeline`,
+  `getRunAuditSummary`, `renameSession`, `deleteTutorialOrphans`), orphan-session cleanup wire-up,
+  Reset-tutorial link in `ComposerPreferencesPanel`, Vitest integration,
+  Playwright E2E, staging smoke (frontend Tasks 7.5–16).
 
 **Roadmap reference:** [00-implementation-roadmap.md](00-implementation-roadmap.md).
 Design spec: [04-first-run-tutorial.md](04-first-run-tutorial.md).
@@ -82,7 +87,7 @@ Design spec: [04-first-run-tutorial.md](04-first-run-tutorial.md).
   this affordance). The Phase 4 PATCH contract permits nullification via
   `{"tutorial_completed_at": null}` so Phase 8 can clear the column with no
   additional Phase 4 changes; see §"Cross-plan contract" in
-  [21a-phase-4-backend.md](21a-phase-4-backend.md).
+  [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md).
 - A "rename" transform alternative to the LLM-rate transform for the canonical
   seed (Open Question C1; recommended call is `(a) LLM with aggressive cache`,
   which is what this plan implements).
@@ -116,12 +121,16 @@ The tutorial flow has three distinct trust surfaces, each with a specific tier:
    done."
 
 3. **Tutorial cache file** (`~/.elspeth_web/tutorial_cache/<sha>.json` or
-   equivalent — operator-configurable): **Server-generated cache content**
-   (final tier classification deferred to P23). We wrote the file; corruption
-   is a fault we must surface, not paper over. If the file exists, it must JSON-parse to the
-   expected shape; if not, crash. The cache is an **optimisation, not a
-   fallback**. Cache misses (key not present) are not faults — they fall
-   through to a real LLM call.
+   equivalent — operator-configurable): **Server-generated content cache**.
+   Operationally follows Tier-1 rules (crash on corruption, miss on absence,
+   no live-LLM fallback on corruption); conceptually the data is LLM-derived,
+   not Tier-1 "our data" in the CLAUDE.md sense. We wrote the file;
+   corruption is a fault we must surface, not paper over. If the file exists,
+   it must JSON-parse to the expected shape; if not, crash. The cache is an
+   **optimisation, not a fallback**. Cache misses (key not present) are not
+   faults — they fall through to a real LLM call. See
+   `21a1-phase-4-backend-part-1.md` Task 5 §"Tier classification" for the full
+   framing.
 
 4. **LLM-generated source URLs** (the 5 government URLs returned by the LLM in
    turn 2's `set_pipeline` call): **Tier 3 at the composer LLM boundary** —
@@ -163,7 +172,7 @@ introduced in the user's first **real** session, not the tutorial.
 |---|---|---|---|
 | C1 | Tutorial transform: rename, LLM, or both? | **(a) LLM with aggressive cache** | The canonical seed produces a pipeline with the existing `web_scrape` + `llm_rate` transforms. No rename-transform alternative is shipped. The cache is the cost-control mechanism. |
 | C2 | Tutorial-skip affordance | **(b) subtle skip link in turn 1 → fast-forwards to turn 6 only** | Turn 1 component includes a small "I've used ELSPETH before, skip this" link. Clicking it sets `tutorial_completed_at` to now AND advances directly to turn 6's mode-choice — without build/run. The vocabulary teaching is lost (acceptable for returning users per design doc 04 §Risks). |
-| C3 | Re-take tutorial from settings | **Phase 8 Task 6** | Not implemented in Phase 4. The settings menu has no "retake" entry until Phase 8 ships it. Phase 4 ships the PATCH contract that permits nullification (`tutorial_completed_at: null` clears the column) so Phase 8's button needs no Phase 4 schema or service changes — see §"Cross-plan contract — `tutorial_completed_at` PATCH semantics" in 21a. |
+| C3 | Re-take tutorial from settings | **In Phase 4** (Reset link in `ComposerPreferencesPanel.tsx` clears `tutorial_completed_at`) | Phase 4 ships an in-settings "Reset tutorial" link added to the existing `ComposerPreferencesPanel.tsx` (21b2 §"Task 14.5"); the link PATCHes `{"tutorial_completed_at": null}` per the cross-plan contract (see §"Cross-plan contract — `tutorial_completed_at` PATCH semantics" in [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md)). This is the always-available escape hatch for a user who skipped or completed and wants to retake without operator intervention. Phase 8 Task 6's polished "Replay hello-world tutorial" button is a separate, foregrounded affordance built on the same PATCH contract; per project memory `feedback_no_calendar_shipping_commitments`, Phase 8 may slip indefinitely, so the Phase 4 link ensures retake is reachable from launch. No sibling-plan deferral: the UI lands in `ComposerPreferencesPanel.tsx` inside this phase. |
 
 ## "Shifting the Burden" risk explicitly acknowledged
 
@@ -224,7 +233,7 @@ the Alembic project, which is a much larger commitment.
   read/write path and the new Tier-1 guard.
 - `tests/integration/web/test_preferences_routes.py` — add cases for the new
   PATCH field.
-- The composer run-path file (identified during plan 21a Task 7's recon) —
+- The composer run-path file (identified during plan 21a1 Task 7's recon) —
   add a cache-consultation hook gated on `request.app.state.preferences_service`
   reporting `tutorial_completed_at is None` for the user (i.e., tutorial mode).
 
@@ -269,6 +278,16 @@ the Alembic project, which is a much larger commitment.
 - `src/elspeth/web/frontend/src/stores/sessionStore.ts` — minor extension if
   the tutorial needs to name the session "hello-world (cool government pages)"
   via an existing rename path; confirmed during plan 21b recon.
+- `src/elspeth/web/frontend/src/api/client.ts` — four function additions
+  (`runTutorialPipeline`, `getRunAuditSummary`, `deleteTutorialOrphans`)
+  plus rename `updateSessionTitle` → `renameSession` (single rename, all
+  call sites updated atomically; No Legacy Code Policy — no alias). Owned
+  by **21b2 Task 7.5** (relocated from 21a2 Task 7.3 — these are frontend
+  client symbols; they live with the frontend plan).
+- `src/elspeth/web/frontend/src/components/settings/ComposerPreferencesPanel.tsx`
+  — add the "Reset tutorial" link inside the `ComposerPreferencesForm`
+  body. Owned by **21b2 Task 14.5** (resolves Open Question C3 in-phase;
+  no sibling-plan deferral).
 
 ### Not modified
 
@@ -297,18 +316,61 @@ the Alembic project, which is a much larger commitment.
    `markTutorialCompleted(defaultMode)`.
 9. (21b) Detection: extend `App.tsx` to route to the tutorial when
    `tutorialCompleted === false`.
-10. (21b) Container + state machine.
-11. (21b) Six turn components, in arc order (1 → 2 → 2b → 3 → 4 → 5 → 6).
-12. (21b) Finalisation: at turn 6, write both preferences and rename the
+10. (21b) Frontend API client surface (`runTutorialPipeline`,
+    `getRunAuditSummary`, `deleteTutorialOrphans`, rename
+    `updateSessionTitle` → `renameSession`). Lands before turn 4/5/6
+    consumers; see 21b2 §"Task 7.5".
+11. (21b) Container + state machine. Container's mount-time orphan-cleanup
+    call (`DELETE /api/tutorial/orphans`) fires here — see 21b2 §"Task 11"
+    Step 4.
+12. (21b) Six turn components, in arc order (1 → 2 → 2b → 3 → 4 → 5 → 6).
+13. (21b) Finalisation: at turn 6, write both preferences and rename the
     session.
-13. (21b) Skip affordance in turn 1.
-14. (21b) Vitest integration: container with mock store + mock API.
-15. (21b) Playwright E2E: brand-new user journey.
-16. (21b) Staging smoke at `elspeth.foundryside.dev`.
+14. (21b) Skip affordance in turn 1.
+15. (21b) Vitest integration: container with mock store + mock API.
+16. (21b) Reset-tutorial link in `ComposerPreferencesPanel.tsx`
+    (resolves Open Question C3 in-phase — see 21b2 §"Task 14.5").
+17. (21b) Playwright E2E: brand-new user journey.
+18. (21b) Staging smoke at `elspeth.foundryside.dev`.
 
 Each task is TDD-shaped (write failing test, watch it fail, implement, watch
 it pass, commit). Plans 21a and 21b each contain their own per-task TDD
 breakdown.
+
+## PR strategy
+
+Phase 4 lands as **two PRs against `RC5.2`**, mirroring the 21a / 21b split.
+Architecture review (A8) flagged this as a 30-file change with a weighted
+blast-radius score of 27 ("Very High"); shipping it as a single PR would
+make rollback an all-or-nothing operation across two distinct system layers.
+
+- **PR-21a** — backend half. Tasks 0 through 9 split across
+  `21a1-phase-4-backend-part-1.md` (Tasks 0–7.0, 7, **Task 9 `elspeth
+  tutorial warm-cache` CLI subcommand added per R2-S6, 2026-05-19** —
+  preflight, schema column, Pydantic model, service, route tests,
+  tutorial cache, run-path integration, Landscape audit-story schema,
+  warm-cache CLI) and `21a2-phase-4-backend-part-2.md` (Tasks 7.1, 7.2,
+  7.4 orphan-cleanup endpoint, 8 — tutorial-run endpoint, audit-story
+  endpoint, `DELETE /api/tutorial/orphans` endpoint, **and the launch
+  telemetry counters added by P14: `composer.tutorial.complete_total`,
+  `composer.tutorial.skip_total`, `composer.tutorial.abandon_total`**).
+  The frontend API client surface (originally drafted as 21a2 Task 7.3)
+  is relocated to the frontend plan per M-R2-2 (2026-05-19) — see 21b2
+  §"Task 7.5: Frontend API client surface — `runTutorialPipeline`,
+  `getRunAuditSummary`, `renameSession`, `deleteTutorialOrphans`" for the
+  relocated work. The two halves are co-dependent and land in a single
+  PR. **Must merge first.**
+- **PR-21b** — frontend half. Tasks 1 through 16 across
+  `21b1-phase-4-frontend-part-1.md` (Tasks 1–7) and
+  `21b2-phase-4-frontend-part-2.md` (Tasks 7.5, 8–10, 11 with orphan-cleanup
+  wire-up, 12–14, 14.5 Reset-link in `ComposerPreferencesPanel`, 15
+  Playwright, 16 staging smoke). **Depends on PR-21a; do not merge to
+  `RC5.2` before PR-21a is on `RC5.2`.**
+
+Rationale: blast-radius isolation (a backend regression and a frontend
+regression are independently revertable), and the frontend's Vitest +
+Playwright tests cannot run green until PR-21a's `/api/tutorial/run` and
+`/api/sessions/.../audit-story` endpoints exist on the target branch.
 
 ## Auditability boundary (CLAUDE.md attributability test)
 
@@ -326,7 +388,7 @@ What the tutorial layer adds that is **not** in the Landscape:
 - Cache hits — when the cache hits, the run-path does **not** return a foreign
   run's audit-trail snippets. Instead:
   - A new `run_id` is created under the current session via
-    `_replay_cached_content_to_landscape` (21a Task 7). The synthesised
+    `_replay_cached_content_to_landscape` (21a1 Task 7). The synthesised
     Landscape entry is owned by the current session, populated from the
     cached deterministic content (`rows`, `source_data_hash`, `pipeline_yaml`).
   - The synthesised entry carries `seeded_from_cache: true` and the cache key
@@ -370,10 +432,10 @@ fresh LLM run — is the cost we're trying to avoid).
 | **Cache hit obscures provenance of LLM responses.** | On a cache hit the synthesised current-session run records `seeded_from_cache: true` and the SHA-256 cache key (`canonical_prompt:model_id`). An auditor querying `explain(recorder, run_id, token_id)` for a cache-hit run sees both the local lineage and the cache-key join back to the original seeding run. Turn 5's narration also acknowledges the cache replay in user-facing copy — neither the audit trail nor the UX hides the replay. |
 | **Tutorial cache key collision.** | The key is `SHA-256(canonical_prompt + ":" + model_id)`. Collisions are cryptographically negligible. The risk is **not** collision; the risk is **stale entries**: if the model rotates (e.g., the deployment switches from claude-opus-4.7 to a newer model), the previously cached entry is for a different model and must miss. The key includes `model_id` precisely to force a miss on model rotation. There is no LRU eviction (the cache is small — one canonical key per model the deployment has used); operators may delete the cache directory at will. |
 | **User edits the seed prompt to something the composer can't handle.** | Composer validation falls back to the existing error path. The tutorial surfaces the validation error in audit-readiness style ("here's what couldn't be built and why") and offers a "restore canonical seed" affordance per design doc 04 §Risks. The edited prompt is **not** cached (the cache key matches the canonical seed prompt exactly). |
-| **User refreshes the page mid-tutorial.** | The tutorial state machine is in-memory (Zustand-free; lives in `HelloWorldTutorial.tsx` `useReducer` state). On refresh, the user lands back at turn 1 — unless the tutorial reached the point where the pipeline was created (turn 2b onwards). At turn 2b, the session exists in the backend; the tutorial detection logic considers a user with `tutorial_completed_at IS NULL` AND `>=1 session` as "tutorial interrupted." The recovery path is to re-show turn 1 with a small "You started the tutorial earlier — pick it up from where you left off?" note. **However**, recovering mid-tutorial state cleanly is genuinely hard (turn 2b depends on the LLM's interpretation event from Phase 5b being still-pending, turn 4's run output may or may not exist, etc.). **Accepted simplification:** on refresh, restart at turn 1. The unsaved-on-the-way work is fine to lose; the canonical seed produces a fresh pipeline each time, and the cache makes that fast. |
-| **Cache corruption.** | Cache files are server-generated content; corruption is a fault (final tier classification deferred to P23). The tutorial cache reader uses Pydantic to parse the JSON file. If the parse fails, crash with the file path and the parse error chained via `from`. The operator's recovery is to delete the cache directory. **Do not** silently fall back to a live LLM call: that would mask the corruption and ship demonstrably wrong audit snippets to the user. |
+| **User refreshes the page mid-tutorial.** | Refresh during the tutorial → state machine restarts at turn 1. The state machine is in-memory (Zustand-free; lives in `HelloWorldTutorial.tsx` `useReducer` state); there is **no** `sessionStorage` scaffolding. Acceptable simplification (plan-fix P10, 2026-05-19): the tutorial is ~5 minutes; canonical-seed produces a fresh pipeline each time; cache makes that fast. **No `sessionStorage` scaffolding** — a flat-key approach (`elspeth_tutorial_progress`) isn't user-scoped, so it risks cross-user contamination on shared workstations (systems S6); per-user keying would add Vitest+Playwright surface area that doesn't materially improve UX. Verified by a Playwright case in 21b2 Task 14 (`refresh mid-tutorial restarts at turn 1`) that walks to turn 3, reloads, and asserts turn 1 plus a null `sessionStorage` key. |
+| **Cache corruption.** | Cache files are a server-generated content cache — operationally Tier-1 (crash on corruption, miss on absence, no live-LLM fallback) but conceptually LLM-derived. The tutorial cache reader uses Pydantic to parse the JSON file. If the parse fails, crash with the file path and the parse error chained via `from`. The operator's recovery is to delete the cache directory. **Do not** silently fall back to a live LLM call: that would mask the corruption and ship demonstrably wrong audit snippets to the user. Full framing: `21a1-phase-4-backend-part-1.md` Task 5 §"Tier classification". |
 | **Concurrent first-session for the same user (two browser tabs).** | Two tabs may both decide "tutorial not yet done" and both render the tutorial container. The user finishes in tab A; PATCH writes `tutorial_completed_at`. Tab B continues rendering its tutorial container until its next preference read. Outcome: tab B may produce a second pipeline/session named "hello-world (cool government pages)". This is acceptable — the user has two pipelines they can run/edit/delete independently. No locking is added (the Phase 1A "Concurrent PATCH race window" mitigation applies: SQLite `ON CONFLICT DO UPDATE` resolves to the last write). |
-| **User explicitly clicks "skip" but immediately wants to come back.** | The skip affordance writes `tutorial_completed_at = now()`. Phase 8 Task 6 ships a "Replay hello-world tutorial" button in settings that PATCHes `{"tutorial_completed_at": null}` to re-enter tutorial mode (the Phase 4 PATCH contract supports this directly — see §"Cross-plan contract" in 21a). Between Phase 4 ship and Phase 8 ship, an operator can clear the row via SQL. |
+| **User explicitly clicks "skip" but immediately wants to come back.** | Per the P20 resolution, Phase 4 ships an in-settings "Reset tutorial" link added to the existing `ComposerPreferencesPanel.tsx` (21b2 §"Task 14.5") that PATCHes `{"tutorial_completed_at": null}` per the cross-plan contract (see §"Cross-plan contract — `tutorial_completed_at` PATCH semantics" in [21a1-phase-4-backend-part-1.md](21a1-phase-4-backend-part-1.md)). A user who skipped or completed and wants to retake can use the link without operator intervention. The Phase 8 Task 6 "Replay hello-world tutorial" button is a separate, polished affordance built on the same PATCH contract; the Phase 4 link is the always-available escape hatch from launch onward, in case Phase 8 slips. |
 | **User edits the LLM's interpretation in turn 2b but then changes their mind.** | The Phase 5b interpretation-events table records every resolution; if the user wants to revisit, the standard composer flow surfaces pending interpretation events. The tutorial's turn 2b is just a styled wrapper around the existing `InterpretationReviewTurn` from Phase 5b. The user cannot "undo" an interpretation acceptance from inside the tutorial; the design doc 04 implicit choice is that this is acceptable for a 3-minute hello-world. |
 | **Cache fills with one entry per model rotation, growing forever.** | One entry per `(canonical_prompt, model)` is small (model count is small; canonical prompts is one). Filesystem footprint is bounded. No eviction policy needed. |
 | **Phase 5b's `interpretation_events_table` doesn't yet record the prompt-template string.** | This is a Phase 5b dependency. The Phase 4 preflight (plan 21a Task 0) verifies it. If 5b's table doesn't yet record the prompt template, the tutorial cannot deliver on the design doc 04 promise "Your accepted definition of 'cool' — recorded as a prompt template" — in which case Phase 4 implementation halts and the operator is informed. Per CLAUDE.md "no defensive programming": the tutorial does **not** fall back to canned text. |

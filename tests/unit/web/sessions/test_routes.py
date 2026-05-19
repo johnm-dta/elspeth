@@ -1520,12 +1520,14 @@ class TestIDORCoverageDrift:
         )
 
     def test_sessions_routes_ownership_call_sites(self) -> None:
-        """sessions/routes.py — _verify_session_ownership inventory."""
-        from elspeth.web.sessions import routes
+        """sessions/routes/ — _verify_session_ownership inventory."""
+        from elspeth.web.sessions.routes import composer, interpretation, messages, runs, sessions
 
-        found = _collect_ownership_call_site_identities(routes, "_verify_session_ownership")
+        found = set()
+        for routes_module in (sessions, composer, messages, runs, interpretation):
+            found.update(_collect_ownership_call_site_identities(routes_module, "_verify_session_ownership"))
         self._assert_inventory(
-            "sessions/routes.py",
+            "sessions/routes/",
             "_verify_session_ownership",
             self.EXPECTED_SESSIONS_OWNERSHIP_ENDPOINTS,
             found,

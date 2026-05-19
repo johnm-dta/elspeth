@@ -510,7 +510,9 @@ per_file_rules:
     assert _root_findings(GVE_ATTRIBUTION_RULE, tmp_path) == []
 
 
-def test_audit_evidence_json_mode_succeeds_on_current_codebase() -> None:
+def test_audit_evidence_json_mode_succeeds_on_current_codebase(
+    elspeth_lints_subprocess_env: dict[str, str],
+) -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -527,6 +529,7 @@ def test_audit_evidence_json_mode_succeeds_on_current_codebase() -> None:
         capture_output=True,
         text=True,
         cwd=Path(__file__).resolve().parents[3],
+        env=elspeth_lints_subprocess_env,
     )
 
     assert result.returncode == 0, f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"

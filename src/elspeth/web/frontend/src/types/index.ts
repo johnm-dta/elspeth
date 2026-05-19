@@ -24,17 +24,7 @@ export interface AuthConfig {
 }
 
 /**
- * Minimal identity claims extracted from the JWT or session.
- * Used internally for attribution and display.
- */
-export interface UserIdentity {
-  user_id: string;
-  username: string;
-}
-
-/**
  * Full user profile returned by GET /api/auth/me.
- * Extends UserIdentity with display-oriented fields.
  */
 export interface UserProfile {
   user_id: string;

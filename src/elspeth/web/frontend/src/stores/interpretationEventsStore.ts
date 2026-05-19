@@ -378,6 +378,3 @@ export const useInterpretationEventsStore = create<InterpretationEventsState>(
     },
   }),
 );
-
-// Re-export for non-React consumers (tests, debug surfaces).
-export const _internals = { incrementResolvedCount, EMPTY_COUNTS };

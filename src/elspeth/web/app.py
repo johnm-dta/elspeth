@@ -16,11 +16,11 @@ import structlog
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from opentelemetry import metrics
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
-from prometheus_client import make_asgi_app
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ValidationError, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -850,12 +850,18 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         }
 
     # --- Prometheus metrics scrape endpoint ---
-    # Mounted before the SPA StaticFiles so /metrics takes precedence over the
-    # catch-all html=True mount below (Starlette routes by registration order).
-    # Backed by the process-level _PROMETHEUS_READER singleton wired above; all
-    # OTel counters/histograms registered via metrics.get_meter() feed into this
-    # endpoint automatically.
-    app.mount("/metrics", make_asgi_app())
+    # Registered as a route (not a mount) so bare `/metrics` matches without
+    # the trailing-slash redirect that a Mount requires. The SPA StaticFiles
+    # mount at `/` (registered below) would otherwise shadow `/metrics` for
+    # the non-slash variant, returning 404 because no `metrics` file exists
+    # in dist/. Route handlers match before mounts in Starlette, so this
+    # also wins precedence over the SPA catch-all regardless of order.
+    # Backed by the process-level _PROMETHEUS_READER wired at module import;
+    # all OTel counters/histograms registered via metrics.get_meter() feed
+    # into this endpoint automatically via the global REGISTRY.
+    @app.get("/metrics", include_in_schema=False)
+    def _prometheus_metrics() -> Response:
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     # --- Static file serving for the React SPA (production) ---
     # Mount frontend/dist/ AFTER all API and WS routes so /api/* takes precedence.

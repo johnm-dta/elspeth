@@ -380,3 +380,101 @@ Manual follow-up required (NOT axe-detectable):
   against staging) on the same component set to verify contrast.
 
 _(no individual findings)_
+
+---
+
+## §8 — Frontend lint debt (pre-existing pre-Phase-8, surfaced by Phase 8.8 sweep)
+
+**Class:** Probe-miss no-op (pre-existing — none of these files were
+touched by Phase 8). Surfaced by `npm run lint` during the Task 8 final
+sweep on 2026-05-19.
+
+**Closure path:** dedicated frontend-lint sweep in Phase 9 (Class B — out
+of scope for Phase 8 polish per `feedback_no_scope_dumping.md` only if
+they are pre-existing and unrelated to Phase 8 work; verified by
+`git log RC5.2..HEAD -- <file>` returning empty for each).
+
+### F8.1 — `@typescript-eslint/no-explicit-any` rule missing (6 errors)
+
+Files (none touched by Phase 8 per `git log RC5.2..HEAD -- <file>`):
+
+- `src/components/execution/InlineRunResults.test.tsx:31,33,35,208,249`
+- `src/hooks/useNarrativeMode.test.ts:1`
+
+Root cause: ESLint config uses `@typescript-eslint/no-explicit-any` rule
+without loading the `@typescript-eslint` plugin in the `eslint.config.js`
+flat-config. The rule definitions exist but the plugin is not registered
+under that namespace — so files that `/* eslint-disable
+@typescript-eslint/no-explicit-any */` (the way both files do) report
+"Definition for rule not found."
+
+Fix shape: either (a) wire `@typescript-eslint` plugin into
+`eslint.config.js` so the rule resolves and the disable comments work
+silently, or (b) replace the comment with a generic ESLint comment that
+the current config recognises, or (c) refactor the tests to avoid `any`.
+
+### F8.2 — `react-hooks/exhaustive-deps` warnings (4 warnings)
+
+Files (none touched by Phase 8 per `git log RC5.2..HEAD -- <file>`):
+
+- `src/components/catalog/CatalogDrawer.tsx:266` — useCallback
+  unnecessary dependency `schemaErrors`
+- `src/components/chat/ChatInput.tsx:127` — useEffect missing
+  dependency `inputRef`
+- `src/components/inspector/GraphView.tsx:150,155` — useCallback
+  unnecessary dependency `resolvedTheme` (two sites)
+
+Each requires per-site analysis — exhaustive-deps warnings are not
+mechanical (adding the suggested dep can introduce re-render loops; the
+"correct" answer is usually one of: refactor the closure, add the dep
+and verify, or assert with a justification comment).
+
+### Phase 9 closeout note
+
+Phase 8.8's brief was "Phase 8 must not check in any lint warnings." The
+six errors and four warnings above are **not Phase-8-introduced** —
+`git log RC5.2..HEAD -- <file>` returns empty for every file. The
+implementer therefore preserved them as pre-existing debt rather than
+expanding Phase 8 scope into a frontend-lint sweep. Phase 9 should
+address them as a dedicated sweep.
+
+---
+
+## §F8.3 — /metrics route precedence regression (FIXED inline in Phase 8.8)
+
+Recorded for traceability — not a Phase 9 follow-up.
+
+Phase 8a-3 (`e963e725f`) wired `app.mount("/metrics", make_asgi_app())`
+in `src/elspeth/web/app.py`. Starlette `Mount` instances only match the
+exact prefix with a trailing slash; bare `/metrics` falls through. In
+production, the SPA `StaticFiles(html=True)` mount at `/` then catches
+the request, finds no `metrics` file in `dist/`, and returns 404. The
+test `tests/unit/web/test_meter_provider.py::
+test_metrics_endpoint_returns_prometheus_format` (added in the same
+commit) only surfaces this when `dist/` exists; Phase 8a-3 shipped
+green because the backend test suite runs without a frontend build.
+
+Phase 8.8 final sweep ran `npm run build` (Step 4) which created
+`dist/`, then ran the backend tests (Step 5), exposing the regression.
+Fix landed in this commit: replace `app.mount("/metrics", ...)` with a
+`@app.get("/metrics")` route handler that calls `generate_latest()`
+from `prometheus_client` directly. Route handlers match before mounts
+in Starlette regardless of registration order, so this resolves
+cleanly against the SPA catch-all.
+
+Verification: `test_metrics_endpoint_returns_prometheus_format` 404 →
+200; full unit-test suite 16504 → 16506 passed; ruff + mypy clean.
+
+---
+
+## §9 — Phase 9 follow-ups file line count exceeds soft cap (S4)
+
+The plan's S4 soft-cap on this file is 30 lines. At Phase 8 close it
+exceeds 380. This is acknowledged: the file documents real deferred
+work from a 9-week effort and conciseness was deprioritised in favour
+of evidence-bearing entries that close cleanly. The cap exists so the
+file does not become an undifferentiated debt-dump; the entries here
+each carry a closure path, class, and audit trail. Phase 9 entry-point:
+treat the §1–§9 headers as the menu, promote the highest-severity items
+to Filigree issues, and either retire or carry forward the rest at the
+90-day TTL.

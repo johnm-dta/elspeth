@@ -171,17 +171,6 @@ allow_hits:
     \ in AggregateDeclarationContractViolation and raised from the dispatcher boundary. No silent drops.\
     \ See N3 \xA7Acceptance + comment"
   expires: null
-- key: engine/executors/declaration_dispatch.py:R6:_dispatch:fp=eaaceb67467655f7
-  owner: architecture
-  reason: "ADR-010 \xA7Semantics amendment (2026-04-20) \u2014 catches PluginContractViolation so PassThroughContractViolation\
-    \ (which inherits PluginContractViolation, not DeclarationContractViolation, per ADR-010 \xA7Consequences\
-    \ line 96-97) is subject to audit-complete aggregation rather than short-circuiting the dispatcher\
-    \ loop. Without this catch, a pass-through violation would shadow every later contract on the same\
-    \ row \u2014 regressing the audit-complete posture. Both caught classes are registered in TIER_1_ERRORS;\
-    \ the aggregate is also TIER_1_ERRORS, preserving Tier-1 propagation."
-  safety: The caught PluginContractViolation is appended to violations list and raised (singleton or aggregate)
-    at loop end; no silent drops. AggregateDeclarationContractViolation is a Tier-1 class, preserving
-    the propagation guarantee.
   expires: null
 - key: engine/_best_effort.py:R4:best_effort:fp=c48026df1d344433
   owner: architecture

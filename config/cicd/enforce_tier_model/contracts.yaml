@@ -232,6 +232,11 @@ allow_hits:
   reason: "ADR-010 H2 (2026-04-20) payload_schema type gate — register_declaration_contract uses isinstance(payload_schema, type) to reject non-type payload_schema values (must be a TypedDict class, not an instance or string). Tier-1 trust boundary at registry entry; caller-supplied bad shape is a framework bug that crashes before the registry freezes. Predates H2 (C2 closure); H2 preserves the same pattern."
   safety: TypeError raised immediately with diagnostic message
   expires: null
+- key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=88e060f1276007c6
+  owner: architecture
+  reason: "ADR-010 Phase 2C violation_class type gate — register_declaration_contract uses isinstance(violation_class, type) to reject non-type violation_class values (must be a DeclarationContractViolation subclass, not an instance or string). Same Tier-1 trust boundary pattern as the sibling payload_schema gate above — caller-supplied bad shape is a framework bug that crashes before the registry freezes."
+  safety: TypeError raised immediately with diagnostic message; subsequent issubclass check on the same value naming the required base class follows
+  expires: null
 - key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=f01f2689fdd1623e
   owner: composer-audit
   reason: >-

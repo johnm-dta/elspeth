@@ -25,13 +25,12 @@ from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
-from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap
+from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap, RowProcessorHandle
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.results import RowResult
     from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome
-    from elspeth.engine.processor import RowProcessor
 
 
 def _require_sink_name(result: RowResult) -> str:
@@ -375,7 +374,7 @@ def _process_merged_coalesce_outcome(
     outcome: CoalesceOutcome,
     coalesce_name: CoalesceName,
     coalesce_node_map: dict[CoalesceName, NodeID],
-    processor: RowProcessor,
+    processor: RowProcessorHandle,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -394,7 +393,14 @@ def _process_merged_coalesce_outcome(
     merged_token = outcome.merged_token
     if merged_token is None:
         raise OrchestrationInvariantError("CoalesceOutcome has_merged=True but merged_token is None")
-    coalesce_node_id = coalesce_node_map[coalesce_name]
+    try:
+        coalesce_node_id = coalesce_node_map[coalesce_name]
+    except KeyError as exc:
+        configured_names = ", ".join(sorted(str(name) for name in coalesce_node_map)) or "<none>"
+        raise OrchestrationInvariantError(
+            f"CoalesceOutcome for {coalesce_name!r} has a merged token but no coalesce node mapping. "
+            f"Configured coalesce names: {configured_names}."
+        ) from exc
     continuation_results: list[RowResult] = list(
         processor.process_token(
             token=merged_token,
@@ -414,7 +420,7 @@ def _process_merged_coalesce_outcome(
 def handle_coalesce_timeouts(
     coalesce_executor: CoalesceExecutor,
     coalesce_node_map: dict[CoalesceName, NodeID],
-    processor: RowProcessor,
+    processor: RowProcessorHandle,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -431,7 +437,7 @@ def handle_coalesce_timeouts(
     Args:
         coalesce_executor: CoalesceExecutor managing join barriers
         coalesce_node_map: Maps CoalesceName -> coalesce node ID in graph
-        processor: RowProcessor for downstream processing
+        processor: RowProcessor-compatible handle for downstream processing
         ctx: Plugin context for transform execution
         counters: Mutable ExecutionCounters to update
         pending_tokens: Dict of sink_name -> tokens to append results to
@@ -461,7 +467,7 @@ def handle_coalesce_timeouts(
 def flush_coalesce_pending(
     coalesce_executor: CoalesceExecutor,
     coalesce_node_map: dict[CoalesceName, NodeID],
-    processor: RowProcessor,
+    processor: RowProcessorHandle,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -476,7 +482,7 @@ def flush_coalesce_pending(
     Args:
         coalesce_executor: CoalesceExecutor managing join barriers
         coalesce_node_map: Maps CoalesceName -> coalesce node ID in graph
-        processor: RowProcessor for downstream processing
+        processor: RowProcessor-compatible handle for downstream processing
         ctx: Plugin context for transform execution
         counters: Mutable ExecutionCounters to update
         pending_tokens: Dict of sink_name -> tokens to append results to

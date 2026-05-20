@@ -24,6 +24,7 @@ from elspeth.contracts.contexts import LifecycleContext, SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.events import ExternalCallCompleted
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.plugins.infrastructure.base import BaseSink
@@ -218,11 +219,28 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:16df438775374c43"
+    source_file_hash: str | None = "sha256:103613900a342f9f"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
     supports_resume = False  # Dataverse writes are not locally staged
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Upserts rows into Microsoft Dataverse via OData using an alternate key.",
+                composer_hints=(
+                    "Dataverse sink supports upsert mode only; alternate_key must be one of the field_mapping target columns.",
+                    "field_mapping maps pipeline field names to Dataverse column names and must not produce duplicate targets.",
+                    "lookups map pipeline fields to navigation-property bindings; avoid collisions with field_mapping targets.",
+                    "environment_url must be HTTPS and within the allowed Dataverse domain patterns.",
+                    "Required alternate-key values must be strings at write time; invalid rows are diverted instead of coerced.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

@@ -2,6 +2,8 @@
 
 ChaosLLM is a fake LLM server for load testing, stress testing, and fault injection. It provides OpenAI and Azure OpenAI compatible endpoints with configurable error injection, response generation, and metrics recording.
 
+This CLI is provided by the `errorworks` package and was checked against the installed `chaosllm` command on 2026-05-20.
+
 ## Use Cases
 
 - **Load testing** - Measure throughput and find bottlenecks without API costs
@@ -106,6 +108,7 @@ Built-in configurations for common testing scenarios:
 | `gentle` | Basic functionality testing | 2% total | 50ms | No |
 | `realistic` | Mimics typical Azure behavior | ~7% total | 80ms | Occasional |
 | `stress_aimd` | Stress test AIMD throttle | 15% rate limit | 50ms | Every 30s |
+| `stress_extreme` | Extreme stress and failure-mode testing | Higher than `stress_aimd` | Variable | Frequent |
 | `chaos` | Everything breaks constantly | 25%+ total | Variable | Frequent |
 | `silent` | Zero errors, baseline throughput | 0% | 10ms | No |
 

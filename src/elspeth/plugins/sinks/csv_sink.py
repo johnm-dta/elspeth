@@ -113,7 +113,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3d718ccaa8bb05b7"
+    source_file_hash: str | None = "sha256:5011995a6ff8fd24"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -631,11 +631,11 @@ class CSVSink(BaseSink):
             return PluginAssistance(
                 plugin_name="csv",
                 issue_code=None,
-                summary="Write rows as CSV. Configurable encoding, quoting, collision_policy, and display-header overrides.",
+                summary="Write rows as CSV. Configurable encoding, quoting, collision_policy, and header-display overrides.",
                 composer_hints=(
                     "delimiter and quoting are operator-level concerns — pick deliberately for the consuming tool (Excel prefers ',' + QUOTE_MINIMAL; analytics tools may prefer '\\t').",
                     "collision_policy: 'fail' (default), 'auto_increment', or 'overwrite'. Pick deliberately — accidental overwrite destroys prior runs.",
-                    "Header row is written once at start. Resume runs that append must use the same column order; pin headers explicitly with display_headers when schema can evolve.",
+                    "Header row is written once at start. Resume appends must use the same column order; pin headers explicitly with headers when schema can evolve.",
                     "Set on_write_failure to a quarantine sink so per-row write errors don't crash the run.",
                 ),
             )

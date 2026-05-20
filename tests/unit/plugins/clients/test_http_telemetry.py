@@ -411,7 +411,7 @@ class TestHTTPClientTelemetry:
         assert "@" not in event.provider, f"Userinfo separator leaked in provider: {event.provider}"
 
         # Provider should contain only hostname (optionally with port)
-        assert "api.example.com" in event.provider
+        assert event.provider == "api.example.com"
 
     def test_provider_extraction_handles_url_without_credentials(self) -> None:
         """Provider extraction works correctly for URLs without credentials."""

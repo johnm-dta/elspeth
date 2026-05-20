@@ -7,6 +7,7 @@ from pydantic import Field, field_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
@@ -217,11 +218,27 @@ class KeywordFilter(BaseTransform):
     name = "keyword_filter"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:77db6f5c05af2cfd"
+    source_file_hash: str | None = "sha256:44530e78aa5b10c6"
     config_model = KeywordFilterConfig
     is_batch_aware = False
     creates_tokens = False
     passes_through_input = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Blocks rows whose configured string fields match regex patterns.",
+                composer_hints=(
+                    "Set fields to explicit string field names when possible; fields='all' scans only string values.",
+                    "blocked_patterns are regular expressions, so escape literal punctuation and anchors deliberately.",
+                    "Explicit fields fail closed when missing or non-string; route on_error to quarantine or review.",
+                    "Rows without matches pass through unchanged; matched rows return blocked_content errors.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

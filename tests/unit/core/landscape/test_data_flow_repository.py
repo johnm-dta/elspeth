@@ -1193,7 +1193,7 @@ class TestForkTokenRowcountValidation:
                     nonlocal insert_count
                     result = original_execute(stmt, *args, **kwargs)
                     # Only intercept INSERT statements (not SELECT for validation)
-                    if hasattr(stmt, "is_insert") and stmt.is_insert:
+                    if stmt.is_insert:
                         insert_count += 1
                         # First insert is child token — return zero rowcount
                         if insert_count == 1:
@@ -1241,7 +1241,7 @@ class TestCoalesceTokensRowcountValidation:
                 def patched_execute(stmt, *args: Any, **kwargs: Any):
                     nonlocal insert_count
                     result = original_execute(stmt, *args, **kwargs)
-                    if hasattr(stmt, "is_insert") and stmt.is_insert:
+                    if stmt.is_insert:
                         insert_count += 1
                         if insert_count == 1:
                             mock_result = MagicMock()
@@ -1279,7 +1279,7 @@ class TestExpandTokenRowcountValidation:
                 def patched_execute(stmt, *args: Any, **kwargs: Any):
                     nonlocal insert_count
                     result = original_execute(stmt, *args, **kwargs)
-                    if hasattr(stmt, "is_insert") and stmt.is_insert:
+                    if stmt.is_insert:
                         insert_count += 1
                         if insert_count == 1:
                             mock_result = MagicMock()

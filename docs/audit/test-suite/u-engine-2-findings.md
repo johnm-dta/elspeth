@@ -141,13 +141,30 @@ Filed:
 
 ## Filed issues
 
-| ID | Title | Type | Priority |
-|---|---|---|---|
-| `elspeth-958f307f29` | U-ENGINE-2 test audit remediation — coalesce, orchestrator, retry, and runtime boundary sweep | epic | P2 |
-| `elspeth-68cd1876d0` | resolve_preflight ordering gap — malformed commencement gates can run dependency pipelines in tests | task | P2 |
-| `elspeth-aa7781f802` | SpanFactory OpenTelemetry tests importorskip a mandatory dependency — tracing regressions can be skipped | task | P2 |
-| `elspeth-c5add729fa` | Coalesce continuation tests omit missing node-map invariant — raw KeyError can escape | task | P2 |
-| `elspeth-786291485f` | Trigger restore tests miss already-over-threshold count without fire offset — resumed batches can wait for another row | task | P2 |
+| ID | Title | Type | Priority | Status |
+|---|---|---|---|---|
+| `elspeth-958f307f29` | U-ENGINE-2 test audit remediation — coalesce, orchestrator, retry, and runtime boundary sweep | epic | P2 | Ready to close after child closeout |
+| `elspeth-68cd1876d0` | resolve_preflight ordering gap — malformed commencement gates can run dependency pipelines in tests | task | P2 | Closed 2026-05-20 |
+| `elspeth-aa7781f802` | SpanFactory OpenTelemetry tests importorskip a mandatory dependency — tracing regressions can be skipped | task | P2 | Closed 2026-05-20 |
+| `elspeth-c5add729fa` | Coalesce continuation tests omit missing node-map invariant — raw KeyError can escape | task | P2 | Closed 2026-05-20 |
+| `elspeth-786291485f` | Trigger restore tests miss already-over-threshold count without fire offset — resumed batches can wait for another row | task | P2 | Closed 2026-05-20 |
+
+## Remediation status
+
+The filed U-ENGINE-2 remediation children were resolved in branch
+`fix/tests-audit-20260520`:
+
+- `resolve_preflight()` now has a boundary regression proving malformed
+  commencement gates fail before dependency cycle detection, dependency
+  execution, or gate evaluation.
+- `test_spans.py` no longer skips mandatory OpenTelemetry SDK coverage; missing
+  OpenTelemetry now fails at the direct import sites.
+- Merged coalesce timeout/flush continuations now raise
+  `OrchestrationInvariantError` with coalesce-name context when
+  `coalesce_node_map` is missing the reported coalesce.
+- Restored count-trigger batches with old checkpoints lacking
+  `count_fire_offset` now trigger immediately when `batch_count >= count`, while
+  below-threshold missing offsets remain unfired.
 
 ## Remaining work
 

@@ -35,9 +35,8 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import repr_hash
 from elspeth.core.canonical import canonical_json, stable_hash
-from elspeth.core.landscape._database_ops import DatabaseOps
+from elspeth.core.landscape._database_ops import DatabaseOps, LandscapeConnectionProvider
 from elspeth.core.landscape._helpers import generate_id, now
-from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.model_loaders import (
     EdgeLoader,
     NodeLoader,
@@ -78,7 +77,7 @@ class DataFlowRepository:
 
     def __init__(
         self,
-        db: LandscapeDB,
+        db: LandscapeConnectionProvider,
         ops: DatabaseOps,
         *,
         token_outcome_loader: TokenOutcomeLoader,

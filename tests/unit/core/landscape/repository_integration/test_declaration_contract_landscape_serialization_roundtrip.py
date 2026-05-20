@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any, TypedDict
 
+from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+
 from elspeth.contracts import NodeStateFailed, NodeType
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
@@ -31,7 +33,6 @@ from elspeth.contracts.enums import NodeStateStatus
 from elspeth.contracts.errors import ExecutionError
 from elspeth.core.landscape.lineage import explain
 from elspeth.engine.executors.declaration_dispatch import run_post_emission_checks
-from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
 
 class _RoundTripPayload(TypedDict):

@@ -23,13 +23,13 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
+    from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.plugin_context import PluginContext
@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
-    from elspeth.engine.processor import RowProcessor
 
 # Import protocols at runtime (not TYPE_CHECKING) because RowPlugin type alias
 # is used in runtime annotations and isinstance() checks
@@ -54,6 +53,64 @@ PendingTokenMap = dict[str, list[tuple["TokenInfo", "PendingOutcome | None"]]]
 # batch-aware transforms (is_batch_aware=True on TransformProtocol)
 RowPlugin = TransformProtocol
 """Row-processing plugin type for pipeline transforms list."""
+
+
+class RowProcessorHandle(Protocol):
+    """Orchestrator-facing processor contract stored in run/loop contexts."""
+
+    @property
+    def run_id(self) -> str:
+        """Expose the run identifier for scheduler recovery diagnostics."""
+        ...
+
+    @property
+    def token_manager(self) -> Any:
+        """Expose the token manager used by source-quarantine handling."""
+        ...
+
+    def process_row(self, *args: Any, **kwargs: Any) -> Any:
+        """Process a new source row through the pipeline."""
+        ...
+
+    def process_existing_row(self, *args: Any, **kwargs: Any) -> Any:
+        """Process a persisted row through the pipeline during resume."""
+        ...
+
+    def process_token(self, *args: Any, **kwargs: Any) -> Any:
+        """Continue processing an existing token from a graph node."""
+        ...
+
+    def check_aggregation_timeout(self, *args: Any, **kwargs: Any) -> Any:
+        """Check whether an aggregation node should timeout-flush."""
+        ...
+
+    def get_aggregation_buffer_count(self, *args: Any, **kwargs: Any) -> int:
+        """Return buffered item count for an aggregation node."""
+        ...
+
+    def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
+        """Flush an aggregation node outside normal row processing."""
+        ...
+
+    def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
+        """Drain recoverable durable scheduler work during resume."""
+        ...
+
+    def has_scheduled_work(self) -> bool:
+        """Return whether the durable scheduler has active non-terminal work."""
+        ...
+
+    def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
+        """Return serializable aggregation checkpoint state."""
+        ...
+
+    def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
+        """Return serializable coalesce checkpoint state."""
+        ...
+
+    def resolve_sink_step(self) -> int:
+        """Return the audit step index used for sink writes."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,7 +450,7 @@ class RunContext:
     """
 
     ctx: PluginContext
-    processor: RowProcessor
+    processor: RowProcessorHandle
     coalesce_executor: CoalesceExecutor | None
     coalesce_node_map: Mapping[CoalesceName, NodeID]
     agg_transform_lookup: Mapping[str, AggNodeEntry]
@@ -424,7 +481,7 @@ class LoopContext:
     pending_tokens: PendingTokenMap
 
     # --- Read-only after construction (not reassigned) ---
-    processor: RowProcessor
+    processor: RowProcessorHandle
     ctx: PluginContext
     config: PipelineConfig
     agg_transform_lookup: Mapping[str, AggNodeEntry]

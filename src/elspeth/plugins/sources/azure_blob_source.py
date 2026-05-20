@@ -23,6 +23,7 @@ from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, S
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.core.identifiers import validate_field_names
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
@@ -322,8 +323,25 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e4ca062a06b630a9"
+    source_file_hash: str | None = "sha256:c757f82202f36ecd"
     config_model = AzureBlobSourceConfig
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Loads CSV, JSON, or JSONL rows from Azure Blob Storage.",
+                composer_hints=(
+                    "Configure exactly one auth path: connection_string, sas_token+account_url, managed identity+account_url, or service principal+account_url.",
+                    "Choose format explicitly; csv uses csv_options, while json/jsonl use json_options and optional data_key.",
+                    "For headerless CSV set csv_options.has_header=false and provide columns; columns is invalid for headered CSV or non-CSV blobs.",
+                    "Use field_mapping only to override normalized field names at the source boundary.",
+                    "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

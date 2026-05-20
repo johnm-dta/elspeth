@@ -143,6 +143,7 @@ from elspeth.engine.orchestrator.types import (
     ResumeState,
     RouteValidationError,
     RowPlugin,
+    RowProcessorHandle,
     RunContext,
     RunResult,
     _CheckpointFactory,
@@ -719,7 +720,7 @@ class Orchestrator:
     def _make_checkpoint_after_sink_factory(
         self,
         run_id: str,
-        processor: RowProcessor,
+        processor: RowProcessorHandle,
     ) -> _CheckpointFactory:
         """Create a per-sink checkpoint callback factory.
 

@@ -144,9 +144,9 @@ class TestRowProcessorPipelineRow:
             ctx=ctx,
         )
 
-        # Result should have token with PipelineRow
-        assert len(results) >= 1
-        result = results[0]
+        # Single-token no-transform path should produce exactly one terminal result.
+        assert len(results) == 1
+        [result] = results
         assert isinstance(result.token.row_data, PipelineRow)
         assert result.token.row_data["amount"] == 100
         assert result.token.row_data.contract is contract
@@ -219,9 +219,9 @@ class TestRowProcessorExistingRow:
         factory.data_flow.create_token.assert_called_once()
         factory.data_flow.create_row.assert_not_called()
 
-        # Result should have token with PipelineRow
-        assert len(results) >= 1
-        result = results[0]
+        # Single-token no-transform resume path should produce exactly one terminal result.
+        assert len(results) == 1
+        [result] = results
         assert isinstance(result.token.row_data, PipelineRow)
         assert result.token.row_data.contract is contract
 

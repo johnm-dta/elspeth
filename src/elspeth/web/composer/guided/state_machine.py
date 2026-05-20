@@ -25,6 +25,15 @@ from typing import TYPE_CHECKING, Any
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
+from elspeth.web.composer.guided.resolved import (
+    SinkOutputResolved as SinkOutputResolved,
+)
+from elspeth.web.composer.guided.resolved import (
+    SinkResolved as SinkResolved,
+)
+from elspeth.web.composer.guided.resolved import (
+    SourceResolved as SourceResolved,
+)
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
 # Pre-v5 persisted sessions are intentionally incompatible with v5: the
@@ -121,107 +130,6 @@ class TurnRecord:
             )
         except (KeyError, ValueError) as exc:
             raise InvariantError(f"TurnRecord.from_dict: malformed record {d!r}") from exc
-
-
-@dataclass(frozen=True, slots=True)
-class SourceResolved:
-    """Source plugin state after Step 1.
-
-    Frozen, audit-tier. Stored in GuidedSession.step_1_result.
-    """
-
-    plugin: str
-    options: Mapping[str, Any]
-    observed_columns: Sequence[str]
-    sample_rows: Sequence[Mapping[str, Any]]
-
-    def __post_init__(self) -> None:
-        freeze_fields(self, "options", "observed_columns", "sample_rows")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain JSON-serialisable dict."""
-        return {
-            "plugin": self.plugin,
-            "options": deep_thaw(self.options),
-            "observed_columns": list(deep_thaw(self.observed_columns)),
-            "sample_rows": [dict(deep_thaw(r)) for r in self.sample_rows],
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> SourceResolved:
-        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
-        try:
-            return cls(
-                plugin=d["plugin"],
-                options=d["options"],
-                observed_columns=tuple(d["observed_columns"]),
-                sample_rows=tuple(dict(r) for r in d["sample_rows"]),
-            )
-        except (KeyError, ValueError, TypeError) as exc:
-            raise InvariantError(f"SourceResolved.from_dict: malformed record {d!r}") from exc
-
-
-@dataclass(frozen=True, slots=True)
-class SinkOutputResolved:
-    """A single sink output after Step 2.
-
-    Frozen, audit-tier. Part of SinkResolved.outputs sequence.
-    """
-
-    plugin: str
-    options: Mapping[str, Any]
-    required_fields: Sequence[str]
-    schema_mode: str  # "fixed" | "flexible" | "observed"
-
-    def __post_init__(self) -> None:
-        freeze_fields(self, "options", "required_fields")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain JSON-serialisable dict."""
-        return {
-            "plugin": self.plugin,
-            "options": deep_thaw(self.options),
-            "required_fields": list(deep_thaw(self.required_fields)),
-            "schema_mode": self.schema_mode,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> SinkOutputResolved:
-        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
-        try:
-            return cls(
-                plugin=d["plugin"],
-                options=d["options"],
-                required_fields=tuple(d["required_fields"]),
-                schema_mode=d["schema_mode"],
-            )
-        except (KeyError, ValueError, TypeError) as exc:
-            raise InvariantError(f"SinkOutputResolved.from_dict: malformed record {d!r}") from exc
-
-
-@dataclass(frozen=True, slots=True)
-class SinkResolved:
-    """Sink configuration after Step 2.
-
-    Frozen, audit-tier. Stored in GuidedSession.step_2_result.
-    """
-
-    outputs: Sequence[SinkOutputResolved]
-
-    def __post_init__(self) -> None:
-        freeze_fields(self, "outputs")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain JSON-serialisable dict."""
-        return {"outputs": [o.to_dict() for o in self.outputs]}
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> SinkResolved:
-        """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
-        try:
-            return cls(outputs=tuple(SinkOutputResolved.from_dict(o) for o in d["outputs"]))
-        except (KeyError, ValueError, TypeError) as exc:
-            raise InvariantError(f"SinkResolved.from_dict: malformed record {d!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)

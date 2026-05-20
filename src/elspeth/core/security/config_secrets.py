@@ -6,7 +6,7 @@ them into environment variables before config resolution.
 IMPORTANT: This module reuses the existing KeyVaultSecretLoader from
 secret_loader.py to avoid code duplication and maintain consistent caching.
 
-Resolution records are returned with HMAC fingerprints (not plaintext values)
+Resolution records are returned with keyed fingerprints (not plaintext values)
 for deferred audit recording. Fingerprinting happens immediately after each
 secret is loaded — plaintext values never leave this module.
 
@@ -64,7 +64,7 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
     Returns:
         List of resolution records for deferred audit recording.
         Each record contains: env_var_name, source, vault_url, secret_name,
-        timestamp, latency_ms, fingerprint (HMAC-SHA256 hex digest).
+        timestamp, latency_ms, fingerprint (64-character keyed hex digest).
 
         Plaintext secret values are NOT included in the returned records.
 
@@ -84,7 +84,7 @@ def load_secrets_from_config(config: SecretsConfig) -> list[SecretResolutionInpu
     if not fingerprint_key_available:
         raise SecretLoadError(
             "ELSPETH_FINGERPRINT_KEY is required when loading secrets from Key Vault.\n"
-            "The fingerprint key is used to compute HMAC fingerprints of secrets for the audit trail.\n"
+            "The fingerprint key is used to compute keyed fingerprints of secrets for the audit trail.\n"
             "Fix by either:\n"
             "  1. Set ELSPETH_FINGERPRINT_KEY environment variable, or\n"
             "  2. Add ELSPETH_FINGERPRINT_KEY to your secrets mapping to load from Key Vault:\n"

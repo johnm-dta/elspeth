@@ -1,4 +1,4 @@
-# tests/core/landscape/test_recorder_runs.py
+# tests/unit/core/landscape/repository_integration/test_recorder_runs.py
 """Tests for RecorderFactory run lifecycle management and status validation."""
 
 from __future__ import annotations

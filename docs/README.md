@@ -29,9 +29,9 @@ from earlier workstreams were moved to
 Current architecture and design references.
 
 - [Architecture Overview](../ARCHITECTURE.md) — C4 model, data flows, and system-level orientation
-- [System Overview](architecture/overview.md) — subsystem map and architectural narrative
-- [Requirements Matrix](architecture/requirements.md) — audited requirement coverage snapshot
-- [Subsystems](architecture/subsystems.md) — component deep-dives
+- [System Overview](architecture/overview.md) — compatibility pointer to the maintained root architecture overview
+- [Requirements Matrix](architecture/requirements.md) — compatibility pointer to current requirement and contract sources
+- [Subsystems](architecture/subsystems.md) — compatibility pointer to current subsystem diagrams and ADRs
 - [Token Lifecycle](architecture/token-lifecycle.md) — row identity through forks and joins
 - [Landscape System](architecture/landscape.md) — audit trail architecture
 - [Landscape Entry Points](architecture/landscape-entry-points.md) — where audit records are created

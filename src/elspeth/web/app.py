@@ -610,6 +610,8 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             jwks_cache_ttl_seconds=settings.jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds=settings.jwks_failure_retry_seconds,
         )
+    else:
+        raise RuntimeError(f"Unsupported auth provider: {settings.auth_provider}")
     app.state.auth_provider = auth_provider
     app.state.auth_audit_recorder = AuthAuditRecorder.from_settings(settings)
     app.state.oidc_authorization_endpoint = None  # Set by lifespan for OIDC/Entra

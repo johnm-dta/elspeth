@@ -1,11 +1,13 @@
-"""SourceGuaranteedFieldsContract -> dispatcher -> Landscape -> explain() round-trip."""
+"""SinkRequiredFieldsContract -> dispatcher -> Landscape -> explain() round-trip."""
 
 from __future__ import annotations
 
 import json
 from typing import Any, ClassVar, TypedDict
 
-from elspeth.contracts import Determinism, NodeStateFailed
+from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+
+from elspeth.contracts import Determinism, NodeStateFailed, NodeType
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BoundaryInputs,
@@ -20,29 +22,35 @@ from elspeth.contracts.declaration_contracts import (
     implements_dispatch_site,
     register_declaration_contract,
 )
+from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import NodeStateStatus
-from elspeth.contracts.errors import ExecutionError, SourceGuaranteedFieldsViolation
+from elspeth.contracts.errors import ExecutionError, SinkRequiredFieldsViolation
 from elspeth.contracts.plugin_context import PluginContext
-from elspeth.contracts.results import SourceRow
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.landscape.lineage import explain
 from elspeth.engine.executors.declaration_dispatch import run_boundary_checks
-from elspeth.engine.executors.source_guaranteed_fields import SourceGuaranteedFieldsContract
-from elspeth.plugins.infrastructure.base import BaseSource
-from tests.fixtures.landscape import make_recorder_with_run
+from elspeth.engine.executors.sink_required_fields import SinkRequiredFieldsContract
+from elspeth.plugins.infrastructure.base import BaseSink
 
 
 def _setup_landscape(*, run_id: str, row_id: str, token_id: str, node_id: str):
     setup = make_recorder_with_run(
         run_id=run_id,
-        source_node_id=node_id,
-        source_plugin_name="SourceGuaranteedFieldsSource",
+        source_node_id="source-0",
+        source_plugin_name="test-source",
+    )
+    register_test_node(
+        setup.factory.data_flow,
+        run_id=run_id,
+        node_id=node_id,
+        node_type=NodeType.SINK,
+        plugin_name="SinkRequiredFieldsSink",
     )
     row = setup.factory.data_flow.create_row(
         run_id=run_id,
-        source_node_id=node_id,
+        source_node_id="source-0",
         row_index=0,
-        data={"customer_id": "v", "account_id": "v"},
+        data={"customer_id": "v"},
         row_id=row_id,
     )
     setup.factory.data_flow.create_token(row_id=row.row_id, token_id=token_id)
@@ -54,8 +62,8 @@ def _record_failure(setup, *, token_id: str, node_id: str, run_id: str, error: E
         token_id=token_id,
         node_id=node_id,
         run_id=run_id,
-        step_index=0,
-        input_data={"customer_id": "v", "account_id": "v"},
+        step_index=1,
+        input_data={"customer_id": "v"},
     )
     setup.factory.execution.complete_node_state(
         state.state_id,
@@ -77,43 +85,57 @@ def _record_failure(setup, *, token_id: str, node_id: str, run_id: str, error: E
     return json.loads(failed_states[0].error_json)["context"]
 
 
-def _contract(fields: tuple[str, ...]) -> SchemaContract:
-    return SchemaContract(
-        mode="OBSERVED",
-        fields=tuple(
-            FieldContract(
-                normalized_name=name,
-                original_name=name,
-                python_type=str,
-                required=True,
-                source="inferred",
-                nullable=False,
-            )
-            for name in fields
-        ),
-        locked=True,
+def _contract(
+    *,
+    required_fields: tuple[str, ...],
+    optional_fields: tuple[str, ...] = (),
+) -> SchemaContract:
+    fields = tuple(
+        FieldContract(
+            normalized_name=name,
+            original_name=name,
+            python_type=str,
+            required=True,
+            source="inferred",
+            nullable=False,
+        )
+        for name in required_fields
+    ) + tuple(
+        FieldContract(
+            normalized_name=name,
+            original_name=name,
+            python_type=str,
+            required=False,
+            source="inferred",
+            nullable=False,
+        )
+        for name in optional_fields
     )
+    return SchemaContract(mode="OBSERVED", fields=fields, locked=True)
 
 
-class _TestSourcePlugin(BaseSource):
-    name = "SourceGuaranteedFieldsSource"
-    determinism = Determinism.IO_READ
-    output_schema = object
+class _TestSinkPlugin(BaseSink):
+    name = "SinkRequiredFieldsSink"
+    determinism = Determinism.IO_WRITE
+    input_schema = object
 
     def __init__(
         self,
         *,
         name: str,
         node_id: str,
-        declared_guaranteed_fields: frozenset[str],
+        declared_required_fields: frozenset[str],
     ) -> None:
         super().__init__({})
         self.name = name
         self.node_id = node_id
-        self.declared_guaranteed_fields = declared_guaranteed_fields
+        self.declared_required_fields = declared_required_fields
 
-    def load(self, ctx: PluginContext):
-        yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)))
+    def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> SinkWriteResult:
+        raise NotImplementedError
+
+    def flush(self) -> None:
+        pass
 
     def close(self) -> None:
         pass
@@ -121,14 +143,14 @@ class _TestSourcePlugin(BaseSource):
 
 def _plugin(
     *,
-    name: str = "SourceGuaranteedFieldsSource",
-    node_id: str = "source-guaranteed-fields-node",
-    declared_guaranteed_fields: frozenset[str] = frozenset({"customer_id", "account_id"}),
+    name: str = "SinkRequiredFieldsSink",
+    node_id: str = "sink-required-fields-node",
+    declared_required_fields: frozenset[str] = frozenset({"customer_id", "amount"}),
 ) -> Any:
-    return _TestSourcePlugin(
+    return _TestSinkPlugin(
         name=name,
         node_id=node_id,
-        declared_guaranteed_fields=declared_guaranteed_fields,
+        declared_required_fields=declared_required_fields,
     )
 
 
@@ -149,12 +171,12 @@ class _SecretRoundTripViolation(DeclarationContractViolation):
 
 
 class _SecondaryBoundaryContract(DeclarationContract):
-    name: ClassVar[str] = "secondary_source_boundary_test"
+    name: ClassVar[str] = "secondary_sink_boundary_test"
     payload_schema: ClassVar[type] = _SecondaryPayload
     violation_class: ClassVar[type[_SecondaryBoundaryViolation]] = _SecondaryBoundaryViolation
 
     def applies_to(self, plugin: Any) -> bool:
-        return bool(plugin.declared_guaranteed_fields)
+        return bool(plugin.declared_required_fields)
 
     @implements_dispatch_site("boundary_check")
     def boundary_check(self, inputs: BoundaryInputs, outputs: BoundaryOutputs) -> None:
@@ -165,40 +187,40 @@ class _SecondaryBoundaryContract(DeclarationContract):
             row_id=inputs.row_id,
             token_id=inputs.token_id,
             payload={"note": "second"},
-            message="secondary source boundary violation",
+            message="secondary sink boundary violation",
         )
 
     @classmethod
     def negative_example(cls) -> ExampleBundle:
         inputs = BoundaryInputs(
             plugin=_plugin(),
-            node_id="source-secondary-neg-node",
-            run_id="source-secondary-neg-run",
-            row_id="source-secondary-neg-row",
-            token_id="source-secondary-neg-token",
-            static_contract=frozenset({"customer_id", "account_id"}),
-            row_data={"account_id": "v"},
-            row_contract=_contract(("account_id",)),
+            node_id="sink-secondary-neg-node",
+            run_id="sink-secondary-neg-run",
+            row_id="sink-secondary-neg-row",
+            token_id="sink-secondary-neg-token",
+            static_contract=frozenset({"customer_id", "amount"}),
+            row_data={"customer_id": "v"},
+            row_contract=_contract(required_fields=("customer_id",), optional_fields=("amount",)),
         )
         return ExampleBundle(site=DispatchSite.BOUNDARY, args=(inputs, BoundaryOutputs()))
 
     @classmethod
     def positive_example_does_not_apply(cls) -> ExampleBundle:
         inputs = BoundaryInputs(
-            plugin=_plugin(declared_guaranteed_fields=frozenset()),
-            node_id="source-secondary-non-app-node",
-            run_id="source-secondary-non-app-run",
-            row_id="source-secondary-non-app-row",
-            token_id="source-secondary-non-app-token",
+            plugin=_plugin(declared_required_fields=frozenset()),
+            node_id="sink-secondary-non-app-node",
+            run_id="sink-secondary-non-app-run",
+            row_id="sink-secondary-non-app-row",
+            token_id="sink-secondary-non-app-token",
             static_contract=frozenset(),
             row_data={"customer_id": "v"},
-            row_contract=_contract(("customer_id",)),
+            row_contract=None,
         )
         return ExampleBundle(site=DispatchSite.BOUNDARY, args=(inputs, BoundaryOutputs()))
 
 
 class _SecretBoundaryContract(DeclarationContract):
-    name: ClassVar[str] = "source_guaranteed_fields_secret_roundtrip"
+    name: ClassVar[str] = "sink_required_fields_secret_roundtrip"
     payload_schema: ClassVar[type] = _SecretPayload
     violation_class: ClassVar[type[_SecretRoundTripViolation]] = _SecretRoundTripViolation
 
@@ -221,13 +243,13 @@ class _SecretBoundaryContract(DeclarationContract):
     def negative_example(cls) -> ExampleBundle:
         inputs = BoundaryInputs(
             plugin=_plugin(),
-            node_id="source-secret-neg-node",
-            run_id="source-secret-neg-run",
-            row_id="source-secret-neg-row",
-            token_id="source-secret-neg-token",
+            node_id="sink-secret-neg-node",
+            run_id="sink-secret-neg-run",
+            row_id="sink-secret-neg-row",
+            token_id="sink-secret-neg-token",
             static_contract=frozenset({"customer_id"}),
             row_data={"customer_id": "v"},
-            row_contract=_contract(("customer_id",)),
+            row_contract=_contract(required_fields=("customer_id",)),
         )
         return ExampleBundle(site=DispatchSite.BOUNDARY, args=(inputs, BoundaryOutputs()))
 
@@ -236,7 +258,7 @@ class _SecretBoundaryContract(DeclarationContract):
         return cls.negative_example()
 
 
-class TestSourceGuaranteedFieldsRoundTrip:
+class TestSinkRequiredFieldsRoundTrip:
     def setup_method(self) -> None:
         self._snapshot = _snapshot_registry_for_tests()
         _clear_registry_for_tests()
@@ -245,12 +267,12 @@ class TestSourceGuaranteedFieldsRoundTrip:
         _restore_registry_snapshot_for_tests(self._snapshot)
 
     def test_boundary_violation_survives_landscape_round_trip(self) -> None:
-        register_declaration_contract(SourceGuaranteedFieldsContract())
+        register_declaration_contract(SinkRequiredFieldsContract())
 
-        run_id = "run-source-guaranteed-fields"
-        row_id = "row-source-guaranteed-fields"
-        token_id = "token-source-guaranteed-fields"
-        node_id = "source-guaranteed-fields-node"
+        run_id = "run-sink-required-fields"
+        row_id = "row-sink-required-fields"
+        token_id = "token-sink-required-fields"
+        node_id = "sink-required-fields-node"
         setup = _setup_landscape(run_id=run_id, row_id=row_id, token_id=token_id, node_id=node_id)
 
         try:
@@ -261,42 +283,42 @@ class TestSourceGuaranteedFieldsRoundTrip:
                     run_id=run_id,
                     row_id=row_id,
                     token_id=token_id,
-                    static_contract=frozenset({"customer_id", "account_id"}),
-                    row_data={"customer_id": "v", "account_id": "v"},
-                    row_contract=_contract(("account_id",)),
+                    static_contract=frozenset({"customer_id", "amount"}),
+                    row_data={"customer_id": "v"},
+                    row_contract=_contract(required_fields=("customer_id",), optional_fields=("amount",)),
                 ),
                 outputs=BoundaryOutputs(),
             )
-        except SourceGuaranteedFieldsViolation as violation:
+        except SinkRequiredFieldsViolation as violation:
             error = ExecutionError(
                 exception=str(violation),
                 exception_type=type(violation).__name__,
-                phase="source_boundary_check",
+                phase="sink_write",
                 context=violation.to_audit_dict(),
             )
         else:
-            raise AssertionError("Expected SourceGuaranteedFieldsViolation")
+            raise AssertionError("Expected SinkRequiredFieldsViolation")
 
         context = _record_failure(setup, token_id=token_id, node_id=node_id, run_id=run_id, error=error)
-        assert context["exception_type"] == "SourceGuaranteedFieldsViolation"
-        assert context["contract_name"] == "source_guaranteed_fields"
-        assert context["plugin"] == "SourceGuaranteedFieldsSource"
+        assert context["exception_type"] == "SinkRequiredFieldsViolation"
+        assert context["contract_name"] == "sink_required_fields"
+        assert context["plugin"] == "SinkRequiredFieldsSink"
         assert context["node_id"] == node_id
         assert context["run_id"] == run_id
         assert context["row_id"] == row_id
         assert context["token_id"] == token_id
-        assert context["payload"]["declared"] == ["account_id", "customer_id"]
-        assert context["payload"]["runtime_observed"] == ["account_id"]
-        assert context["payload"]["missing"] == ["customer_id"]
+        assert context["payload"]["declared"] == ["amount", "customer_id"]
+        assert context["payload"]["runtime_observed"] == ["customer_id"]
+        assert context["payload"]["missing"] == ["amount"]
 
     def test_aggregate_round_trip_with_second_boundary_contract(self) -> None:
-        register_declaration_contract(SourceGuaranteedFieldsContract())
+        register_declaration_contract(SinkRequiredFieldsContract())
         register_declaration_contract(_SecondaryBoundaryContract())
 
-        run_id = "run-source-guaranteed-fields-aggregate"
-        row_id = "row-source-guaranteed-fields-aggregate"
-        token_id = "token-source-guaranteed-fields-aggregate"
-        node_id = "source-guaranteed-fields-node"
+        run_id = "run-sink-required-fields-aggregate"
+        row_id = "row-sink-required-fields-aggregate"
+        token_id = "token-sink-required-fields-aggregate"
+        node_id = "sink-required-fields-node"
         setup = _setup_landscape(run_id=run_id, row_id=row_id, token_id=token_id, node_id=node_id)
 
         try:
@@ -307,9 +329,9 @@ class TestSourceGuaranteedFieldsRoundTrip:
                     run_id=run_id,
                     row_id=row_id,
                     token_id=token_id,
-                    static_contract=frozenset({"customer_id", "account_id"}),
-                    row_data={"account_id": "v"},
-                    row_contract=_contract(("account_id",)),
+                    static_contract=frozenset({"customer_id", "amount"}),
+                    row_data={"customer_id": "v"},
+                    row_contract=None,
                 ),
                 outputs=BoundaryOutputs(),
             )
@@ -317,7 +339,7 @@ class TestSourceGuaranteedFieldsRoundTrip:
             error = ExecutionError(
                 exception=str(aggregate),
                 exception_type=type(aggregate).__name__,
-                phase="source_boundary_check",
+                phase="sink_write",
                 context=aggregate.to_audit_dict(),
             )
         else:
@@ -327,15 +349,15 @@ class TestSourceGuaranteedFieldsRoundTrip:
         assert context["exception_type"] == "AggregateDeclarationContractViolation"
         assert context["is_aggregate"] is True
         child_types = {entry["exception_type"] for entry in context["violations"]}
-        assert child_types == {"SourceGuaranteedFieldsViolation", "_SecondaryBoundaryViolation"}
+        assert child_types == {"SinkRequiredFieldsViolation", "_SecondaryBoundaryViolation"}
 
     def test_secret_like_payload_value_is_scrubbed_before_landscape_round_trip(self) -> None:
         register_declaration_contract(_SecretBoundaryContract())
 
-        run_id = "run-source-guaranteed-fields-secret"
-        row_id = "row-source-guaranteed-fields-secret"
-        token_id = "token-source-guaranteed-fields-secret"
-        node_id = "source-guaranteed-fields-node"
+        run_id = "run-sink-required-fields-secret"
+        row_id = "row-sink-required-fields-secret"
+        token_id = "token-sink-required-fields-secret"
+        node_id = "sink-required-fields-node"
         setup = _setup_landscape(run_id=run_id, row_id=row_id, token_id=token_id, node_id=node_id)
 
         try:
@@ -348,7 +370,7 @@ class TestSourceGuaranteedFieldsRoundTrip:
                     token_id=token_id,
                     static_contract=frozenset({"customer_id"}),
                     row_data={"customer_id": "v"},
-                    row_contract=_contract(("customer_id",)),
+                    row_contract=_contract(required_fields=("customer_id",)),
                 ),
                 outputs=BoundaryOutputs(),
             )
@@ -356,7 +378,7 @@ class TestSourceGuaranteedFieldsRoundTrip:
             error = ExecutionError(
                 exception=str(violation),
                 exception_type=type(violation).__name__,
-                phase="source_boundary_check",
+                phase="sink_write",
                 context=violation.to_audit_dict(),
             )
         else:
@@ -364,5 +386,5 @@ class TestSourceGuaranteedFieldsRoundTrip:
 
         context = _record_failure(setup, token_id=token_id, node_id=node_id, run_id=run_id, error=error)
         assert "sk-abcdef" not in json.dumps(context)
-        assert context["contract_name"] == "source_guaranteed_fields_secret_roundtrip"
+        assert context["contract_name"] == "sink_required_fields_secret_roundtrip"
         assert context["payload"]["marker"] == "<redacted-secret>"

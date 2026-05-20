@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, TypedDict
 
+from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+
 from elspeth.contracts import NodeStateFailed, NodeType
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
@@ -28,7 +30,6 @@ from elspeth.contracts.schema_contract import FieldContract, PipelineRow, Schema
 from elspeth.core.landscape.lineage import explain
 from elspeth.engine.executors.declaration_dispatch import run_pre_emission_checks
 from elspeth.engine.executors.declared_required_fields import DeclaredRequiredFieldsContract
-from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
 
 def _setup_landscape(*, run_id: str, row_id: str, token_id: str, node_id: str):

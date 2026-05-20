@@ -16,6 +16,7 @@ from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -84,9 +85,26 @@ class ReportAssemble(BaseTransform):
     name = "report_assemble"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:8a483663e3309fc9"
+    source_file_hash: str | None = "sha256:82cc05ca5602c9f9"
     config_model = ReportAssembleConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Assembles a flushed batch of text rows into one paginated report row.",
+                composer_hints=(
+                    "Use report_assemble under aggregations with a trigger; it requires aggregation_batch context.",
+                    "text_field must be a string field present on every input row.",
+                    "Choose format as plain_text, markdown, or html_fragment; html_fragment escapes text before wrapping paragraphs.",
+                    "output_field must not collide with reserved report metadata fields such as report_index or line_count.",
+                    "Output is one report row per flush window, not the original text rows.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

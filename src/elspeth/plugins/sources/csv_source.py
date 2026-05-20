@@ -84,7 +84,7 @@ class CSVSource(BaseSource):
     name = "csv"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5be5fd630bbae3c9"
+    source_file_hash: str | None = "sha256:f0c1210f0dadb49c"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -574,9 +574,9 @@ class CSVSource(BaseSource):
                 composer_hints=(
                     "Default schema.mode to 'observed' unless the user explicitly asked to project to a smaller schema.",
                     "Call inspect_source before declaring schema.mode: 'fixed' — fixed mode silently drops rows that don't match.",
-                    "Confirm the file has a header row; headerless inputs need an explicit 'columns' list, not 'fields'.",
+                    "Decide whether the CSV is headered: without columns CSVSource treats the first non-skipped row as headers; for headerless data set columns=[...] so the first data row stays data. Do not copy a header row into inline source data unless it is real headered CSV.",
                     "Excel-exported CSVs are often cp1252 or have a UTF-16 BOM — verify encoding before pinning schema.",
-                    "Set on_validation_failure: 'quarantine' (route to a sink) or 'discard' (drop with audit). Default is 'discard'.",
+                    "Set on_validation_failure to a sink name for quarantine/review, or 'discard' to drop with audit. Default is 'discard'.",
                 ),
             )
         return None

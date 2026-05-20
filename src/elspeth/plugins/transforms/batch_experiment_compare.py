@@ -18,6 +18,7 @@ from pydantic import Field, field_validator, model_validator
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -121,9 +122,25 @@ class BatchExperimentCompare(BaseTransform):
     name = "batch_experiment_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:64e8f47d192690d0"
+    source_file_hash: str | None = "sha256:0f59970e8c643a24"
     config_model = BatchExperimentCompareConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Compares treatment or prompt variants by mean score over an aggregation batch.",
+                composer_hints=(
+                    "Use batch_experiment_compare under aggregations with a trigger; it emits one row per non-baseline variant.",
+                    "variant_field and score_field must differ; baseline_variant defaults to the first-seen variant.",
+                    "score_field must be numeric; rows with missing or non-finite scores are counted in the comparison metadata.",
+                    "Output fields are experiment metrics such as mean_delta, relative_lift, and confidence bounds.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

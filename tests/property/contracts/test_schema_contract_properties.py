@@ -29,7 +29,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from elspeth.contracts.errors import ContractMergeError
+from elspeth.contracts.errors import ContractMergeError, TypeMismatchViolation
 from elspeth.contracts.schema_contract import (
     FieldContract,
     PipelineRow,
@@ -707,5 +707,5 @@ class TestValidationProperties:
         # Any value should pass type validation
         for value in [42, "hello", 3.14, True, None, [1, 2, 3], {"nested": True}]:
             violations = contract.validate({name: value})
-            type_violations = [v for v in violations if hasattr(v, "expected_type")]
+            type_violations = [v for v in violations if isinstance(v, TypeMismatchViolation)]
             assert len(type_violations) == 0

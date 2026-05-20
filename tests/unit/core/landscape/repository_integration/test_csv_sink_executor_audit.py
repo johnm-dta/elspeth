@@ -1,4 +1,4 @@
-# tests/integration/audit/test_csv_sink_executor_audit.py
+# tests/unit/core/landscape/repository_integration/test_csv_sink_executor_audit.py
 """End-to-end audit-chain integration test for SinkExecutor + CSVSink.
 
 Relocated from tests/unit/contracts/sink_contracts/test_csv_sink_contract.py
@@ -20,15 +20,16 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from tests.fixtures.base_classes import create_observed_contract, inject_write_failure
+from tests.fixtures.factories import make_context
+from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+
 from elspeth.contracts import NodeType, PendingOutcome, TokenInfo
 from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.engine.executors import SinkExecutor
 from elspeth.engine.spans import SpanFactory
 from elspeth.plugins.sinks.csv_sink import CSVSink
-from tests.fixtures.base_classes import create_observed_contract, inject_write_failure
-from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
 
 class TestCSVSinkExecutorAuditChain:

@@ -11,6 +11,7 @@ from pydantic import Field, field_validator, model_validator
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -146,10 +147,26 @@ class BatchClassifierMetrics(BaseTransform):
     name = "batch_classifier_metrics"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:56f86b4c42d1d21d"
+    source_file_hash: str | None = "sha256:74709a8c8a9717dd"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Computes classifier accuracy, confusion counts, and precision/recall/F1 metrics for a batch.",
+                composer_hints=(
+                    "Use batch_classifier_metrics under aggregations with a trigger; it emits metric summary rows.",
+                    "actual_field and predicted_field must be distinct scalar label fields.",
+                    "Set positive_label only for binary metrics; macro, micro, and weighted metrics are always computed.",
+                    "Output is classifier metrics, not per-row predictions; downstream fields should reference the metric keys.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

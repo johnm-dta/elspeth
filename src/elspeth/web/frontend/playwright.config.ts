@@ -3,10 +3,23 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig, devices } from "@playwright/test";
 
-const FRONTEND_PORT = 5173;
-const BACKEND_PORT = 8451;
-const FRONTEND_URL = `http://localhost:${FRONTEND_PORT}`;
-const BACKEND_HEALTH_URL = `http://127.0.0.1:${BACKEND_PORT}/api/health`;
+function portFromEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${name} must be an integer TCP port, got '${value}'`);
+  }
+  return port;
+}
+
+const FRONTEND_PORT = portFromEnv("PLAYWRIGHT_FRONTEND_PORT", 5173);
+const BACKEND_PORT = portFromEnv("PLAYWRIGHT_BACKEND_PORT", 8451);
+const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
+const BACKEND_BASE_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+const BACKEND_HEALTH_URL = `${BACKEND_BASE_URL}/api/health`;
 
 const REPO_ROOT_FROM_FRONTEND = "../../../..";
 
@@ -22,6 +35,10 @@ const E2E_DATA_DIR = process.env.PLAYWRIGHT_E2E_DATA_DIR
 const STORAGE_STATE_PATH = resolve(HERE, "tests", "e2e", ".auth", "user.json");
 
 process.env.PLAYWRIGHT_E2E_DATA_DIR = E2E_DATA_DIR;
+process.env.PLAYWRIGHT_FRONTEND_BASE_URL = FRONTEND_URL;
+process.env.PLAYWRIGHT_BACKEND_BASE_URL = BACKEND_BASE_URL;
+process.env.PLAYWRIGHT_FRONTEND_PORT = String(FRONTEND_PORT);
+process.env.PLAYWRIGHT_BACKEND_PORT = String(BACKEND_PORT);
 
 const isCI = !!process.env.CI;
 
@@ -94,7 +111,7 @@ export default defineConfig({
       env: composerSettingsEnv,
     },
     {
-      command: "npm run dev",
+      command: `npm run dev -- --host 127.0.0.1 --port ${FRONTEND_PORT}`,
       url: FRONTEND_URL,
       reuseExistingServer: !isCI,
       timeout: 30_000,

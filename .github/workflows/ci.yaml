@@ -641,6 +641,12 @@ jobs:
             npx playwright install --with-deps chromium
           fi
 
+      - name: Assign isolated Playwright ports
+        run: |
+          port_base=$((20000 + (GITHUB_RUN_ID % 20000)))
+          echo "PLAYWRIGHT_BACKEND_PORT=$port_base" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_FRONTEND_PORT=$((port_base + 1))" >> "$GITHUB_ENV"
+
       - name: Run Playwright tests
         working-directory: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend
         env:

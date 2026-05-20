@@ -178,6 +178,35 @@ def _make_fork_coalesce_pipeline() -> CompositionState:
     )
 
 
+def _make_named_sources_pipeline() -> CompositionState:
+    return CompositionState(
+        source=None,
+        sources={
+            "customers": SourceSpec(
+                plugin="csv",
+                on_success="customer_rows",
+                options={"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            "orders": SourceSpec(
+                plugin="json",
+                on_success="order_rows",
+                options={"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                on_validation_failure="bad_orders",
+            ),
+        },
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(name="customer_rows", plugin="json", options={"path": "/data/customer_rows.json"}, on_write_failure="discard"),
+            OutputSpec(name="order_rows", plugin="json", options={"path": "/data/order_rows.json"}, on_write_failure="discard"),
+            OutputSpec(name="bad_orders", plugin="json", options={"path": "/data/bad_orders.json"}, on_write_failure="discard"),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 class TestGenerateYaml:
     def test_generate_pipeline_dict_matches_generate_yaml_shape(self) -> None:
         state = _make_fork_coalesce_pipeline()
@@ -260,6 +289,17 @@ class TestGenerateYaml:
         assert INTERPRETATION_REQUIREMENTS_KEY not in options
         assert options["prompt_template"] == "Rate resolved meaning: {{ row.text }}"
         assert options["resolved_prompt_template_hash"] == "sha256-rfc8785-v1:abc123"
+
+    def test_generate_pipeline_dict_emits_sources_mapping_for_named_sources(self) -> None:
+        state = _make_named_sources_pipeline()
+
+        pipeline_dict = generate_pipeline_dict(state)
+
+        assert "source" not in pipeline_dict
+        assert pipeline_dict["sources"]["customers"]["plugin"] == "csv"
+        assert pipeline_dict["sources"]["customers"]["options"]["on_validation_failure"] == "discard"
+        assert pipeline_dict["sources"]["orders"]["options"]["on_validation_failure"] == "bad_orders"
+        assert yaml.safe_load(generate_yaml(state)) == pipeline_dict
 
     def test_generate_pipeline_dict_rejects_unknown_node_type(self) -> None:
         """YAML export must not silently drop nodes outside the closed set."""

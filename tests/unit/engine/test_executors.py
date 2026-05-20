@@ -84,6 +84,7 @@ from elspeth.contracts.errors import (
     TIER_1_ERRORS,
     AuditIntegrityError,
     ContractMergeError,
+    DeclarationContractViolation,
     DeclaredRequiredInputFieldsViolation,
     FrameworkBugError,
     OrchestrationInvariantError,
@@ -5893,9 +5894,10 @@ class TestPassThroughCrossCheck:
         assert violation.token_id == "tok_9"
 
     def test_cross_check_is_tier_1_registered(self) -> None:
-        """PassThroughContractViolation membership in TIER_1_ERRORS guards on_error bypass."""
+        """PassThroughContractViolation registration guards on_error bypass."""
         assert PassThroughContractViolation in TIER_1_ERRORS
-        assert issubclass(PassThroughContractViolation, PluginContractViolation)
+        assert issubclass(PassThroughContractViolation, DeclarationContractViolation)
+        assert not issubclass(PassThroughContractViolation, PluginContractViolation)
 
     def test_cross_check_crashes_when_emitted_row_contract_is_none(self) -> None:
         """Emitted row with contract=None is a framework invariant violation."""

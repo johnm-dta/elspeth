@@ -1,5 +1,5 @@
 {
-  "name": "elspeth-rapid",
+  "name": "elspeth",
   "private": true,
   "devDependencies": {
     "azurite": "^3.30.0"

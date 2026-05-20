@@ -48,6 +48,8 @@ if TYPE_CHECKING:
     from elspeth.plugins.infrastructure.clients.base import TelemetryEmitCallback
 
 __all__ = [
+    "OPENROUTER_APP_REFERER",
+    "OPENROUTER_APP_TITLE",
     "OPENROUTER_BASE_URL",
     "OPENROUTER_BASE_URL_APPLIES_WHEN",
     "OpenRouterConfig",
@@ -61,6 +63,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 OPENROUTER_BASE_URL_APPLIES_WHEN = (("base_url", OPENROUTER_BASE_URL),)
 """Value-source predicate for configs targeting the canonical OpenRouter API."""
+
+OPENROUTER_APP_REFERER = "https://github.com/johnm-dta/elspeth"
+"""Canonical public project URL used for OpenRouter app attribution."""
+
+OPENROUTER_APP_TITLE = "Elspeth"
+"""Canonical OpenRouter app display title."""
 
 
 _HTTP_ERROR_BODY_LIMIT = 512
@@ -194,7 +202,8 @@ class OpenRouterLLMProvider:
         # Pre-build auth headers — avoids storing the raw API key as a named attribute
         self._request_headers = {
             "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "https://github.com/elspeth-rapid",
+            "HTTP-Referer": OPENROUTER_APP_REFERER,
+            "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
         }
         self._base_url = base_url
         self._timeout = timeout_seconds

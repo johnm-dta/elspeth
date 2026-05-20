@@ -1,4 +1,15 @@
 name: ELSPETH CodeQL config
 
 paths-ignore:
+  - tests/**
   - elspeth-lints/src/**/fixtures/**
+
+query-filters:
+  # ADR-023 assigns ELSPETH quality/architecture invariants to elspeth-lints.
+  # Keep CodeQL focused on generic vulnerability analysis for PR gating.
+  - exclude:
+      id: py/unsafe-cyclic-import
+  - exclude:
+      id: py/uninitialized-local-variable
+  - exclude:
+      id: py/unused-loop-variable

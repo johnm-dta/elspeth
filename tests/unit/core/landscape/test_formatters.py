@@ -447,6 +447,18 @@ class TestCSVFormatter:
         with pytest.raises(AuditIntegrityError, match="Infinity"):
             formatter.flatten({"latency_ms": float("inf")})
 
+    def test_csv_formatter_rejects_nested_key_collision(self) -> None:
+        """Nested and dotted keys must not collapse to the same CSV column."""
+        formatter = CSVFormatter()
+
+        with pytest.raises(ValueError, match=r"CSV flatten key collision: 'audit\.run_id'"):
+            formatter.flatten(
+                {
+                    "audit.run_id": "flat-run",
+                    "audit": {"run_id": "nested-run"},
+                }
+            )
+
 
 class TestJSONFormatter:
     """JSONFormatter preserves nested structure for JSON output."""
@@ -702,3 +714,131 @@ class TestLineageTextFormatter:
         text = formatter.format(None)
 
         assert "not found" in text.lower() or "no lineage" in text.lower()
+
+    def test_formats_full_lineage_sections(self) -> None:
+        """Renders all optional lineage sections without fabricating audit data."""
+        from elspeth.contracts import (
+            Call,
+            CallStatus,
+            CallType,
+            NodeStateCompleted,
+            NodeStateStatus,
+            RoutingEvent,
+            RoutingMode,
+            RowLineage,
+            TerminalPath,
+            Token,
+            TokenOutcome,
+            TransformErrorRecord,
+            ValidationErrorRecord,
+        )
+        from elspeth.core.landscape.formatters import LineageTextFormatter
+        from elspeth.core.landscape.lineage import LineageResult
+
+        now = datetime(2026, 1, 29, 12, 0, 0, tzinfo=UTC)
+        result = LineageResult(
+            token=Token(
+                token_id="tok-child",
+                row_id="row-456",
+                created_at=now,
+                run_id="run-001",
+                branch_name="review-path",
+            ),
+            source_row=RowLineage(
+                row_id="row-456",
+                run_id="run-001",
+                source_node_id="src-node",
+                row_index=0,
+                source_data_hash="abc123",
+                created_at=now,
+                source_data=None,
+                payload_available=False,
+            ),
+            outcome=TokenOutcome(
+                outcome_id="out-buffered",
+                token_id="tok-child",
+                run_id="run-001",
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+                completed=False,
+                recorded_at=now,
+            ),
+            node_states=(
+                NodeStateCompleted(
+                    state_id="state-1",
+                    token_id="tok-child",
+                    node_id="transform-1",
+                    step_index=2,
+                    attempt=0,
+                    status=NodeStateStatus.COMPLETED,
+                    input_hash="input-hash",
+                    output_hash="output-hash",
+                    started_at=now,
+                    completed_at=now,
+                    duration_ms=12.5,
+                ),
+            ),
+            routing_events=(
+                RoutingEvent(
+                    event_id="route-1",
+                    state_id="state-1",
+                    edge_id="edge-1",
+                    routing_group_id="group-1",
+                    ordinal=3,
+                    mode=RoutingMode.COPY,
+                    reason_hash="reason-hash",
+                    created_at=now,
+                ),
+            ),
+            calls=(
+                Call(
+                    call_id="call-1",
+                    state_id="state-1",
+                    call_index=0,
+                    call_type=CallType.HTTP,
+                    status=CallStatus.SUCCESS,
+                    request_hash="req-hash",
+                    response_hash="resp-hash",
+                    created_at=now,
+                    latency_ms=7.25,
+                ),
+            ),
+            validation_errors=(
+                ValidationErrorRecord(
+                    error_id="val-1",
+                    run_id="run-001",
+                    node_id="src-node",
+                    row_hash="row-hash",
+                    error="missing field",
+                    schema_mode="fixed",
+                    destination="quarantine",
+                    created_at=now,
+                ),
+            ),
+            transform_errors=(
+                TransformErrorRecord(
+                    error_id="tx-1",
+                    run_id="run-001",
+                    token_id="tok-child",
+                    transform_id="transform-1",
+                    row_hash="row-hash",
+                    destination="fail-sink",
+                    created_at=now,
+                ),
+            ),
+            parent_tokens=(Token(token_id="tok-parent", row_id="row-456", created_at=now, run_id="run-001"),),
+        )
+
+        text = LineageTextFormatter().format(result)
+
+        assert "Branch: review-path" in text
+        assert "Payload Available: False" in text
+        assert "Source Data:" not in text
+        assert "Outcome: NULL" in text
+        assert "Path: BUFFERED" in text
+        assert "[2] transform-1: completed" in text
+        assert "[3] copy edge=edge-1 group=group-1 reason_hash=reason-hash" in text
+        assert "http: success (7.2ms)" in text
+        assert "[fixed] missing field" in text
+        assert "[transform-1] fail-sink" in text
+        assert "tok-parent" in text

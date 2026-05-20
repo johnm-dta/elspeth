@@ -19,7 +19,7 @@ generated-review, and handover snapshots from earlier workstreams were moved to
 | Investigating audit data | [Landscape MCP Analysis](guides/landscape-mcp-analysis.md) and [Architecture Overview](../ARCHITECTURE.md) |
 | Developing plugins | [Data Trust and Error Handling](guides/data-trust-and-error-handling.md), [Plugin Development Guide](../PLUGIN.md), then [Plugin Protocol](contracts/plugin-protocol.md) |
 | Contributing to the codebase | [Contributing](../CONTRIBUTING.md) |
-| Evaluating ELSPETH | [Executive Summary](release/executive-summary.md), [Progress Report](release/elspeth-progress-rc1-to-rc5.md), and [Velocity Report](release/elspeth-velocity-rc1-to-rc5.md) |
+| Evaluating ELSPETH | [Executive Summary](release/executive-summary.md), [Composer Guide](release/composer-guide.md), [Platform Architecture](release/platform-architecture.md), [Public-Sector Assessment Mapping](release/assessment-mapping.md), and [Audit and Lineage Guarantees](release/guarantees.md) |
 
 ---
 
@@ -99,11 +99,13 @@ Runbooks and production procedures.
 Audience-facing release, progress, velocity, and evaluation documents. See the
 [release docs README](release/README.md) for the full index.
 
-- [Executive Summary](release/executive-summary.md) — draft public-sector evaluation brief for RC-5.2
+- [Executive Summary](release/executive-summary.md) — capability and assurance brief for Australian public-sector evaluators *(DRAFT — awaiting operator sign-off)*
+- [Composer Guide](release/composer-guide.md) — current user-facing guide to the web authoring surface
+- [Platform Architecture](release/platform-architecture.md) — current platform architecture, trust-boundary, and operational-responsibility overview
+- [Public-Sector Assessment Mapping](release/assessment-mapping.md) — current evidence map for government evaluation touchpoints
 - [Progress Report: RC-1 to RC-5](release/elspeth-progress-rc1-to-rc5.md) — current cumulative-output view (RC-5.2, May 2026): what shipped, period by period
 - [Velocity Report: RC-1 to RC-5](release/elspeth-velocity-rc1-to-rc5.md) — current per-day commit volume (RC-5.2, May 2026): tempo and peak-day attribution
 - [Audit and Lineage Guarantees](release/guarantees.md) — long-lived assurance narrative; refreshed per release (current contract surface; §1–§10 RC-3 base, §11–§14 RC-5.2 additions)
-- [Executive Summary (RC-5.2)](release/executive-summary.md) — capability and assurance brief for Australian public-sector evaluators *(DRAFT — awaiting operator sign-off)*
 - [Archived RC snapshots](../docs-archive/2026-05-19-docs-cleanout/docs/release/) — `feature-inventory.md` (RC-3.3), `rc4-executive-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix-postmortem.md` — historical context only; see the [2026-05-19 cleanout MANIFEST](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) for full relocation map
 
 ## Historical Snapshots

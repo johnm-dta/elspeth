@@ -53,6 +53,7 @@ artifact that the executor runs directly.
 - [Documentation](#documentation)
 - [When to Use Elspeth](#when-to-use-elspeth)
 - [Contributing](#contributing)
+  - [Security And Governance](#security-and-governance)
 - [License](#license)
 
 ---
@@ -226,6 +227,23 @@ RC-5.2 turns the Web Composer into a more durable, recoverable authoring system:
 - **CI and documentation hardening** — release reports, docs cleanup, Playwright
   gating, CodeQL, and `elspeth-lints` checks make the release train easier to
   review and repeat.
+
+The RC-5.2 release documentation is intentionally explicit:
+
+- [Executive Summary](docs/release/executive-summary.md) is the current
+  public-sector evaluation brief.
+- [Composer Guide](docs/release/composer-guide.md) explains the current web
+  authoring experience: guided mode, freeform authoring, readiness checks,
+  save-for-review, run, export, and recovery.
+- [Platform Architecture](docs/release/platform-architecture.md) explains the
+  runtime surfaces, trust boundaries, audit-first behaviour, and adopter
+  responsibilities.
+- [Audit and Lineage Guarantees](docs/release/guarantees.md) is the current
+  assurance surface for audit, lineage, execution, data, identity,
+  secret-reference handling, sessions, and Composer authoring.
+- [Public-Sector Assessment Mapping](docs/release/assessment-mapping.md)
+  records the current evidence against government evaluation touchpoints. It is
+  an evidence map, not a claim of formal conformance.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
@@ -937,6 +955,7 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records for routing, declaration-trust, terminal outcomes, and other load-bearing decisions |
 | [docs/guides/data-trust-and-error-handling.md](docs/guides/data-trust-and-error-handling.md) | Developers | Trust model, external-boundary handling, quarantine, and plugin error semantics |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |
+| [docs/release/](docs/release/) | Evaluators | Executive summary, Composer guide, platform architecture, guarantees, assessment mapping, release evidence |
 | [docs/reference/](docs/reference/) | Developers | Configuration reference |
 | [docs/runbooks/](docs/runbooks/) | Operators | Deployment and operations |
 
@@ -984,6 +1003,17 @@ npm install
 # Linting
 .venv/bin/python -m ruff check src/
 ```
+
+### Security And Governance
+
+- Report suspected vulnerabilities through [SECURITY.md](SECURITY.md). Do not
+  disclose exploit details in a public issue before a maintainer confirms a safe
+  disclosure path.
+- Community behaviour expectations are in
+  [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- Support boundaries and response expectations are in [SUPPORT.md](SUPPORT.md).
+- Project decision-making, release authority, and continuity risks are
+  described in [GOVERNANCE.md](GOVERNANCE.md).
 
 ---
 

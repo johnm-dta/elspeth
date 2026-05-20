@@ -111,6 +111,7 @@ from elspeth.engine.executors import (
 )
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row
+from tests.fixtures.audit_hashing import assert_stable_hash
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 from tests.unit.engine.conftest import make_test_step_resolver as _make_step_resolver
@@ -221,6 +222,14 @@ def _make_factory() -> MagicMock:
     factory.execution.get_batch.side_effect = get_batch_side_effect
     factory.execution.get_batch_members.side_effect = get_batch_members_side_effect
     return factory
+
+
+def _single_complete_node_state_kwargs(factory: MagicMock, *, status: NodeStateStatus) -> dict[str, Any]:
+    """Assert the node under test recorded exactly one terminal node-state completion."""
+    factory.execution.complete_node_state.assert_called_once()
+    kwargs = factory.execution.complete_node_state.call_args.kwargs
+    assert kwargs["status"] == status
+    return kwargs
 
 
 def _make_span_factory() -> SpanFactory:
@@ -632,15 +641,16 @@ class TestTransformExecutor:
         assert kwargs["status"] == NodeStateStatus.COMPLETED
         assert kwargs["state_id"] == "state_001"
 
-    def test_result_has_audit_fields_populated(self) -> None:
-        """Result has input_hash, output_hash, duration_ms populated by executor."""
+    def test_result_hashes_bind_to_input_and_output_payloads(self) -> None:
+        """Result hashes bind to the exact input and output payloads."""
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         token = _make_token(contract=contract)
+        output_row = make_row({"value": "out"}, contract=contract)
         transform = _make_transform()
         transform.process.return_value = TransformResult.success(
-            make_row({"value": "out"}, contract=contract),
+            output_row,
             success_reason={"action": "test"},
         )
         ctx = make_context()
@@ -651,8 +661,8 @@ class TestTransformExecutor:
             ctx,
         )
 
-        assert result.input_hash is not None
-        assert result.output_hash is not None
+        assert_stable_hash(result.input_hash, token.row_data.to_dict())
+        assert_stable_hash(result.output_hash, output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 
@@ -1481,10 +1491,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        # Verify FAILED state was recorded before raising
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_fork_destination_creates_children(self) -> None:
         """Config gate with 'fork' destination creates child tokens."""
@@ -1570,8 +1577,7 @@ class TestGateExecutor:
                 token_manager=None,
             )
 
-        statuses = [call.kwargs.get("status") for call in factory.execution.complete_node_state.call_args_list]
-        assert NodeStateStatus.FAILED in statuses
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_missing_route_resolution_fails_closed(self) -> None:
         """Missing route resolution mapping raises MissingEdgeError (no fallback)."""
@@ -1596,9 +1602,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_exception_records_failed_and_reraises(self) -> None:
         """Exception during config gate eval records FAILED and re-raises.
@@ -1630,9 +1634,7 @@ class TestGateExecutor:
                 ctx,
             )
 
-        assert factory.execution.complete_node_state.call_count >= 1
-        last_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert last_call[1]["status"] == NodeStateStatus.FAILED
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     def test_config_gate_runtime_error_in_dispatch_records_failed_state(self) -> None:
         """RuntimeError during dispatch records FAILED state (Phase 0 fix #8).
@@ -1683,11 +1685,7 @@ class TestGateExecutor:
                 token_manager=None,  # Triggers OrchestrationInvariantError in dispatch
             )
 
-        # Verify FAILED status was recorded (the fix ensures this)
-        statuses = [call.kwargs.get("status") for call in factory.execution.complete_node_state.call_args_list]
-        assert NodeStateStatus.FAILED in statuses, (
-            "Node state should be FAILED when dispatch raises any Exception, not just MissingEdgeError"
-        )
+        _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
     # --- Error routing edge cases (exd audit) ---
 
@@ -1751,15 +1749,8 @@ class TestGateExecutor:
 
         executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # Find the COMPLETED call (not the begin_node_state call)
-        completed_call = None
-        for call in factory.execution.complete_node_state.call_args_list:
-            if call.kwargs.get("status") == NodeStateStatus.COMPLETED:
-                completed_call = call
-                break
-
-        assert completed_call is not None, "Expected a COMPLETED node state call"
-        context_after = completed_call.kwargs.get("context_after")
+        completed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.COMPLETED)
+        context_after = completed_kwargs.get("context_after")
         assert context_after is not None, "context_after should be set on success path"
 
         # Verify it's the right DTO with correct values
@@ -1792,10 +1783,8 @@ class TestGateExecutor:
         with pytest.raises(MissingEdgeError):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # The FAILED call should not have context_after
-        failed_call = factory.execution.complete_node_state.call_args_list[-1]
-        assert failed_call.kwargs.get("status") == NodeStateStatus.FAILED
-        assert "context_after" not in failed_call.kwargs
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert "context_after" not in failed_kwargs
 
     # Note: test_post_dispatch_failure_marks_state_failed_via_guard was removed
     # because gate.py now reuses input_hash for output_hash (gates don't modify
@@ -3617,7 +3606,7 @@ class TestSinkExecutor:
         ctx = make_context()
         pending = _default_pending()
 
-        with pytest.raises((ContractMergeError, FrameworkBugError)):
+        with pytest.raises(FrameworkBugError, match=r"Contract merge failed after .*ms") as exc_info:
             executor.write(
                 sink,
                 tokens,
@@ -3627,6 +3616,7 @@ class TestSinkExecutor:
                 pending_outcome=pending,
             )
 
+        assert isinstance(exc_info.value.__cause__, ContractMergeError)
         sink.write.assert_not_called()
         sink.flush.assert_not_called()
         factory.data_flow.record_token_outcome.assert_not_called()
@@ -4946,17 +4936,17 @@ class TestAggregationExecutorTerminality:
         finally:
             agg_mod.stable_hash = original_hash  # type: ignore[attr-defined]
 
-        # Node state: FAILED (auto-completed by guard)
-        # Find the FAILED call — guard auto-completes with phase="executor_post_process"
-        failed_calls = [c for c in factory.execution.complete_node_state.call_args_list if c[1].get("status") == NodeStateStatus.FAILED]
-        assert len(failed_calls) >= 1
-        # At least one FAILED call should have the guard's phase tag
-        guard_fail = [c for c in failed_calls if getattr(c[1].get("error"), "phase", None) == "executor_post_process"]
-        assert len(guard_fail) == 1
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
+        assert failed_kwargs["state_id"] == "state_001"
+        assert getattr(failed_kwargs["error"], "phase", None) == "executor_post_process"
 
         # Batch: FAILED (outer except handler)
-        batch_failed = [c for c in factory.execution.complete_batch.call_args_list if c[1].get("status") == BatchStatus.FAILED]
-        assert len(batch_failed) >= 1
+        factory.execution.complete_batch.assert_called_once()
+        batch_kwargs = factory.execution.complete_batch.call_args.kwargs
+        assert batch_kwargs["batch_id"] == "batch_001"
+        assert batch_kwargs["status"] == BatchStatus.FAILED
+        assert batch_kwargs["trigger_type"] == TriggerType.COUNT
+        assert batch_kwargs["state_id"] == "state_001"
 
         # Buffers cleared for recovery
         assert executor.get_buffer_count(nid) == 0
@@ -5225,14 +5215,10 @@ class TestGateExecutorExecutionErrorFieldRename:
         with pytest.raises(ExpressionEvaluationError):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        # Find the FAILED call to complete_node_state
-        failed_calls = [
-            call for call in factory.execution.complete_node_state.call_args_list if call.kwargs.get("status") == NodeStateStatus.FAILED
-        ]
-        assert len(failed_calls) >= 1, "Expected at least one FAILED node state call"
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
         # Extract the error argument — it should be an ExecutionError
-        error_obj = failed_calls[0].kwargs.get("error")
+        error_obj = failed_kwargs.get("error")
         assert error_obj is not None, "error kwarg should be set on FAILED state"
         assert isinstance(error_obj, ExecutionError)
 
@@ -5269,12 +5255,9 @@ class TestGateExecutorExecutionErrorFieldRename:
         with pytest.raises(ValueError, match="unknown_route"):
             executor.execute_config_gate(config, "cg_1", token, ctx)
 
-        failed_calls = [
-            call for call in factory.execution.complete_node_state.call_args_list if call.kwargs.get("status") == NodeStateStatus.FAILED
-        ]
-        assert len(failed_calls) >= 1
+        failed_kwargs = _single_complete_node_state_kwargs(factory, status=NodeStateStatus.FAILED)
 
-        error_obj = failed_calls[0].kwargs.get("error")
+        error_obj = failed_kwargs.get("error")
         assert isinstance(error_obj, ExecutionError)
 
         # Verify serialization: 'type' key with value 'ValueError'
@@ -5716,17 +5699,18 @@ class TestTransformExecutorBatchPath:
 
     # --- Audit fields populated ---
 
-    def test_batch_result_has_audit_fields(self) -> None:
-        """Batch transform results have input_hash, output_hash, duration_ms populated."""
+    def test_batch_result_hashes_bind_to_input_and_output_payloads(self) -> None:
+        """Batch transform hashes bind to the exact input batch and output payload."""
         from elspeth.engine.batch_adapter import SharedBatchAdapter
 
         factory = _make_factory()
         executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
         contract = _make_contract()
         transform = self._make_batch_transform()
+        output_row = make_row({"value": "out"}, contract=contract)
 
         success_result = TransformResult.success(
-            make_row({"value": "out"}, contract=contract),
+            output_row,
             success_reason={"action": "batched"},
         )
         mock_adapter = MagicMock(spec=SharedBatchAdapter)
@@ -5740,8 +5724,8 @@ class TestTransformExecutorBatchPath:
 
         result, _, _ = executor.execute_transform(transform, token, ctx)
 
-        assert result.input_hash is not None
-        assert result.output_hash is not None
+        assert_stable_hash(result.input_hash, token.row_data.to_dict())
+        assert_stable_hash(result.output_hash, output_row)
         assert result.duration_ms is not None
         assert result.duration_ms >= 0
 

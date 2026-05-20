@@ -204,3 +204,27 @@ class TestResolvePreflightDirect:
 
         mock_detect.assert_not_called()
         mock_resolve.assert_not_called()
+
+    def test_malformed_commencement_gate_rejected_before_dependency_resolution(self) -> None:
+        """Gate expression validation must run before dependency side effects."""
+        from elspeth.core.dependency_config import DependencyConfig
+        from elspeth.core.expression_parser import ExpressionSyntaxError
+        from elspeth.engine.bootstrap import resolve_preflight
+
+        mock_config = MagicMock()
+        mock_config.depends_on = [DependencyConfig(name="indexer", settings="./index.yaml")]
+        mock_config.commencement_gates = [CommencementGateConfig.model_construct(name="malformed_gate", condition="collections[")]
+
+        mock_runner = MagicMock(spec=PipelineRunner)
+
+        with (
+            patch("elspeth.engine.dependency_resolver.detect_cycles") as mock_detect,
+            patch("elspeth.engine.dependency_resolver.resolve_dependencies") as mock_resolve,
+            patch("elspeth.engine.commencement.evaluate_commencement_gates") as mock_eval,
+            pytest.raises(ExpressionSyntaxError, match="Invalid syntax"),
+        ):
+            resolve_preflight(mock_config, Path("/fake/pipeline.yaml"), probes=[], runner=mock_runner)
+
+        mock_detect.assert_not_called()
+        mock_resolve.assert_not_called()
+        mock_eval.assert_not_called()

@@ -394,7 +394,14 @@ def _process_merged_coalesce_outcome(
     merged_token = outcome.merged_token
     if merged_token is None:
         raise OrchestrationInvariantError("CoalesceOutcome has_merged=True but merged_token is None")
-    coalesce_node_id = coalesce_node_map[coalesce_name]
+    try:
+        coalesce_node_id = coalesce_node_map[coalesce_name]
+    except KeyError as exc:
+        configured_names = ", ".join(sorted(str(name) for name in coalesce_node_map)) or "<none>"
+        raise OrchestrationInvariantError(
+            f"CoalesceOutcome for {coalesce_name!r} has a merged token but no coalesce node mapping. "
+            f"Configured coalesce names: {configured_names}."
+        ) from exc
     continuation_results: list[RowResult] = list(
         processor.process_token(
             token=merged_token,

@@ -21,7 +21,7 @@
 |---|---|---|---|---|---|
 | 1 | U-CONTRACTS-1 (Plugin & registry contracts) | 25 | ✅ Done | [findings](u-contracts-1-findings.md), [raw](u-contracts-1-raw-reports.md) | `f92ba560ad`, `8d5558dc25`, `7b7fe68836` |
 | 2 | U-CORE-1 (Landscape audit-DB recording) | 32 | ✅ Done | [findings](u-core-1-findings.md), [raw](u-core-1-raw-reports.md) | `297dafdf47`, `499100db05`, `82c7c028a8`, `f6f50e9394` |
-| 3 | I-1 (Audit integration tests) | 32 | ✅ Done | [findings](i-1-findings.md), [raw](i-1-raw-reports.md) | `ae9f541775`, `4a013f9833`; `f6f50e9394` scope-revised |
+| 3 | I-1 (Audit integration tests) | 32 | ✅ Done | [findings](i-1-findings.md), [raw](i-1-raw-reports.md) | `ae9f541775` closed via taxonomy gate, `4a013f9833`; `f6f50e9394` scope-revised |
 | 4 | U-ENGINE-1 partial continuation | partial | 🔎 Partial | [findings](u-engine-1-findings.md), [raw](u-engine-1-raw-reports.md) | `8bf288792a`, `bd49237412`, `e4281a36d8`, `e0afd080cc`, `462f50680f`, `f295b77e76`, `9a1262dbc7`, `ff85897f8f`, `314eb3552e`, `2744d69903`, `0c1c7d5cec`, `eb12769648`, `975f45dfcb` |
 | 5 | U-ENGINE-2 partial continuation | partial | 🔎 Partial | [findings](u-engine-2-findings.md), [raw](u-engine-2-raw-reports.md) | `958f307f29`, `68cd1876d0`, `aa7781f802`, `c5add729fa`, `786291485f` |
 | 6 | _next full wave_ | — | ⏳ Pending | — | — |
@@ -158,7 +158,7 @@ These appear in multiple chunks; they should be addressed once with a CI rule or
 - **Spec-less `Mock()`/`MagicMock()`** (U-CONTRACTS-1, U-CORE-1, I-1, U-ENGINE-1 partial). Filed `elspeth-e984600f90`; recommend a CI grep/lint to flag behavioral mocks without `spec=` or a real fake in `tests/`.
 - **Hash-without-binding theatre** (U-CORE-1, I-1, U-ENGINE-1 partial). Filed `elspeth-e0afd080cc`; recommend a shared fixture asserting `(actual_hash) == stable_hash(input)`.
 - **Dataclass-machinery tautology cluster** (all chunks, including U-ENGINE-1 partial). Tests construct a `@dataclass`, set fields, read them back. Delete on sight.
-- **Production-code-path bypass in integration tests** (I-1: 26 of 32 files). Filed as `elspeth-ae9f541775`.
+- **Production-code-path bypass in integration tests** (I-1: 26 of 32 files). Filed as `elspeth-ae9f541775`; false-confidence taxonomy fixed 2026-05-20 by moving repository-level tests out of `tests/integration/audit/`.
 - **Regression-dump test files** (I-1: `test_fixes.py`). Any file named after a sprint, ticket, or "fixes" warrants scrutiny.
 
 ## Calibration learnings (across 3 waves)

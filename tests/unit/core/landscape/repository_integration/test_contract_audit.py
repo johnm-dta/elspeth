@@ -1,4 +1,4 @@
-# tests/integration/audit/test_contract_audit.py
+# tests/unit/core/landscape/repository_integration/test_contract_audit.py
 """End-to-end integration tests for contract audit trail.
 
 These tests verify the full integration of:
@@ -20,6 +20,7 @@ from textwrap import dedent
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import select
+from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run
 
 from elspeth.contracts import (
     ContractAuditRecord,
@@ -32,7 +33,6 @@ from elspeth.contracts import (
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.schema import validation_errors_table
 from elspeth.plugins.sources.csv_source import CSVSource
-from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext

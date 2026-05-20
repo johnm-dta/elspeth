@@ -1,4 +1,4 @@
-# tests/integration/audit/test_sqlcipher_pipeline.py
+# tests/unit/core/landscape/repository_integration/test_sqlcipher_pipeline.py
 """Integration tests for SQLCipher-encrypted audit databases.
 
 Verifies that a full pipeline run produces a correctly encrypted audit trail,
@@ -19,12 +19,12 @@ class TestPipelineWithSQLCipherLandscape:
     def test_pipeline_with_sqlcipher_landscape(self, tmp_path: Path) -> None:
         """A full CRUD cycle via RecorderFactory works on an encrypted DB."""
         from sqlalchemy import select
+        from tests.fixtures.landscape import make_factory
 
         from elspeth.contracts import NodeType, RunStatus
         from elspeth.contracts.schema import SchemaConfig
         from elspeth.core.landscape.database import LandscapeDB
         from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
-        from tests.fixtures.landscape import make_factory
 
         db_path = tmp_path / "pipeline_audit.db"
         passphrase = "integration-test-passphrase"

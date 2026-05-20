@@ -32,7 +32,7 @@ import pytest
 from errorworks.llm.config import ChaosLLMConfig, load_config
 from errorworks.llm.server import ChaosLLMServer
 
-from elspeth.contracts import NodeType, PipelineRow, TransformErrorReason, TransformResult
+from elspeth.contracts import ExceptionResult, NodeType, PipelineRow, TransformErrorReason, TransformResult
 from elspeth.contracts.identity import TokenInfo
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -43,7 +43,6 @@ if TYPE_CHECKING:
     import httpx
 
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.engine.batch_adapter import ExceptionResult
 
 # Dynamic schema for LLM transforms
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -542,7 +541,7 @@ class CollectingOutputPort:
         ExceptionResults are treated as errors.
         """
         # Handle ExceptionResult (plugin bugs)
-        if hasattr(result, "exception"):
+        if isinstance(result, ExceptionResult):
             with self._lock:
                 self.errors.append(({"reason": "test_error", "error": f"exception: {result.exception}"}, token))
             return

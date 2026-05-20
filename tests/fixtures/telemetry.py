@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -68,9 +69,9 @@ class TelemetryTestExporter:
             all_match = True
             for key, expected in filters.items():
                 actual = getattr(event, key, None)
-                if actual is not None and hasattr(actual, "value"):
+                if isinstance(actual, Enum):
                     actual = actual.value
-                if hasattr(expected, "value"):
+                if isinstance(expected, Enum):
                     expected = expected.value
                 if actual != expected:
                     all_match = False

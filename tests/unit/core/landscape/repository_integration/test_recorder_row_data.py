@@ -1,4 +1,4 @@
-# tests/core/landscape/test_recorder_row_data.py
+# tests/unit/core/landscape/repository_integration/test_recorder_row_data.py
 """Tests for RecorderFactory query.get_row_data() with explicit states."""
 
 import json

@@ -1,4 +1,4 @@
-# tests/core/landscape/test_recorder_contracts.py
+# tests/unit/core/landscape/repository_integration/test_recorder_contracts.py
 """Tests for RecorderFactory schema contract methods.
 
 Phase 5 Unified Schema Contracts: Task 3 - RecorderFactory contract methods

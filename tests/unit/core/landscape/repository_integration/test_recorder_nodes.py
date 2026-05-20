@@ -1,4 +1,4 @@
-# tests/core/landscape/test_recorder_nodes.py
+# tests/unit/core/landscape/repository_integration/test_recorder_nodes.py
 """Tests for RecorderFactory node, edge, and schema operations."""
 
 from __future__ import annotations

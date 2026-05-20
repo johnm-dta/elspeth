@@ -68,6 +68,20 @@ Filed:
 - `elspeth-bd49237412` — engine chunk remediation.
 - `elspeth-e0afd080cc` — shared hash-binding test infrastructure.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-bd49237412` resolved for the cited engine chunk sites.
+  Transform, batch-transform, dependency settings, and sink diversion hash
+  assertions now compare against the exact `stable_hash`, canonical settings
+  SHA-256, or diversion-reason hash material. A broad run of
+  `tests/unit/engine/test_executors.py` still fails on the unrelated
+  `TestPassThroughCrossCheck.test_cross_check_is_tier_1_registered`
+  subclass assertion; the focused hash-binding tests pass.
+- 2026-05-20: `elspeth-e0afd080cc` added shared hash-binding assertions in
+  `tests.fixtures.audit_hashing` for stable hashes, prefixed canonical SHA-256,
+  and HMAC-SHA256 signatures. The engine hash-binding sites and dependency
+  settings hash test now use the shared helper surface.
+
 ### UENG-2 — Private processor outcome tests mostly test dataclass construction
 
 Evidence:
@@ -95,6 +109,13 @@ Filed:
 
 - `elspeth-e4281a36d8`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-e4281a36d8` resolved. The weak coalesce assertion now
+  verifies that the token is held at the coalesce node without emitting a
+  terminal result, and the private outcome dataclass roll-call block was
+  deleted.
+
 ### UENG-3 — Merge-failure test accepts the wrong exception boundary
 
 Evidence:
@@ -116,6 +137,12 @@ framework boundary, this test still passes.
 Filed:
 
 - `elspeth-462f50680f`.
+
+Remediation status:
+
+- 2026-05-20: `elspeth-462f50680f` resolved. The sink merge-failure test now
+  requires `FrameworkBugError`, asserts the underlying cause is
+  `ContractMergeError`, and preserves the no-write/no-flush/no-outcome checks.
 
 ### UENG-4 — TRANSFORM flush dispatcher tests allow duplicate dispatch
 
@@ -143,6 +170,12 @@ The tests should assert exact cardinality while preserving the existing
 Filed:
 
 - `elspeth-f295b77e76`.
+
+Remediation status:
+
+- 2026-05-20: `elspeth-f295b77e76` resolved. The TRANSFORM-mode flush
+  dispatcher tests now assert the exact single invocation, including triggering
+  token identity and effective input-field intersection.
 
 ### UENG-5 — Pipeline-row processor tests allow duplicated terminal results
 
@@ -172,6 +205,13 @@ Filed:
 
 - `elspeth-9a1262dbc7`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-9a1262dbc7` resolved. The no-transform
+  `process_row()` and resume `process_existing_row()` tests now assert exactly
+  one terminal result and destructure that singleton instead of inspecting
+  `results[0]`.
+
 ### UENG-6 — Source-node audit tests allow extra node_state rows
 
 Evidence:
@@ -199,6 +239,12 @@ assert exact cardinality and identify the source node state explicitly.
 Filed:
 
 - `elspeth-ff85897f8f`.
+
+Remediation status:
+
+- 2026-05-20: `elspeth-ff85897f8f` resolved. Source-node audit tests now
+  filter for `node_id == "source-0"`, assert exactly one source state, and
+  destructure that singleton before checking terminal status.
 
 ### UENG-7 — GateExecutor audit-state tests allow extra node-state completions
 
@@ -239,6 +285,13 @@ Filed:
 
 - `elspeth-314eb3552e`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-314eb3552e` resolved. GateExecutor audit-state tests now
+  assert exactly one `complete_node_state` call for the node under test before
+  checking terminal status, failure error payloads, and success
+  `context_after`.
+
 ### UENG-8 — Boundary source/sink skip tests do not satisfy role detection
 
 Evidence:
@@ -272,6 +325,14 @@ Filed:
 
 - `elspeth-2744d69903`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-2744d69903` resolved. Boundary-dispatch source/sink
+  role tests now use synthetic plugins with the MRO-visible `load()` or
+  `write()`/`flush()` methods required by production role detection, and
+  counting contract wrappers prove the intended boundary contract runs once
+  while the opposite role is skipped.
+
 ### UENG-9 — Aggregation post-processing failure test allows duplicate terminal writes
 
 Evidence:
@@ -302,6 +363,13 @@ Filed:
 
 - `elspeth-0c1c7d5cec`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-0c1c7d5cec` resolved. The aggregation
+  post-processing failure regression now asserts the single guarded FAILED
+  node-state completion and the single FAILED batch completion, binding both to
+  the expected state and batch identifiers.
+
 ### UENG-10 — SinkExecutor cleanup tests do not prove state identity
 
 Evidence:
@@ -331,6 +399,14 @@ Filed:
 
 - `elspeth-eb12769648`.
 
+Remediation status:
+
+- 2026-05-20: `elspeth-eb12769648` resolved. Failsink cleanup tests now map
+  opened primary/failsink node states to expected state IDs, assert exact
+  FAILED/COMPLETED cleanup attempts and successful terminalizations, and verify
+  cleanup error phase/context for reset, result-type, begin-state, and mid-loop
+  audit-recording failures.
+
 ### UENG-11 — SinkExecutor artifact registration test checks only call count
 
 Evidence:
@@ -353,6 +429,13 @@ call-count assertion.
 Filed:
 
 - `elspeth-975f45dfcb`.
+
+Remediation status:
+
+- 2026-05-20: `elspeth-975f45dfcb` resolved. The mixed primary/failsink
+  artifact registration test now uses distinct artifact descriptors and asserts
+  exact registration payloads for primary and failsink state IDs, sink node IDs,
+  paths, hashes, and sizes.
 
 ## Filed issues
 

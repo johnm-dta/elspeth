@@ -26,7 +26,7 @@ If you only have time for one document, pick the row that matches your role.
 | **An Australian public-service executive or assurance reader** evaluating the platform for pilot adoption | [`executive-summary.md`](executive-summary.md) | [`guarantees.md`](guarantees.md) for contractual claims |
 | **Engineering leadership** scoping or sequencing work against the platform | [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) (the cumulative output snapshot at the foot) | Then sample the *Velocity by Phase* table in [`elspeth-velocity-rc1-to-rc5.md`](elspeth-velocity-rc1-to-rc5.md) |
 | **An engineer joining the project** | [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) in full, by Period | Then [`guarantees.md`](guarantees.md) for the contracts the code must uphold |
-| **An auditor or integrator** verifying contractual claims | [`guarantees.md`](guarantees.md) (the contract surface) | Then `/CHANGELOG.md` (RC-3+) for the line-by-line release record |
+| **An auditor or integrator** verifying assurance claims | [`guarantees.md`](guarantees.md) (the assurance surface) | Then `/CHANGELOG.md` (RC-3+) for the line-by-line release record |
 | **Anyone investigating a specific historical decision or release** | The relevant document in the [2026-05-19 docs archive](../../docs-archive/2026-05-19-docs-cleanout/docs/release/) | The current progress report for any subsequent context |
 
 ---
@@ -36,7 +36,6 @@ If you only have time for one document, pick the row that matches your role.
 Before diving into the documents below, know which sources they aggregate. **If a document in this directory contradicts a canonical source, the canonical source wins.**
 
 - **Per-release detailed changelogs:** [`/CHANGELOG.md`](../../CHANGELOG.md) (RC-3+), and the archived [`CHANGELOG-RC2.md`](../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC2.md) / [`CHANGELOG-RC1.md`](../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC1.md) — line-by-line release records.
-- **Live work tracking:** Filigree (`filigree session-context`) — what is in progress *now*; the progress report's "what's next" section pulls forward-looking items from here.
 - **Architectural decisions:** [`/docs/architecture/adr/`](../architecture/adr/) — the binding ADRs.
 - **In-code architecture analyses:** [`/docs/architecture/`](../architecture/) and the layer-import graph emitted by `scripts/cicd/enforce_tier_model.py dump-edges`.
 
@@ -47,6 +46,9 @@ Before diving into the documents below, know which sources they aggregate. **If 
 | Document | What it answers | Intended reader |
 |----------|-----------------|-----------------|
 | [`executive-summary.md`](executive-summary.md) *(DRAFT — awaiting operator sign-off)* | Capability and assurance summary; what the platform does, what it does not yet guarantee, what an evaluator should consider next. | **Public-service executives, programme sponsors, assurance and risk staff.** Australian public-service / institutional register. |
+| [`composer-guide.md`](composer-guide.md) | What the Composer can do, how guided/freeform authoring works, what readiness checks mean, and how a user completes or recovers a composition. | **Evaluators, programme teams, operators, and technical reviewers.** Public-facing / lightly technical. |
+| [`platform-architecture.md`](platform-architecture.md) | Current runtime surfaces, trust boundaries, audit-first behaviour, configuration validation, external-system boundaries, and adopter responsibilities. | **Evaluators, technical leaders, architects, and assurance reviewers.** Public-facing / technical. |
+| [`assessment-mapping.md`](assessment-mapping.md) | How the RC-5.2 evidence set maps to likely public-sector evaluation questions, without claiming formal conformance. | **Assurance, risk, security, delivery governance, and agency evaluation teams.** Evidence map. |
 | [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md) | What has the project shipped between RC-1 and RC-5? Period-by-period, capability-by-capability, with cumulative commit counts. | **Engineering team and engineering leadership.** Detailed engineering content; not written for non-engineering stakeholders. |
 | [`elspeth-velocity-rc1-to-rc5.md`](elspeth-velocity-rc1-to-rc5.md) | How much work was completed per day? Per-day commit volume across all 123 active days, with peak-day attribution. | **Engineering team and engineering leadership.** Per-commit cadence detail; commit count is a tempo signal, not a value signal. |
 
@@ -56,7 +58,25 @@ The two engineering documents are designed as a **pair**: the progress doc cover
 
 | Document | What it answers | Status |
 |----------|-----------------|--------|
-| [`guarantees.md`](guarantees.md) | Audit, lineage, and trust-model guarantees ELSPETH makes. | **Partially refreshed to RC-5.2.** §1–§10 are the RC-3 vintage; §11–§14 are RC-5.2 additions covering authentication, secret references, multi-user sessions, and composer authoring. §7.2 has been amended to reflect that the "ELSPETH is not multi-user" disclaimer is no longer accurate. |
+| [`guarantees.md`](guarantees.md) | Audit, lineage, and trust-model guarantees ELSPETH makes. | **Layered assurance appendix.** §1–§10 preserve the original RC-3 contract language; §11–§14 add RC-5.2 authentication, secret-reference, multi-user-session, and composer-authoring guarantees. §7.2 has been amended to reflect that the "ELSPETH is not multi-user" disclaimer is no longer accurate. |
+
+## Release PDF pack
+
+The [`pdf/`](pdf/) pipeline builds PDF/UA-1 reading copies for release
+briefing, engineering evidence, architecture, Composer, assurance, and
+data-trust material. The generated PDFs live under `pdf/out/` and are
+regeneratable build artefacts; the Typst sources and build pipeline are
+the maintained release assets.
+
+Current outputs:
+
+- `elspeth-executive-summary.pdf`
+- `elspeth-progress-rc1-to-rc5.pdf`
+- `elspeth-velocity-rc1-to-rc5.pdf`
+- `elspeth-architecture.pdf`
+- `elspeth-composer.pdf`
+- `elspeth-guarantees.pdf`
+- `elspeth-data-trust.pdf`
 
 ## Archived snapshots
 

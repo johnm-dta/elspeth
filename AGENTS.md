@@ -27,6 +27,17 @@ You are starting this session with zero context. No memory of prior conversation
 
 ---
 
+## Focused Subagents
+
+Use focused subagents when they materially improve confidence or throughput.
+For release reviews, broad audits, multi-surface debugging, and independent
+implementation slices, split the work by boundary and dispatch subagents without
+asking for another permission round. Keep each subagent prompt self-contained,
+give it a narrow scope, avoid overlapping write sets, and integrate its findings
+against the live tree before reporting or closing work.
+
+---
+
 ## Git Safety
 
 **Never run destructive commands without explicit user permission:**

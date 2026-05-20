@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import tempfile
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -55,44 +55,38 @@ ALL_RULE_ROOTS: tuple[tuple[str, str], ...] = (
     ("trust_tier.tier_model", "src/elspeth"),
 )
 ALL_RULE_IDS: tuple[str, ...] = tuple(rid for rid, _ in ALL_RULE_ROOTS)
+RAW_FINGERPRINT_RULES: frozenset[str] = frozenset({"trust_tier.tier_model"})
 
 
-def _run_rule(rule_id: str, root: str) -> list[dict[str, object]]:
+def _run_rule(rule_id: str, root: str, *, allowlist_dir: Path) -> list[dict[str, object]]:
     """Run a single rule against ``root`` and return parsed JSON findings.
 
     ``root`` is interpreted relative to ``REPO_ROOT`` (the CLI honours both
-    absolute paths and paths relative to ``cwd``). The CLI exits non-zero
-    whenever a rule emits at least one finding; we ignore the exit code and
-    parse stdout, matching the CI's separation of "did the lint find anything"
-    from "did the lint process crash".
+    absolute paths and paths relative to ``cwd``). Rules listed in
+    ``RAW_FINGERPRINT_RULES`` run against an empty allowlist so their committed
+    baseline can protect raw fingerprint stability even when the CI gate is
+    green after allowlist suppression. The CLI exits non-zero whenever a rule
+    emits at least one finding; we ignore the exit code and parse stdout,
+    matching the CI's separation of "did the lint find anything" from "did the
+    lint process crash".
     """
     env = {**os.environ, "PYTHONPATH": str(ELSPETH_LINTS_SRC)}
     resolved_root = root if Path(root).is_absolute() else str(REPO_ROOT / root)
-    command = [
-        str(PYTHON),
-        "-m",
-        "elspeth_lints.core.cli",
-        "check",
-        "--rules",
-        rule_id,
-        "--format",
-        "json",
-        "--root",
-        resolved_root,
-    ]
-    if rule_id == "trust_tier.tier_model":
-        # The baseline intentionally fingerprints the raw tier-model finding
-        # stream. CI's production allowlist suppresses currently accepted debt,
-        # which would turn the baseline into "zero findings" and stop detecting
-        # fingerprint rotation.
-        with tempfile.TemporaryDirectory() as empty_allowlist:
-            return _run_rule_command(rule_id, [*command, "--allowlist-dir", empty_allowlist], env)
-    return _run_rule_command(rule_id, command, env)
-
-
-def _run_rule_command(rule_id: str, command: list[str], env: dict[str, str]) -> list[dict[str, object]]:
+    allowlist_args = ["--allowlist-dir", str(allowlist_dir)] if rule_id in RAW_FINGERPRINT_RULES else []
     result = subprocess.run(
-        command,
+        [
+            str(PYTHON),
+            "-m",
+            "elspeth_lints.core.cli",
+            "check",
+            "--rules",
+            rule_id,
+            *allowlist_args,
+            "--format",
+            "json",
+            "--root",
+            resolved_root,
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -107,7 +101,7 @@ def _run_rule_command(rule_id: str, command: list[str], env: dict[str, str]) -> 
     return parsed
 
 
-def capture_all() -> dict[str, list[dict[str, str]]]:
+def capture_all(*, allowlist_dir: Path) -> dict[str, list[dict[str, str]]]:
     """Run every shipped rule, project to ``{file_path, fingerprint}``, sort deterministically.
 
     ``file_path`` and ``fingerprint`` are always strings in the CLI's JSON
@@ -116,7 +110,7 @@ def capture_all() -> dict[str, list[dict[str, str]]]:
     """
     captured: dict[str, list[dict[str, str]]] = {}
     for rule_id, root in ALL_RULE_ROOTS:
-        findings = _run_rule(rule_id, root)
+        findings = _run_rule(rule_id, root, allowlist_dir=allowlist_dir)
         captured[rule_id] = sorted(
             (
                 {
@@ -134,7 +128,11 @@ _MAX_DIFFS_PER_RULE = 10
 
 
 @pytest.mark.fingerprint_baseline
-def test_baseline_capture_is_self_consistent() -> None:
+@pytest.mark.skipif(
+    sys.version_info[:2] != (3, 13),
+    reason="elspeth-lints raw fingerprint baselines are version-specific; Python 3.13 is canonical",
+)
+def test_baseline_capture_is_self_consistent(tmp_path: Path) -> None:
     """Re-run every rule; the result must equal the committed baseline byte-for-byte.
 
     On failure, emit a per-rule diff of (file_path, fingerprint) pairs that were
@@ -143,8 +141,10 @@ def test_baseline_capture_is_self_consistent() -> None:
     with a "was 5, now 5" diagnostic. Capped at ``_MAX_DIFFS_PER_RULE`` per rule
     so a regression in many files doesn't dump megabytes into the test log.
     """
+    allowlist_dir = tmp_path / "empty-allowlist"
+    allowlist_dir.mkdir()
     committed = json.loads(BASELINE.read_text(encoding="utf-8"))
-    fresh = capture_all()
+    fresh = capture_all(allowlist_dir=allowlist_dir)
     if fresh == committed:
         return
     lines: list[str] = ["Fingerprints shifted vs baseline:"]

@@ -8,7 +8,7 @@ per_file_rules:
 - pattern: tui/screens/explain_screen.py
   rules:
   - R5
-  reason: Discriminated union pattern matching on ScreenState and NodeState detail projection
+  reason: ScreenState and NodeState detail projection guards, including explicit selection-state checks for CodeQL-visible initialization
   expires: null
   max_hits: 9
 - pattern: tui/widgets/node_detail.py

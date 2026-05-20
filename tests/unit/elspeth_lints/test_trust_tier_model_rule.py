@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import sys
 import tempfile
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
@@ -389,6 +390,10 @@ class TestR1SourceRegressions:
         ]
         assert r1_findings == []
 
+    @pytest.mark.skipif(
+        sys.version_info[:2] != (3, 13),
+        reason="tier-model allowlist fingerprints are version-specific; Python 3.13 is canonical",
+    )
     def test_source_boundary_non_r5_findings_are_site_allowlisted(self) -> None:
         allowlist = load_allowlist(Path("config/cicd/enforce_tier_model"))
 

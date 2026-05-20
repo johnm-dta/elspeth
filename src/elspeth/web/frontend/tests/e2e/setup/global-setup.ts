@@ -14,8 +14,12 @@ const TEST_USER = {
   display_name: "E2E Tester",
 };
 
-const FRONTEND_ORIGIN = "http://localhost:5173";
-const BACKEND_BASE_URL = "http://127.0.0.1:8451";
+const FRONTEND_PORT = process.env.PLAYWRIGHT_FRONTEND_PORT ?? "5173";
+const BACKEND_PORT = process.env.PLAYWRIGHT_BACKEND_PORT ?? "8451";
+const FRONTEND_ORIGIN =
+  process.env.PLAYWRIGHT_FRONTEND_BASE_URL ?? `http://127.0.0.1:${FRONTEND_PORT}`;
+const BACKEND_BASE_URL =
+  process.env.PLAYWRIGHT_BACKEND_BASE_URL ?? `http://127.0.0.1:${BACKEND_PORT}`;
 const TOKEN_KEY = "auth_token";
 
 async function obtainToken(apiBaseURL: string): Promise<string> {

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretBytes, ValidationError
 from sqlalchemy.exc import CompileError, OperationalError
 from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
@@ -36,10 +36,10 @@ def _settings(tmp_path: Path, **overrides) -> WebSettings:
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
-        "shareable_link_signing_key": b"\x00" * 32,
+        "shareable_link_signing_key": SecretBytes(b"\x00" * 32),
     }
     defaults.update(overrides)
-    return WebSettings(**defaults)
+    return WebSettings(**defaults)  # type: ignore[arg-type]
 
 
 class _StaticJsonResponse:
@@ -190,62 +190,41 @@ class TestBodySizeLimitMiddleware:
     declarations that would otherwise reach the parser at all.
     """
 
-    def test_rejects_oversized_content_length(self, tmp_path) -> None:
-        app = create_app(_settings(tmp_path))
-        client = TestClient(app)
-        # 11 MB declared > 10 MB cap.  Body content itself doesn't matter
-        # because the middleware checks the header and short-circuits
-        # before reading the body.
-        response = client.post(
-            "/api/health",
-            headers={"Content-Length": "11000000", "Content-Type": "application/json"},
-            content=b"{}",
-        )
+    @pytest.mark.asyncio
+    async def test_rejects_oversized_content_length(self) -> None:
+        # 11 MB declared > 10 MB cap. Body content itself doesn't matter
+        # because the middleware checks the header and short-circuits before
+        # reading the body.
+        response = await self._dispatch_with_content_length(11_000_000)
+
         assert response.status_code == 413
 
-    def test_allows_under_limit_content_length(self, tmp_path) -> None:
+    @pytest.mark.asyncio
+    async def test_allows_under_limit_content_length(self) -> None:
         # Sanity check that the middleware does not over-reject — a
-        # tiny body must still reach the (404) handler for the missing
-        # POST /api/health route, not be 413'd by the size guard.
-        app = create_app(_settings(tmp_path))
-        client = TestClient(app)
-        response = client.post(
-            "/api/health",
-            headers={"Content-Type": "application/json"},
-            content=b"{}",
-        )
-        assert response.status_code != 413
+        # tiny declared body must still reach call_next, not be 413'd by the
+        # size guard.
+        response = await self._dispatch_with_content_length(2)
+        assert response.status_code == 204
 
-    def test_allows_exact_content_length_boundary(self, tmp_path) -> None:
-        app = create_app(_settings(tmp_path))
-        client = TestClient(app)
-        response = client.post(
-            "/api/health",
-            headers={
-                "Content-Length": str(_BodySizeLimitMiddleware._MAX_BODY_BYTES),
-                "Content-Type": "application/json",
-            },
-            content=b"{}",
-        )
-        assert response.status_code != 413
+    @pytest.mark.asyncio
+    async def test_allows_exact_content_length_boundary(self) -> None:
+        response = await self._dispatch_with_content_length(_BodySizeLimitMiddleware._MAX_BODY_BYTES)
+        assert response.status_code == 204
 
-    def test_rejects_one_byte_over_content_length_boundary(self, tmp_path) -> None:
-        app = create_app(_settings(tmp_path))
-        client = TestClient(app)
-        response = client.post(
-            "/api/health",
-            headers={
-                "Content-Length": str(_BodySizeLimitMiddleware._MAX_BODY_BYTES + 1),
-                "Content-Type": "application/json",
-            },
-            content=b"{}",
-        )
+    @pytest.mark.asyncio
+    async def test_rejects_one_byte_over_content_length_boundary(self) -> None:
+        response = await self._dispatch_with_content_length(_BodySizeLimitMiddleware._MAX_BODY_BYTES + 1)
         assert response.status_code == 413
 
     @pytest.mark.asyncio
     async def test_missing_content_length_stream_passes_through_without_body_read(self) -> None:
         """No Content-Length means the middleware defers to per-route validators."""
-        middleware = _BodySizeLimitMiddleware(app=lambda scope, receive, send: None)
+
+        async def noop_app(scope, receive, send) -> None:
+            return None
+
+        middleware = _BodySizeLimitMiddleware(app=noop_app)
         scope = {
             "type": "http",
             "method": "POST",
@@ -270,6 +249,39 @@ class TestBodySizeLimitMiddleware:
         response = await middleware.dispatch(request, call_next)
 
         assert response.status_code == 204
+
+    async def _dispatch_with_content_length(self, content_length: int) -> StarletteResponse:
+        async def noop_app(scope, receive, send) -> None:
+            return None
+
+        middleware = _BodySizeLimitMiddleware(app=noop_app)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/health",
+            "headers": [
+                (b"content-length", str(content_length).encode("ascii")),
+                (b"content-type", b"application/json"),
+            ],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "scheme": "http",
+            "root_path": "",
+            "http_version": "1.1",
+        }
+
+        async def receive() -> dict[str, object]:
+            raise AssertionError("Content-Length-only guard must not read request bodies")
+
+        request = Request(scope, receive)
+
+        async def call_next(_request: Request) -> StarletteResponse:
+            return StarletteResponse(status_code=204)
+
+        response = await middleware.dispatch(request, call_next)
+        assert isinstance(response, StarletteResponse)
+        return response
 
 
 class TestGetSettingsDependency:
@@ -868,7 +880,7 @@ class TestDataDirCreation:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
-            shareable_link_signing_key=b"\x00" * 32,
+            shareable_link_signing_key=SecretBytes(b"\x00" * 32),
         )
         create_app(settings)
         assert fresh_dir.exists()

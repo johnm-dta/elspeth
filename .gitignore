@@ -255,8 +255,16 @@ deploy/
 # Makefile, etc.) IS tracked so the pipeline is reproducible from
 # a fresh checkout.
 docs/assets/*.pdf
-docs/release/pdf/out/
 .claude/scheduled_tasks.lock
 *.db-shm
 *.db-wal
-docs/release/pdf/
+
+# Release PDF pipeline source is intentionally tracked; generated
+# outputs and bulky font source trees are not.
+docs/release/*
+!docs/release/pdf/output/
+
+
+# No
+clarion
+clarion.yaml

@@ -60,7 +60,7 @@ jobs:
   # ===========================================================================
   build-push:
     name: Build and Push
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     # Only run if CI passed (for workflow_run trigger) or always for tags/dispatch
     if: |
       github.event_name == 'push' ||
@@ -276,7 +276,7 @@ jobs:
   # ===========================================================================
   smoke-test:
     name: Smoke Test
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     needs: [build-push]
     steps:
       - name: Checkout code (for example files)
@@ -425,7 +425,7 @@ jobs:
   # ===========================================================================
   release:
     name: Create Release
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     needs: [build-push, smoke-test]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:

@@ -74,5 +74,5 @@ Out of scope:
 
 The project is MIT licensed and currently pre-production outside the scoped
 interim ATO statement described in `docs/release/executive-summary.md`. The
-current assurance posture is documented candidly in
-`docs/release/executive-summary.md` and `docs/release/guarantees.md`.
+security posture is documented candidly in `docs/release/assessment-mapping.md`
+and `docs/release/guarantees.md`.

@@ -28,11 +28,14 @@ that assert on emitted data.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 from opentelemetry import metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from starlette.testclient import TestClient
+from pydantic import SecretBytes
+from starlette.responses import Response
+from starlette.routing import Route
 
 # ---------------------------------------------------------------------------
 # Test 1 — importing app.py wires a real MeterProvider
@@ -83,6 +86,7 @@ def test_counter_emits_to_in_memory_reader() -> None:
         counter.add(1, {"env": "test"})
 
         metrics_data = reader.get_metrics_data()
+        assert metrics_data is not None
 
         found = False
         for rm in metrics_data.resource_metrics:
@@ -90,8 +94,9 @@ def test_counter_emits_to_in_memory_reader() -> None:
                 for metric in sm.metrics:
                     if metric.name == "test_counter_b1r3":
                         for point in metric.data.data_points:
-                            if dict(point.attributes).get("env") == "test":
-                                assert point.value >= 1
+                            if dict(point.attributes or {}).get("env") == "test":
+                                number_point = cast(Any, point)
+                                assert number_point.value >= 1
                                 found = True
 
         assert found, (
@@ -116,9 +121,9 @@ def test_metrics_endpoint_returns_prometheus_format(tmp_path: Path) -> None:
     - Body contains at least one non-comment, non-empty line (a real metric or
       the ``# HELP`` / ``# TYPE`` preamble).
 
-    Uses ``starlette.testclient.TestClient`` in a minimal synchronous invocation
-    so the test runs without an asyncio event loop.  The ``/metrics`` mount is
-    independent of the lifespan context; it works before ``yield`` completes.
+    Uses the synchronously registered FastAPI route directly so the test runs
+    without the application lifespan or an AnyIO portal. The ``/metrics`` route
+    is independent of the lifespan context; it works before ``yield`` completes.
     """
     from opentelemetry import metrics
 
@@ -131,7 +136,7 @@ def test_metrics_endpoint_returns_prometheus_format(tmp_path: Path) -> None:
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
-        shareable_link_signing_key=b"\x00" * 32,
+        shareable_link_signing_key=SecretBytes(b"\x00" * 32),
     )
 
     app = create_app(settings)
@@ -153,12 +158,15 @@ def test_metrics_endpoint_returns_prometheus_format(tmp_path: Path) -> None:
     )
     pin_counter.add(1, {"phase8_pr_review": "s2"})
 
-    # Use raise_server_exceptions=False so that lifespan exceptions (e.g. the
-    # OIDC discovery step that isn't configured in tests) don't propagate.  The
-    # /metrics endpoint is mounted before lifespan runs, so it responds even
-    # without the full lifespan completing.
-    with TestClient(app, raise_server_exceptions=False) as client:
-        response = client.get("/metrics")
+    # Call the registered synchronous route directly. TestClient would add an
+    # AnyIO portal and, when used as a context manager, run lifespan startup;
+    # neither is part of this route-level meter -> exposition contract.
+    metrics_route = next(
+        route for route in app.routes if getattr(route, "path", None) == "/metrics" and "GET" in getattr(route, "methods", set())
+    )
+    assert isinstance(metrics_route, Route)
+    response = metrics_route.endpoint()
+    assert isinstance(response, Response)
 
     assert response.status_code == 200, (
         f"Expected 200 from GET /metrics but got {response.status_code}. "
@@ -168,7 +176,7 @@ def test_metrics_endpoint_returns_prometheus_format(tmp_path: Path) -> None:
     content_type = response.headers.get("content-type", "")
     assert "text/plain" in content_type, f"Expected text/plain content-type from /metrics but got {content_type!r}."
 
-    body = response.text
+    body = bytes(response.body).decode("utf-8")
     # Hard-pin: the counter we just emitted must appear in exposition with
     # the value we added.  Prometheus normalises the metric name (dot →
     # underscore) but otherwise preserves it; the value line carries the

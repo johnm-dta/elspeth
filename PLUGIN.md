@@ -29,7 +29,7 @@ Create custom sources, transforms, and sinks for ELSPETH pipelines.
 
 - **Python 3.12+** with type hints, dataclasses
 - **Pydantic v2** for config validation
-- **ELSPETH concepts** - Read `CLAUDE.md` for the Three-Tier Trust Model
+- **ELSPETH concepts** - Read [Data Trust and Error Handling](docs/guides/data-trust-and-error-handling.md) for the Three-Tier Trust Model
 
 ```bash
 git clone https://github.com/johnm-dta/elspeth.git && cd elspeth
@@ -847,7 +847,6 @@ class MyTransform(BaseTransform):
 
 ## See Also
 
-- [CLAUDE.md](CLAUDE.md) - Three-Tier Trust Model and data handling philosophy
 - [Data Trust and Error Handling](docs/guides/data-trust-and-error-handling.md) - External boundaries, quarantine, and plugin error handling
 - [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture and plugin integration points
 - [Configuration Reference](docs/reference/configuration.md) - Full configuration options

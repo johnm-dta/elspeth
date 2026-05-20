@@ -466,14 +466,14 @@ def test_insert_composition_state_allocates_contiguous_versions(service):
 
 
 @pytest.mark.timeout(5)
-def test_session_write_lock_serializes_sqlite_same_session_state_version_allocation(tmp_path):
+def test_file_backed_sqlite_lock_serializes_same_session_state_version_allocation(tmp_path):
     """Current 1A state writers also use SELECT MAX(version)+1.
-    Two same-session SQLite writers must not both reserve version 1.
 
-    Use a file-backed SQLite database here because ``StaticPool`` shares one
-    in-memory DBAPI connection across threads; that fixture shape is useful for
-    cheap unit coverage, but it is not the production concurrency shape being
-    proven by this race regression.
+    Use file-backed SQLite here, not the shared in-memory StaticPool fixture:
+    StaticPool hands both worker threads the same DB-API connection, so
+    concurrent ``engine.begin()`` blocks can interfere before the per-session
+    lock is reached. Staging and production use independently checked-out
+    file-backed connections, matching this proof.
     """
     import threading
     import time
@@ -486,16 +486,15 @@ def test_session_write_lock_serializes_sqlite_same_session_state_version_allocat
     from elspeth.web.sessions.protocol import CompositionStateData
     from elspeth.web.sessions.schema import initialize_session_schema
 
-    db_path = tmp_path / "sessions-state-lock.db"
+    db_path = tmp_path / "sessions.db"
     engine = create_session_engine(f"sqlite:///{db_path}")
     initialize_session_schema(engine)
-    service = SessionServiceImpl(
+    service: SessionServiceImpl = SessionServiceImpl(
         engine,
         data_dir=tmp_path,
         telemetry=build_sessions_telemetry(),
         log=structlog.get_logger("test"),
     )
-
     barrier = threading.Barrier(2)
     with engine.begin() as conn:
         _make_session(conn, session_id="s4_state_lock")

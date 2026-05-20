@@ -14,3 +14,6 @@ per_file_rules:
   - pattern: "tests/unit/core/landscape/test_database_compatibility_guards.py"
     rules: ["manifest.test_to_source_mapping"]
     reason: "ADR-019 compatibility tests intentionally build stale token_outcomes schemas to verify fail-fast migration errors."
+  - pattern: "tests/unit/mcp/test_startup_schema_errors.py"
+    rules: ["manifest.test_to_source_mapping"]
+    reason: "MCP startup compatibility tests intentionally build stale token_outcomes schemas to verify fail-fast schema-error reporting."

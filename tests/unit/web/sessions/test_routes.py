@@ -4863,6 +4863,21 @@ class TestComposePluginCrashResponse:
 
     SECRET_PATH = "/etc/elspeth/secrets/bootstrap.key"
 
+    class _StructuredLogRecorder:
+        """Minimal slog stand-in for assertions that must ignore global structlog state."""
+
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        def error(self, event: str, **fields: object) -> None:
+            self.events.append({"event": event, **fields})
+
+    @classmethod
+    def _capture_route_slogs(cls, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+        recorder = cls._StructuredLogRecorder()
+        monkeypatch.setattr("elspeth.web.sessions.routes._helpers.slog", recorder)
+        return recorder.events
+
     def test_compose_plugin_value_error_returns_structured_500(self, tmp_path) -> None:
         original = ValueError(f"plugin bug: {self.SECRET_PATH}")
         mock_composer = AsyncMock()
@@ -5021,14 +5036,12 @@ class TestComposePluginCrashResponse:
         # state row should have been created by the crash path.
         assert persisted is None
 
-    def test_compose_plugin_crash_log_has_no_traceback_fields(self, tmp_path) -> None:
+    def test_compose_plugin_crash_log_has_no_traceback_fields(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         """P2 regression fix: the plugin-crash structured log MUST NOT
         carry traceback-shaped fields. ``exc_info=True`` was dropped
         because plugin exception ``__cause__`` chains may include DB
         URLs, filesystem paths, or secret fragments.
         """
-        from structlog.testing import capture_logs
-
         original = ValueError(f"plugin bug with secret {self.SECRET_PATH}")
         mock_composer = AsyncMock()
         mock_composer.compose = AsyncMock(
@@ -5042,11 +5055,11 @@ class TestComposePluginCrashResponse:
         resp = client.post("/api/sessions", json={"title": "Test"})
         session_id = resp.json()["id"]
 
-        with capture_logs() as cap_logs:
-            response = client.post(
-                f"/api/sessions/{session_id}/messages",
-                json={"content": "Build me a pipeline"},
-            )
+        cap_logs = self._capture_route_slogs(monkeypatch)
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "Build me a pipeline"},
+        )
         assert response.status_code == 500
 
         crash_events = [e for e in cap_logs if e.get("event") == "compose_plugin_crash"]
@@ -5065,7 +5078,7 @@ class TestComposePluginCrashResponse:
         assert self.SECRET_PATH not in serialised
         assert "plugin bug" not in serialised
 
-    def test_compose_plugin_crash_sentinel_leak(self, tmp_path) -> None:
+    def test_compose_plugin_crash_sentinel_leak(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multi-sentinel test: inject an exception whose ``__str__`` and
         whose ``__cause__.__str__`` each carry a distinct secret sentinel.
         Neither must appear in the HTTP response body nor in any captured
@@ -5073,8 +5086,6 @@ class TestComposePluginCrashResponse:
         structlog processor or log field addition inadvertently serialises
         exception content.
         """
-        from structlog.testing import capture_logs
-
         message_secret = "postgres://user:p4ss@prod-db.internal:5432/audit"  # secret-scan: allow-this-line
         cause_secret = "/var/secrets/elspeth/bootstrap-key.pem"
 
@@ -5093,11 +5104,11 @@ class TestComposePluginCrashResponse:
         resp = client.post("/api/sessions", json={"title": "Test"})
         session_id = resp.json()["id"]
 
-        with capture_logs() as cap_logs:
-            response = client.post(
-                f"/api/sessions/{session_id}/messages",
-                json={"content": "Build me a pipeline"},
-            )
+        cap_logs = self._capture_route_slogs(monkeypatch)
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "Build me a pipeline"},
+        )
         assert response.status_code == 500
 
         # Neither sentinel in response body.
@@ -5105,12 +5116,13 @@ class TestComposePluginCrashResponse:
         assert cause_secret not in response.text
 
         # Neither sentinel in any captured log record.
+        assert cap_logs, "plugin-crash path should emit a structured event"
         for event in cap_logs:
             serialised = str(event)
             assert message_secret not in serialised, event
             assert cause_secret not in serialised, event
 
-    def test_compose_plugin_crash_save_operational_error_preserves_500_body(self, tmp_path) -> None:
+    def test_compose_plugin_crash_save_operational_error_preserves_500_body(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression (elspeth-303f751204): when save_composition_state
         raises an ``OperationalError`` (lock timeout, pool disconnect,
         deadlock) while persisting partial_state during a plugin crash,
@@ -5125,7 +5137,6 @@ class TestComposePluginCrashResponse:
         response path entirely.
         """
         from sqlalchemy.exc import OperationalError
-        from structlog.testing import capture_logs
 
         partial = CompositionState(
             source=None,
@@ -5160,11 +5171,11 @@ class TestComposePluginCrashResponse:
         resp = client.post("/api/sessions", json={"title": "Test"})
         session_id = resp.json()["id"]
 
-        with capture_logs() as cap_logs:
-            response = client.post(
-                f"/api/sessions/{session_id}/messages",
-                json={"content": "Build me a pipeline"},
-            )
+        cap_logs = self._capture_route_slogs(monkeypatch)
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"content": "Build me a pipeline"},
+        )
 
         # Structured 500 body is preserved despite the secondary save failure.
         assert response.status_code == 500

@@ -228,22 +228,22 @@ RC-5.2 turns the Web Composer into a more durable, recoverable authoring system:
   gating, CodeQL, and `elspeth-lints` checks make the release train easier to
   review and repeat.
 
-The RC-5.2 release documentation is intentionally explicit. The 2026-05-19
-docs cleanout consolidated older point-in-time release pages into
-`docs-archive/`; the current release entry points are:
+The RC-5.2 release documentation is intentionally explicit:
 
 - [Executive Summary](docs/release/executive-summary.md) is the current
   public-sector evaluation brief.
-- [Progress Report: RC-1 to RC-5](docs/release/elspeth-progress-rc1-to-rc5.md)
-  records shipped capability period by period, including the RC-5.2 composer
-  maturation stream.
-- [Velocity Report: RC-1 to RC-5](docs/release/elspeth-velocity-rc1-to-rc5.md)
-  records release cadence and peak-day attribution.
+- [Composer Guide](docs/release/composer-guide.md) explains the current web
+  authoring experience: guided mode, freeform authoring, readiness checks,
+  save-for-review, run, export, and recovery.
+- [Platform Architecture](docs/release/platform-architecture.md) explains the
+  runtime surfaces, trust boundaries, audit-first behaviour, and adopter
+  responsibilities.
 - [Audit and Lineage Guarantees](docs/release/guarantees.md) is the current
   assurance surface for audit, lineage, execution, data, identity,
   secret-reference handling, sessions, and Composer authoring.
-- [Release Documentation Index](docs/release/README.md) identifies the current
-  RC-5.2 documents and the archived historical snapshots.
+- [Public-Sector Assessment Mapping](docs/release/assessment-mapping.md)
+  records the current evidence against government evaluation touchpoints. It is
+  an evidence map, not a claim of formal conformance.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
@@ -544,13 +544,13 @@ landscape:
 
 ## Status And Direction
 
-RC-5 is the release where the Web Composer becomes a real product surface, but
-the structural change is broader than the web UI. The project now has two
-authoring paths over a single high-assurance substrate, richer run evidence,
-declared plugin contracts, a stronger terminal outcome model, and more
-mechanical CI policy around audit integrity.
+The RC-5 line is where the Web Composer becomes a real product surface, but the
+structural change is broader than the web UI. The project now has two authoring
+paths over a single high-assurance substrate, richer run evidence, declared
+plugin contracts, a stronger terminal outcome model, and more mechanical CI
+policy around audit integrity.
 
-Current RC-5 behaviour:
+Current RC-5.2 behaviour:
 
 - YAML remains a first-class operator path.
 - The Web Composer builds through discovery, mutation, blob, secret-reference,
@@ -874,12 +874,11 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-Elspeth can run from a published Docker image. Replace `v0.5.2` with the tag
-published for the release you are evaluating; use the exact tag for older
-release lines when evaluating an earlier RC.
+Elspeth can run from a published Docker image. Replace `v0.5.1` with the tag
+published for the release you are evaluating.
 
 ```bash
-IMAGE_TAG=v0.5.2
+IMAGE_TAG=v0.5.1
 
 # Run a pipeline
 docker run --rm \
@@ -954,10 +953,9 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | [PLUGIN.md](PLUGIN.md) | Plugin Authors | How to create sources, transforms, sinks |
 | [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | Verified requirements with implementation status |
 | [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records for routing, declaration-trust, terminal outcomes, and other load-bearing decisions |
-| [CLAUDE.md](CLAUDE.md) | AI Assistants | Project context, trust model, patterns |
 | [docs/guides/data-trust-and-error-handling.md](docs/guides/data-trust-and-error-handling.md) | Developers | Trust model, external-boundary handling, quarantine, and plugin error semantics |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |
-| [docs/release/](docs/release/) | Evaluators | Executive summary, progress and velocity reports, guarantees, release evidence, and archive map |
+| [docs/release/](docs/release/) | Evaluators | Executive summary, Composer guide, platform architecture, guarantees, assessment mapping, release evidence |
 | [docs/reference/](docs/reference/) | Developers | Configuration reference |
 | [docs/runbooks/](docs/runbooks/) | Operators | Deployment and operations |
 

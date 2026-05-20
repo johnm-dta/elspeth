@@ -21,11 +21,23 @@ def _normalized_placeholder_label(value: str) -> str:
     return "".join(ch for ch in value.strip().lower() if ch.isalnum())
 
 
-def is_wire_visible_placeholder(value: str) -> bool:
-    """Return true when a wire-visible identity field carries a sentinel value."""
+def is_placeholder_value(value: str) -> bool:
+    """Return true when a user/config value carries a placeholder sentinel."""
     stripped = value.strip()
     if not stripped:
         return False
     if stripped.startswith("<") and stripped.endswith(">"):
         return True
     return _normalized_placeholder_label(stripped) in _PLACEHOLDER_LABELS
+
+
+def reject_placeholder_value(value: str, *, field_name: str) -> str:
+    """Return value unless it is a placeholder sentinel."""
+    if is_placeholder_value(value):
+        raise ValueError(f"{field_name} must be a real configured value; placeholder values are not valid")
+    return value
+
+
+def is_wire_visible_placeholder(value: str) -> bool:
+    """Return true when a wire-visible identity field carries a sentinel value."""
+    return is_placeholder_value(value)

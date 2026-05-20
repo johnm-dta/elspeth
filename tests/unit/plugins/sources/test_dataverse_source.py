@@ -325,6 +325,20 @@ class TestDataverseSourceConfigValidation:
         assert cfg.entity == "contacts"
         assert cfg.fetch_xml is None
 
+    @pytest.mark.parametrize("entity", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_entity_placeholder_rejected(self, entity: str) -> None:
+        from elspeth.plugins.sources.dataverse import DataverseSourceConfig
+
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSourceConfig.from_dict(_base_config(entity=entity))
+
+    @pytest.mark.parametrize("select_field", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_select_placeholder_rejected(self, select_field: str) -> None:
+        from elspeth.plugins.sources.dataverse import DataverseSourceConfig
+
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSourceConfig.from_dict(_base_config(select=[select_field]))
+
     def test_valid_fetchxml_config(self) -> None:
         """Accept a minimal valid FetchXML config."""
         from elspeth.plugins.sources.dataverse import DataverseSourceConfig

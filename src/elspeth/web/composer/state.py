@@ -783,9 +783,7 @@ def _validate_gate_expression(condition: str) -> str | None:
 # to scraped third parties — a Tier-1 audit-integrity defect — regardless of
 # any prose rationale ("placeholder", "internal default") the composer LLM
 # attached to them. Mechanical backstop for the skill-prompt rule in
-# pipeline_composer.md (web_scrape.http section); pairs with the future
-# angle-bracket placeholder rule tracked in elspeth-f1efeed9c2 for layered
-# defence.
+# pipeline_composer.md (web_scrape.http section).
 _RFC_RESERVED_DOMAIN_LABELS: tuple[str, ...] = (
     "example.com",
     "example.org",

@@ -4,12 +4,12 @@
 
 import { request, type APIRequestContext } from "@playwright/test";
 
-// Overridable by the staging-targeted Playwright config so the same specs
-// can run against either the local-spawned webServer (default) or an
-// already-deployed environment (e.g. elspeth.foundryside.dev). The local
-// config does not set this env var, preserving the original default.
+// Overridable by Playwright configs so the same specs can run against either
+// the local-spawned webServer or an already-deployed environment (e.g.
+// elspeth.foundryside.dev).
+const BACKEND_PORT = process.env.PLAYWRIGHT_BACKEND_PORT ?? "8451";
 const BACKEND_BASE_URL =
-  process.env.PLAYWRIGHT_BACKEND_BASE_URL ?? "http://127.0.0.1:8451";
+  process.env.PLAYWRIGHT_BACKEND_BASE_URL ?? `http://127.0.0.1:${BACKEND_PORT}`;
 
 export interface SessionSummary {
   id: string;

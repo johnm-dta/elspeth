@@ -5924,6 +5924,40 @@ class TestSetPipeline:
             field="code_themes:api_key",
         )
 
+    def test_set_pipeline_rejects_placeholder_database_table_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        catalog.list_sinks.return_value = [
+            *catalog.list_sinks.return_value,
+            PluginSummary(
+                name="database",
+                description="Database sink",
+                plugin_type="sink",
+                config_fields=[],
+            ),
+        ]
+        args = _valid_pipeline_args()
+        args["outputs"][0] = {
+            "sink_name": "main",
+            "plugin": "database",
+            "options": {
+                "url": {"secret_ref": "DATABASE_URL"},
+                "table": "<OPERATOR_REQUIRED>",
+                "schema": {"mode": "observed"},
+            },
+            "on_write_failure": "discard",
+        }
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        error = result.data["error"]
+        assert "Output 'main'" in error
+        assert "table" in error
+        assert "placeholder" in error
+
     def test_set_pipeline_accepts_wired_secret_ref_marker(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()

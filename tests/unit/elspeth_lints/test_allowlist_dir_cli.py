@@ -15,7 +15,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ELSPETH_LINTS_SRC = REPO_ROOT / "elspeth-lints" / "src"
@@ -34,6 +37,10 @@ def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.mark.skipif(
+    sys.version_info[:2] != (3, 13),
+    reason="tier-model allowlist fingerprints are version-specific; Python 3.13 is the canonical lint runtime",
+)
 def test_allowlist_dir_unset_uses_per_rule_defaults() -> None:
     """When --allowlist-dir is unset, rules resolve their own default directories."""
     # trust_tier.tier_model with its real allowlist → 0 findings (gate is green)

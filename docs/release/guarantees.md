@@ -1,7 +1,7 @@
 # What ELSPETH Guarantees
 
-> **PARTIALLY REFRESHED — RC-3 base, RC-5.2 capabilities appended.**
-> §1 through §6 of this document are the RC-3 guarantees as originally drafted (3 March 2026) and remain the contract for their respective subsystems. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 are RC-5.2 additions documenting guarantees that were added in RC-4 and RC-5 (authentication, secret references, multi-user sessions, composer authoring) and that this document had not previously covered. A full restructure to a single RC-5.2 voice is on the roadmap; until then, treat the version-by-version layering as the canonical reading.
+> **LAYERED ASSURANCE APPENDIX — RC-3 contract language with RC-5.2 additions.**
+> §1 through §6 preserve the RC-3 guarantees as originally drafted (3 March 2026) because downstream engineering and audit references cite that wording. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 document RC-5.2 guarantees for authentication, secret references, multi-user sessions, and composer authoring. Read this as a versioned assurance appendix, not as marketing copy.
 
 **Versions:** RC-3 (§1–§10) + RC-5.2 additions (§11–§14)
 **Original date:** 3 March 2026 (§1–§10)
@@ -11,7 +11,7 @@
 
 ## Document scope
 
-This document defines the promises ELSPETH makes to its users and to anyone evaluating the audit trail. These are not aspirational features — they are **contractual guarantees** that the system must uphold. A violation of any clause here is a P0 bug.
+This document defines the promises ELSPETH makes to its users and to anyone evaluating the audit trail. These are not aspirational features — they are assurance guarantees that the system must uphold. A violation of any clause here is a release-blocking bug.
 
 This document is **not** a roadmap, a feature list, or a marketing surface. For the inventory of what has shipped, see [`elspeth-progress-rc1-to-rc5.md`](elspeth-progress-rc1-to-rc5.md). For the high-level capability and assurance posture, see [`executive-summary.md`](executive-summary.md).
 

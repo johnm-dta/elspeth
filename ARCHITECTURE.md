@@ -292,7 +292,7 @@ secret_resolutions (Key Vault usage)
 field_resolutions (header normalization)
 ```
 
-**Critical Pattern:** Composite PK `(node_id, run_id)` on `nodes` table requires using denormalized `node_states.run_id` directly in queries (see CLAUDE.md).
+**Critical Pattern:** Composite PK `(node_id, run_id)` on `nodes` table requires using denormalized `node_states.run_id` directly in queries.
 
 ### 3.3 Plugins Components
 
@@ -933,7 +933,7 @@ ongoing CI enforcement.
 | **Maintainability** | Clean module boundaries, consistent patterns across subsystems |
 | **Testability** | 2.6:1 test-to-production LOC ratio, mutation testing, property tests |
 | **Type Safety** | mypy strict mode, runtime-checkable protocols, NewType aliases |
-| **Documentation** | CLAUDE.md (10K+ words), 6 ADRs, runbooks, architecture docs |
+| **Documentation** | ADRs, runbooks, architecture docs, and trust-boundary guides |
 | **Error Handling** | Three-tier trust model with distinct rules per boundary |
 | **Security** | HMAC fingerprinting, AST-based expression parsing (no eval), SQLCipher support |
 | **Performance** | Batch operations, connection pooling, rate limiting |
@@ -1012,5 +1012,4 @@ All diagrams use Mermaid syntax for version control compatibility.
 
 - [README.md](README.md) - Project overview and quick start
 - [PLUGIN.md](PLUGIN.md) - Plugin development guide
-- [CLAUDE.md](CLAUDE.md) - Complete project context and patterns
 - [docs/reference/](docs/reference/) - Configuration reference

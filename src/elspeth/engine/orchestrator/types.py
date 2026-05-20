@@ -65,32 +65,25 @@ class RowProcessorHandle(Protocol):
 
     @property
     def token_manager(self) -> Any:
-        """Expose the token manager used by source-quarantine handling."""
-        ...
+        raise NotImplementedError
 
     def process_row(self, *args: Any, **kwargs: Any) -> Any:
-        """Process a new source row through the pipeline."""
-        ...
+        raise NotImplementedError
 
     def process_existing_row(self, *args: Any, **kwargs: Any) -> Any:
-        """Process a persisted row through the pipeline during resume."""
-        ...
+        raise NotImplementedError
 
     def process_token(self, *args: Any, **kwargs: Any) -> Any:
-        """Continue processing an existing token from a graph node."""
-        ...
+        raise NotImplementedError
 
     def check_aggregation_timeout(self, *args: Any, **kwargs: Any) -> Any:
-        """Check whether an aggregation node should timeout-flush."""
-        ...
+        raise NotImplementedError
 
     def get_aggregation_buffer_count(self, *args: Any, **kwargs: Any) -> int:
-        """Return buffered item count for an aggregation node."""
-        ...
+        raise NotImplementedError
 
     def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
-        """Flush an aggregation node outside normal row processing."""
-        ...
+        raise NotImplementedError
 
     def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
         """Drain recoverable durable scheduler work during resume."""
@@ -113,16 +106,13 @@ class RowProcessorHandle(Protocol):
         ...
 
     def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
-        """Return serializable aggregation checkpoint state."""
-        ...
+        raise NotImplementedError
 
     def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
-        """Return serializable coalesce checkpoint state."""
-        ...
+        raise NotImplementedError
 
     def resolve_sink_step(self) -> int:
-        """Return the audit step index used for sink writes."""
-        ...
+        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)

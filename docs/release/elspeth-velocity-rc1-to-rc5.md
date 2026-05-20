@@ -1,14 +1,14 @@
 # ELSPETH Velocity Report — Daily Output, January–May 2026
 
 **Period covered:** 12 January 2026 → 19 May 2026 (128 calendar days; **123 active commit days**)
-**Total commits:** 4,521 unique across `origin/full-history-pre-rc1`, `origin/pre-RC2`, and `HEAD`
+**Total commits:** 4,521 unique across the RC-1, RC-2, and RC-5.2 history snapshots
 **Average velocity:** 35.3 commits per calendar day; **36.8 commits per active day**
 **Author of record:** John Morrissey
 **Audience:** Engineering team and engineering leadership
 **Register:** Technical
 **Purpose:** Per-day commit volume so the team can see how much was completed each day, where the peaks are, and what each peak delivered.
 
-> **Reading the figures.** Per-active-day rates of 36–80 commits should be read against the project's contributor count, which is tracked separately at the enterprise level. The recovery patterns visible in the data — 1–2 day pauses after major releases, and low-activity weeks immediately preceding phase changes — reflect a deliberate cadence pattern, not external scheduling and not slippage. Reading any single week's count without the phase context will mislead; the *Velocity by Phase* table below is the right reading frame.
+> **Reading the figures.** Commit volume is delivery telemetry, not a substitute for assurance, maintainability, or product value. Per-active-day rates of 36–80 commits should be read against the project's contributor count, which is tracked separately at the enterprise level. The recovery patterns visible in the data — 1–2 day pauses after major releases, and low-activity weeks immediately preceding phase changes — reflect a deliberate cadence pattern, not external scheduling and not slippage. Reading any single week's count without the phase context will mislead; the *Velocity by Phase* table below is the right reading frame.
 
 This document is the **velocity / tempo** view. For cumulative feature output, see [elspeth-progress-rc1-to-rc5.md](elspeth-progress-rc1-to-rc5.md).
 
@@ -52,8 +52,8 @@ The peak days where epics land or RC cutovers happen. Attribution is taken from 
 | 4 | 2026-01-18 | 125 | Pre-RC1 LLM infrastructure: OpenAI / Azure client base classes; pooled-execution scaffolding; reorder buffer with timing. |
 | 5 | 2026-02-03 | 125 | RC-2.1 → RC-2.2: Langfuse SDK v3 migration; secret-resolution audit trail; schema-contract propagation; Tier 2 tracing on Azure / OpenRouter / batch LLM. |
 | 6 | 2026-02-02 | 118 | RC-2 cutover day. `ELSPETH - Release Candidate 2` commit + post-cutover cleanup (display headers; FieldResolutionApplied event; Tier 1 corrupt-field-resolution crash). |
-| 7 | 2026-05-14 | 97 | RC-5.2 release-stamp day: changelog finalize; per-step chat merge into `RC5.2`; phase3 compose-loop persistence merge. |
-| 8 | 2026-05-19 | 94 | Phase 8 polish + Phase 6 completion-gestures merge + CI allowlist burn-down merge + Phase-5 chat-data-entry merge + ansible-ubuntu-deploy docs (current `HEAD`). |
+| 7 | 2026-05-14 | 97 | RC-5.2 release-stamp day: changelog finalize; per-step chat merge; phase3 compose-loop persistence merge. |
+| 8 | 2026-05-19 | 94 | Phase 8 polish + Phase 6 completion-gestures merge + CI allowlist burn-down merge + Phase-5 chat-data-entry merge + ansible-ubuntu-deploy docs. |
 | 9 | 2026-05-18 | 94 | Phase 7 catalog reshape merge + `fix/catalog-i1-i2-i3` (drawer error log, snapshot lock, NETWORK retirement) + plugin-coverage gate calibration. |
 | 10 | 2026-05-09 | 93 | RC-5.1 composer-progress-persistence Phase 1B: `persist_compose_turn` happy path, `OperationalError` + audit-failure primacy, `IntegrityError` disposition, persist-payload DCs. |
 | 11 | 2026-05-13 | 88 | Phase A coverage gap + per-step chat → RC-5.2 merge + post-rebase tier-model fix-ups + cross-step `chat_history` accumulation test. |
@@ -251,7 +251,7 @@ For a coarser view, here are the calendar weeks (Monday-anchored) with totals an
 | W16 | 2026-04-27 → 05-03 | 123 | Composer skill-pack updates; Phase plans |
 | W17 | 2026-05-04 → 05-10 | 308 | RC-5.1 closing sprint (composer correctness); Phase 1B persistence |
 | W18 | 2026-05-11 → 05-17 | 486 | RC-5.1 release (May 11); RC-5.2 release (May 14); progress-persistence Phases 1–4 |
-| W19 (partial) | 2026-05-18 → 05-19 | 188 | Phase 6 / 7 / 8 polish; current `HEAD` |
+| W19 (partial) | 2026-05-18 → 05-19 | 188 | Phase 6 / 7 / 8 polish |
 
 ---
 
@@ -288,13 +288,13 @@ The last seven days (May 13–19) have averaged **71 commits / day**; the prior 
 ## How These Numbers Were Computed
 
 ```bash
-# Active-day per-day commits across the three RC snapshot branches
-git log origin/full-history-pre-rc1 origin/pre-RC2 HEAD \
+# Active-day per-day commits across the three RC history snapshots
+git log <rc1-history> <rc2-history> <rc5.2-history> \
     --format='%ad' --date=short \
   | sort | uniq -c
 
-# Unique commit count across all three branches
-git log origin/full-history-pre-rc1 origin/pre-RC2 HEAD --format='%h' \
+# Unique commit count across all three snapshots
+git log <rc1-history> <rc2-history> <rc5.2-history> --format='%h' \
   | sort -u | wc -l
 ```
 
@@ -308,5 +308,5 @@ Peak-day attribution is taken from the dominant `feat(...)` / `add(...)` / `impl
 
 - `CHANGELOG.md`
 - Git history for deleted RC-1 and RC-2 changelog snapshots
-- Git remotes: `origin/full-history-pre-rc1`, `origin/pre-RC2`, `origin/RC5.2`, `origin/main`
+- Git history snapshots for RC-1, RC-2, RC-5.2, and `main`
 - `docs/release/elspeth-progress-rc1-to-rc5.md` — companion cumulative-output document

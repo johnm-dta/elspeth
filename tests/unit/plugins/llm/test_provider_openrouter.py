@@ -366,6 +366,39 @@ class TestExecuteQuery:
 
         assert result.finish_reason is FinishReason.STOP
 
+    def test_sends_current_openrouter_app_attribution_headers(
+        self,
+        mock_recorder: MagicMock,
+        mock_telemetry_emit: MagicMock,
+    ) -> None:
+        mock_recorder.allocate_call_index.side_effect = [0, 1]
+        provider = OpenRouterLLMProvider(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            timeout_seconds=30.0,
+            recorder=mock_recorder,
+            run_id="run-1",
+            telemetry_emit=mock_telemetry_emit,
+        )
+
+        with patch("elspeth.plugins.infrastructure.clients.http.httpx.Client") as mock_client_class:
+            mock_client = mock_client_class.return_value
+            mock_client.post.return_value = _make_http_response()
+
+            provider.execute_query(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gpt-4o",
+                temperature=0.0,
+                max_tokens=100,
+                state_id="state-1",
+                token_id="tok-1",
+            )
+
+        request_headers = mock_client.post.call_args.kwargs["headers"]
+        assert request_headers["HTTP-Referer"] == "https://github.com/johnm-dta/elspeth"
+        assert request_headers["X-OpenRouter-Title"] == "Elspeth"
+        assert "elspeth-rapid" not in set(request_headers.values())
+
 
 class TestHTTPErrorMapping:
     """Tests for HTTP status code → exception mapping."""

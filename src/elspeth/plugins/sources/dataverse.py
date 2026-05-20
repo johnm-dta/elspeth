@@ -24,6 +24,7 @@ from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
+from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.clients.dataverse import (
     DataverseAuthConfig,
@@ -130,6 +131,30 @@ class DataverseSourceConfig(DataPluginConfig):
                 validate_additional_domain(pattern)
         return v
 
+    @field_validator("entity")
+    @classmethod
+    def validate_entity_not_placeholder(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("entity cannot be empty")
+        return reject_placeholder_value(stripped, field_name="entity")
+
+    @field_validator("select")
+    @classmethod
+    def validate_select_not_placeholder(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        stripped_fields: list[str] = []
+        for index, select_name in enumerate(v):
+            if not select_name or not select_name.strip():
+                raise ValueError(f"select[{index}] cannot be empty")
+            stripped = select_name.strip()
+            reject_placeholder_value(stripped, field_name=f"select[{index}]")
+            stripped_fields.append(stripped)
+        return stripped_fields
+
     @model_validator(mode="after")
     def validate_query_mode(self) -> Self:
         has_structured = self.entity is not None
@@ -181,7 +206,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6dc5b9ec7c49e11b"
+    source_file_hash: str | None = "sha256:bc31a2918a365798"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 

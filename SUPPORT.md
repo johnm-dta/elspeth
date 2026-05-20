@@ -15,8 +15,8 @@ It is not offered with a public service-level agreement.
 - For security-sensitive issues, follow `SECURITY.md` instead of opening a
   public issue with details.
 - For public-sector evaluation, start with
-  `docs/release/executive-summary.md`, `docs/release/guarantees.md`, and the
-  `docs/release/README.md` release-documentation index.
+  `docs/release/executive-summary.md`,
+  `docs/release/assessment-mapping.md`, and `docs/release/guarantees.md`.
 
 ## What Maintainers Need
 

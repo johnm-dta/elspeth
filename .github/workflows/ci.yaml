@@ -28,99 +28,133 @@ env:
 permissions:
   contents: read
 
+# Public-repository guardrail: self-hosted runners execute arbitrary workflow
+# code on our infrastructure, so fork PRs stay on GitHub-hosted runners.
+# Trusted pushes and same-repository PRs use the nyx runner.
+#
+# GitHub's runs-on expression accepts either a runner label string or a JSON
+# array of labels. Keep this expression identical across jobs so the aggregate
+# CI Success check reflects one routing policy.
+#
+# Self-hosted container jobs can leave root-owned venv/cache artifacts in the
+# default workspace. Every checkout below uses a per-run, per-job path so stale
+# workspace siblings cannot break actions/checkout before project commands run.
+#
+#   ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+
 jobs:
   # ===========================================================================
   # Stage 1: Static analysis (shared Python environment)
   # ===========================================================================
   static-analysis:
     name: Static analysis
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-static-analysis
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev
 
       - name: Install dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
 
       - name: Check code style (ruff)
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run ruff check src/ tests/ scripts/ examples/ elspeth-lints/src/
 
       - name: Check formatting (ruff format)
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run ruff format --check src/ tests/ scripts/ examples/ elspeth-lints/src/
 
       - name: Type check (mypy)
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run mypy src/ elspeth-lints/src/
 
       - name: Check SlotType / guided.ts mirror consistency
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run python scripts/cicd/check_slot_type_cross_language.py
 
       - name: Enforce contract alignment
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run python scripts/check_contracts.py
 
       - name: Run plugin options metadata elspeth-lints rule
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules plugin_contract.options_metadata \
             --root .
 
       - name: Run plugin-contract elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules plugin_contract.component_type,plugin_contract.plugin_hashes \
             --root src/elspeth
 
       - name: Run immutability elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules immutability.freeze_guards,immutability.frozen_annotations \
             --root src/elspeth
 
       - name: Run audit-evidence elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution \
             --root src/elspeth
 
       - name: Run composer elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules 'composer/*' \
             --root src/elspeth
 
       - name: Run contract-manifest elspeth-lints rule
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules manifest.contract_manifest \
             --root src/elspeth
 
       - name: Run manifest inventory elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules manifest.symbol_inventory,manifest.test_to_source_mapping \
             --root .
 
       - name: Run trust-tier elspeth-lints rule
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_tier.tier_model \
             --root src/elspeth
 
       - name: Forbid new bespoke CI enforcers
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules meta.no-new-bespoke-cicd-enforcer \
@@ -128,6 +162,7 @@ jobs:
 
       - name: Emit elspeth-lints SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -141,6 +176,7 @@ jobs:
 
       - name: Emit elspeth-lints immutability SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -154,6 +190,7 @@ jobs:
 
       - name: Emit elspeth-lints plugin-contract SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -167,6 +204,7 @@ jobs:
 
       - name: Emit elspeth-lints audit-evidence SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -180,6 +218,7 @@ jobs:
 
       - name: Emit elspeth-lints composer SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -193,6 +232,7 @@ jobs:
 
       - name: Emit elspeth-lints contract-manifest SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -206,6 +246,7 @@ jobs:
 
       - name: Emit elspeth-lints manifest-inventory SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -219,6 +260,7 @@ jobs:
 
       - name: Emit elspeth-lints trust-tier SARIF artifact
         if: always()
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -236,17 +278,18 @@ jobs:
         with:
           name: elspeth-lints-sarif
           path: |
-            elspeth-lints.sarif
-            elspeth-lints-immutability.sarif
-            elspeth-lints-plugin-contract.sarif
-            elspeth-lints-audit-evidence.sarif
-            elspeth-lints-composer.sarif
-            elspeth-lints-contract-manifest.sarif
-            elspeth-lints-manifest-inventory.sarif
-            elspeth-lints-trust-tier.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-immutability.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-plugin-contract.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-audit-evidence.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-composer.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-contract-manifest.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-manifest-inventory.sarif
+            ${{ env.CI_CHECKOUT_PATH }}/elspeth-lints-trust-tier.sarif
           retention-days: 7
 
       - name: Compare shadow-mode lints
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python scripts/cicd/parity_harness.py \
             --manifest config/cicd/lint_migration_status.yaml \
@@ -257,7 +300,11 @@ jobs:
   # ===========================================================================
   test:
     name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:${{ matrix.python-version }}-bookworm
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-test-${{ matrix.python-version }}
     needs: [static-analysis]
     strategy:
       fail-fast: false
@@ -272,27 +319,30 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev jq
 
       - name: Install dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
 
       - name: Run tests with coverage
         if: matrix.coverage
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           uv run pytest tests/ \
             --cov=src/elspeth \
@@ -304,6 +354,7 @@ jobs:
 
       - name: Enforce audit-critical coverage floors
         if: matrix.coverage
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           # Ratchet the verified 2026-05-19 baseline while the test-debt
           # uplift to 95% is planned. Do not lower without fresh evidence.
@@ -314,6 +365,7 @@ jobs:
 
       - name: Run tests without coverage
         if: ${{ !matrix.coverage }}
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           uv run pytest tests/ \
             -v \
@@ -324,7 +376,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: coverage-report
-          path: coverage.xml
+          path: ${{ env.CI_CHECKOUT_PATH }}/coverage.xml
           retention-days: 7
 
   # ===========================================================================
@@ -332,32 +384,39 @@ jobs:
   # ===========================================================================
   integration:
     name: Integration Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
     needs: [test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-integration
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev
 
       - name: Install dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
 
       - name: Run integration tests
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: uv run pytest tests/integration/ -v -m integration || echo "Integration tests skipped (no API keys)"
@@ -384,11 +443,15 @@ jobs:
   # (the Phase 1C plan calls this out at line 127-131).
   test-postgres-testcontainer:
     name: Test (Postgres testcontainer)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
     needs: [static-analysis]
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-test-postgres-testcontainer
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -400,15 +463,25 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            dpkg-query -W libsqlcipher-dev
+          else
+            sudo apt-get update -q
+            sudo apt-get install -y -q libsqlcipher-dev
+          fi
 
       - name: Install dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
 
       - name: Verify Docker is available
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: docker info
 
       - name: Verify testcontainers Postgres extra is installed
@@ -416,6 +489,7 @@ jobs:
         # plan explicitly forbids ``|| echo missing``-style fallbacks here.
         # If the import fails, the job fails — which is the correct
         # signal that the lane cannot prove CL-PP-11.
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run python -c "import testcontainers.postgres"
 
       - name: Run testcontainer tests
@@ -425,6 +499,7 @@ jobs:
         # automatically. The earlier `tests/integration/web/` constraint
         # would silently skip out-of-tree testcontainer-marked tests
         # while CI still reported green — defeating the gate's purpose.
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           uv run pytest tests/ \
             -v \
@@ -435,31 +510,38 @@ jobs:
   # ===========================================================================
   supply-chain-audit:
     name: Dependency and License Audit
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
     needs: [static-analysis]
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-supply-chain-audit
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev
 
       - name: Install dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
 
       - name: Audit Python dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           uv export \
             --quiet \
@@ -468,14 +550,19 @@ jobs:
             --no-emit-project \
             --format requirements-txt \
             --output-file requirements-audit.txt
+          # CVE-2025-45768 / PYSEC-2025-183 has no fixed PyJWT release;
+          # the disputed weakness is application-selected HMAC key length.
+          # WebSettings enforces a 32-byte secret_key floor on non-loopback hosts.
           uv run --with "pip-audit>=2.9,<3" pip-audit \
             --strict \
             --requirement requirements-audit.txt \
             --no-deps \
             --disable-pip \
+            --ignore-vuln PYSEC-2025-183 \
             --progress-spinner=off
 
       - name: Check Python dependency licenses
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           uv run --with "pip-licenses>=5,<6" pip-licenses \
             --fail-on "GPL;AGPL" \
@@ -487,7 +574,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: python-license-report
-          path: python-license-report.md
+          path: ${{ env.CI_CHECKOUT_PATH }}/python-license-report.md
           retention-days: 30
 
   # ===========================================================================
@@ -498,10 +585,14 @@ jobs:
   # browser journey blocks merge instead of being waved through.
   e2e-frontend:
     name: Frontend E2E (Playwright)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-e2e-frontend
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -513,12 +604,21 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            dpkg-query -W libsqlcipher-dev
+          else
+            sudo apt-get update -q
+            sudo apt-get install -y -q libsqlcipher-dev
+          fi
 
       - name: Install Python dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
 
       - name: Set up Node.js
@@ -526,18 +626,29 @@ jobs:
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: src/elspeth/web/frontend/package-lock.json
+          cache-dependency-path: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: src/elspeth/web/frontend
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend
         run: npm ci
 
       - name: Install Playwright browser
-        working-directory: src/elspeth/web/frontend
-        run: npx playwright install --with-deps chromium
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend
+        run: |
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            npx playwright install chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+
+      - name: Assign isolated Playwright ports
+        run: |
+          port_base=$((20000 + (GITHUB_RUN_ID % 20000)))
+          echo "PLAYWRIGHT_BACKEND_PORT=$port_base" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_FRONTEND_PORT=$((port_base + 1))" >> "$GITHUB_ENV"
 
       - name: Run Playwright tests
-        working-directory: src/elspeth/web/frontend
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend
         env:
           CI: "true"
         run: npm run test:e2e
@@ -547,7 +658,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: playwright-report
-          path: src/elspeth/web/frontend/playwright-report/
+          path: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend/playwright-report/
           retention-days: 7
 
       - name: Upload Playwright traces
@@ -555,7 +666,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: playwright-traces
-          path: src/elspeth/web/frontend/test-results/
+          path: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend/test-results/
           retention-days: 7
 
   # ===========================================================================
@@ -571,28 +682,32 @@ jobs:
   # blocks merge.
   frontend-unit:
     name: Frontend unit (vitest + typecheck)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-frontend-unit
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
           cache: "npm"
-          cache-dependency-path: src/elspeth/web/frontend/package-lock.json
+          cache-dependency-path: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: src/elspeth/web/frontend
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend
         run: npm ci
 
       - name: Type check
-        working-directory: src/elspeth/web/frontend
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend
         run: npm run typecheck
 
       - name: Run vitest
-        working-directory: src/elspeth/web/frontend
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}/src/elspeth/web/frontend
         env:
           CI: "true"
         run: npm test -- --run
@@ -602,7 +717,7 @@ jobs:
   # ===========================================================================
   ci-success:
     name: CI Success
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
     needs:
       - static-analysis
       - test

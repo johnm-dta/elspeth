@@ -3,8 +3,8 @@
 // Verifies the full boot path:
 //   1. globalSetup ran and wrote storageState with a valid auth_token
 //      (otherwise the app redirects to /login and these tests fail).
-//   2. Both webServer instances (uvicorn backend on 8451, Vite dev server
-//      on 5173) came up healthy.
+//   2. Both webServer instances came up healthy on the Playwright-assigned
+//      backend and frontend ports.
 //   3. The frontend SPA loads, restores auth from localStorage, and renders
 //      the composer empty state.
 //   4. The backend's /api/sessions endpoint accepts the bearer token and

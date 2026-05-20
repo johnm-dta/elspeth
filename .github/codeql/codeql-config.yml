@@ -2,3 +2,13 @@ name: ELSPETH CodeQL config
 
 paths-ignore:
   - elspeth-lints/src/**/fixtures/**
+
+query-filters:
+  # PR gating keeps CodeQL responsible for security findings and correctness
+  # problems marked problem.severity=error, including py/unsafe-cyclic-import.
+  # Warning/recommendation quality findings are governed by ruff, mypy,
+  # elspeth-lints, and the test suite to avoid duplicative style gating.
+  - exclude:
+      problem.severity:
+        - warning
+        - recommendation

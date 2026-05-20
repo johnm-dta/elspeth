@@ -104,9 +104,19 @@ class TestAzureBlobSinkConfig:
         with pytest.raises(PluginConfigError, match="container"):
             AzureBlobSink(_base_config(container="   "))
 
+    @pytest.mark.parametrize("container", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_container_raises(self, container: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            AzureBlobSink(_base_config(container=container))
+
     def test_empty_blob_path_raises(self) -> None:
         with pytest.raises(PluginConfigError, match="blob_path"):
             AzureBlobSink(_base_config(blob_path=""))
+
+    @pytest.mark.parametrize("blob_path", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_blob_path_raises(self, blob_path: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            AzureBlobSink(_base_config(blob_path=blob_path))
 
     def test_invalid_template_syntax_raises_value_error(self) -> None:
         with pytest.raises(PluginConfigError, match="Invalid blob_path template"):

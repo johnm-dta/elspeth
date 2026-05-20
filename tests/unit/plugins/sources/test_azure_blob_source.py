@@ -144,10 +144,22 @@ class TestAzureBlobSourceConfig:
         with pytest.raises(PluginConfigError, match="container"):
             _make_source(cfg)
 
+    @pytest.mark.parametrize("container", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_container_raises(self, container: str) -> None:
+        cfg = _base_config(container=container)
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            _make_source(cfg)
+
     def test_empty_blob_path_raises(self) -> None:
         """Empty blob_path raises PluginConfigError."""
         cfg = _base_config(blob_path="")
         with pytest.raises(PluginConfigError, match="blob_path"):
+            _make_source(cfg)
+
+    @pytest.mark.parametrize("blob_path", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_placeholder_blob_path_raises(self, blob_path: str) -> None:
+        cfg = _base_config(blob_path=blob_path)
+        with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
 
     def test_columns_rejected_for_json(self) -> None:

@@ -100,11 +100,25 @@ class TestDataverseSinkConfig:
         cfg = DataverseSinkConfig.from_dict(_config(entity="  contacts  "))
         assert cfg.entity == "contacts"
 
+    @pytest.mark.parametrize("entity", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_entity_placeholder_rejected(self, entity: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(_config(entity=entity))
+
+    @pytest.mark.parametrize("alternate_key", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_alternate_key_placeholder_rejected(self, alternate_key: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(_config(alternate_key=alternate_key))
+
     def test_field_mapping_required(self) -> None:
         c = _config()
         del c["field_mapping"]
         with pytest.raises(PluginConfigError, match="field_mapping"):
             DataverseSinkConfig.from_dict(c)
+
+    def test_field_mapping_target_placeholder_rejected(self) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(_config(field_mapping={"email": "operator_required", "name": "fullname"}))
 
     def test_https_enforcement(self) -> None:
         with pytest.raises(PluginConfigError, match="HTTPS"):
@@ -132,6 +146,19 @@ class TestDataverseSinkConfig:
         assert cfg.lookups is not None
         assert "account_id" in cfg.lookups
         assert cfg.lookups["account_id"].target_entity == "accounts"
+
+    def test_lookup_target_entity_placeholder_rejected(self) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(
+                _config(
+                    lookups={
+                        "account_id": {
+                            "target_entity": "operator_required",
+                            "target_field": "parentcustomerid",
+                        }
+                    }
+                )
+            )
 
     def test_lookup_target_entity_required(self) -> None:
         with pytest.raises(PluginConfigError, match="target_entity"):
@@ -214,6 +241,19 @@ class TestDataverseSinkConfig:
 
         assert cfg.lookups is not None
         assert cfg.lookups["account_id"].target_field == "parentcustomerid"
+
+    def test_lookup_target_field_placeholder_rejected(self) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DataverseSinkConfig.from_dict(
+                _config(
+                    lookups={
+                        "account_id": {
+                            "target_entity": "accounts",
+                            "target_field": "operator_required",
+                        }
+                    }
+                )
+            )
 
     def test_lookup_config_rejects_extra_fields(self) -> None:
         with pytest.raises(PluginConfigError):

@@ -26,6 +26,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.clients.dataverse import (
@@ -54,14 +55,14 @@ class LookupConfig(BaseModel):
     def validate_target_entity_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("target_entity cannot be empty")
-        return v.strip()
+        return reject_placeholder_value(v.strip(), field_name="target_entity")
 
     @field_validator("target_field")
     @classmethod
     def validate_target_field_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("target_field cannot be empty")
-        return v.strip()
+        return reject_placeholder_value(v.strip(), field_name="target_field")
 
 
 class DataverseSinkConfig(DataPluginConfig):
@@ -137,14 +138,14 @@ class DataverseSinkConfig(DataPluginConfig):
     def validate_entity_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("entity cannot be empty")
-        return v.strip()
+        return reject_placeholder_value(v.strip(), field_name="entity")
 
     @field_validator("alternate_key")
     @classmethod
     def validate_alternate_key_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("alternate_key cannot be empty")
-        return v.strip()
+        return reject_placeholder_value(v.strip(), field_name="alternate_key")
 
     @model_validator(mode="after")
     def validate_no_outbound_key_collisions(self) -> Self:
@@ -159,6 +160,9 @@ class DataverseSinkConfig(DataPluginConfig):
         targets = list(self.field_mapping.values())
         seen: dict[str, str] = {}
         for pipeline_field, dv_column in self.field_mapping.items():
+            if not dv_column or not dv_column.strip():
+                raise ValueError(f"field_mapping target for '{pipeline_field}' cannot be empty")
+            reject_placeholder_value(dv_column, field_name=f"field_mapping target for '{pipeline_field}'")
             if dv_column in seen:
                 raise ValueError(
                     f"field_mapping collision: pipeline fields '{seen[dv_column]}' and "
@@ -219,7 +223,7 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:103613900a342f9f"
+    source_file_hash: str | None = "sha256:a1d072d6e3df1651"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)

@@ -8,7 +8,8 @@ from sqlalchemy import MetaData, Table, create_engine, select
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_context import PluginContext
-from elspeth.plugins.sinks.database_sink import DatabaseSink
+from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.plugins.sinks.database_sink import DatabaseSink, DatabaseSinkConfig
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_operation_context
 
@@ -35,6 +36,18 @@ class TestDatabaseSink:
     def db_url(self, tmp_path: Path) -> str:
         """Create a SQLite database URL."""
         return f"sqlite:///{tmp_path / 'test.db'}"
+
+    @pytest.mark.parametrize("table_name", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
+    def test_config_rejects_placeholder_table_name(self, table_name: str) -> None:
+        with pytest.raises(PluginConfigError, match="placeholder"):
+            DatabaseSinkConfig.from_dict(
+                {
+                    "url": "sqlite:///:memory:",
+                    "table": table_name,
+                    "schema": STRICT_SCHEMA,
+                },
+                plugin_name="database",
+            )
 
     def test_write_creates_table(self, db_url: str, ctx: PluginContext) -> None:
         """write() creates table and inserts rows."""

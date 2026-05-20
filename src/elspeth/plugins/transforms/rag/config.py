@@ -113,6 +113,18 @@ class RAGRetrievalConfig(TransformDataConfig):
             )
         return v
 
+    @field_validator("query_field")
+    @classmethod
+    def validate_query_field(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("query_field cannot be empty")
+        if not stripped.isidentifier():
+            raise ValueError(f"query_field must be a valid Python identifier, got {v!r}")
+        if keyword.iskeyword(stripped):
+            raise ValueError(f"query_field must not be a Python keyword, got {stripped!r}")
+        return stripped
+
     @property
     def declared_input_fields(self) -> frozenset[str]:
         return super().declared_input_fields | frozenset({self.query_field})

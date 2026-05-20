@@ -25,7 +25,15 @@ from typing import TYPE_CHECKING, Any
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
-from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
+from elspeth.web.composer.guided.resolved import (
+    SinkOutputResolved as SinkOutputResolved,
+)
+from elspeth.web.composer.guided.resolved import (
+    SinkResolved as SinkResolved,
+)
+from elspeth.web.composer.guided.resolved import (
+    SourceResolved as SourceResolved,
+)
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
 # Pre-v5 persisted sessions are intentionally incompatible with v5: the

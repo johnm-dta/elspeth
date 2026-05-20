@@ -58,6 +58,35 @@ RowPlugin = TransformProtocol
 class RowProcessorHandle(Protocol):
     """Orchestrator-facing processor contract stored in run/loop contexts."""
 
+    @property
+    def token_manager(self) -> Any:
+        """Expose the token manager used by source-quarantine handling."""
+        ...
+
+    def process_row(self, *args: Any, **kwargs: Any) -> Any:
+        """Process a new source row through the pipeline."""
+        ...
+
+    def process_existing_row(self, *args: Any, **kwargs: Any) -> Any:
+        """Process a persisted row through the pipeline during resume."""
+        ...
+
+    def process_token(self, *args: Any, **kwargs: Any) -> Any:
+        """Continue processing an existing token from a graph node."""
+        ...
+
+    def check_aggregation_timeout(self, *args: Any, **kwargs: Any) -> Any:
+        """Check whether an aggregation node should timeout-flush."""
+        ...
+
+    def get_aggregation_buffer_count(self, *args: Any, **kwargs: Any) -> int:
+        """Return buffered item count for an aggregation node."""
+        ...
+
+    def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
+        """Flush an aggregation node outside normal row processing."""
+        ...
+
     def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
         """Return serializable aggregation checkpoint state."""
         ...

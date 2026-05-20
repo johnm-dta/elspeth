@@ -219,15 +219,12 @@ class ExplainScreen:
             self._detail_panel.update_state(None)
             return
 
-        match self._state:
-            case LoadedState(db=db, run_id=run_id):
-                node_state = self._load_node_state(db, run_id, node_id)
-                self._detail_panel.update_state(node_state)
-            case LoadingFailedState(db=db, run_id=run_id):
-                node_state = self._load_node_state(db, run_id, node_id)
-                self._detail_panel.update_state(node_state)
-            case _:
-                self._detail_panel.update_state(None)
+        if isinstance(self._state, (LoadedState, LoadingFailedState)):
+            node_state = self._load_node_state(self._state.db, self._state.run_id, node_id)
+            self._detail_panel.update_state(node_state)
+            return
+
+        self._detail_panel.update_state(None)
 
     def _load_node_state(self, db: LandscapeDB, run_id: str, node_id: str) -> NodeStateInfo | None:
         """Load node state from database.

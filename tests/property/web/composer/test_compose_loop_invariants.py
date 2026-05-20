@@ -378,12 +378,20 @@ async def _drive_trace_async(
         original_do_commit = harness.sessions_service._engine.dialect.do_commit
         commit_started = threading.Event()
         release_commit = threading.Event()
+        commit_finished = threading.Event()
+        commit_errors: list[BaseException] = []
 
         def _gated_commit(dbapi_conn: object) -> None:
-            commit_started.set()
-            if not release_commit.wait(timeout=2.0):
-                pytest.fail("property worker commit gate was not released within 2s")
-            original_do_commit(dbapi_conn)
+            try:
+                commit_started.set()
+                if not release_commit.wait(timeout=10.0):
+                    pytest.fail("property worker commit gate was not released within 10s")
+                original_do_commit(dbapi_conn)
+            except BaseException as exc:
+                commit_errors.append(exc)
+                raise
+            finally:
+                commit_finished.set()
 
         harness.sessions_service._engine.dialect.do_commit = _gated_commit
         try:
@@ -398,6 +406,14 @@ async def _drive_trace_async(
             with pytest.raises(asyncio.CancelledError):
                 await task
             release_commit.set()
+            for _ in range(1000):
+                if commit_finished.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("property trace did not finish shielded COMMIT within 10s")
+            if commit_errors:
+                raise AssertionError("property trace shielded COMMIT failed after caller cancellation") from commit_errors[0]
             await _wait_for_tool_rows(harness)
         finally:
             harness.sessions_service._engine.dialect.do_commit = original_do_commit
@@ -471,11 +487,11 @@ async def _drive_trace_async(
 
 
 async def _wait_for_tool_rows(harness: _Harness) -> None:
-    for _ in range(200):
-        if any(row.role == "tool" for row in _chat_rows(harness)):
+    for _ in range(1000):
+        if [row.role for row in _chat_rows(harness)] == ["assistant", "tool"]:
             return
         await asyncio.sleep(0.01)
-    pytest.fail("property trace did not persist a tool row within 2s")
+    pytest.fail("property trace did not persist assistant/tool rows within 10s")
 
 
 def _drive_single_example_trace(

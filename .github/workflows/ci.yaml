@@ -28,21 +28,28 @@ env:
 permissions:
   contents: read
 
+# Public-repository guardrail: self-hosted runners execute arbitrary workflow
+# code on our infrastructure, so fork PRs stay on GitHub-hosted runners.
+# Trusted pushes and same-repository PRs use the nyx runner.
+#
+# GitHub's runs-on expression accepts either a runner label string or a JSON
+# array of labels. Keep this expression identical across jobs so the aggregate
+# CI Success check reflects one routing policy.
+#
+#   ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+
 jobs:
   # ===========================================================================
   # Stage 1: Static analysis (shared Python environment)
   # ===========================================================================
   static-analysis:
     name: Static analysis
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
@@ -51,8 +58,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev
 
       - name: Install dependencies
         run: uv sync --frozen --all-extras
@@ -257,7 +264,9 @@ jobs:
   # ===========================================================================
   test:
     name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:${{ matrix.python-version }}-bookworm
     needs: [static-analysis]
     strategy:
       fail-fast: false
@@ -273,11 +282,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ matrix.python-version }}
-
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
@@ -285,8 +289,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev
 
       - name: Install dependencies
         run: uv sync --frozen --all-extras
@@ -332,17 +336,14 @@ jobs:
   # ===========================================================================
   integration:
     name: Integration Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
     needs: [test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
@@ -351,8 +352,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev
 
       - name: Install dependencies
         run: uv sync --frozen --all-extras
@@ -384,7 +385,7 @@ jobs:
   # (the Phase 1C plan calls this out at line 127-131).
   test-postgres-testcontainer:
     name: Test (Postgres testcontainer)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
     needs: [static-analysis]
     steps:
       - name: Checkout code
@@ -402,8 +403,12 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            dpkg-query -W libsqlcipher-dev
+          else
+            sudo apt-get update -q
+            sudo apt-get install -y -q libsqlcipher-dev
+          fi
 
       - name: Install dependencies
         run: uv sync --frozen --all-extras
@@ -435,16 +440,13 @@ jobs:
   # ===========================================================================
   supply-chain-audit:
     name: Dependency and License Audit
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
     needs: [static-analysis]
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
@@ -453,8 +455,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          apt-get update -q
+          apt-get install -y -q libsqlcipher-dev
 
       - name: Install dependencies
         run: uv sync --frozen --all-extras
@@ -502,7 +504,7 @@ jobs:
   # browser journey blocks merge instead of being waved through.
   e2e-frontend:
     name: Frontend E2E (Playwright)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -519,8 +521,12 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libsqlcipher-dev
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            dpkg-query -W libsqlcipher-dev
+          else
+            sudo apt-get update -q
+            sudo apt-get install -y -q libsqlcipher-dev
+          fi
 
       - name: Install Python dependencies
         run: uv sync --frozen --all-extras
@@ -538,7 +544,12 @@ jobs:
 
       - name: Install Playwright browser
         working-directory: src/elspeth/web/frontend
-        run: npx playwright install --with-deps chromium
+        run: |
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            npx playwright install chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
 
       - name: Run Playwright tests
         working-directory: src/elspeth/web/frontend
@@ -575,7 +586,7 @@ jobs:
   # blocks merge.
   frontend-unit:
     name: Frontend unit (vitest + typecheck)
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -606,7 +617,7 @@ jobs:
   # ===========================================================================
   ci-success:
     name: CI Success
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
     needs:
       - static-analysis
       - test

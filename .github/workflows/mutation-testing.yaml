@@ -26,7 +26,7 @@ env:
 
 jobs:
   mutation-test:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     timeout-minutes: 60  # Mutation testing is slow
 
     steps:
@@ -93,7 +93,7 @@ jobs:
           retention-days: 30
 
   mutation-test-landscape:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     timeout-minutes: 120  # Landscape has more code
 
     steps:

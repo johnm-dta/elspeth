@@ -32,7 +32,6 @@ import json
 import re
 import subprocess
 import sys
-from collections import deque
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -42,9 +41,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALLOWLIST_DIR = REPO_ROOT / "config" / "cicd" / "enforce_tier_model"
 SRC_ROOT = REPO_ROOT / "src" / "elspeth"
+ROTATABLE_RULE_IDS = frozenset({"R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "TC", "L1"})
 KEY_RE = re.compile(
     r"^Stale tier-model allowlist entry: "
-    r"(?P<file>[^:]+):(?P<rule>R\d+):(?P<symbol>.+?):fp=(?P<fp>[0-9a-f]+)$"
+    r"(?P<file>[^:]+):(?P<rule>R\d+|TC|L1):(?P<symbol>.+?):fp=(?P<fp>[0-9a-f]+)$"
 )
 
 
@@ -79,43 +79,26 @@ def run_tier_model() -> list[dict[str, Any]]:
 
 
 def find_enclosing_symbol(source_path: Path, target_line: int) -> str:
-    """Return ``ClassName:method_name`` (or just ``function_name``) at target_line."""
+    """Return the tier-model symbol context enclosing ``target_line``."""
     tree = ast.parse(source_path.read_text())
-    classes: list[ast.ClassDef] = []
-    functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    enclosing_symbols: list[tuple[int, int, str]] = []
 
-    def _walk(node: ast.AST, class_stack: list[str]) -> None:
+    def _contains_target(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        end_line = node.end_lineno if node.end_lineno is not None else node.lineno
+        return node.lineno <= target_line <= end_line
+
+    def _walk(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef):
-                if (
-                    hasattr(child, "lineno")
-                    and hasattr(child, "end_lineno")
-                    and child.lineno <= target_line <= (child.end_lineno or child.lineno)
-                ):
-                    classes.append(child)
-                _walk(child, [*class_stack, child.name])
-            elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                if (
-                    hasattr(child, "lineno")
-                    and hasattr(child, "end_lineno")
-                    and child.lineno <= target_line <= (child.end_lineno or child.lineno)
-                ):
-                    functions.append(child)
-                _walk(child, class_stack)
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if _contains_target(child):
+                    enclosing_symbols.append((child.lineno, child.col_offset, child.name))
+                    _walk(child)
             else:
-                _walk(child, class_stack)
+                _walk(child)
 
-    _walk(tree, [])
-
-    # Choose innermost function and innermost class
-    func = max(functions, key=lambda n: n.lineno, default=None)
-    cls = max(classes, key=lambda n: n.lineno, default=None)
-    parts = []
-    if cls is not None:
-        parts.append(cls.name)
-    if func is not None:
-        parts.append(func.name)
-    return ":".join(parts) if parts else "_module_"
+    _walk(tree)
+    enclosing_symbols.sort(key=lambda item: (item[0], item[1]))
+    return ":".join(symbol for _, _, symbol in enclosing_symbols) if enclosing_symbols else "_module_"
 
 
 def split_findings(
@@ -127,7 +110,7 @@ def split_findings(
     for f in findings:
         if f["rule_id"] == "trust_tier.tier_model" and f["message"].startswith("Stale tier-model allowlist entry:"):
             stale.append(f)
-        elif f["rule_id"] in {"R1", "R2", "R3", "R4", "R5", "R6"} and f["severity"] == "error":
+        elif f["rule_id"] in ROTATABLE_RULE_IDS and f["severity"] == "error":
             new.append(f)
     return stale, new
 
@@ -176,11 +159,11 @@ def main() -> int:
             yaml_caches[path] = load_yaml(path)
         return yaml_caches[path]
 
-    # Build a lookup of (file, rule, symbol) -> metadata copied from stale
-    # entries. Multiple allowlist entries can point at the same symbol for the
-    # same rule; keep each entry's metadata distinct and consume it in linter
-    # order when pairing with rotated findings.
-    stale_metadata: dict[tuple[str, str, str], deque[dict[str, Any]]] = {}
+    # Build a lookup of (file, rule, symbol) → metadata copied from stale
+    # entries. A symbol can legitimately have multiple hits for the same rule;
+    # keep a queue so each rotated finding preserves the matching entry's
+    # owner/reason/safety/expiry instead of inheriting the last stale hit.
+    stale_metadata: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     stale_keys_to_remove: dict[Path, set[str]] = {}
     for f in stale:
         parsed = parse_stale_key(f["message"])
@@ -195,12 +178,15 @@ def main() -> int:
             if entry["key"] == full_key:
                 # Strip the fp from the symbol triple in the index — we want
                 # to match by (file, rule, symbol_context) regardless of fp.
-                stale_metadata.setdefault((rel_file, rule, symbol), deque()).append({k: v for k, v in entry.items() if k != "key"})
+                stale_metadata.setdefault((rel_file, rule, symbol), []).append({k: v for k, v in entry.items() if k != "key"})
                 stale_keys_to_remove.setdefault(ypath, set()).add(full_key)
                 break
 
-    # For each new violation, compute its canonical key and emit a rotated entry.
+    # For each new violation, compute its canonical key and emit a rotated entry
+    # only when it pairs with stale metadata. Genuinely new findings must stay
+    # review-visible; manufacturing TODO allowlist entries would weaken the gate.
     new_entries: dict[Path, list[dict[str, Any]]] = {}
+    unmatched_new: list[str] = []
     for f in new:
         rel_file = f["file_path"]
         rule = f["rule_id"]
@@ -211,21 +197,15 @@ def main() -> int:
         ypath = yaml_for_file(rel_file)
         metadata_queue = stale_metadata.get((rel_file, rule, symbol))
         if metadata_queue:
-            metadata = metadata_queue.popleft()
+            metadata = metadata_queue.pop(0)
         else:
-            # Genuinely new violation (no rotation pair). Emit with a TODO so
-            # the operator can fill in the boundary justification.
-            metadata = {
-                "owner": "TODO",
-                "reason": "TODO — fingerprint rotation without matching stale entry; review whether this is a new violation that needs an explicit allowlist entry or a fix",
-                "safety": "TODO",
-                "expires": None,
-            }
+            unmatched_new.append(new_key)
+            continue
         entry = {"key": new_key, **metadata}
         new_entries.setdefault(ypath, []).append(entry)
 
     # Now rewrite each affected yaml.
-    affected_paths = set(yaml_caches) | set(stale_keys_to_remove) | set(new_entries)
+    affected_paths = set(yaml_caches) | set(new_entries)
     for ypath in sorted(affected_paths):
         data = get_yaml(ypath)
         before = len(data.get("allow_hits", []))
@@ -241,6 +221,14 @@ def main() -> int:
             f"{before} → {after} entries "
             f"(removed {len(keys_to_remove)} stale, added {len(new_entries.get(ypath, []))})"
         )
+
+    if unmatched_new:
+        sys.stderr.write(
+            "Refusing to auto-allow genuinely new tier-model violation(s); review or fix explicitly:\n"
+            + "\n".join(f"  {key}" for key in unmatched_new)
+            + "\n"
+        )
+        return 1
 
     return 0
 

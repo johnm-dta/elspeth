@@ -29,7 +29,7 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
+    from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.plugin_context import PluginContext
@@ -59,6 +59,11 @@ class RowProcessorHandle(Protocol):
     """Orchestrator-facing processor contract stored in run/loop contexts."""
 
     @property
+    def run_id(self) -> str:
+        """Expose the run identifier for scheduler recovery diagnostics."""
+        ...
+
+    @property
     def token_manager(self) -> Any:
         raise NotImplementedError
 
@@ -79,6 +84,26 @@ class RowProcessorHandle(Protocol):
 
     def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
+
+    def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
+        """Drain recoverable durable scheduler work during resume."""
+        ...
+
+    def has_scheduled_work(self) -> bool:
+        """Return whether the durable scheduler has active non-terminal work."""
+        ...
+
+    def active_scheduled_row_ids(self) -> frozenset[str]:
+        """Return row IDs represented by active durable scheduler work."""
+        ...
+
+    def summarize_scheduled_work(self) -> tuple[str, ...]:
+        """Return grouped active scheduler work for invariant diagnostics."""
+        ...
+
+    def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
+        """Mark durable scheduler work consumed by a barrier as terminal."""
+        ...
 
     def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
         raise NotImplementedError
@@ -102,7 +127,8 @@ class PipelineConfig:
     construction, ensuring pipeline config is immutable during a run.
 
     Attributes:
-        source: Source plugin instance
+        source: Compatibility view of the first source plugin instance
+        sources: Source plugin instances keyed by stable source name
         transforms: Transform plugin instances (processed in DAG order)
         sinks: Dict of sink_name -> sink plugin instance
         config: Additional run configuration
@@ -114,6 +140,7 @@ class PipelineConfig:
     source: SourceProtocol
     transforms: Sequence[RowPlugin]
     sinks: Mapping[str, SinkProtocol]
+    sources: Mapping[str, SourceProtocol] = field(default_factory=dict)
     config: Mapping[str, Any] = field(default_factory=dict)
     gates: Sequence[GateSettings] = field(default_factory=list)
     aggregation_settings: Mapping[str, AggregationSettings] = field(default_factory=dict)
@@ -124,6 +151,8 @@ class PipelineConfig:
             from elspeth.contracts.errors import OrchestrationInvariantError
 
             raise OrchestrationInvariantError("PipelineConfig requires at least one sink")
+        if not self.sources:
+            object.__setattr__(self, "sources", {"source": self.source})
         # Freeze mutable container fields. freeze_fields deep-freezes recursively,
         # converting nested dicts/lists to MappingProxyType/tuple throughout.
         # transforms/gates/coalesce_settings contain frozen dataclass instances
@@ -131,7 +160,7 @@ class PipelineConfig:
         object.__setattr__(self, "transforms", tuple(self.transforms))
         object.__setattr__(self, "gates", tuple(self.gates))
         object.__setattr__(self, "coalesce_settings", tuple(self.coalesce_settings))
-        freeze_fields(self, "sinks", "config", "aggregation_settings")
+        freeze_fields(self, "sources", "sinks", "config", "aggregation_settings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,6 +411,7 @@ class GraphArtifacts:
 
     edge_map: Mapping[tuple[NodeID, str], str]
     source_id: NodeID
+    source_id_map: Mapping[str, NodeID]
     sink_id_map: Mapping[SinkName, NodeID]
     transform_id_map: Mapping[int, NodeID]
     config_gate_id_map: Mapping[GateName, NodeID]
@@ -391,6 +421,7 @@ class GraphArtifacts:
         freeze_fields(
             self,
             "edge_map",
+            "source_id_map",
             "sink_id_map",
             "transform_id_map",
             "config_gate_id_map",
@@ -491,11 +522,12 @@ class ResumeState:
     run_id: str
     restored_aggregation_state: Mapping[str, AggregationCheckpointState]
     restored_coalesce_state: CoalesceCheckpointState | None
-    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]]
+    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]]
     schema_contract: SchemaContract
+    schema_contracts_by_source: Mapping[NodeID, SchemaContract] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "restored_aggregation_state")
+        freeze_fields(self, "restored_aggregation_state", "schema_contracts_by_source")
         # unprocessed_rows contains raw row dicts that PipelineRow expects as
         # plain dict — deep_freeze would convert them to MappingProxyType.
         if not isinstance(self.unprocessed_rows, tuple):

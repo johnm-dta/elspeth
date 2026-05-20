@@ -210,6 +210,8 @@ def _create_nondeterministic_call(
                 run_id="run-1",
                 source_node_id=node_id,
                 row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash="src_hash",
                 created_at=datetime.now(UTC),
             )

@@ -163,12 +163,6 @@ allow_hits:
   reason: Optional field access at trust boundary
   safety: Code reviewed - legitimate pattern
   expires: '2026-07-02'
-- key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=ea839197606998d2
-  owner: architecture
-  reason: Silent except in schema lookup — DIVERT edge may target non-existent node
-    (forward reference or optional path)
-  safety: Continues to next coalesce point; warning about potential data loss is best-effort
-  expires: '2026-11-13'
 - key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=0d32fa231299f2d6
   owner: bugfix
   pattern: tier3-narrow-catch
@@ -201,13 +195,42 @@ allow_hits:
     so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures
     in PurgeResult, operator informed via CLI output
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=7a2f9a2b860707a7
-  owner: core
-  reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance
-    guards against corrupted checkpoint
-  safety: Raises AuditIntegrityError if not dict; no silent coercion
-  expires: null
-- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=c48ba8486b6c2e03
+- key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=03d7c23063749855
+  owner: architecture
+  reason: Silent except in schema lookup — DIVERT edge may target non-existent node
+    (forward reference or optional path)
+  safety: Continues to next coalesce point; warning about potential data loss is best-effort
+  expires: '2026-11-13'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=697daa2ece69ddeb
+  owner: bugfix
+  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
+    rejects
+  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
+  expires: '2026-11-13'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=b24db997031f987c
+  owner: bugfix
+  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
+    rejects
+  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
+  expires: '2026-11-13'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=561c7495ae328e56
+  owner: architecture
+  reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically
+    serializable
+  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=a29de3eac9a1b093
+  owner: bugfix
+  pattern: audit-record-fallback
+  reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity
+    that canonical_json rejects
+  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=e4161acafd7c7b5c
+  owner: bugfix
+  pattern: audit-record-fallback
+  reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity
+    that canonical_json rejects
+  safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved
+- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=27d8e85e908d8c0e
   owner: checkpoint
   reason: Resume-point read may discover the persisted checkpoint is incompatible
     with the current schema (post-deploy migration scenario); narrow catch falls back
@@ -216,32 +239,3 @@ allow_hits:
     treats the run as not-resumable and starts from the source. No audit data is lost;
     lineage is preserved by full recompute.
   expires: '2026-08-20'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=8ca3a7ee3cc84783
-  owner: bugfix
-  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
-    rejects
-  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-11-13'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=90984799b1de3e99
-  owner: bugfix
-  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
-    rejects
-  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-11-13'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=79239e021b66fa02
-  owner: architecture
-  reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically
-    serializable
-  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=b4edfad55e521778
-  owner: bugfix
-  pattern: audit-record-fallback
-  reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity
-    that canonical_json rejects
-  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=cf71d23d49a057eb
-  owner: bugfix
-  pattern: audit-record-fallback
-  reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity
-    that canonical_json rejects
-  safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved

@@ -4,7 +4,7 @@
 Every example directory under examples/ must contain at least one YAML
 settings file, and each file must:
   1. Be parseable as YAML
-  2. Contain a dict with the required top-level keys (source, sinks)
+  2. Contain a dict with the required top-level keys (source or sources, sinks)
   3. Where possible, pass full ElspethSettings validation via load_settings()
 
 Examples that require external services (Azure, OpenRouter) or
@@ -14,12 +14,25 @@ so they are tested for structural validity only.
 
 from __future__ import annotations
 
+import json
+import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
+from sqlalchemy import select
 
+from elspeth.cli_helpers import instantiate_plugins_from_config
+from elspeth.contracts import RunStatus
 from elspeth.core.config import ElspethSettings, load_settings
+from elspeth.core.dag import ExecutionGraph
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.schema import rows_table, run_sources_table
+from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.engine.orchestrator import Orchestrator
+from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 
 # Examples that contain ${VAR} env var references that would fail
 # load_settings without the env vars being set.
@@ -57,8 +70,10 @@ _EXAMPLES_WITHOUT_SETTINGS: frozenset[str] = frozenset(
     }
 )
 
-# Required top-level keys for any Elspeth settings file.
-_REQUIRED_KEYS: frozenset[str] = frozenset({"source", "sinks"})
+# Required top-level keys for any Elspeth settings file. Source roots may use
+# either the legacy singular ``source`` form or the canonical plural ``sources``
+# form for named multi-source examples.
+_REQUIRED_KEYS: frozenset[str] = frozenset({"sinks"})
 
 
 class TestShippedExamples:
@@ -91,6 +106,101 @@ class TestShippedExamples:
     def _needs_env_vars(example_name: str) -> bool:
         """Return True if the example requires env vars we cannot set in CI."""
         return example_name in _EXAMPLES_WITH_ENV_VARS
+
+    @staticmethod
+    def _assert_source_roots_valid(name: str, path: Path, data: dict[str, Any]) -> None:
+        has_source = "source" in data
+        has_sources = "sources" in data
+        assert has_source != has_sources, f"{name}/{path.name}: define exactly one of source or sources"
+        if has_source:
+            source = data["source"]
+            assert isinstance(source, dict), f"{name}/{path.name}: source must be a dict"
+            assert "plugin" in source, f"{name}/{path.name}: source missing 'plugin' key"
+            return
+
+        sources = data["sources"]
+        assert isinstance(sources, dict), f"{name}/{path.name}: sources must be a dict"
+        assert sources, f"{name}/{path.name}: sources must not be empty"
+        for source_name, source in sources.items():
+            assert isinstance(source_name, str), f"{name}/{path.name}: source name must be a string"
+            assert isinstance(source, dict), f"{name}/{path.name}: source '{source_name}' must be a dict"
+            assert "plugin" in source, f"{name}/{path.name}: source '{source_name}' missing 'plugin' key"
+
+    @staticmethod
+    def _copy_example_to_tmp(example_pipeline_dir: Path, tmp_path: Path, example_name: str) -> Path:
+        scratch_examples_dir = tmp_path / "examples"
+        scratch_examples_dir.mkdir()
+        copied_example_dir = scratch_examples_dir / example_name
+        shutil.copytree(
+            example_pipeline_dir / example_name,
+            copied_example_dir,
+            ignore=shutil.ignore_patterns("*.db", "*.db-shm", "*.db-wal", "*.jsonl", "payloads"),
+        )
+        return copied_example_dir
+
+    @staticmethod
+    def _run_example(settings_path: Path) -> tuple[Any, LandscapeDB]:
+        settings = load_settings(settings_path)
+        bundle = instantiate_plugins_from_config(settings)
+        graph = ExecutionGraph.from_plugin_instances(
+            source=bundle.source,
+            source_settings=bundle.source_settings,
+            sources=bundle.sources,
+            source_settings_map=bundle.source_settings_map,
+            transforms=bundle.transforms,
+            sinks=bundle.sinks,
+            aggregations=bundle.aggregations,
+            gates=list(settings.gates),
+            coalesce_settings=(list(settings.coalesce) if settings.coalesce else None),
+            queues=settings.queues,
+        )
+        config = assemble_and_validate_pipeline_config(
+            source=bundle.source,
+            sources=bundle.sources,
+            transforms=bundle.transforms,
+            sinks=bundle.sinks,
+            aggregations=bundle.aggregations,
+            settings=settings,
+            graph=graph,
+        )
+        db = LandscapeDB(settings.landscape.url)
+        result = Orchestrator(db).run(
+            config,
+            graph=graph,
+            settings=settings,
+            payload_store=FilesystemPayloadStore(settings_path.parent / "runs" / "payloads"),
+        )
+        return result, db
+
+    @staticmethod
+    def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    @staticmethod
+    def _audit_source_rows(db: LandscapeDB, run_id: str) -> tuple[list[tuple[str, str, str]], list[tuple[str, int, int]]]:
+        with db.engine.connect() as conn:
+            run_sources = conn.execute(
+                select(
+                    run_sources_table.c.source_name,
+                    run_sources_table.c.source_node_id,
+                    run_sources_table.c.lifecycle_state,
+                )
+                .where(run_sources_table.c.run_id == run_id)
+                .order_by(run_sources_table.c.source_name)
+            ).all()
+            rows = conn.execute(
+                select(
+                    rows_table.c.source_node_id,
+                    rows_table.c.source_row_index,
+                    rows_table.c.ingest_sequence,
+                )
+                .where(rows_table.c.run_id == run_id)
+                .order_by(rows_table.c.ingest_sequence)
+            ).all()
+        return (
+            [(source_name, source_node_id, lifecycle_state) for source_name, source_node_id, lifecycle_state in run_sources],
+            [(source_node_id, source_row_index, ingest_sequence) for source_node_id, source_row_index, ingest_sequence in rows],
+        )
 
     # ------------------------------------------------------------------
     # Tests
@@ -137,6 +247,7 @@ class TestShippedExamples:
 
             missing = _REQUIRED_KEYS - set(data.keys())
             assert not missing, f"{name}/{path.name}: missing required keys {missing}"
+            self._assert_source_roots_valid(name, path, data)
 
     def test_all_settings_have_valid_source_structure(self, example_pipeline_dir: Path) -> None:
         """All settings files have a properly structured source section."""
@@ -146,9 +257,7 @@ class TestShippedExamples:
             with open(path) as f:
                 data: dict[str, Any] = yaml.safe_load(f)
 
-            source = data.get("source")
-            assert isinstance(source, dict), f"{name}/{path.name}: source must be a dict"
-            assert "plugin" in source, f"{name}/{path.name}: source missing 'plugin' key"
+            self._assert_source_roots_valid(name, path, data)
 
     def test_all_settings_have_valid_sinks_structure(self, example_pipeline_dir: Path) -> None:
         """All settings files have a properly structured sinks section."""
@@ -182,10 +291,83 @@ class TestShippedExamples:
         for name, path in local_settings:
             loaded = load_settings(path)
             assert isinstance(loaded, ElspethSettings), f"{name}/{path.name}: load_settings did not return ElspethSettings"
-            # Verify the source plugin is set
-            assert loaded.source.plugin, f"{name}/{path.name}: source.plugin is empty"
+            assert loaded.sources, f"{name}/{path.name}: no sources defined"
+            for source_name, source in loaded.sources.items():
+                assert source.plugin, f"{name}/{path.name}: source '{source_name}' plugin is empty"
             # Verify at least one sink exists
             assert len(loaded.sinks) > 0, f"{name}/{path.name}: no sinks defined"
+
+    def test_multi_flow_example_executes_end_to_end(
+        self,
+        example_pipeline_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """multi_flow ships as a runnable two-source, two-flow example."""
+        example_dir = self._copy_example_to_tmp(example_pipeline_dir, tmp_path, "multi_flow")
+        monkeypatch.chdir(tmp_path)
+        db: LandscapeDB | None = None
+        try:
+            result, db = self._run_example(example_dir / "settings.yaml")
+
+            assert result.status is RunStatus.COMPLETED
+            assert result.rows_processed == 4
+            run_sources, rows = self._audit_source_rows(db, result.run_id)
+            assert [(source_name, state) for source_name, _node_id, state in run_sources] == [
+                ("signups", "loaded"),
+                ("tickets", "loaded"),
+            ]
+            node_to_source = {node_id: source_name for source_name, node_id, _state in run_sources}
+            assert [
+                (node_to_source[node_id], source_row_index, ingest_sequence) for node_id, source_row_index, ingest_sequence in rows
+            ] == [
+                ("signups", 0, 0),
+                ("signups", 1, 1),
+                ("tickets", 0, 2),
+                ("tickets", 1, 3),
+            ]
+            signups = self._read_jsonl(example_dir / "output" / "signups.jsonl")
+            tickets = self._read_jsonl(example_dir / "output" / "tickets.jsonl")
+            assert [row["signup_id"] for row in signups] == ["S-100", "S-101"]
+            assert [row["ticket_id"] for row in tickets] == ["T-900", "T-901"]
+        finally:
+            if db is not None:
+                db.close()
+
+    def test_multi_source_queue_example_executes_end_to_end(
+        self,
+        example_pipeline_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """multi_source_queue ships as a runnable fan-in queue example."""
+        example_dir = self._copy_example_to_tmp(example_pipeline_dir, tmp_path, "multi_source_queue")
+        monkeypatch.chdir(tmp_path)
+        db: LandscapeDB | None = None
+        try:
+            result, db = self._run_example(example_dir / "settings.yaml")
+
+            assert result.status is RunStatus.COMPLETED
+            assert result.rows_processed == 3
+            run_sources, rows = self._audit_source_rows(db, result.run_id)
+            assert [(source_name, state) for source_name, _node_id, state in run_sources] == [
+                ("orders", "loaded"),
+                ("refunds", "loaded"),
+            ]
+            node_to_source = {node_id: source_name for source_name, node_id, _state in run_sources}
+            assert [
+                (node_to_source[node_id], source_row_index, ingest_sequence) for node_id, source_row_index, ingest_sequence in rows
+            ] == [
+                ("orders", 0, 0),
+                ("orders", 1, 1),
+                ("refunds", 0, 2),
+            ]
+            combined = self._read_jsonl(example_dir / "output" / "combined.jsonl")
+            assert len(combined) == 3
+            assert Counter(row["kind"] for row in combined) == Counter({"order": 2, "refund": 1})
+        finally:
+            if db is not None:
+                db.close()
 
     def test_env_var_examples_are_structurally_valid(self, example_pipeline_dir: Path) -> None:
         """Examples with env vars are valid YAML with correct structure.
@@ -204,8 +386,8 @@ class TestShippedExamples:
                 data: dict[str, Any] = yaml.safe_load(f)
 
             # These must have the required keys
-            assert "source" in data, f"{name}/{path.name}: missing source"
             assert "sinks" in data, f"{name}/{path.name}: missing sinks"
+            self._assert_source_roots_valid(name, path, data)
 
             # Verify transforms structure if present
             if "transforms" in data:

@@ -34,7 +34,7 @@ def _setup_with_token(
     run_id: str = "run-1",
 ) -> tuple[LandscapeDB, RecorderFactory, str, str]:
     db, factory = _setup(run_id=run_id)
-    row = factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    row = factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     token = factory.data_flow.create_token("row-1", token_id="tok-1")
     return db, factory, row.row_id, token.token_id
 

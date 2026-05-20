@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PipelineRow, RunStatus
+from elspeth.contracts import Determinism, PipelineRow, RunStatus, SourceRow
+from elspeth.contracts.enums import OutputMode
 from elspeth.contracts.errors import GracefulShutdownError, OrchestrationInvariantError
 from elspeth.contracts.events import (
     PhaseCompleted,
@@ -24,6 +25,9 @@ from elspeth.contracts.events import (
     RunFinished,
     RunSummary,
 )
+from elspeth.contracts.types import AggregationName
+from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
+from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -175,6 +179,53 @@ class FailOnSecondRowTransform(BaseTransform):
         )
 
 
+class IdleBlockingSource(_TestSourceBase):
+    """Source that requires an aggregation timeout while waiting for row two."""
+
+    name = "idle_blocking_source"
+    output_schema = _TestSchema
+
+    def __init__(self, flush_seen: threading.Event) -> None:
+        super().__init__()
+        self.on_success = "agg_in"
+        self._flush_seen = flush_seen
+
+    def load(self, ctx: Any) -> Any:
+        rows = list(self.wrap_rows([{"value": 1}]))
+        yield rows[0]
+        if not self._flush_seen.wait(timeout=0.3):
+            raise RuntimeError("aggregation timeout did not fire while source was idle")
+        yield SourceRow.valid(
+            {"value": 2},
+            contract=rows[0].contract,
+        )
+
+
+class IdleFlushSignalingBatchTransform(BaseTransform):
+    """Batch transform that records when timeout flushing occurs."""
+
+    name = "idle_flush_signaler"
+    determinism = Determinism.DETERMINISTIC
+    input_schema = _TestSchema
+    output_schema = _TestSchema
+    is_batch_aware = True
+    on_success = "output"
+    on_error = "discard"
+
+    def __init__(self, flush_seen: threading.Event) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+        self._flush_seen = flush_seen
+
+    def process(  # type: ignore[override]
+        self, rows: list[PipelineRow], ctx: Any
+    ) -> TransformResult:
+        self._flush_seen.set()
+        return TransformResult.success(
+            make_pipeline_row({"flushed_count": len(rows)}),
+            success_reason={"action": "idle_timeout_flushed"},
+        )
+
+
 # ===========================================================================
 # Test classes
 # ===========================================================================
@@ -274,6 +325,54 @@ class TestExecutionLoopRowProcessing:
         )
         assert isinstance(result.run_id, str)
         assert len(result.run_id) > 0
+
+    def test_timeout_aggregation_flushes_while_source_is_idle(self, payload_store) -> None:
+        """Aggregation timeout must fire without waiting for another source row."""
+        flush_seen = threading.Event()
+        source = IdleBlockingSource(flush_seen)
+        transform = IdleFlushSignalingBatchTransform(flush_seen)
+        sink = CollectSink("output")
+
+        agg_settings = AggregationSettings(
+            name="idle_flush",
+            plugin=transform.name,
+            input="agg_in",
+            on_success="output",
+            on_error="discard",
+            trigger=TriggerConfig(timeout_seconds=0.05),
+            output_mode=OutputMode.TRANSFORM,
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(
+                plugin=source.name,
+                on_success="agg_in",
+                options={},
+            ),
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+            aggregations={"idle_flush": (as_transform(transform), agg_settings)},
+            gates=[],
+        )
+        agg_node_id = graph.get_aggregation_id_map()[AggregationName("idle_flush")]
+        transform.node_id = agg_node_id
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(transform)],
+            sinks={"output": as_sink(sink)},
+            aggregation_settings={agg_node_id: agg_settings},
+        )
+
+        result = Orchestrator(LandscapeDB.in_memory()).run(
+            config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert flush_seen.is_set()
+        assert sink.results[0]["flushed_count"] == 1
 
 
 class TestDatabaseInitialization:

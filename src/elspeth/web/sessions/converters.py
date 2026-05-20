@@ -44,9 +44,12 @@ def state_from_record(record: CompositionStateRecord) -> CompositionState:
         msg = f"CompositionStateRecord {record.id} has None metadata_ — database corruption or migration gap"
         raise ValueError(msg)
 
+    record_sources = record.sources
+
     state_dict = {
         "version": record.version,
         "source": deep_thaw(record.source) if record.source is not None else None,
+        "sources": deep_thaw(record_sources) if record_sources is not None else None,
         # nodes/edges/outputs: None is the legitimate initial state when no
         # nodes have been added yet. Mapping None -> [] is meaning-preserving
         # (empty collection, not fabricated data).

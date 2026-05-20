@@ -53,6 +53,8 @@ def _insert_purged_call(
                 run_id=run_id,
                 source_node_id=node_id,
                 row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash=stable_hash({"row": row_id}),
                 created_at=now,
             )

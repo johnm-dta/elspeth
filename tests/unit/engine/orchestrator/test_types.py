@@ -195,12 +195,14 @@ class TestGraphArtifacts:
         artifacts = GraphArtifacts(
             edge_map={(NodeID("node1"), "continue"): "edge1"},
             source_id=NodeID("source"),
+            source_id_map={"source": NodeID("source")},
             sink_id_map={SinkName("output"): NodeID("sink1")},
             transform_id_map={0: NodeID("t0")},
             config_gate_id_map={GateName("gate1"): NodeID("g1")},
             coalesce_id_map={CoalesceName("merge1"): NodeID("c1")},
         )
         assert isinstance(artifacts.edge_map, MappingProxyType)
+        assert isinstance(artifacts.source_id_map, MappingProxyType)
         assert isinstance(artifacts.sink_id_map, MappingProxyType)
         assert isinstance(artifacts.transform_id_map, MappingProxyType)
         assert isinstance(artifacts.config_gate_id_map, MappingProxyType)
@@ -212,6 +214,7 @@ class TestGraphArtifacts:
         artifacts = GraphArtifacts(
             edge_map={},
             source_id=NodeID("source"),
+            source_id_map={},
             sink_id_map={},
             transform_id_map={},
             config_gate_id_map={},

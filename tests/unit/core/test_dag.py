@@ -540,7 +540,7 @@ class TestSchemaContractValidation:
 class TestSourceSinkValidation:
     """Validation of source and sink constraints."""
 
-    def test_validate_requires_exactly_one_source(self) -> None:
+    def test_validate_requires_at_least_one_source(self) -> None:
         from elspeth.contracts import NodeType
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
@@ -549,7 +549,7 @@ class TestSourceSinkValidation:
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv")
         graph.add_edge("t1", "sink", label="continue")
 
-        with pytest.raises(GraphValidationError, match="exactly one source"):
+        with pytest.raises(GraphValidationError, match="at least one source"):
             graph.validate()
 
     def test_validate_requires_at_least_one_sink(self) -> None:

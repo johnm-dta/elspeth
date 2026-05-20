@@ -183,6 +183,8 @@ class TestBatchTokenIdentity:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             all_results.extend(results)
             for r in results:
@@ -257,6 +259,8 @@ class TestBatchTokenIdentity:
             source_row=source_row_0,
             transforms=[transform],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         assert len(results_0) == 1
         assert results_0[0].outcome is None
@@ -271,6 +275,8 @@ class TestBatchTokenIdentity:
             source_row=source_row_1,
             transforms=[transform],
             ctx=ctx,
+            source_row_index=1,
+            ingest_sequence=1,
         )
 
         # Should have: CONSUMED_IN_BATCH (triggering token) + COMPLETED (output)
@@ -347,6 +353,8 @@ class TestBatchTokenIdentity:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             all_results.extend(results)
             for r in results:

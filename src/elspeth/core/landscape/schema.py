@@ -54,7 +54,14 @@ metadata = MetaData()
 #        to join Landscape LLM calls back to session interpretation_events.
 #   9 → Phase 4 hello-world tutorial audit-story fields:
 #        runs.llm_call_count, runs.seeded_from_cache, and runs.cache_key.
-SQLITE_SCHEMA_EPOCH = 9
+#   10 → Multi-source foundation: per-source run records, source-scoped row
+#        indexes, global ingest sequence ordering, and durable token work items.
+#   11 → Durable scheduler continuation routing: token_work_items.on_success_sink
+#        preserves sink-bound continuations across resume/recovery.
+#   12 → Durable scheduler resume identity: token_work_items stores token lineage
+#        and coalesce cursor fields so resumed workers do not depend on in-memory
+#        pending_items state.
+SQLITE_SCHEMA_EPOCH = 12
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -118,6 +125,27 @@ run_attributions_table = Table(
 )
 Index("ix_run_attributions_user", run_attributions_table.c.initiated_by_user_id, run_attributions_table.c.auth_provider_type)
 
+run_sources_table = Table(
+    "run_sources",
+    metadata,
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("source_node_id", String(64), nullable=False),
+    Column("source_name", String(64), nullable=False),
+    Column("plugin_name", String(128), nullable=False),
+    Column("lifecycle_state", String(32), nullable=False),
+    Column("config_hash", String(64), nullable=False),
+    Column("schema_json", Text),
+    Column("schema_contract_json", Text),
+    Column("schema_contract_hash", String(16)),
+    Column("field_resolution_json", Text),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("run_id", "source_node_id"),
+    UniqueConstraint("run_id", "source_name"),
+    ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index("ix_run_sources_run", run_sources_table.c.run_id)
+Index("ix_run_sources_source_name", run_sources_table.c.run_id, run_sources_table.c.source_name)
+
 # === Nodes (Plugin Instances) ===
 
 nodes_table = Table(
@@ -174,11 +202,14 @@ rows_table = Table(
     Column("row_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("source_node_id", String(64), nullable=False),
-    Column("row_index", Integer, nullable=False),
+    Column("row_index", Integer),
+    Column("source_row_index", Integer, nullable=False),
+    Column("ingest_sequence", Integer, nullable=False),
     Column("source_data_hash", String(64), nullable=False),
     Column("source_data_ref", String(256)),
     Column("created_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("run_id", "row_index"),
+    UniqueConstraint("run_id", "source_node_id", "source_row_index"),
+    UniqueConstraint("run_id", "ingest_sequence"),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )
@@ -246,6 +277,51 @@ Index(
     unique=True,
     sqlite_where=(token_outcomes_table.c.completed == 1),
     postgresql_where=(token_outcomes_table.c.completed == 1),
+)
+
+token_work_items_table = Table(
+    "token_work_items",
+    metadata,
+    Column("work_item_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False, index=True),
+    Column("token_id", String(64), nullable=False),
+    Column("row_id", String(64), nullable=False),
+    Column("node_id", String(64)),
+    Column("step_index", Integer, nullable=False),
+    Column("ingest_sequence", Integer, nullable=False),
+    Column("row_payload_json", Text, nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("queue_key", String(128)),
+    Column("barrier_key", String(128)),
+    Column("on_success_sink", String(128)),
+    Column("branch_name", String(128)),
+    Column("fork_group_id", String(128)),
+    Column("join_group_id", String(128)),
+    Column("expand_group_id", String(128)),
+    Column("coalesce_node_id", String(NODE_ID_COLUMN_LENGTH)),
+    Column("coalesce_name", String(128)),
+    Column("attempt", Integer, nullable=False),
+    Column("lease_owner", String(128)),
+    Column("lease_expires_at", DateTime(timezone=True)),
+    Column("available_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
+    ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+    ForeignKeyConstraint(["coalesce_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index("ix_token_work_items_ready", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.available_at)
+Index(
+    "ix_token_work_items_lease", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.lease_expires_at
+)
+Index(
+    "uq_token_work_items_terminal_identity",
+    token_work_items_table.c.run_id,
+    token_work_items_table.c.token_id,
+    token_work_items_table.c.attempt,
+    unique=True,
+    sqlite_where=token_work_items_table.c.node_id.is_(None),
 )
 
 # === Token Parents (for multi-parent joins) ===
@@ -496,6 +572,8 @@ Index("ix_batch_outputs_batch", batch_outputs_table.c.batch_id)
 Index("ix_nodes_run_id", nodes_table.c.run_id)
 Index("ix_edges_run_id", edges_table.c.run_id)
 Index("ix_rows_run_id", rows_table.c.run_id)
+Index("ix_rows_run_ingest_sequence", rows_table.c.run_id, rows_table.c.ingest_sequence)
+Index("ix_rows_run_source_row", rows_table.c.run_id, rows_table.c.source_node_id, rows_table.c.source_row_index)
 Index("ix_tokens_row_id", tokens_table.c.row_id)
 # Performance index for run-accounting API projections and session-list batch
 # reads. This is additive and intentionally does not advance the SQLite schema

@@ -8,7 +8,7 @@ ctx.operation_id to source-scoped values, preventing audit misattribution.
 from __future__ import annotations
 
 from types import MappingProxyType
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID
@@ -25,7 +25,7 @@ def _make_orchestrator() -> Orchestrator:
     return Orchestrator(make_landscape_db())
 
 
-def _make_loop_ctx(ctx: PluginContext) -> LoopContext:
+def _make_loop_ctx(ctx: PluginContext, *, coalesce_executor: MagicMock | None = None) -> LoopContext:
     """Build minimal LoopContext for finalization tests.
 
     Config has empty aggregation_settings and sinks, and coalesce_executor
@@ -35,14 +35,16 @@ def _make_loop_ctx(ctx: PluginContext) -> LoopContext:
     config = MagicMock()
     config.aggregation_settings = {}
     config.sinks = {}
+    processor = MagicMock()
+    processor.get_aggregation_buffer_count.return_value = 0
     return LoopContext(
         counters=ExecutionCounters(),
         pending_tokens={},
-        processor=MagicMock(),
+        processor=processor,
         ctx=ctx,
         config=config,
         agg_transform_lookup=MappingProxyType({}),
-        coalesce_executor=None,
+        coalesce_executor=coalesce_executor,
         coalesce_node_map=MappingProxyType({}),
     )
 
@@ -80,6 +82,7 @@ class TestFinalizeSourceIterationContext:
             field_resolution_recorded=True,
             schema_contract_recorded=True,
             interrupted_by_shutdown=True,
+            flush_end_of_input=False,
         )
 
         assert ctx.node_id == source_id, (
@@ -111,7 +114,117 @@ class TestFinalizeSourceIterationContext:
             field_resolution_recorded=True,
             schema_contract_recorded=True,
             interrupted_by_shutdown=False,
+            flush_end_of_input=True,
         )
 
         assert ctx.node_id == source_id
         assert ctx.operation_id == source_operation_id
+
+    def test_coalesce_flush_is_skipped_for_source_local_finalization(self) -> None:
+        """Multi-source source completion is not global end-of-input."""
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            node_id="transform-residue",
+            operation_id=None,
+        )
+        orchestrator = _make_orchestrator()
+        coalesce_executor = MagicMock()
+        loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
+
+        with patch("elspeth.engine.orchestrator.core.flush_coalesce_pending") as flush_coalesce:
+            orchestrator._finalize_source_iteration(
+                loop_ctx,
+                factory=MagicMock(),
+                run_id="test-run",
+                source_id=NodeID("source-orders"),
+                source_operation_id="op-source-load-orders",
+                field_resolution_recorded=True,
+                schema_contract_recorded=True,
+                interrupted_by_shutdown=False,
+                flush_end_of_input=False,
+            )
+
+        flush_coalesce.assert_not_called()
+
+    def test_coalesce_flush_runs_at_true_end_of_input(self) -> None:
+        """Final source completion owns run-global coalesce flushing."""
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            node_id="transform-residue",
+            operation_id=None,
+        )
+        orchestrator = _make_orchestrator()
+        coalesce_executor = MagicMock()
+        loop_ctx = _make_loop_ctx(ctx, coalesce_executor=coalesce_executor)
+
+        with patch("elspeth.engine.orchestrator.core.flush_coalesce_pending") as flush_coalesce:
+            orchestrator._finalize_source_iteration(
+                loop_ctx,
+                factory=MagicMock(),
+                run_id="test-run",
+                source_id=NodeID("source-refunds"),
+                source_operation_id="op-source-load-refunds",
+                field_resolution_recorded=True,
+                schema_contract_recorded=True,
+                interrupted_by_shutdown=False,
+                flush_end_of_input=True,
+            )
+
+        flush_coalesce.assert_called_once()
+
+    def test_aggregation_flush_is_skipped_for_source_local_finalization(self) -> None:
+        """Multi-source source completion must not flush shared aggregations."""
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            node_id="transform-residue",
+            operation_id=None,
+        )
+        orchestrator = _make_orchestrator()
+        loop_ctx = _make_loop_ctx(ctx)
+        loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": MagicMock()}
+
+        with patch("elspeth.engine.orchestrator.core.flush_remaining_aggregation_buffers") as flush_aggregation:
+            orchestrator._finalize_source_iteration(
+                loop_ctx,
+                factory=MagicMock(),
+                run_id="test-run",
+                source_id=NodeID("source-orders"),
+                source_operation_id="op-source-load-orders",
+                field_resolution_recorded=True,
+                schema_contract_recorded=True,
+                interrupted_by_shutdown=False,
+                flush_end_of_input=False,
+            )
+
+        flush_aggregation.assert_not_called()
+
+    def test_aggregation_flush_runs_at_true_end_of_input(self) -> None:
+        """Final source completion owns run-global aggregation flushing."""
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            node_id="transform-residue",
+            operation_id=None,
+        )
+        orchestrator = _make_orchestrator()
+        loop_ctx = _make_loop_ctx(ctx)
+        loop_ctx.config.aggregation_settings = {"aggregation_total_amounts": MagicMock()}
+
+        with patch("elspeth.engine.orchestrator.core.flush_remaining_aggregation_buffers") as flush_aggregation:
+            orchestrator._finalize_source_iteration(
+                loop_ctx,
+                factory=MagicMock(),
+                run_id="test-run",
+                source_id=NodeID("source-refunds"),
+                source_operation_id="op-source-load-refunds",
+                field_resolution_recorded=True,
+                schema_contract_recorded=True,
+                interrupted_by_shutdown=False,
+                flush_end_of_input=True,
+            )
+
+        flush_aggregation.assert_called_once()
+        loop_ctx.processor.get_aggregation_buffer_count.assert_called_once_with(NodeID("aggregation_total_amounts"))

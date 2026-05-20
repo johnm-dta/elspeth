@@ -21,6 +21,16 @@ from typing import Any
 from elspeth.web.composer.state import NodeSpec, SourceSpec
 
 
+def source_producer_id(source_name: str) -> str:
+    """Return the stable producer id for a named composer source."""
+    return "source" if source_name == "source" else f"source:{source_name}"
+
+
+def is_source_producer_id(producer_id: str) -> bool:
+    """Return whether a producer id represents a source root."""
+    return producer_id == "source" or producer_id.startswith("source:")
+
+
 @dataclass(frozen=True, slots=True)
 class ProducerEntry:
     """A producer registered against one or more connection names.
@@ -68,6 +78,7 @@ class ProducerResolver:
         cls,
         *,
         source: SourceSpec | None,
+        sources: Mapping[str, SourceSpec] | None = None,
         nodes: tuple[NodeSpec, ...],
         sink_names: frozenset[str],
     ) -> ProducerResolver:
@@ -94,13 +105,17 @@ class ProducerResolver:
                 return
             producer_map[connection_name] = entry
 
-        if source is not None:
+        source_map = dict(sources or {})
+        if not source_map and source is not None:
+            source_map["source"] = source
+
+        for source_name, source_entry in source_map.items():
             register(
-                source.on_success,
+                source_entry.on_success,
                 ProducerEntry(
-                    producer_id="source",
-                    plugin_name=source.plugin,
-                    options=source.options,
+                    producer_id=source_producer_id(source_name),
+                    plugin_name=source_entry.plugin,
+                    options=source_entry.options,
                 ),
             )
 
@@ -144,11 +159,11 @@ class ProducerResolver:
         does not traverse (currently: coalesce — its branch semantics
         are handled by callers that need them).
 
-        Source producers (producer_id == "source") return immediately
+        Source producers (producer_id == "source" or "source:<name>") return immediately
         WITHOUT a node-table lookup. The source is registered in
         _producer_map but is intentionally absent from _node_by_id
         (it is not a NodeSpec). Any code path that called
-        _node_by_id[producer.producer_id] for the source would raise
+        _node_by_id[producer.producer_id] for a source would raise
         KeyError — short-circuit here is load-bearing.
         """
         current = connection_name
@@ -162,7 +177,7 @@ class ProducerResolver:
             if current not in self._producer_map:
                 return None
             producer = self._producer_map[current]
-            if producer.producer_id == "source":
+            if is_source_producer_id(producer.producer_id):
                 return producer
             producer_node = self._node_by_id[producer.producer_id]
             if producer_node.node_type == "gate":
@@ -173,8 +188,8 @@ class ProducerResolver:
     def get_node(self, node_id: str) -> NodeSpec | None:
         """Return the registered NodeSpec for a producer id, or None.
 
-        Returns None when the id is "source" (the source is intentionally
-        not a NodeSpec) or when the id is unknown. Schema-contract code
+        Returns None when the id is a source producer (sources are
+        intentionally not NodeSpecs) or when the id is unknown. Schema-contract code
         interpreting source-as-producer must short-circuit on None
         rather than indexing the underlying dict.
         """

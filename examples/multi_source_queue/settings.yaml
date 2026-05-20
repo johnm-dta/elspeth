@@ -1,0 +1,50 @@
+# Multi-source queue example
+#
+# Two source roots publish the same connection name, `inbound`. The explicit
+# queue node makes that fan-in legal and durable. Rows pass through unchanged;
+# there is no cross-source join or merge.
+
+sources:
+  orders:
+    plugin: csv
+    on_success: inbound
+    options:
+      path: examples/multi_source_queue/input/orders.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
+  refunds:
+    plugin: csv
+    on_success: inbound
+    options:
+      path: examples/multi_source_queue/input/refunds.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
+
+queues:
+  inbound: {}
+
+transforms:
+- name: normalize_rows
+  plugin: passthrough
+  input: inbound
+  on_success: combined
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+
+sinks:
+  combined:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/multi_source_queue/output/combined.jsonl
+      format: jsonl
+      collision_policy: auto_increment
+      schema:
+        mode: observed
+
+landscape:
+  url: sqlite:///examples/multi_source_queue/runs/audit.db

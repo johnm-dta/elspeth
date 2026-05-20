@@ -33,6 +33,8 @@ class TestRecorderFactoryQueryMethods:
             source_node_id=source.node_id,
             row_index=0,
             data={"name": "test"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Retrieve by ID
@@ -71,6 +73,8 @@ class TestRecorderFactoryQueryMethods:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -109,6 +113,8 @@ class TestRecorderFactoryQueryMethods:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Create parent token and fork
@@ -152,6 +158,8 @@ class TestRecorderFactoryQueryMethods:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Create parent token and fork into branches
@@ -201,6 +209,8 @@ class TestRecorderFactoryQueryMethods:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -243,6 +253,8 @@ class TestRecorderFactoryQueryMethods:
             source_node_id=gate.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -287,6 +299,8 @@ class TestRecorderFactoryQueryMethods:
             source_node_id=source.node_id,
             row_index=0,
             data={"name": "test"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Without payload_ref, should return NEVER_STORED

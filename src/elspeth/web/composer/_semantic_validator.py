@@ -35,6 +35,7 @@ from elspeth.contracts.plugin_semantics import (
 from elspeth.web.composer._producer_resolver import (
     ProducerEntry,
     ProducerResolver,
+    is_source_producer_id,
 )
 from elspeth.web.composer.state import (
     CompositionState,
@@ -191,7 +192,8 @@ def validate_semantic_contracts(
 
     sink_names = frozenset(output.name for output in state.outputs)
     resolver = ProducerResolver.build(
-        source=state.source,
+        source=None,
+        sources=state.sources,
         nodes=state.nodes,
         sink_names=sink_names,
     )
@@ -254,7 +256,7 @@ def validate_semantic_contracts(
         # producers as UNKNOWN under FAIL would break every working
         # csv → line_explode pipeline. Skip these edges entirely;
         # extending BaseSource is a separate plan.
-        if upstream_producer.producer_id == "source":
+        if is_source_producer_id(upstream_producer.producer_id):
             continue
 
         producer_decl = _safe_output_semantics(upstream_producer)

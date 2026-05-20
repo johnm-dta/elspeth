@@ -649,13 +649,10 @@ Aggregation buffers are persisted in checkpoints:
 
 ### Timeout Behavior
 
-Timeout triggers are checked **before** each row is processed, not via background timers.
-
-**Known Limitation (True Idle):** If no rows arrive, buffered data will not flush until either:
-1. A new row arrives (triggering the timeout check)
-2. The source completes (triggering end-of-source flush)
-
-For streaming sources that may never end, combine timeout with count triggers, or implement periodic heartbeat rows at the source level.
+Timeout triggers are checked **before** each row is processed and while source
+iteration is waiting for the next row. Buffered aggregation data can therefore
+flush during true source-idle periods without requiring source-level heartbeat
+rows.
 
 ### Aggregation Invariants
 

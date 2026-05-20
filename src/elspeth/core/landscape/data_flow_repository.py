@@ -138,6 +138,22 @@ class DataFlowRepository:
         run_id: str = result.run_id
         return run_id
 
+    def resolve_row_ingest_sequence(self, row_id: str) -> int:
+        """Resolve a row's global ingest ordering for scheduler fairness.
+
+        This is Tier 1 audit data. A token continuation can only exist for a
+        persisted row, so a missing row is corruption or an orchestration bug.
+        """
+        query = select(rows_table.c.ingest_sequence).where(rows_table.c.row_id == row_id)
+        result = self._ops.execute_fetchone(query)
+        if result is None:
+            raise AuditIntegrityError(
+                f"Cannot schedule work for row_id={row_id!r}: row does not exist. "
+                "This is Tier 1 data corruption -- scheduler work must reference persisted rows."
+            )
+        ingest_sequence: int = result.ingest_sequence
+        return ingest_sequence
+
     def _resolve_token_ownership(self, token_id: str) -> tuple[str, str]:
         """Resolve the (row_id, run_id) that owns a given token_id.
 
@@ -384,6 +400,8 @@ class DataFlowRepository:
         row_index: int,
         data: Mapping[str, object],
         *,
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
         row_id: str | None = None,
         quarantined: bool = False,
     ) -> Row:
@@ -392,8 +410,10 @@ class DataFlowRepository:
         Args:
             run_id: Run this row belongs to
             source_node_id: Source node that loaded this row
-            row_index: Position in source (0-indexed)
+            row_index: Legacy/display row position
             data: Row data for hashing and optional storage
+            source_row_index: Position within the source (0-indexed)
+            ingest_sequence: Monotonic run-wide ingest order
             row_id: Optional row ID (generated if not provided)
             quarantined: If True, data is Tier-3 external data that may contain
                 non-canonical values (NaN, Infinity). Uses repr_hash fallback.
@@ -411,6 +431,19 @@ class DataFlowRepository:
             This ensures Landscape owns its audit format end-to-end.
         """
         row_id = row_id or generate_id()
+        missing_identity_fields = []
+        if source_row_index is None:
+            missing_identity_fields.append("source_row_index")
+        if ingest_sequence is None:
+            missing_identity_fields.append("ingest_sequence")
+        if missing_identity_fields:
+            raise AuditIntegrityError(
+                f"create_row requires explicit source-scoped identity for run_id={run_id!r} row_id={row_id!r} "
+                f"source_node_id={source_node_id!r}; missing {', '.join(missing_identity_fields)}. "
+                "Do not fabricate source_row_index or ingest_sequence from row_index."
+            )
+        assert source_row_index is not None
+        assert ingest_sequence is not None
 
         # Quarantined rows are Tier-3 external data that may contain non-canonical
         # values (NaN, Infinity). Use repr_hash as a fallback per canonical.py docs.
@@ -444,6 +477,8 @@ class DataFlowRepository:
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             source_data_hash=data_hash,
             source_data_ref=final_payload_ref,
             created_at=timestamp,
@@ -455,6 +490,8 @@ class DataFlowRepository:
                 run_id=row.run_id,
                 source_node_id=row.source_node_id,
                 row_index=row.row_index,
+                source_row_index=source_row_index,
+                ingest_sequence=ingest_sequence,
                 source_data_hash=row.source_data_hash,
                 source_data_ref=row.source_data_ref,
                 created_at=row.created_at,

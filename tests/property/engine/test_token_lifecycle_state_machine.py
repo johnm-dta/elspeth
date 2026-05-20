@@ -232,6 +232,8 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             source_node_id=self.source_node.node_id,
             row_index=self.row_index,
             data=data,
+            source_row_index=self.row_index,
+            ingest_sequence=self.row_index,
         )
         self.row_index += 1
 
@@ -612,6 +614,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"value": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             # Create multiple tokens for same row
@@ -647,6 +651,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"value": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             token = factory.data_flow.create_token(row_id=row.row_id)
@@ -705,6 +711,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data=data,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             token = factory.data_flow.create_token(row_id=row.row_id)
@@ -765,6 +773,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data=data,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             token = factory.data_flow.create_token(row_id=row.row_id)
@@ -814,6 +824,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"value": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             # Create parent token and fork with variable number of branches

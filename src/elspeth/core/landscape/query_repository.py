@@ -86,7 +86,8 @@ class QueryRepository:
         Returns:
             List of Row models, ordered by row_index
         """
-        query = select(rows_table).where(rows_table.c.run_id == run_id).order_by(rows_table.c.row_index)
+        order_column = rows_table.c.ingest_sequence if "ingest_sequence" in rows_table.c else rows_table.c.row_index
+        query = select(rows_table).where(rows_table.c.run_id == run_id).order_by(order_column)
         db_rows = self._ops.execute_fetchall(query)
         return [self._row_loader.load(r) for r in db_rows]
 
@@ -567,6 +568,8 @@ class QueryRepository:
             run_id=row.run_id,
             source_node_id=row.source_node_id,
             row_index=row.row_index,
+            source_row_index=row.source_row_index,
+            ingest_sequence=row.ingest_sequence,
             source_data_hash=row.source_data_hash,
             created_at=row.created_at,
             source_data=source_data,

@@ -75,7 +75,10 @@ from sqlalchemy.types import JSON
 #   9 → ``sessions.archived_at`` added so user-side archive can hide
 #        sessions with durable run/completion history rather than deleting
 #        audit-bearing rows. Unrun sessions may still be physically deleted.
-SESSION_SCHEMA_EPOCH = 9
+#   10 → ``composition_states.sources`` added so named multi-source composer
+#        states survive save/load instead of collapsing to the legacy singular
+#        ``source`` compatibility column.
+SESSION_SCHEMA_EPOCH = 10
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -289,6 +292,7 @@ composition_states_table = Table(
     ),
     Column("version", Integer, nullable=False),
     Column("source", JSON, nullable=True),
+    Column("sources", JSON, nullable=True),
     Column("nodes", JSON, nullable=True),
     Column("edges", JSON, nullable=True),
     Column("outputs", JSON, nullable=True),

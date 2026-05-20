@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue
 import signal
 import threading
 import time
@@ -28,7 +29,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import chain
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -70,6 +71,7 @@ from elspeth.contracts.declaration_contracts import (
 )
 from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
+    AuditIntegrityError,
     ExecutionError,
     FrameworkBugError,
     GracefulShutdownError,
@@ -1037,11 +1039,13 @@ class Orchestrator:
         for sink in config.sinks.values():
             run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
         if include_source:
-            run_hook("source.on_complete", config.source.name, partial(config.source.on_complete, ctx))
+            for source in config.sources.values():
+                run_hook("source.on_complete", source.name, partial(source.on_complete, ctx))
 
         # Close source (if included) and all sinks
         if include_source:
-            run_hook("source.close", config.source.name, config.source.close)
+            for source in config.sources.values():
+                run_hook("source.close", source.name, source.close)
 
         # Close all transforms (release resources - file handles, connections, etc.)
         for transform in config.transforms:
@@ -1059,10 +1063,10 @@ class Orchestrator:
 
     def _assign_plugin_node_ids(
         self,
-        source: SourceProtocol,
+        sources: Mapping[str, SourceProtocol],
         transforms: Sequence[RowPlugin],
         sinks: Mapping[str, SinkProtocol],
-        source_id: NodeID,
+        source_id_map: Mapping[str, NodeID],
         transform_id_map: Mapping[int, NodeID],
         sink_id_map: Mapping[SinkName, NodeID],
     ) -> None:
@@ -1072,18 +1076,23 @@ class Orchestrator:
         node_id: str | None and the orchestrator populates it.
 
         Args:
-            source: Source plugin instance
+            sources: Source plugin instances keyed by source name
             transforms: List of transform plugins
             sinks: Dict of sink_name -> sink plugin
-            source_id: Node ID for source
+            source_id_map: Source name -> source node ID
             transform_id_map: Maps transform sequence -> node_id
             sink_id_map: Maps sink_name -> node_id
 
         Raises:
             ValueError: If transform/sink not in ID map
         """
-        # Set node_id on source
-        source.node_id = source_id
+        # Set node_id on sources
+        for source_name, source in sources.items():
+            if source_name not in source_id_map:
+                raise OrchestrationInvariantError(
+                    f"Source '{source_name}' not found in graph source map. Graph has mappings for sources: {list(source_id_map.keys())}"
+                )
+            source.node_id = source_id_map[source_name]
 
         # Set node_id on transforms
         # Note: Aggregation transforms already have node_id set by CLI (mapped from
@@ -1129,8 +1138,8 @@ class Orchestrator:
             node_to_plugin[gate_node_id] = gate
 
         node_to_next: dict[NodeID, NodeID | None] = {}
-        source_id = graph.get_source()
-        node_to_next[source_id] = graph.get_next_node(source_id)
+        for source_id in graph.get_sources():
+            node_to_next[source_id] = graph.get_next_node(source_id)
         for node_id in graph.get_pipeline_node_sequence():
             node_to_next[node_id] = graph.get_next_node(node_id)
         for coalesce_node_id in graph.get_coalesce_id_map().values():
@@ -1289,6 +1298,7 @@ class Orchestrator:
             clock=self._clock,
             max_workers=self._concurrency_config.max_workers if self._concurrency_config else None,
             telemetry_manager=self._telemetry,
+            scheduler=factory.scheduler,
         )
 
         return processor, coalesce_node_map, coalesce_executor
@@ -1743,9 +1753,10 @@ class Orchestrator:
                 plugin_version = f"engine:{ENGINE_VERSION}"
                 determinism = Determinism.DETERMINISTIC
                 source_file_hash = None  # Engine-internal nodes have no source file
-            elif node_id in coalesce_node_ids:
-                # Coalesce nodes merge tokens from parallel paths - deterministic operation
-                # Use engine version to track which version of the coalesce logic was used
+            elif node_id in coalesce_node_ids or node_info.node_type == NodeType.QUEUE:
+                # Coalesce/queue nodes are engine-internal deterministic
+                # coordination nodes. Use engine version to track which
+                # version of the structural logic was used.
                 plugin_version = f"engine:{ENGINE_VERSION}"
                 determinism = Determinism.DETERMINISTIC
                 source_file_hash = None  # Engine-internal nodes have no source file
@@ -1774,8 +1785,9 @@ class Orchestrator:
             # Get output_contract for source nodes
             # Sources have get_schema_contract() method that returns their output contract
             output_contract = None
-            if node_id == source_id:
-                output_contract = config.source.get_schema_contract()
+            if node_info.node_type == NodeType.SOURCE:
+                source_name = str(node_info.config["source_name"] if "source_name" in node_info.config else "source")
+                output_contract = config.sources[source_name].get_schema_contract()
 
             factory.data_flow.register_node(
                 run_id=run_id,
@@ -1818,9 +1830,13 @@ class Orchestrator:
         # Get execution order from graph
         execution_order = graph.topological_order()
 
-        # Build node_id -> plugin instance mapping for metadata extraction
-        # Source: single plugin from config.source
-        source_id = graph.get_source()
+        # Build node_id -> plugin instance mapping for metadata extraction.
+        source_id_map: dict[str, NodeID] = {}
+        for candidate_source_id in graph.get_sources():
+            source_info = graph.get_node_info(candidate_source_id)
+            source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
+            source_id_map[source_name] = candidate_source_id
+        source_id = next(iter(source_id_map.values()))
         transform_id_map: dict[int, NodeID] = graph.get_transform_id_map()
         sink_id_map: dict[SinkName, NodeID] = graph.get_sink_id_map()
         config_gate_id_map: dict[GateName, NodeID] = graph.get_config_gate_id_map()
@@ -1833,7 +1849,9 @@ class Orchestrator:
         # Map plugin instances to their node IDs for metadata extraction
         # Config gates and coalesce nodes don't have plugin instances (they're structural)
         # Aggregation transforms DO have instances - they're in config.transforms with node_id set
-        node_to_plugin: dict[NodeID, Any] = {source_id: config.source}
+        node_to_plugin: dict[NodeID, Any] = {}
+        for source_name, source_node_id in source_id_map.items():
+            node_to_plugin[source_node_id] = config.sources[source_name]
         for seq, transform in enumerate(config.transforms):
             if seq in transform_id_map:
                 # Regular transform - mapped by sequence number
@@ -1931,10 +1949,11 @@ class Orchestrator:
 
             # Validate source quarantine destination
             # Call module function directly (no wrapper method)
-            validate_source_quarantine_destination(
-                source=config.source,
-                available_sinks=set(config.sinks.keys()),
-            )
+            for source in config.sources.values():
+                validate_source_quarantine_destination(
+                    source=source,
+                    available_sinks=set(config.sinks.keys()),
+                )
 
             # Validate sink failsink destinations
 
@@ -1954,6 +1973,7 @@ class Orchestrator:
         return GraphArtifacts(
             edge_map=edge_map,
             source_id=source_id,
+            source_id_map=source_id_map,
             sink_id_map=sink_id_map,
             transform_id_map=transform_id_map,
             config_gate_id_map=config_gate_id_map,
@@ -1997,10 +2017,10 @@ class Orchestrator:
 
         # Assign node_ids to all plugins
         self._assign_plugin_node_ids(
-            source=config.source,
+            sources=config.sources,
             transforms=config.transforms,
             sinks=config.sinks,
-            source_id=source_id,
+            source_id_map=artifacts.source_id_map,
             transform_id_map=transform_id_map,
             sink_id_map=sink_id_map,
         )
@@ -2024,7 +2044,8 @@ class Orchestrator:
 
         try:
             if include_source_on_start:
-                config.source.on_start(ctx)
+                for source in config.sources.values():
+                    source.on_start(ctx)
             for transform in config.transforms:
                 transform.on_start(ctx)
             for sink in config.sinks.values():
@@ -2118,8 +2139,15 @@ class Orchestrator:
         Returns:
             GraphArtifacts populated from existing Landscape records.
         """
-        # Get explicit node ID mappings from graph
-        source_id = graph.get_source()
+        # Get explicit node ID mappings from graph. Resume must preserve every
+        # source root from the original multi-source DAG; graph.get_source()
+        # is intentionally single-source-only and invalid here.
+        source_id_map: dict[str, NodeID] = {}
+        for candidate_source_id in graph.get_sources():
+            source_info = graph.get_node_info(candidate_source_id)
+            source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
+            source_id_map[source_name] = candidate_source_id
+        source_id = next(iter(source_id_map.values()))
         sink_id_map = graph.get_sink_id_map()
         transform_id_map = graph.get_transform_id_map()
         config_gate_id_map = graph.get_config_gate_id_map()
@@ -2155,10 +2183,11 @@ class Orchestrator:
 
         # Validate source quarantine destination
         # Call module function directly (no wrapper method)
-        validate_source_quarantine_destination(
-            source=config.source,
-            available_sinks=set(config.sinks.keys()),
-        )
+        for source in config.sources.values():
+            validate_source_quarantine_destination(
+                source=source,
+                available_sinks=set(config.sinks.keys()),
+            )
 
         # Validate sink failsink destinations
         sink_validation_stubs = {name: SimpleNamespace(on_write_failure=sink._on_write_failure) for name, sink in config.sinks.items()}
@@ -2172,6 +2201,7 @@ class Orchestrator:
         return GraphArtifacts(
             edge_map=edge_map,
             source_id=source_id,
+            source_id_map=source_id_map,
             sink_id_map=sink_id_map,
             transform_id_map=transform_id_map,
             config_gate_id_map=config_gate_id_map,
@@ -2247,7 +2277,8 @@ class Orchestrator:
         run_id: str,
         source_id: NodeID,
         source_item: SourceRow,
-        row_index: int,
+        source_row_index: int,
+        ingest_sequence: int,
         edge_map: Mapping[tuple[NodeID, str], str],
         loop_ctx: LoopContext,
     ) -> None:
@@ -2280,14 +2311,16 @@ class Orchestrator:
         if not quarantine_sink:
             raise RouteValidationError(
                 f"Source '{config.source.name}' yielded quarantined row "
-                f"(row_index={row_index}) with missing quarantine_destination. "
+                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
+                f"with missing quarantine_destination. "
                 f"This is a plugin bug: quarantined rows MUST specify a destination. "
                 f"Use SourceRow.quarantined(row, error, destination) factory method."
             )
         if quarantine_sink not in config.sinks:
             raise RouteValidationError(
                 f"Source '{config.source.name}' yielded quarantined row "
-                f"(row_index={row_index}) with invalid quarantine_destination='{quarantine_sink}'. "
+                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
+                f"with invalid quarantine_destination='{quarantine_sink}'. "
                 f"No sink named '{quarantine_sink}' exists. "
                 f"Available sinks: {sorted(config.sinks.keys())}. "
                 f"This is a plugin bug: quarantine_destination must match "
@@ -2311,7 +2344,9 @@ class Orchestrator:
         quarantine_token = processor.token_manager.create_quarantine_token(
             run_id=run_id,
             source_node_id=source_id,
-            row_index=row_index,
+            row_index=ingest_sequence,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             source_row=source_item,
             validation_error_id=validation_error_id,
         )
@@ -2488,6 +2523,114 @@ class Orchestrator:
 
     _PROGRESS_ROW_INTERVAL = 100
     _PROGRESS_TIME_INTERVAL = 5.0  # seconds
+    _SOURCE_IDLE_POLL_INTERVAL_SECONDS = 0.01
+
+    def _requires_idle_aggregation_polling(self, config: PipelineConfig) -> bool:
+        """Return True when a pipeline has time-sensitive aggregation triggers."""
+        return any(settings.trigger.has_timeout or settings.trigger.has_condition for settings in config.aggregation_settings.values())
+
+    def _idle_timeout_context(self, source_ctx: PluginContext) -> PluginContext:
+        """Create an isolated context for idle timeout work.
+
+        Source generators may still be executing on a background ``next()``
+        thread while idle timeout checks run on the orchestrator thread. The
+        timeout path must therefore never clear or overwrite the source
+        context's node/operation identity.
+        """
+        return PluginContext(
+            run_id=source_ctx.run_id,
+            config=source_ctx.config,
+            landscape=source_ctx.landscape,
+            payload_store=source_ctx.payload_store,
+            rate_limit_registry=source_ctx.rate_limit_registry,
+            concurrency_config=source_ctx.concurrency_config,
+            shutdown_event=source_ctx.shutdown_event,
+            contract=source_ctx.contract,
+            telemetry_emit=source_ctx.telemetry_emit,
+        )
+
+    def _process_idle_timeout_flushes(
+        self,
+        loop_ctx: LoopContext,
+        *,
+        agg_transform_lookup: Mapping[str, AggNodeEntry],
+        coalesce_node_map: Mapping[CoalesceName, NodeID],
+        source_id: NodeID,
+        source_operation_id: str,
+    ) -> None:
+        """Flush time-sensitive aggregation/coalesce state while no source row is ready."""
+        ctx = self._idle_timeout_context(loop_ctx.ctx)
+        # Match the existing pre-row timeout path: a source item has not been
+        # handed to transforms, so transform state should be established by the
+        # transform executor instead of inheriting the source operation id.
+        ctx.operation_id = None
+        timeout_result = check_aggregation_timeouts(
+            config=loop_ctx.config,
+            processor=loop_ctx.processor,
+            ctx=ctx,
+            pending_tokens=loop_ctx.pending_tokens,
+            agg_transform_lookup=dict(agg_transform_lookup),
+        )
+        loop_ctx.counters.accumulate_flush_result(timeout_result)
+
+        if loop_ctx.coalesce_executor is not None:
+            handle_coalesce_timeouts(
+                coalesce_executor=loop_ctx.coalesce_executor,
+                coalesce_node_map=dict(coalesce_node_map),
+                processor=loop_ctx.processor,
+                ctx=ctx,
+                counters=loop_ctx.counters,
+                pending_tokens=loop_ctx.pending_tokens,
+            )
+
+    def _next_source_item_with_idle_timeout_flushes(
+        self,
+        source_iterator: Iterator[SourceRow],
+        loop_ctx: LoopContext,
+        *,
+        agg_transform_lookup: Mapping[str, AggNodeEntry],
+        coalesce_node_map: Mapping[CoalesceName, NodeID],
+        source_id: NodeID,
+        source_operation_id: str,
+    ) -> SourceRow:
+        """Fetch the next source row while periodically flushing idle timeouts."""
+        result_queue: queue.Queue[tuple[str, SourceRow | BaseException | None]] = queue.Queue(maxsize=1)
+
+        self._restore_source_iteration_context(
+            loop_ctx.ctx,
+            source_id=source_id,
+            source_operation_id=source_operation_id,
+        )
+
+        def fetch_next() -> None:
+            try:
+                result_queue.put(("row", next(source_iterator)))
+            except StopIteration:
+                result_queue.put(("stop", None))
+            except BaseException as exc:  # pragma: no cover - re-raised on orchestrator thread
+                result_queue.put(("error", exc))
+
+        threading.Thread(target=fetch_next, daemon=True).start()
+        receive_source_result = result_queue.get
+
+        while True:
+            try:
+                kind, payload = receive_source_result(timeout=self._SOURCE_IDLE_POLL_INTERVAL_SECONDS)
+            except queue.Empty:
+                self._process_idle_timeout_flushes(
+                    loop_ctx,
+                    agg_transform_lookup=agg_transform_lookup,
+                    coalesce_node_map=coalesce_node_map,
+                    source_id=source_id,
+                    source_operation_id=source_operation_id,
+                )
+                continue
+
+            if kind == "stop":
+                raise StopIteration
+            if kind == "error":
+                raise cast(BaseException, payload)
+            return cast(SourceRow, payload)
 
     def _maybe_emit_progress(
         self,
@@ -2548,11 +2691,14 @@ class Orchestrator:
         schema_contract_recorded: bool,
         *,
         interrupted_by_shutdown: bool,
+        flush_end_of_input: bool,
     ) -> None:
         """Post-loop work after source iteration completes or is interrupted.
 
-        Restores operation_id, optionally flushes end-of-source aggregation and
-        coalesce state, and records deferred field resolution / schema contract.
+        Restores operation_id and records source-local deferred field resolution
+        / schema contract. Aggregation and coalesce flushes are run-global
+        end-of-input work: in multi-source runs they must execute only after the
+        last source is exhausted, not after each individual source.
 
         On graceful shutdown we intentionally skip end-of-source flushes. A
         shutdown stops after the current row; it must not synthesize
@@ -2580,8 +2726,10 @@ class Orchestrator:
             source_operation_id=source_operation_id,
         )
 
-        if not interrupted_by_shutdown:
-            # CRITICAL: Flush remaining aggregation buffers only at true end-of-source.
+        if not interrupted_by_shutdown and flush_end_of_input:
+            # CRITICAL: Flush remaining aggregation buffers only at true end-of-input.
+            # Multi-source runs may feed shared downstream queues, aggregations,
+            # and coalesce barriers. Per-source completion is not a global EOF.
             # A graceful shutdown is resumable and must preserve buffered state
             # instead of forcing an END_OF_SOURCE flush.
             if config.aggregation_settings:
@@ -2609,7 +2757,9 @@ class Orchestrator:
                             f"These tokens would never reach a terminal state."
                         )
 
-            # Flush pending coalesce operations only when the source is actually exhausted.
+            # Flush pending coalesce operations only when all configured sources
+            # are exhausted. Per-source flushing would resolve shared barriers
+            # before later source roots have had a chance to contribute.
             if coalesce_executor is not None:
                 flush_coalesce_pending(
                     coalesce_executor=coalesce_executor,
@@ -2636,6 +2786,7 @@ class Orchestrator:
         config: PipelineConfig,
         run_id: str,
         ctx: PluginContext,
+        source: SourceProtocol | None = None,
     ) -> Iterator[SourceRow]:
         """Execute SOURCE phase: emit lifecycle events, load source, handle errors.
 
@@ -2643,8 +2794,9 @@ class Orchestrator:
         (file not found, auth failure) are emitted as PhaseError before re-raising.
         """
 
+        active_source = source or config.source
         phase_start = time.perf_counter()
-        self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=config.source.name))
+        self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=active_source.name))
         self._emit_telemetry(
             PhaseChanged(
                 timestamp=datetime.now(UTC),
@@ -2655,15 +2807,15 @@ class Orchestrator:
         )
 
         try:
-            with self._span_factory.source_span(config.source.name):
-                source_iterator = iter(config.source.load(ctx))
+            with self._span_factory.source_span(active_source.name):
+                source_iterator = iter(active_source.load(ctx))
                 try:
                     first_row = next(source_iterator)
                 except StopIteration:
                     self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
                     return iter(())
         except Exception as e:
-            self._emit_phase_error(PipelinePhase.SOURCE, e, target=config.source.name)
+            self._emit_phase_error(PipelinePhase.SOURCE, e, target=active_source.name)
             raise
 
         self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
@@ -2678,6 +2830,7 @@ class Orchestrator:
         edge_map: Mapping[tuple[NodeID, str], str],
         *,
         shutdown_event: threading.Event | None = None,
+        flush_end_of_input: bool = True,
     ) -> LoopResult:
         """Run the main processing loop: source iteration, quarantine, transform, flush.
 
@@ -2715,12 +2868,24 @@ class Orchestrator:
             # before each iteration so external calls are attributed to source_load
             source_operation_id = source_op_handle.operation.operation_id
 
-            source_iterator = self._load_source_with_events(config, run_id, ctx)
             self._restore_source_iteration_context(
                 ctx,
                 source_id=source_id,
                 source_operation_id=source_operation_id,
             )
+            source_name = next(iter(config.sources))
+            factory.run_lifecycle.record_run_source(
+                run_id=run_id,
+                source_node_id=source_id,
+                source_name=source_name,
+                plugin_name=config.source.name,
+                config_hash=stable_hash(config.source.config),
+                source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
+                schema_contract=config.source.get_schema_contract(),
+                lifecycle_state="loading",
+            )
+
+            source_iterator = self._load_source_with_events(config, run_id, ctx)
 
             # Deferred recording flags — field resolution after first iteration,
             # schema contract after first VALID row. If begin_run already stored
@@ -2742,7 +2907,27 @@ class Orchestrator:
 
             interrupted_by_shutdown = False
             try:
-                for row_index, source_item in enumerate(source_iterator):
+                source_row_index = 0
+                use_idle_polling = self._requires_idle_aggregation_polling(config)
+                while True:
+                    try:
+                        if use_idle_polling:
+                            source_item = self._next_source_item_with_idle_timeout_flushes(
+                                source_iterator,
+                                loop_ctx,
+                                agg_transform_lookup=agg_transform_lookup,
+                                coalesce_node_map=coalesce_node_map,
+                                source_id=source_id,
+                                source_operation_id=source_operation_id,
+                            )
+                        else:
+                            source_item = next(source_iterator)
+                    except StopIteration:
+                        break
+
+                    current_source_row_index = source_row_index
+                    source_row_index += 1
+                    ingest_sequence = counters.rows_processed
                     counters.rows_processed += 1
 
                     # Record field resolution on first iteration (generators execute body on first next())
@@ -2757,7 +2942,8 @@ class Orchestrator:
                             run_id,
                             source_id,
                             source_item,
-                            row_index,
+                            current_source_row_index,
+                            ingest_sequence,
                             edge_map,
                             loop_ctx,
                         )
@@ -2797,10 +2983,15 @@ class Orchestrator:
                     counters.accumulate_flush_result(timeout_result)
 
                     results = processor.process_row(
-                        row_index=row_index,
+                        row_index=ingest_sequence,
                         source_row=source_item,
                         transforms=config.transforms,
                         ctx=ctx,
+                        source_node_id=source_id,
+                        source_plugin=config.source,
+                        source_on_success=config.source.on_success,
+                        source_row_index=current_source_row_index,
+                        ingest_sequence=ingest_sequence,
                     )
                     if results:
                         loop_ctx.last_token_id = results[-1].token.token_id
@@ -2845,6 +3036,24 @@ class Orchestrator:
                     field_resolution_recorded,
                     schema_contract_recorded,
                     interrupted_by_shutdown=interrupted_by_shutdown,
+                    flush_end_of_input=flush_end_of_input,
+                )
+                field_resolution = config.source.get_field_resolution()
+                resolution_mapping: Mapping[str, str] | None = None
+                normalization_version: str | None = None
+                if field_resolution is not None:
+                    resolution_mapping, normalization_version = field_resolution
+                factory.run_lifecycle.record_run_source(
+                    run_id=run_id,
+                    source_node_id=source_id,
+                    source_name=source_name,
+                    plugin_name=config.source.name,
+                    config_hash=stable_hash(config.source.config),
+                    source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
+                    schema_contract=config.source.get_schema_contract(),
+                    field_resolution_mapping=resolution_mapping,
+                    normalization_version=normalization_version,
+                    lifecycle_state="interrupted" if interrupted_by_shutdown else "loaded",
                 )
 
             except Exception as e:
@@ -2861,9 +3070,11 @@ class Orchestrator:
     def _run_resume_processing_loop(
         self,
         loop_ctx: LoopContext,
-        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]],
+        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]],
         schema_contract: SchemaContract,
         *,
+        schema_contracts_by_source: Mapping[NodeID, SchemaContract] | None = None,
+        source_on_success_by_source: Mapping[NodeID, str] | None = None,
         shutdown_event: threading.Event | None = None,
     ) -> bool:
         """Run the resume processing loop: iterate unprocessed rows, transform, flush, accumulate.
@@ -2898,11 +3109,49 @@ class Orchestrator:
         # checkpointed again instead of being flushed to sinks.
         interrupted_by_shutdown = shutdown_event is not None and shutdown_event.is_set()
 
+        if not interrupted_by_shutdown and processor.has_scheduled_work():
+            recovered_row_ids = frozenset(row[0] for row in unprocessed_rows)
+            scheduled_row_ids = processor.active_scheduled_row_ids()
+            uncovered_row_ids = recovered_row_ids - scheduled_row_ids
+            if uncovered_row_ids:
+                formatted_uncovered = ", ".join(sorted(uncovered_row_ids))
+                formatted_scheduled = ", ".join(sorted(scheduled_row_ids)) or "<none>"
+                raise AuditIntegrityError(
+                    "Resume scheduler coverage is incomplete: active scheduler work exists, "
+                    "but recovered rows are not represented by scheduler work items. "
+                    f"Uncovered row_id(s): {formatted_uncovered}. "
+                    f"Scheduled row_id(s): {formatted_scheduled}. "
+                    "Refusing mixed scheduler/source replay to avoid skipped or duplicated rows."
+                )
+            results = processor.drain_scheduled_work(ctx)
+            counters.rows_processed += len({result.token.row_id for result in results})
+            accumulate_row_outcomes(results, counters, pending_tokens)
+            unprocessed_rows = ()
+
         # Process each unprocessed row using process_existing_row
         # (rows already exist in DB, only tokens need to be created)
-        for row_id, _row_index, row_data in unprocessed_rows:
+        for resumed_row in unprocessed_rows:
             if interrupted_by_shutdown:
                 break
+            if len(resumed_row) == 4:
+                row_id, _row_index, source_node_id, row_data = resumed_row
+                if schema_contracts_by_source is None or source_node_id not in schema_contracts_by_source:
+                    raise OrchestrationInvariantError(
+                        f"Cannot resume row {row_id!r} from source node {source_node_id!r}: "
+                        "source-scoped schema contract is missing from resume state."
+                    )
+                row_contract = schema_contracts_by_source[source_node_id]
+                if source_on_success_by_source is None or source_node_id not in source_on_success_by_source:
+                    raise OrchestrationInvariantError(
+                        f"Cannot resume row {row_id!r} from source node {source_node_id!r}: "
+                        "source-scoped on_success routing is missing from resume state."
+                    )
+                source_on_success = source_on_success_by_source[source_node_id]
+            else:
+                row_id, _row_index, row_data = resumed_row
+                source_node_id = None
+                row_contract = schema_contract
+                source_on_success = None
             counters.rows_processed += 1
 
             # ─────────────────────────────────────────────────────────────────
@@ -2921,13 +3170,16 @@ class Orchestrator:
 
             # Wrap row_data in PipelineRow with contract (PIPELINEROW MIGRATION)
             # Row data from resume is a plain dict, but process_existing_row expects PipelineRow
-            pipeline_row = PipelineRow(data=row_data, contract=schema_contract)
+            ctx.contract = row_contract
+            pipeline_row = PipelineRow(data=row_data, contract=row_contract)
 
             results = processor.process_existing_row(
                 row_id=row_id,
                 row_data=pipeline_row,
                 transforms=config.transforms,
                 ctx=ctx,
+                source_node_id=source_node_id,
+                source_on_success=source_on_success,
             )
             if results:
                 loop_ctx.last_token_id = results[-1].token.token_id
@@ -2992,6 +3244,14 @@ class Orchestrator:
                     pending_tokens=pending_tokens,
                 )
 
+            if processor.has_scheduled_work():
+                active_work = "; ".join(processor.summarize_scheduled_work()) or "<unknown>"
+                raise OrchestrationInvariantError(
+                    f"Resume for run '{processor.run_id}' left non-terminal scheduler work after end-of-source flush. "
+                    "Blocked or future WAITING scheduler state must be recovered explicitly before run completion. "
+                    f"Active scheduler work: {active_work}."
+                )
+
         return interrupted_by_shutdown
 
     def _execute_run(
@@ -3042,14 +3302,47 @@ class Orchestrator:
 
         try:
             # 3. Source + Process phase
-            loop_result = self._run_main_processing_loop(
-                loop_ctx,
-                factory,
-                run_id,
-                artifacts.source_id,
-                artifacts.edge_map,
-                shutdown_event=shutdown_event,
-            )
+            loop_result: LoopResult | None = None
+            source_items = tuple(artifacts.source_id_map.items())
+            for source_ordinal, (source_name, source_id) in enumerate(source_items):
+                source_config = replace(
+                    config,
+                    source=config.sources[source_name],
+                    sources={source_name: config.sources[source_name]},
+                )
+                source_loop_ctx = LoopContext(
+                    counters=loop_ctx.counters,
+                    pending_tokens=loop_ctx.pending_tokens,
+                    processor=loop_ctx.processor,
+                    ctx=loop_ctx.ctx,
+                    config=source_config,
+                    agg_transform_lookup=loop_ctx.agg_transform_lookup,
+                    coalesce_executor=loop_ctx.coalesce_executor,
+                    coalesce_node_map=loop_ctx.coalesce_node_map,
+                    last_token_id=loop_ctx.last_token_id,
+                )
+                loop_result = self._run_main_processing_loop(
+                    source_loop_ctx,
+                    factory,
+                    run_id,
+                    source_id,
+                    artifacts.edge_map,
+                    shutdown_event=shutdown_event,
+                    flush_end_of_input=source_ordinal == len(source_items) - 1,
+                )
+                loop_ctx.last_token_id = source_loop_ctx.last_token_id
+                if loop_result.interrupted:
+                    break
+
+            if loop_result is None:
+                raise OrchestrationInvariantError("Pipeline has no sources to process")
+            if not loop_result.interrupted and loop_ctx.processor.has_scheduled_work():
+                active_work = "; ".join(loop_ctx.processor.summarize_scheduled_work()) or "<unknown>"
+                raise OrchestrationInvariantError(
+                    f"Run '{run_ctx.processor.run_id}' left non-terminal scheduler work after final source flush. "
+                    "Blocked, READY, or future WAITING scheduler state must be resolved before run completion. "
+                    f"Active scheduler work: {active_work}."
+                )
 
             # 4. Sink writes — outside source_load track_operation context.
             # Each sink write has its own track_operation (sink_write) in SinkExecutor.
@@ -3170,36 +3463,6 @@ class Orchestrator:
             )
         recovery = RecoveryManager(self._db, self._checkpoint_manager)
 
-        # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
-        # Resume must use the ORIGINAL run's schema, not the current source's schema
-        # This enables proper type coercion (datetime/Decimal) from JSON payload strings
-        source_schema_json = factory.run_lifecycle.get_source_schema(run_id)
-
-        # Deserialize schema and recreate Pydantic model class with full type fidelity
-        # Call module function directly (no wrapper method)
-        schema_dict = json.loads(source_schema_json)
-        source_schema_class = reconstruct_schema_from_json(schema_dict)
-
-        # PIPELINEROW MIGRATION: Retrieve contract from audit trail for row wrapping
-        # During resume, we need to wrap plain dicts in PipelineRow with contract
-        # This ensures type fidelity and maintains the same data structures as main run
-        schema_contract = factory.run_lifecycle.get_run_contract(run_id)
-        if schema_contract is None:
-            # TIER-1 AUDIT INTEGRITY: Crash if contract is missing from audit trail
-            # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
-            # Inferring a contract from row data would:
-            # 1. Mask missing/corrupt audit data (evidence tampering)
-            # 2. Produce incomplete contracts (fields appearing later are omitted)
-            # 3. Violate the NO LEGACY CODE POLICY (no backward compatibility shims)
-            raise OrchestrationInvariantError(
-                f"Cannot resume run '{run_id}': schema contract is missing from audit trail. "
-                f"This indicates either:\n"
-                f"  1. The audit database is corrupt or incomplete\n"
-                f"  2. The run was started with a version that didn't record contracts\n"
-                f"Resume cannot proceed safely without the schema contract. "
-                f"The audit trail must be complete and trustworthy."
-            )
-
         # Resume replays persisted PipelineRow payloads through NullSource rather
         # than re-opening the original source plugin, so source-boundary evidence
         # is inherited from the original run. That is only sound if the current
@@ -3216,7 +3479,59 @@ class Orchestrator:
                 "declaration-contract and Tier-1 registries."
             )
 
-        unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
+        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]]
+        schema_contract: SchemaContract
+        schema_contracts_by_source: dict[NodeID, SchemaContract]
+
+        source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
+        if source_records:
+            source_schema_classes: dict[NodeID, type[Any]] = {}
+            schema_contracts_by_source = {}
+            for raw_source_node_id, source_record in source_records.items():
+                source_node_id = NodeID(str(raw_source_node_id))
+                schema_dict = json.loads(source_record.source_schema_json)
+                source_schema_classes[source_node_id] = reconstruct_schema_from_json(schema_dict)
+                schema_contracts_by_source[source_node_id] = source_record.schema_contract
+
+            unprocessed_rows = recovery.get_unprocessed_row_data_by_source(
+                run_id,
+                payload_store,
+                source_schema_classes=source_schema_classes,
+            )
+            schema_contract = next(iter(schema_contracts_by_source.values()))
+        else:
+            # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
+            # Resume must use the ORIGINAL run's schema, not the current source's schema
+            # This enables proper type coercion (datetime/Decimal) from JSON payload strings
+            source_schema_json = factory.run_lifecycle.get_source_schema(run_id)
+
+            # Deserialize schema and recreate Pydantic model class with full type fidelity
+            # Call module function directly (no wrapper method)
+            schema_dict = json.loads(source_schema_json)
+            source_schema_class = reconstruct_schema_from_json(schema_dict)
+
+            # PIPELINEROW MIGRATION: Retrieve contract from audit trail for row wrapping
+            # During resume, we need to wrap plain dicts in PipelineRow with contract
+            # This ensures type fidelity and maintains the same data structures as main run
+            legacy_schema_contract = factory.run_lifecycle.get_run_contract(run_id)
+            if legacy_schema_contract is None:
+                # TIER-1 AUDIT INTEGRITY: Crash if contract is missing from audit trail
+                # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
+                # Inferring a contract from row data would:
+                # 1. Mask missing/corrupt audit data (evidence tampering)
+                # 2. Produce incomplete contracts (fields appearing later are omitted)
+                # 3. Violate the NO LEGACY CODE POLICY (no backward compatibility shims)
+                raise OrchestrationInvariantError(
+                    f"Cannot resume run '{run_id}': schema contract is missing from audit trail. "
+                    f"This indicates either:\n"
+                    f"  1. The audit database is corrupt or incomplete\n"
+                    f"  2. The run was started with a version that didn't record contracts\n"
+                    f"Resume cannot proceed safely without the schema contract. "
+                    f"The audit trail must be complete and trustworthy."
+                )
+            schema_contract = legacy_schema_contract
+            unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
+            schema_contracts_by_source = {}
 
         return ResumeState(
             factory=factory,
@@ -3225,6 +3540,7 @@ class Orchestrator:
             restored_coalesce_state=restored_coalesce_state,
             unprocessed_rows=unprocessed_rows,
             schema_contract=schema_contract,
+            schema_contracts_by_source=schema_contracts_by_source,
         )
 
     def resume(
@@ -3275,6 +3591,7 @@ class Orchestrator:
         if restored_coalesce_state is not None and not restored_coalesce_state.has_resumable_state:
             restored_coalesce_state = None
         schema_contract = state.schema_contract
+        schema_contracts_by_source = state.schema_contracts_by_source
         unprocessed_rows = state.unprocessed_rows
         resume_start_time = time.perf_counter()
 
@@ -3362,6 +3679,7 @@ class Orchestrator:
                     settings=settings,
                     payload_store=payload_store,
                     schema_contract=schema_contract,
+                    schema_contracts_by_source=schema_contracts_by_source,
                     shutdown_event=active_event,
                 )
 
@@ -3450,13 +3768,14 @@ class Orchestrator:
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
-        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]],
+        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]],
         restored_aggregation_state: Mapping[str, AggregationCheckpointState],
         restored_coalesce_state: CoalesceCheckpointState | None,
         settings: ElspethSettings | None = None,
         *,
         payload_store: PayloadStore,
         schema_contract: SchemaContract,
+        schema_contracts_by_source: Mapping[NodeID, SchemaContract] | None = None,
         shutdown_event: threading.Event | None = None,
     ) -> RunResult:
         """Process unprocessed rows during resume.
@@ -3519,6 +3838,10 @@ class Orchestrator:
                 loop_ctx,
                 unprocessed_rows,
                 schema_contract,
+                schema_contracts_by_source=schema_contracts_by_source,
+                source_on_success_by_source={
+                    source_id: config.sources[source_name].on_success for source_name, source_id in artifacts.source_id_map.items()
+                },
                 shutdown_event=shutdown_event,
             )
 

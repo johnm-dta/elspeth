@@ -36,6 +36,8 @@ def _make_row(factory: RecorderFactory, *, run_id: str = "run-1", row_index: int
         source_node_id="source-0",
         row_index=row_index,
         data={"col": f"value-{row_index}"},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     token = factory.data_flow.create_token(row.row_id)
     return row, token
@@ -91,6 +93,8 @@ class TestCreateRow:
             source_node_id="source-0",
             row_index=0,
             data={"name": "Alice"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         assert row.row_id is not None
         assert row.run_id == "run-1"
@@ -105,6 +109,8 @@ class TestCreateRow:
             row_index=0,
             data={"name": "Alice"},
             row_id="custom-row-id",
+            source_row_index=0,
+            ingest_sequence=0,
         )
         assert row.row_id == "custom-row-id"
 
@@ -115,6 +121,8 @@ class TestCreateRow:
             source_node_id="source-0",
             row_index=0,
             data={"name": "Alice"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         assert row.source_data_hash is not None
         assert len(row.source_data_hash) > 0
@@ -126,12 +134,16 @@ class TestCreateRow:
             source_node_id="source-0",
             row_index=0,
             data={"name": "Alice"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         row_b = factory.data_flow.create_row(
             run_id="run-1",
             source_node_id="source-0",
             row_index=1,
             data={"name": "Alice"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         assert row_a.source_data_hash == row_b.source_data_hash
 
@@ -142,12 +154,16 @@ class TestCreateRow:
             source_node_id="source-0",
             row_index=0,
             data={"name": "Alice"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         row_b = factory.data_flow.create_row(
             run_id="run-1",
             source_node_id="source-0",
             row_index=1,
             data={"name": "Bob"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         assert row_a.source_data_hash != row_b.source_data_hash
 
@@ -158,6 +174,8 @@ class TestCreateRow:
             source_node_id="source-0",
             row_index=0,
             data={"name": "Alice"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         fetched = factory.query.get_row(row.row_id)
         assert fetched is not None
@@ -174,6 +192,8 @@ class TestCreateRow:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         assert row.created_at is not None
 
@@ -185,6 +205,8 @@ class TestCreateRow:
                 source_node_id="source-0",
                 row_index=i,
                 data={"i": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             for i in range(5)
         ]
@@ -202,6 +224,8 @@ class TestCreateToken:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id)
         assert token.token_id is not None
@@ -214,6 +238,8 @@ class TestCreateToken:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id, token_id="custom-token-id")
         assert token.token_id == "custom-token-id"
@@ -225,6 +251,8 @@ class TestCreateToken:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id, branch_name="path-a", fork_group_id="fg-1")
         assert token.branch_name == "path-a"
@@ -237,6 +265,8 @@ class TestCreateToken:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id, fork_group_id="fg-1")
         assert token.fork_group_id == "fg-1"
@@ -248,6 +278,8 @@ class TestCreateToken:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id, join_group_id="jg-1")
         assert token.join_group_id == "jg-1"
@@ -259,6 +291,8 @@ class TestCreateToken:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id)
         assert token.created_at is not None
@@ -270,6 +304,8 @@ class TestCreateToken:
             source_node_id="source-0",
             row_index=0,
             data={"col": "val"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         tokens = [factory.data_flow.create_token(row.row_id) for _ in range(3)]
         token_ids = [t.token_id for t in tokens]
@@ -1184,6 +1220,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1205,6 +1243,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1226,6 +1266,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1245,12 +1287,16 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value-a"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         row_b = factory.data_flow.create_row(
             run_id="run-A",
             source_node_id="source-0",
             row_index=1,
             data={"col": "value-b"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1270,6 +1316,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1290,6 +1338,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1309,12 +1359,16 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value-a"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         row_b = factory.data_flow.create_row(
             run_id="run-A",
             source_node_id="source-0",
             row_index=1,
             data={"col": "value-b"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1334,6 +1388,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1354,6 +1410,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value-a"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1362,6 +1420,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value-b"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_b = factory.data_flow.create_token(row_b.row_id)
 
@@ -1382,12 +1442,16 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value-a"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         row_b = factory.data_flow.create_row(
             run_id="run-A",
             source_node_id="source-0",
             row_index=1,
             data={"col": "value-b"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
         token_b = factory.data_flow.create_token(row_a.row_id)
@@ -1408,6 +1472,8 @@ class TestCrossRunContaminationPrevention:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
         token_b = factory.data_flow.create_token(row_a.row_id)
@@ -1435,6 +1501,8 @@ class TestTokenRunIdConsistency:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id)
         assert token.run_id == "run-1"
@@ -1486,6 +1554,8 @@ class TestTokenRunIdConsistency:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row.row_id)
         fetched = factory.query.get_token(token.token_id)
@@ -1522,6 +1592,8 @@ class TestTokenRunIdConsistency:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 
@@ -1585,6 +1657,8 @@ class TestTokenRunIdConsistency:
             source_node_id="source-0",
             row_index=0,
             data={"col": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_a = factory.data_flow.create_token(row_a.row_id)
 

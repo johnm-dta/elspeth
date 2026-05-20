@@ -400,6 +400,36 @@ class TestComposerToolNameDrift:
 class TestRunnableComposerSkillExamples:
     """Focused runnable-example checks for guidance that models often copy verbatim."""
 
+    def test_secret_guidance_never_uses_legacy_secret_uri_literals(self) -> None:
+        assert "secret://" not in _WEB_SKILL_CONTENT
+
+    def test_llm_secret_guidance_uses_inline_secret_ref_marker(self) -> None:
+        provider_section = _section_between(
+            _WEB_SKILL_CONTENT,
+            "**Provider fallback order**",
+            "**The only situation where stopping is correct**",
+        )
+
+        assert "api_key: {secret_ref: OPENROUTER_API_KEY}" in provider_section
+        assert 'api_key: "secret://OPENROUTER_API_KEY"' not in provider_section
+
+    def test_wire_secret_ref_guidance_matches_live_tool_schema(self) -> None:
+        from elspeth.web.composer.tools import get_tool_definitions
+
+        wire_schema = next(defn for defn in get_tool_definitions() if defn["name"] == "wire_secret_ref")["parameters"]
+        properties = set(wire_schema["properties"])
+        required = set(wire_schema["required"])
+        contract_section = _section_between(
+            _WEB_SKILL_CONTENT,
+            "### Secret Reference Wiring Contract",
+            "### LLM Providers",
+        )
+
+        assert {"name", "target", "target_id", "option_key"}.issubset(properties)
+        assert required == {"name", "target", "option_key"}
+        assert 'wire_secret_ref(name="<NAME>", target="node", target_id="<id>", option_key="<credential_field>")' in contract_section
+        assert 'wire_secret_ref(node="<id>", field="<credential_field>", ref="<NAME>")' not in contract_section
+
     def test_worked_set_pipeline_edge_targets_the_real_sink_connection(self) -> None:
         example = _section_between(
             _WEB_SKILL_CONTENT,

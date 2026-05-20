@@ -32,6 +32,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import deque
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -175,8 +176,11 @@ def main() -> int:
             yaml_caches[path] = load_yaml(path)
         return yaml_caches[path]
 
-    # Build a lookup of (file, rule, symbol) → metadata copied from a stale entry.
-    stale_metadata: dict[tuple[str, str, str], dict[str, Any]] = {}
+    # Build a lookup of (file, rule, symbol) -> metadata copied from stale
+    # entries. Multiple allowlist entries can point at the same symbol for the
+    # same rule; keep each entry's metadata distinct and consume it in linter
+    # order when pairing with rotated findings.
+    stale_metadata: dict[tuple[str, str, str], deque[dict[str, Any]]] = {}
     stale_keys_to_remove: dict[Path, set[str]] = {}
     for f in stale:
         parsed = parse_stale_key(f["message"])
@@ -191,7 +195,7 @@ def main() -> int:
             if entry["key"] == full_key:
                 # Strip the fp from the symbol triple in the index — we want
                 # to match by (file, rule, symbol_context) regardless of fp.
-                stale_metadata[(rel_file, rule, symbol)] = {k: v for k, v in entry.items() if k != "key"}
+                stale_metadata.setdefault((rel_file, rule, symbol), deque()).append({k: v for k, v in entry.items() if k != "key"})
                 stale_keys_to_remove.setdefault(ypath, set()).add(full_key)
                 break
 
@@ -205,8 +209,10 @@ def main() -> int:
         fp = f["fingerprint"]
         new_key = f"{rel_file}:{rule}:{symbol}:fp={fp}"
         ypath = yaml_for_file(rel_file)
-        metadata = stale_metadata.get((rel_file, rule, symbol))
-        if metadata is None:
+        metadata_queue = stale_metadata.get((rel_file, rule, symbol))
+        if metadata_queue:
+            metadata = metadata_queue.popleft()
+        else:
             # Genuinely new violation (no rotation pair). Emit with a TODO so
             # the operator can fill in the boundary justification.
             metadata = {
@@ -219,7 +225,9 @@ def main() -> int:
         new_entries.setdefault(ypath, []).append(entry)
 
     # Now rewrite each affected yaml.
-    for ypath, data in yaml_caches.items():
+    affected_paths = set(yaml_caches) | set(stale_keys_to_remove) | set(new_entries)
+    for ypath in sorted(affected_paths):
+        data = get_yaml(ypath)
         before = len(data.get("allow_hits", []))
         # Remove stale entries.
         keys_to_remove = stale_keys_to_remove.get(ypath, set())

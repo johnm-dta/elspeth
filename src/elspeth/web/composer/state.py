@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Any, Literal, Self, TypedDict
 
@@ -603,7 +603,7 @@ def _batch_distribution_profile_value_field_entries(
 
 
 def _runtime_connection_targets(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
 ) -> set[str]:
     """Collect runtime routing targets from connection fields.
@@ -613,7 +613,7 @@ def _runtime_connection_targets(
     non-sink UI edges are advisory/editor state.
     """
     targets: set[str] = set()
-    if source is not None:
+    for source in sources.values():
         targets.add(source.on_success)
     for node in nodes:
         if node.node_type == "coalesce" and node.on_success is None:
@@ -639,7 +639,7 @@ def _runtime_consumer_connections(nodes: tuple[NodeSpec, ...]) -> set[str]:
 
 
 def _validate_runtime_route_destinations(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
     outputs: tuple[OutputSpec, ...],
 ) -> tuple[ValidationEntry, ...]:
@@ -649,13 +649,19 @@ def _validate_runtime_route_destinations(
     consumer_connections = _runtime_consumer_connections(nodes)
     _err = ValidationEntry
 
-    if source is not None:
+    for source_name, source in sources.items():
         target = source.on_success
         if target not in output_names and target not in consumer_connections:
+            component = "source" if source_name == "source" else f"source:{source_name}"
+            message = (
+                f"Source on_success '{target}' is neither a sink nor a known connection."
+                if source_name == "source"
+                else f"Source '{source_name}' on_success '{target}' is neither a sink nor a known connection."
+            )
             errors.append(
                 _err(
-                    "source",
-                    f"Source on_success '{target}' is neither a sink nor a known connection.",
+                    component,
+                    message,
                     "high",
                 )
             )
@@ -1765,7 +1771,9 @@ class CompositionState:
     All container fields are deep-frozen via freeze_fields().
 
     Attributes:
-        source: The pipeline's single data source. None until set.
+        source: Legacy compatibility view of the first named source. None until
+            a source is set.
+        sources: Named source roots keyed by stable composer/audit-visible name.
         nodes: Ordered tuple of transform, gate, aggregation, coalesce nodes.
         edges: Connections between nodes.
         outputs: Sink configurations.
@@ -1783,20 +1791,49 @@ class CompositionState:
     metadata: PipelineMetadata
     version: int
     guided_session: GuidedSession | None = None
+    sources: Mapping[str, SourceSpec] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.version < 1:
             raise ValueError(f"CompositionState.version must be >= 1, got {self.version}")
+        sources = dict(self.sources)
+        if not sources and self.source is not None:
+            sources["source"] = self.source
+        if sources:
+            first_source = next(iter(sources.values()))
+            if self.source != first_source:
+                object.__setattr__(self, "source", first_source)
+        elif self.source is not None:
+            object.__setattr__(self, "source", None)
+        object.__setattr__(self, "sources", sources)
+        freeze_fields(self, "sources")
 
     # --- Mutation methods ---
 
     def with_source(self, source: SourceSpec) -> CompositionState:
         """Return new state with the given source, version incremented."""
-        return replace(self, source=source, version=self.version + 1)
+        return self.with_named_source("source", source)
 
     def without_source(self) -> CompositionState:
         """Return new state with the source removed, version incremented."""
-        return replace(self, source=None, version=self.version + 1)
+        return replace(self, source=None, sources={}, version=self.version + 1)
+
+    def with_named_source(self, source_name: str, source: SourceSpec) -> CompositionState:
+        """Add or replace a named source root. Version incremented."""
+        if not source_name or not source_name.strip():
+            raise ValueError("source_name must be a non-empty string.")
+        sources = dict(self.sources)
+        sources[source_name] = source
+        return replace(self, source=next(iter(sources.values())), sources=sources, version=self.version + 1)
+
+    def without_named_source(self, source_name: str) -> CompositionState | None:
+        """Remove one named source. Returns None if the source is not found."""
+        if source_name not in self.sources:
+            return None
+        sources = dict(self.sources)
+        del sources[source_name]
+        source = next(iter(sources.values()), None)
+        return replace(self, source=source, sources=sources, version=self.version + 1)
 
     def with_node(self, node: NodeSpec) -> CompositionState:
         """Add or replace a node (matched by id). Version incremented."""
@@ -1886,6 +1923,7 @@ class CompositionState:
                 "description": self.metadata.description,
             },
             "source": None,
+            "sources": {},
             "nodes": [],
             "edges": [],
             "outputs": [],
@@ -1897,6 +1935,13 @@ class CompositionState:
                 "on_success": self.source.on_success,
                 "options": deep_thaw(self.source.options),
                 "on_validation_failure": self.source.on_validation_failure,
+            }
+        for source_name, source in self.sources.items():
+            result["sources"][source_name] = {
+                "plugin": source.plugin,
+                "on_success": source.on_success,
+                "options": deep_thaw(source.options),
+                "on_validation_failure": source.on_validation_failure,
             }
 
         for node in self.nodes:
@@ -1962,8 +2007,11 @@ class CompositionState:
             state == CompositionState.from_dict(state.to_dict())
         """
         source_data = d["source"]
+        raw_sources = d.get("sources", {})
+        sources = {name: SourceSpec.from_dict(source) for name, source in raw_sources.items()}
         return cls(
             source=SourceSpec.from_dict(source_data) if source_data is not None else None,
+            sources=sources,
             nodes=tuple(NodeSpec.from_dict(n) for n in d["nodes"]),
             edges=tuple(EdgeSpec.from_dict(e) for e in d["edges"]),
             outputs=tuple(OutputSpec.from_dict(o) for o in d["outputs"]),
@@ -1983,7 +2031,7 @@ class CompositionState:
         _err = ValidationEntry  # local alias for brevity
 
         # 1. Source exists
-        if self.source is None:
+        if not self.sources:
             errors.append(_err("source", "No source configured.", "high"))
 
         # 2. At least one output
@@ -1993,7 +2041,7 @@ class CompositionState:
         # 3. Edge references valid
         node_ids = {n.id for n in self.nodes}
         output_names = {o.name for o in self.outputs}
-        valid_from = node_ids | {"source"}
+        valid_from = node_ids | set(self.sources) | {"source"}
         valid_to = node_ids | output_names
         for edge in self.edges:
             if edge.from_node not in valid_from:
@@ -2104,11 +2152,11 @@ class CompositionState:
                         )
                     )
 
-        errors.extend(_validate_runtime_route_destinations(self.source, self.nodes, self.outputs))
+        errors.extend(_validate_runtime_route_destinations(self.sources, self.nodes, self.outputs))
 
         # 8. Connection completeness
         source_on_success = self.source.on_success if self.source else None
-        runtime_connections = _runtime_connection_targets(self.source, self.nodes)
+        runtime_connections = _runtime_connection_targets(self.sources, self.nodes)
         for node in self.nodes:
             if node.node_type == "coalesce":
                 missing_branches = sorted(
@@ -2153,7 +2201,7 @@ class CompositionState:
             warnings.append(_warn(component, message, "medium"))
 
         # Build connection-field targets (wiring that doesn't require edges)
-        connection_targets = _runtime_connection_targets(self.source, self.nodes)
+        connection_targets = _runtime_connection_targets(self.sources, self.nodes)
 
         # W1: Output has no runtime routing reference (on_success / on_error / routes)
         # Edges are UI-only — generate_yaml() uses only connection fields,
@@ -2164,8 +2212,9 @@ class CompositionState:
         # and on_write_failure route data to outputs without explicit
         # connection fields.
         implicit_targets: set[str] = set()
-        if self.source is not None and self.source.on_validation_failure != "discard":
-            implicit_targets.add(self.source.on_validation_failure)
+        for source in self.sources.values():
+            if source.on_validation_failure != "discard":
+                implicit_targets.add(source.on_validation_failure)
         for output in self.outputs:
             if output.on_write_failure != "discard":
                 implicit_targets.add(output.on_write_failure)

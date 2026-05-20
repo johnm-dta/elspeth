@@ -64,6 +64,62 @@ class TestSourceSpec:
         assert restored == s
 
 
+class TestCompositionStateNamedSources:
+    def _source(self, plugin: str, on_success: str) -> SourceSpec:
+        return SourceSpec(
+            plugin=plugin,
+            on_success=on_success,
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+
+    def test_sources_mapping_is_primary_and_legacy_source_is_compatibility_view(self) -> None:
+        state = CompositionState(
+            source=None,
+            sources={
+                "customers": self._source("csv", "customer_rows"),
+                "orders": self._source("json", "order_rows"),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="customer_rows", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        assert tuple(state.sources) == ("customers", "orders")
+        assert state.source == state.sources["customers"]
+        assert state.to_dict()["sources"]["orders"]["on_success"] == "order_rows"
+
+    def test_named_source_mutations_add_update_and_remove_one_source(self) -> None:
+        state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
+
+        state = state.with_named_source("customers", self._source("csv", "customer_rows"))
+        state = state.with_named_source("orders", self._source("json", "order_rows"))
+        updated = state.with_named_source("customers", self._source("csv", "updated_customer_rows"))
+        removed = updated.without_named_source("orders")
+
+        assert tuple(updated.sources) == ("customers", "orders")
+        assert updated.sources["customers"].on_success == "updated_customer_rows"
+        assert tuple(removed.sources) == ("customers",)
+        assert removed.source == removed.sources["customers"]
+
+    def test_from_dict_restores_sources_mapping(self) -> None:
+        original = CompositionState(
+            source=None,
+            sources={"customers": self._source("csv", "customer_rows"), "orders": self._source("json", "order_rows")},
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=7,
+        )
+
+        restored = CompositionState.from_dict(original.to_dict())
+
+        assert restored == original
+
+
 class TestNodeSpec:
     def _make_transform(self, **overrides: Any) -> NodeSpec:
         defaults: dict[str, Any] = {

@@ -304,6 +304,7 @@ class _FullPipelineStatePayload(TypedDict):
     """Full-state payload returned by get_pipeline_state."""
 
     source: dict[str, Any] | None
+    sources: dict[str, dict[str, Any]]
     nodes: list[dict[str, Any]]
     outputs: list[dict[str, Any]]
     edges: list[dict[str, Any]]

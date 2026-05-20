@@ -120,7 +120,7 @@
     "shape": "type_driven"
   },
   "patch_source_options": {
-    "hash": "0abdc57fc2d25ef0b7d16966e8c6b424beed0ab45d7ae3a40f20844b434be5f0",
+    "hash": "696379aefca908c58c580963431159b438404650c6b973ae4b0714817625eeaa",
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },
@@ -165,12 +165,12 @@
     "shape": "declarative"
   },
   "set_pipeline": {
-    "hash": "53019b00866c3a2959fc50d547326648889c1f687d487cd9932a92c38adf5b8f",
-    "sensitive_path_count": 4,
+    "hash": "69320669036f5eabb7466a04b63eb940a6f99c61fb3943e1b4793c94b6aae380",
+    "sensitive_path_count": 6,
     "shape": "type_driven"
   },
   "set_source": {
-    "hash": "1dab572ac60198108d065fac6a27e270b320d80a07e3624fd820ac8ff3b05586",
+    "hash": "01089a02a31c165b020000a89f7977ee063d6e0133d8c4364832fd242dd3b016",
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },

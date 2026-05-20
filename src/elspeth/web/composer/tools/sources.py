@@ -89,15 +89,17 @@ def _handle_set_source(
     context: ToolContext,
 ) -> ToolResult:
     result = _execute_set_source(arguments, state, context)
-    if result.updated_state.source is None:
+    source_name = arguments.get("source_name", "source")
+    source = result.updated_state.sources.get(source_name) if isinstance(source_name, str) else None
+    if source is None:
         return result
     return _attach_post_call_hints(
         result,
         context.catalog,
         plugin_type="source",
         tool_name="set_source",
-        plugin_name=result.updated_state.source.plugin,
-        config_snapshot=result.updated_state.source.options,
+        plugin_name=source.plugin,
+        config_snapshot=source.options,
     )
 
 
@@ -105,10 +107,14 @@ _SET_SOURCE_DECLARATION = ToolDeclaration(
     name="set_source",
     handler=_handle_set_source,
     kind=ToolKind.MUTATION,
-    description="Set or replace the pipeline source.",
+    description="Set or replace a named pipeline source.",
     json_schema={
         "type": "object",
         "properties": {
+            "source_name": {
+                "type": "string",
+                "description": "Stable source root name. Defaults to 'source' for legacy single-source pipelines.",
+            },
             "plugin": {"type": "string", "description": "Source plugin name."},
             "on_success": {
                 "type": "string",
@@ -256,6 +262,11 @@ def _reject_manual_source_authoring(
     return _manual_source_authoring_error(tool_name=tool_name)
 
 
+def _source_component_id(source_name: str) -> str:
+    """Return the legacy/default or named source component identifier."""
+    return "source" if source_name == "source" else f"source:{source_name}"
+
+
 def _resolve_source_blob(
     *,
     blob_id: str,
@@ -392,6 +403,7 @@ def _execute_set_source(
 
     plugin = validated.plugin
     options = validated.options
+    source_name = validated.source_name
 
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(context.catalog, "source", plugin)
@@ -412,7 +424,7 @@ def _execute_set_source(
         return _failure_result(state, manual_authoring_error)
     credential_error = _credential_wiring_contract_failure(
         state,
-        component_id="source",
+        component_id=_source_component_id(source_name),
         component_type="source",
         options=options,
     )
@@ -435,8 +447,9 @@ def _execute_set_source(
         options=options,
         on_validation_failure=on_vf,
     )
-    new_state = state.with_source(source)
-    return _mutation_result(new_state, ("source",), data=_vf_destination_note(new_state, on_vf))
+    new_state = state.with_named_source(source_name, source)
+    affected = (_source_component_id(source_name),)
+    return _mutation_result(new_state, affected, data=_vf_destination_note(new_state, on_vf))
 
 
 def _execute_set_source_from_blob(
@@ -722,8 +735,6 @@ def _execute_patch_source_options(
     (``ComposerPluginCrashError`` → HTTP 500) — wrong disposition for
     Tier-3 input.
     """
-    if state.source is None:
-        return _failure_result(state, "No source configured to patch.")
     try:
         validated = PatchSourceOptionsArgumentsModel.model_validate(args)
     except PydanticValidationError as exc:
@@ -732,6 +743,10 @@ def _execute_patch_source_options(
             expected="object conforming to PatchSourceOptionsArgumentsModel",
             actual_type=type(exc).__name__,
         ) from exc
+    source_name = validated.source_name
+    current_source = state.sources.get(source_name)
+    if current_source is None:
+        return _failure_result(state, f"No source named '{source_name}' configured to patch.")
     patch = validated.patch
 
     manual_authoring_error = _reject_manual_source_authoring(patch, tool_name="patch_source_options")
@@ -744,7 +759,7 @@ def _execute_patch_source_options(
     # breaks runtime path resolution and composer/runtime agreement.
     # Replace the binding via a fresh set_source_from_blob (or
     # clear_source) instead of patching it.  See elspeth-07089fbaa3.
-    if "blob_ref" in state.source.options:
+    if "blob_ref" in current_source.options:
         forbidden_keys = {"path", "blob_ref"} & patch.keys()
         if forbidden_keys:
             return _failure_result(
@@ -756,10 +771,10 @@ def _execute_patch_source_options(
                 "clear_source first) to change the underlying blob.",
             )
 
-    new_options = _apply_merge_patch(state.source.options, patch)
+    new_options = _apply_merge_patch(current_source.options, patch)
     credential_error = _credential_wiring_contract_failure(
         state,
-        component_id="source",
+        component_id=_source_component_id(source_name),
         component_type="source",
         options=new_options,
     )
@@ -773,16 +788,16 @@ def _execute_patch_source_options(
 
     # Pre-validate patched options against config model
     prevalidation_error = _prevalidate_source(
-        state.source.plugin,
+        current_source.plugin,
         new_options,
-        state.source.on_validation_failure,
+        current_source.on_validation_failure,
     )
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
 
-    new_source = replace(state.source, options=new_options)
-    new_state = state.with_source(new_source)
-    return _mutation_result(new_state, ("source",))
+    new_source = replace(current_source, options=new_options)
+    new_state = state.with_named_source(source_name, new_source)
+    return _mutation_result(new_state, (_source_component_id(source_name),))
 
 
 def _handle_patch_source_options(
@@ -791,15 +806,17 @@ def _handle_patch_source_options(
     context: ToolContext,
 ) -> ToolResult:
     result = _execute_patch_source_options(arguments, state, context)
-    if result.updated_state.source is None:
+    source_name = arguments.get("source_name", "source")
+    source = result.updated_state.sources.get(source_name) if isinstance(source_name, str) else None
+    if source is None:
         return result
     return _attach_post_call_hints(
         result,
         context.catalog,
         plugin_type="source",
         tool_name="patch_source_options",
-        plugin_name=result.updated_state.source.plugin,
-        config_snapshot=result.updated_state.source.options,
+        plugin_name=source.plugin,
+        config_snapshot=source.options,
     )
 
 
@@ -807,12 +824,16 @@ _PATCH_SOURCE_OPTIONS_DECLARATION = ToolDeclaration(
     name="patch_source_options",
     handler=_handle_patch_source_options,
     kind=ToolKind.MUTATION,
-    description="Apply a shallow merge-patch to the current source options. "
+    description="Apply a shallow merge-patch to a named source's options. "
     "Keys in the patch overwrite existing keys. "
     "Keys set to null are deleted. Missing keys are unchanged.",
     json_schema={
         "type": "object",
         "properties": {
+            "source_name": {
+                "type": "string",
+                "description": "Source root name to patch. Defaults to 'source'.",
+            },
             "patch": {
                 "type": "object",
                 "description": "Merge-patch to apply to source options.",

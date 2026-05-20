@@ -46,6 +46,17 @@ def _strip_web_metadata(options: dict[str, Any]) -> dict[str, Any]:
     return stripped
 
 
+def _source_entry(source: dict[str, Any]) -> dict[str, Any]:
+    """Convert a serialized SourceSpec dict into runtime YAML shape."""
+    source_options = _strip_web_metadata(dict(source["options"]))
+    source_options["on_validation_failure"] = source["on_validation_failure"]
+    return {
+        "plugin": source["plugin"],
+        "on_success": source["on_success"],
+        "options": source_options,
+    }
+
+
 def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
     """Convert a CompositionState to ELSPETH's canonical pipeline dict.
 
@@ -75,17 +86,15 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
         if node_type not in COMPOSER_NODE_TYPES:
             raise ValueError(f"Unknown node_type '{node_type}' for node '{node['id']}'.")
 
-    # Source — state_dict["source"] is always present (None or dict).
-    source = state_dict["source"]
-    if source is not None:
-        # Strip web-specific metadata (e.g., blob_ref) before generating engine YAML.
-        source_options = _strip_web_metadata(dict(source["options"]))
-        source_options["on_validation_failure"] = source["on_validation_failure"]
-        doc["source"] = {
-            "plugin": source["plugin"],
-            "on_success": source["on_success"],
-            "options": source_options,
-        }
+    sources = state_dict["sources"]
+    if len(sources) > 1:
+        doc["sources"] = {name: _source_entry(source) for name, source in sources.items()}
+    else:
+        # Legacy single-source YAML remains canonical for one source so existing
+        # runtime configs and generated sessions keep their pre-multi-source shape.
+        source = state_dict["source"]
+        if source is not None:
+            doc["source"] = _source_entry(source)
 
     # Transforms — filter nodes by type, access always-present fields directly.
     transforms = [n for n in state_dict["nodes"] if n["node_type"] == "transform"]

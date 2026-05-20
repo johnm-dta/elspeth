@@ -91,6 +91,7 @@ from elspeth.web.composer.tools.sources import (
     _resolve_source_blob,
     _ResolvedSourceBlob,
     _source_authoring_options,
+    _source_component_id,
 )
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
@@ -248,127 +249,179 @@ def _execute_set_pipeline(
             actual_type=type(exc).__name__,
         ) from exc
 
-    # 1. Validate source plugin
-    src_plugin = validated.source.plugin
-    plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
-    if plugin_error is not None:
-        return _failure_result(state, plugin_error)
+    if validated.source is not None and validated.sources is not None:
+        return _failure_result(state, "set_pipeline must use either source or sources, not both.")
+    if validated.source is None and validated.sources is None:
+        return _failure_result(state, "set_pipeline requires source or sources.")
 
-    # Inline user-provided source data can be materialised as a blob inside
-    # this same atomic pipeline mutation. The generated path/blob_ref are
-    # authoritative exactly as if create_blob + set_source_from_blob had been
-    # called, but the LLM gets one audited tool decision instead of a serial
-    # blob-then-source-then-pipeline conversation.
-    #
-    # ``src_options`` starts as a mutable copy of the Pydantic-validated
-    # dict so the inline-blob branch below can extend it with the
-    # authoritative ``path`` / ``blob_ref`` without mutating
-    # ``validated.source.options`` (Pydantic returns the inner dict
-    # directly, so mutating it would leak across re-validations in tests).
-    src_options: Mapping[str, Any] = dict(validated.source.options)
-    manual_blob_ref_error = _reject_manual_source_blob_ref(
-        src_options,
-        tool_name="set_pipeline",
-        inline_blob_supported=True,
-    )
-    if manual_blob_ref_error is not None:
-        return _failure_result(state, manual_blob_ref_error)
-    manual_authoring_error = _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
-    if manual_authoring_error is not None:
-        return _failure_result(state, manual_authoring_error)
-    credential_error = _credential_wiring_contract_failure(
-        state,
-        component_id="source",
-        component_type="source",
-        options=src_options,
-    )
-    if credential_error is not None:
-        return credential_error
+    source_specs: dict[str, SourceSpec] = {}
     prepared_inline_blob: _PreparedBlobCreate | None = None
     resolved_source_blob: _ResolvedSourceBlob | None = None
-    source_blob_id = validated.source.blob_id
-    inline_blob = validated.source.inline_blob
-    src_on_vf = (
-        validated.source.on_validation_failure if validated.source.on_validation_failure is not None else _DEFAULT_SOURCE_VALIDATION_FAILURE
-    )
-    if source_blob_id is not None and inline_blob is not None:
-        return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
-    if source_blob_id is not None:
-        resolved = _resolve_source_blob(
-            blob_id=source_blob_id,
-            explicit_plugin=src_plugin,
-            caller_options=src_options,
-            on_validation_failure=src_on_vf,
-            state=state,
-            catalog=catalog,
-            session_engine=session_engine,
-            session_id=session_id,
+    single_source_on_vf: str | None = None
+
+    if validated.sources is not None:
+        if not validated.sources:
+            return _failure_result(state, "set_pipeline sources must include at least one named source.")
+        for source_name, source_model in validated.sources.items():
+            if not source_name.strip():
+                return _failure_result(state, "set_pipeline sources keys must be non-empty source names.")
+            if source_model.blob_id is not None or source_model.inline_blob is not None:
+                return _failure_result(
+                    state,
+                    f"set_pipeline sources.{source_name} cannot use blob_id or inline_blob in v1. "
+                    "Bind blob-backed sources with set_source_from_blob, or use source for a single blob-backed pipeline.",
+                )
+            src_plugin = source_model.plugin
+            plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
+            if plugin_error is not None:
+                return _failure_result(state, f"Source '{source_name}': {plugin_error}")
+            src_options = dict(source_model.options)
+            manual_blob_ref_error = _reject_manual_source_blob_ref(src_options, tool_name="set_pipeline")
+            if manual_blob_ref_error is not None:
+                return _failure_result(state, f"Source '{source_name}': {manual_blob_ref_error}")
+            manual_authoring_error = _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
+            if manual_authoring_error is not None:
+                return _failure_result(state, f"Source '{source_name}': {manual_authoring_error}")
+            credential_error = _credential_wiring_contract_failure(
+                state,
+                component_id=_source_component_id(source_name),
+                component_type="source",
+                options=src_options,
+            )
+            if credential_error is not None:
+                return credential_error
+            src_on_vf = source_model.on_validation_failure or _DEFAULT_SOURCE_VALIDATION_FAILURE
+            path_error = _validate_source_path(src_options, data_dir)
+            if path_error is not None:
+                return _failure_result(state, f"Source '{source_name}': {path_error}")
+            src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
+            if src_prevalidation is not None:
+                return _failure_result(state, f"Source '{source_name}': {src_prevalidation}")
+            source_specs[source_name] = SourceSpec(
+                plugin=src_plugin,
+                on_success=source_model.on_success,
+                options=src_options,
+                on_validation_failure=src_on_vf,
+            )
+    else:
+        legacy_source_model = validated.source
+        if legacy_source_model is None:
+            raise AssertionError("validated.source unexpectedly None after source/sources gate")
+        src_plugin = legacy_source_model.plugin
+        plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
+        if plugin_error is not None:
+            return _failure_result(state, plugin_error)
+
+        # Inline user-provided source data can be materialised as a blob inside
+        # this same atomic pipeline mutation. The generated path/blob_ref are
+        # authoritative exactly as if create_blob + set_source_from_blob had been
+        # called, but the LLM gets one audited tool decision instead of a serial
+        # blob-then-source-then-pipeline conversation.
+        legacy_src_options: Mapping[str, Any] = dict(legacy_source_model.options)
+        manual_blob_ref_error = _reject_manual_source_blob_ref(
+            legacy_src_options,
             tool_name="set_pipeline",
+            inline_blob_supported=True,
         )
-        if isinstance(resolved, ToolResult):
-            return resolved
-        resolved_source_blob = resolved
-        src_plugin = resolved.plugin
-        src_options = resolved.options
-    if inline_blob is not None:
-        if session_engine is None or session_id is None:
-            return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
-        if data_dir is None:
-            return _failure_result(state, "set_pipeline source.inline_blob requires data_dir for storage.")
-        # _prepare_blob_create raises ToolArgumentError on invalid LLM
-        # arguments (CEC1 channel discipline) — propagate to the
-        # compose loop's ARG_ERROR branch rather than masking as
-        # SUCCESS-with-success=False. The inline_blob contents are already
-        # type-validated by ``_InlineBlobModel``
-        # (str/str/str + extra=forbid), so the isinstance guards inside
-        # _prepare_blob_create are unreachable from this caller — see
-        # the cleanup that removes them.
-        provenance = _blob_creation_provenance(inline_blob.content, context)
-        prepared_inline_blob = _prepare_blob_create(
-            inline_blob.model_dump(),
-            data_dir=data_dir,
-            session_id=session_id,
-            creation_modality=provenance.creation_modality,
-            created_from_message_id=user_message_id,
-            creating_model_identifier=provenance.creating_model_identifier,
-            creating_model_version=provenance.creating_model_version,
-            creating_provider=provenance.creating_provider,
-            creating_composer_skill_hash=provenance.creating_composer_skill_hash,
-            creating_arguments_hash=provenance.creating_arguments_hash,
+        if manual_blob_ref_error is not None:
+            return _failure_result(state, manual_blob_ref_error)
+        manual_authoring_error = _reject_manual_source_authoring(legacy_src_options, tool_name="set_pipeline")
+        if manual_authoring_error is not None:
+            return _failure_result(state, manual_authoring_error)
+        credential_error = _credential_wiring_contract_failure(
+            state,
+            component_id="source",
+            component_type="source",
+            options=legacy_src_options,
         )
-        header_conflict = _header_only_inline_csv_conflict(
-            prepared_inline_blob,
-            session_engine=session_engine,
-            session_id=session_id,
+        if credential_error is not None:
+            return credential_error
+        source_blob_id = legacy_source_model.blob_id
+        inline_blob = legacy_source_model.inline_blob
+        src_on_vf = legacy_source_model.on_validation_failure or _DEFAULT_SOURCE_VALIDATION_FAILURE
+        single_source_on_vf = src_on_vf
+        if source_blob_id is not None and inline_blob is not None:
+            return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
+        if source_blob_id is not None:
+            resolved = _resolve_source_blob(
+                blob_id=source_blob_id,
+                explicit_plugin=src_plugin,
+                caller_options=legacy_src_options,
+                on_validation_failure=src_on_vf,
+                state=state,
+                catalog=catalog,
+                session_engine=session_engine,
+                session_id=session_id,
+                tool_name="set_pipeline",
+            )
+            if isinstance(resolved, ToolResult):
+                return resolved
+            resolved_source_blob = resolved
+            src_plugin = resolved.plugin
+            legacy_src_options = resolved.options
+        if inline_blob is not None:
+            if session_engine is None or session_id is None:
+                return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
+            if data_dir is None:
+                return _failure_result(state, "set_pipeline source.inline_blob requires data_dir for storage.")
+            # _prepare_blob_create raises ToolArgumentError on invalid LLM
+            # arguments (CEC1 channel discipline) — propagate to the
+            # compose loop's ARG_ERROR branch rather than masking as
+            # SUCCESS-with-success=False. The inline_blob contents are already
+            # type-validated by ``_InlineBlobModel``
+            # (str/str/str + extra=forbid), so the isinstance guards inside
+            # _prepare_blob_create are unreachable from this caller — see
+            # the cleanup that removes them.
+            provenance = _blob_creation_provenance(inline_blob.content, context)
+            prepared_inline_blob = _prepare_blob_create(
+                inline_blob.model_dump(),
+                data_dir=data_dir,
+                session_id=session_id,
+                creation_modality=provenance.creation_modality,
+                created_from_message_id=user_message_id,
+                creating_model_identifier=provenance.creating_model_identifier,
+                creating_model_version=provenance.creating_model_version,
+                creating_provider=provenance.creating_provider,
+                creating_composer_skill_hash=provenance.creating_composer_skill_hash,
+                creating_arguments_hash=provenance.creating_arguments_hash,
+            )
+            header_conflict = _header_only_inline_csv_conflict(
+                prepared_inline_blob,
+                session_engine=session_engine,
+                session_id=session_id,
+            )
+            if header_conflict is not None:
+                return _failure_result(state, header_conflict)
+
+            # ``prepared_inline_blob.mime_type`` was validated by
+            # ``_prepare_blob_create`` against ``_ALLOWED_BLOB_MIME_TYPES``,
+            # which is the exact key set of ``_MIME_TO_SOURCE``. A KeyError
+            # here means those constants drifted, not a recoverable LLM input
+            # condition.
+            inferred_plugin, inferred_options = _MIME_TO_SOURCE[prepared_inline_blob.mime_type]
+            mime_options: dict[str, str] = inferred_options if inferred_plugin == src_plugin else {}
+            legacy_src_options = {
+                **legacy_src_options,
+                **mime_options,
+                "path": str(prepared_inline_blob.storage_path),
+                "blob_ref": prepared_inline_blob.blob_id,
+                **_source_authoring_options(prepared_inline_blob.creation_modality, prepared_inline_blob.content_hash),
+            }
+            legacy_src_options = _options_with_inline_blob_source_review(legacy_src_options, prepared_inline_blob)
+
+        path_error = _validate_source_path(legacy_src_options, data_dir)
+        if path_error is not None:
+            return _failure_result(state, path_error)
+
+        src_prevalidation = _prevalidate_source(src_plugin, legacy_src_options, src_on_vf)
+        if src_prevalidation is not None:
+            return _failure_result(state, src_prevalidation)
+        source_specs["source"] = SourceSpec(
+            plugin=src_plugin,
+            on_success=legacy_source_model.on_success,
+            options=legacy_src_options,
+            on_validation_failure=src_on_vf,
         )
-        if header_conflict is not None:
-            return _failure_result(state, header_conflict)
-
-        # ``prepared_inline_blob.mime_type`` was validated by
-        # ``_prepare_blob_create`` against ``_ALLOWED_BLOB_MIME_TYPES``, which
-        # is the exact key set of ``_MIME_TO_SOURCE`` — so the mime is
-        # guaranteed present. Direct subscript: a ``KeyError`` here means the
-        # two constants drifted (a system-code bug to fix), not a recoverable
-        # external-data condition.
-        inferred_plugin, inferred_options = _MIME_TO_SOURCE[prepared_inline_blob.mime_type]
-        mime_options: dict[str, str] = inferred_options if inferred_plugin == src_plugin else {}
-        src_options = {
-            **src_options,
-            **mime_options,
-            "path": str(prepared_inline_blob.storage_path),
-            "blob_ref": prepared_inline_blob.blob_id,
-            **_source_authoring_options(prepared_inline_blob.creation_modality, prepared_inline_blob.content_hash),
-        }
-        src_options = _options_with_inline_blob_source_review(src_options, prepared_inline_blob)
-
-    # S2: Validate source path allowlist (same check as _execute_set_source)
-    path_error = _validate_source_path(src_options, data_dir)
-    if path_error is not None:
-        return _failure_result(state, path_error)
-
-    src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
-    if src_prevalidation is not None:
-        return _failure_result(state, src_prevalidation)
 
     # 2. Validate node plugins and options
     for node in validated.nodes:
@@ -480,13 +533,6 @@ def _execute_set_pipeline(
             return _failure_result(state, f"Output '{out_name}': {out_collision_error}")
 
     # 4. Construct specs (same field extraction as individual handlers)
-    source_spec = SourceSpec(
-        plugin=src_plugin,
-        on_success=validated.source.on_success,
-        options=src_options,
-        on_validation_failure=src_on_vf,
-    )
-
     # ``node_type`` / ``edge_type`` are typed as ``str`` on
     # ``_PipelineNodeModel`` / ``_PipelineEdgeModel`` to preserve Tier-3
     # LLM-recoverable feedback (the handler reports unknown enum values
@@ -572,7 +618,8 @@ def _execute_set_pipeline(
 
     # 5. Build new state
     new_state = CompositionState(
-        source=source_spec,
+        source=next(iter(source_specs.values())),
+        sources=source_specs,
         nodes=tuple(node_specs),
         edges=tuple(edge_specs),
         outputs=tuple(output_specs),
@@ -595,9 +642,9 @@ def _execute_set_pipeline(
         if quota_error is not None:
             return _failure_result(state, quota_error)
 
-    # 6. Report all nodes + source + outputs as affected
-    affected = ("source", *(n.id for n in node_specs), *(o.name for o in output_specs))
-    data: dict[str, Any] | None = _vf_destination_note(new_state, src_on_vf)
+    # 6. Report all nodes + sources + outputs as affected
+    affected = (*(_source_component_id(name) for name in source_specs), *(n.id for n in node_specs), *(o.name for o in output_specs))
+    data: dict[str, Any] | None = _vf_destination_note(new_state, single_source_on_vf) if single_source_on_vf is not None else None
     if resolved_source_blob is not None:
         source_blob_payload = {"source_blob": resolved_source_blob.payload}
         data = source_blob_payload if data is None else {**data, **source_blob_payload}
@@ -839,6 +886,26 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                 },
                 "required": ["plugin", "on_success"],
             },
+            "sources": {
+                "type": "object",
+                "description": (
+                    "Named source roots keyed by stable source name. Use this instead of source for multi-source pipelines. "
+                    "Each value has the same shape as source, but blob_id and inline_blob are only supported on the legacy source field in v1."
+                ),
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "plugin": {"type": "string"},
+                        "options": {"type": "object"},
+                        "on_success": {"type": "string"},
+                        "on_validation_failure": {
+                            "type": "string",
+                            "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                        },
+                    },
+                    "required": ["plugin", "on_success"],
+                },
+            },
             "nodes": {
                 "type": "array",
                 "items": {
@@ -962,7 +1029,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                 },
             },
         },
-        "required": ["source", "nodes", "edges", "outputs"],
+        "required": ["nodes", "edges", "outputs"],
     },
     augments_on_failure=True,
 )
@@ -977,6 +1044,7 @@ def _serialize_full_pipeline_state(state: CompositionState, *, requested_compone
     """Serialize the full state and expose accepted full-state spellings."""
     return {
         "source": _serialize_source(state.source) if state.source is not None else None,
+        "sources": {name: _serialize_source(source) for name, source in state.sources.items()},
         "nodes": [_serialize_node(n) for n in state.nodes],
         "outputs": [_serialize_output(o) for o in state.outputs],
         "edges": [_serialize_edge(e) for e in state.edges],

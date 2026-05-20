@@ -416,6 +416,82 @@ class TestSetSource:
         assert result.updated_state.version == 2
         assert "source" in result.affected_nodes
 
+    def test_set_source_with_source_name_adds_named_source(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        first = execute_tool(
+            "set_source",
+            {
+                "source_name": "customers",
+                "plugin": "csv",
+                "on_success": "customer_rows",
+                "options": {"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        second = execute_tool(
+            "set_source",
+            {
+                "source_name": "orders",
+                "plugin": "json",
+                "on_success": "order_rows",
+                "options": {"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                "on_validation_failure": "bad_orders",
+            },
+            first.updated_state,
+            catalog,
+        )
+
+        assert second.success is True
+        assert tuple(second.updated_state.sources) == ("customers", "orders")
+        assert second.updated_state.sources["orders"].plugin == "json"
+        assert "source:orders" in second.affected_nodes
+
+    def test_named_source_patch_and_clear_target_only_selected_source(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        customers = execute_tool(
+            "set_source",
+            {
+                "source_name": "customers",
+                "plugin": "csv",
+                "on_success": "customer_rows",
+                "options": {"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            state,
+            catalog,
+        ).updated_state
+        both = execute_tool(
+            "set_source",
+            {
+                "source_name": "orders",
+                "plugin": "json",
+                "on_success": "order_rows",
+                "options": {"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            customers,
+            catalog,
+        ).updated_state
+
+        patched = execute_tool(
+            "patch_source_options",
+            {"source_name": "orders", "patch": {"path": "/data/orders-patched.json"}},
+            both,
+            catalog,
+        )
+        cleared = execute_tool("clear_source", {"source_name": "customers"}, patched.updated_state, catalog)
+
+        assert patched.success is True
+        assert patched.updated_state.sources["orders"].options["path"] == "/data/orders-patched.json"
+        assert patched.updated_state.sources["customers"].options["path"] == "/data/customers.csv"
+        assert cleared.success is True
+        assert tuple(cleared.updated_state.sources) == ("orders",)
+
     def test_on_validation_failure_accepts_sink_name(self) -> None:
         """on_validation_failure can be a sink name — not just 'discard'/'quarantine'.
 
@@ -6015,6 +6091,50 @@ class TestSetPipeline:
         assert result.validation is not None
         assert result.validation.is_valid is True
         assert result.updated_state.version == 2  # incremented from 1
+
+    def test_set_pipeline_accepts_named_sources_mapping(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args.pop("source")
+        args["sources"] = {
+            "customers": {
+                "plugin": "csv",
+                "on_success": "customer_rows",
+                "options": {"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "orders": {
+                "plugin": "json",
+                "on_success": "order_rows",
+                "options": {"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+        }
+        args["nodes"] = []
+        args["edges"] = []
+        args["outputs"] = [
+            {
+                "sink_name": "customer_rows",
+                "plugin": "csv",
+                "options": {"path": "/data/customer_rows.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            {
+                "sink_name": "order_rows",
+                "plugin": "json",
+                "options": {"path": "/data/order_rows.json", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+        ]
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert tuple(result.updated_state.sources) == ("customers", "orders")
+        assert result.updated_state.source == result.updated_state.sources["customers"]
+        assert "source:customers" in result.affected_nodes
+        assert "source:orders" in result.affected_nodes
 
     def test_set_pipeline_source_defaults_validation_failures_to_discard(self) -> None:
         """Omitting on_validation_failure must not synthesize an absent quarantine sink."""

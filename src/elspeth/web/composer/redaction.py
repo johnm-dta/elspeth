@@ -876,13 +876,14 @@ class SetSourceArgumentsModel(BaseModel):
     the manifest/canonical-arguments parity invariant the adequacy
     guard relies on.
 
-    Field set is exactly the four required keys from the JSON schema at
-    ``tools.py:631-655``.  Fields belonging to neighbouring tools
+    Field set is exactly the four required keys plus optional
+    ``source_name`` from the JSON schema at ``tools.py``.  Fields belonging to neighbouring tools
     (``label``, ``blob_id``, ``inline_blob`` — those are on
     ``set_source_from_blob`` / ``create_blob``) are intentionally absent
     so ``extra="forbid"`` rejects misrouted argument shapes early.
     """
 
+    source_name: str = "source"
     plugin: str
     on_success: str
     options: _LlmJsonObject
@@ -1514,7 +1515,8 @@ class SetPipelineArgumentsModel(BaseModel):
     ``create_blob``) are rejected before any handler-side logic runs.
     """
 
-    source: _SetPipelineSourceModel
+    source: _SetPipelineSourceModel | None = None
+    sources: dict[str, _SetPipelineSourceModel] | None = None
     nodes: list[_PipelineNodeModel]
     edges: list[_PipelineEdgeModel]
     outputs: list[_PipelineOutputModel]
@@ -1561,6 +1563,7 @@ class PatchSourceOptionsArgumentsModel(BaseModel):
 
     Mirrors the JSON schema declared at ``tools.py:883-897`` for the
     ``patch_source_options`` definition and its ``required: ["patch"]``.
+    ``source_name`` selects the named source root and is not sensitive.
 
     ``patch`` carries :class:`Sensitive` with
     :func:`_summarize_set_source_options` — the merge-patch dict has the same
@@ -1575,6 +1578,7 @@ class PatchSourceOptionsArgumentsModel(BaseModel):
     rejects misrouted argument shapes early.
     """
 
+    source_name: str = "source"
     patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
@@ -3112,24 +3116,40 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
     source or blob_ref-less options is the "nothing to redact" outcome,
     recorded explicitly by returning the input unchanged.
     """
-    if "source" not in state_dict:
-        return state_dict
-    source = state_dict["source"]
-    if source is None:
-        return state_dict
+    def _redact_one(source: Any) -> tuple[Any, bool]:
+        if source is None or not isinstance(source, Mapping):
+            return source, False
+        if "options" not in source:
+            return source, False
+        options = source["options"]
+        if options is None or not isinstance(options, Mapping) or "blob_ref" not in options:
+            return source, False
+        redacted_source = dict(source)
+        redacted_options = dict(options)
+        if "path" in redacted_options:
+            redacted_options["path"] = REDACTED_BLOB_SOURCE_PATH
+        redacted_source["options"] = redacted_options
+        return redacted_source, True
 
-    if "options" not in source:
-        return state_dict
-    options = source["options"]
-    if options is None or "blob_ref" not in options:
+    source = state_dict.get("source")
+    redacted_source, source_changed = _redact_one(source)
+    sources = state_dict.get("sources")
+    redacted_sources: dict[str, Any] | None = None
+    sources_changed = False
+    if isinstance(sources, Mapping):
+        redacted_sources = {}
+        for source_name, named_source in sources.items():
+            redacted_named_source, changed = _redact_one(named_source)
+            redacted_sources[source_name] = redacted_named_source
+            sources_changed = sources_changed or changed
+
+    if not source_changed and not sources_changed:
         return state_dict
 
     # Shallow copy the chain to avoid mutating the original
     redacted = dict(state_dict)
-    redacted_source = dict(source)
-    redacted_options = dict(options)
-    if "path" in redacted_options:
-        redacted_options["path"] = REDACTED_BLOB_SOURCE_PATH
-    redacted_source["options"] = redacted_options
-    redacted["source"] = redacted_source
+    if source_changed:
+        redacted["source"] = redacted_source
+    if sources_changed and redacted_sources is not None:
+        redacted["sources"] = redacted_sources
     return redacted

@@ -24,7 +24,7 @@ only to be rejected pre-token at /execute.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 from uuid import UUID
 
@@ -229,9 +229,9 @@ def _source_name_for_dag_source(state: CompositionState, graph: Any, dag_source_
     node_info = graph.get_node_info(dag_source_id)
     config = node_info.config
     if "source_name" in config:
-        source_name = config["source_name"]
+        source_name = cast(str, config["source_name"])
         if source_name in state.sources:
-            return cast(str, source_name)
+            return source_name
     if len(state.sources) == 1:
         return next(iter(state.sources))
     return None

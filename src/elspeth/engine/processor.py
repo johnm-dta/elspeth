@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -450,7 +451,7 @@ class RowProcessor:
         )
         self._telemetry_manager = telemetry_manager
         self._scheduler = scheduler
-        self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}"
+        self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
 
         # Restore aggregation state if provided (crash recovery / resume).
@@ -2641,6 +2642,7 @@ class RowProcessor:
                 item = pending_items.pop(claimed.work_item_id)
             else:
                 item = self._work_item_from_scheduler(claimed)
+            claimed_lease_owner = self._claimed_scheduler_lease_owner(claimed)
             try:
                 result, child_items = self._process_single_token(
                     token=item.token,
@@ -2650,8 +2652,19 @@ class RowProcessor:
                     coalesce_name=item.coalesce_name,
                     on_success_sink=item.on_success_sink,
                 )
-            except Exception:
-                self._scheduler.mark_failed(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
+            except Exception as processing_exc:
+                try:
+                    self._scheduler.mark_failed(
+                        work_item_id=claimed.work_item_id,
+                        now=datetime.now(UTC),
+                        expected_lease_owner=claimed_lease_owner,
+                    )
+                except Exception as scheduler_exc:
+                    raise AuditIntegrityError(
+                        f"Scheduler failed to mark work_item_id={claimed.work_item_id!r} failed after original "
+                        f"processing exception {type(processing_exc).__name__}: {processing_exc}. "
+                        f"The scheduler failure write raised {type(scheduler_exc).__name__}: {scheduler_exc}."
+                    ) from scheduler_exc
                 raise
 
             if result is not None:
@@ -2678,9 +2691,17 @@ class RowProcessor:
                 continue
 
             if isinstance(result, RowResult) and result.outcome is TerminalOutcome.FAILURE:
-                self._scheduler.mark_failed(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
+                self._scheduler.mark_failed(
+                    work_item_id=claimed.work_item_id,
+                    now=datetime.now(UTC),
+                    expected_lease_owner=claimed_lease_owner,
+                )
             else:
-                self._scheduler.mark_terminal(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
+                self._scheduler.mark_terminal(
+                    work_item_id=claimed.work_item_id,
+                    now=datetime.now(UTC),
+                    expected_lease_owner=claimed_lease_owner,
+                )
 
         return results
 
@@ -2709,7 +2730,18 @@ class RowProcessor:
             queue_key=queue_key,
             barrier_key=barrier_key,
             now=now,
+            expected_lease_owner=self._claimed_scheduler_lease_owner(claimed),
         )
+
+    @staticmethod
+    def _claimed_scheduler_lease_owner(claimed: TokenWorkItem) -> str:
+        """Return the proven lease owner for a claimed scheduler item."""
+        if claimed.lease_owner is None:
+            raise AuditIntegrityError(
+                f"Scheduler claimed work_item_id={claimed.work_item_id!r} without a lease_owner; "
+                "cannot perform an owner-fenced state transition."
+            )
+        return claimed.lease_owner
 
     def _barrier_key_for_buffered_scheduler_result(self, result: RowResult | tuple[RowResult, ...]) -> str:
         """Resolve the aggregation barrier that owns a BUFFERED scheduler result."""

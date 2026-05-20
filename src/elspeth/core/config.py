@@ -1467,7 +1467,7 @@ class ElspethSettings(BaseModel):
     @classmethod
     def normalize_legacy_source(cls, data: Any) -> Any:
         """Normalize legacy ``source`` into canonical named ``sources``."""
-        if not isinstance(data, dict):
+        if type(data) is not dict:
             return data
         raw = dict(data)
         has_source = "source" in raw and raw["source"] is not None
@@ -1996,9 +1996,9 @@ def _fingerprint_config_for_audit(
                 landscape["url_password_redacted"] = True
 
     # === Source options ===
-    if "sources" in config and isinstance(config["sources"], dict):
+    if "sources" in config and type(config["sources"]) is dict:
         for source in config["sources"].values():
-            if isinstance(source, dict) and "options" in source and isinstance(source["options"], dict):
+            if type(source) is dict and "options" in source and type(source["options"]) is dict:
                 source["options"] = _fingerprint_secrets(source["options"], fail_if_no_key=fail_if_no_key)
 
     if "source" in config and isinstance(config["source"], dict):

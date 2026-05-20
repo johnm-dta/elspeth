@@ -2124,6 +2124,46 @@ sinks:
         assert len(fingerprint) == 64
         assert all(c in "0123456789abcdef" for c in fingerprint)
 
+    def test_named_source_api_keys_are_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every named source should fingerprint secret options in the audit copy."""
+        from elspeth.core.config import load_settings, resolve_config
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  orders:
+    plugin: http_source
+    on_success: output
+    options:
+      api_key: sk-orders-key
+      url: https://api.example.com/orders
+  refunds:
+    plugin: http_source
+    on_success: output
+    options:
+      api_key: sk-refunds-key
+      url: https://api.example.com/refunds
+sinks:
+  output:
+    plugin: csv_sink
+    on_write_failure: discard
+    options:
+      path: output.csv
+
+""")
+
+        settings = load_settings(config_file)
+        audit_config = resolve_config(settings)
+
+        for source_name in ("orders", "refunds"):
+            source_options = audit_config["sources"][source_name]["options"]
+            assert "api_key" not in source_options
+            fingerprint = source_options["api_key_fingerprint"]
+            assert len(fingerprint) == 64
+            assert all(c in "0123456789abcdef" for c in fingerprint)
+
     def test_token_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Token fields should be preserved for runtime use."""
         from elspeth.core.config import load_settings

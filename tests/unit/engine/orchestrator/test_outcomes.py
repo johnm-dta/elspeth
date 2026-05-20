@@ -527,6 +527,7 @@ class TestCoalesceCountingOwnership:
         processor.process_token.return_value = [
             _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
+        processor.mark_blocked_barrier_terminal.return_value = 1
 
         counters = _make_counters()
         pending = _make_pending()
@@ -557,6 +558,7 @@ class TestCoalesceCountingOwnership:
         processor.process_token.return_value = [
             _make_result(TerminalOutcome.SUCCESS, TerminalPath.COALESCED, token=merged_token, sink_name="output"),
         ]
+        processor.mark_blocked_barrier_terminal.return_value = 1
 
         counters = _make_counters()
         pending = _make_pending()
@@ -587,6 +589,7 @@ class TestCoalesceCountingOwnership:
         processor.process_token.return_value = [
             _make_result(TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW, token=merged_token, sink_name="output"),
         ]
+        processor.mark_blocked_barrier_terminal.return_value = 1
 
         counters = _make_counters()
         pending = _make_pending()
@@ -738,6 +741,7 @@ class TestHandleCoalesceTimeouts:
         processor = Mock()
         processor.process_token.return_value = []
         processor.resolve_node_step.return_value = coalesce_step
+        processor.mark_blocked_barrier_terminal.return_value = 1
 
         counters = _make_counters()
         pending = _make_pending()
@@ -868,11 +872,16 @@ class TestHandleCoalesceTimeouts:
         outcome = Mock()
         outcome.merged_token = None
         outcome.failure_reason = "quorum_not_met"
-        outcome.consumed_tokens = (Mock(), Mock(), Mock())  # 3 consumed tokens
+        outcome.consumed_tokens = (
+            make_token_info(token_id="token-a"),
+            make_token_info(token_id="token-b"),
+            make_token_info(token_id="token-c"),
+        )
 
         executor, processor, counters, pending, node_map = self._setup(
             timed_out_outcomes=[outcome],
         )
+        processor.mark_blocked_barrier_terminal.return_value = 3
 
         handle_coalesce_timeouts(
             coalesce_executor=executor,
@@ -886,6 +895,39 @@ class TestHandleCoalesceTimeouts:
         assert counters.rows_coalesce_failed == 1
         assert counters.rows_failed == 3  # one per consumed token
         assert counters.rows_coalesced == 0
+        processor.mark_blocked_barrier_terminal.assert_called_once_with(
+            "merge_1",
+            ("token-a", "token-b", "token-c"),
+        )
+
+    def test_failed_timeout_raises_when_scheduler_terminal_count_does_not_match_live_tokens(self) -> None:
+        """Failed timeout coalesces must reconcile durable scheduler rows before accepting counters."""
+        outcome = Mock()
+        outcome.merged_token = None
+        outcome.failure_reason = "quorum_not_met"
+        outcome.consumed_tokens = (
+            make_token_info(token_id="token-a"),
+            make_token_info(token_id="token-b"),
+        )
+
+        executor, processor, counters, pending, node_map = self._setup(
+            timed_out_outcomes=[outcome],
+        )
+        processor.mark_blocked_barrier_terminal.return_value = 1
+
+        with pytest.raises(AuditIntegrityError, match=r"live consumed 2 token.*durable scheduler terminalized 1"):
+            handle_coalesce_timeouts(
+                coalesce_executor=executor,
+                coalesce_node_map=node_map,
+                processor=processor,
+                ctx=Mock(),
+                counters=counters,
+                pending_tokens=pending,
+            )
+
+        assert counters.rows_coalesce_failed == 0
+        assert counters.rows_failed == 0
+        processor.process_token.assert_not_called()
 
     def test_failure_emits_token_completed_telemetry_for_each_consumed_token(self) -> None:
         """Timeout-driven coalesce failures must surface in telemetry once per token."""
@@ -901,6 +943,7 @@ class TestHandleCoalesceTimeouts:
         executor, processor, counters, pending, node_map = self._setup(
             timed_out_outcomes=[outcome],
         )
+        processor.mark_blocked_barrier_terminal.return_value = 2
 
         ctx = Mock()
         ctx.run_id = "run-1"

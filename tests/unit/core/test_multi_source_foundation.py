@@ -344,6 +344,8 @@ def test_run_sources_and_source_scoped_rows_are_schema_enforced() -> None:
                 settings_json="{}",
                 canonical_version="test",
                 status="running",
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
         for source_node_id in ("source_a", "source_b"):
@@ -465,6 +467,8 @@ def test_run_sources_foreign_key_rejects_node_from_different_run() -> None:
                     settings_json="{}",
                     canonical_version="test",
                     status="running",
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
         conn.execute(
@@ -1306,6 +1310,56 @@ def test_scheduler_claims_ready_work_and_recovers_expired_leases() -> None:
     assert reclaimed.on_success_sink == "default"
 
 
+@pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal", "failed"])
+def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(transition: _SchedulerTransition) -> None:
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+    _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 0),), node_ids=("normalize",))
+
+    item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    first_claim = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    assert first_claim is not None
+    assert first_claim.work_item_id == item.work_item_id
+
+    recovered = repo.recover_expired_leases(run_id="run-1", now=now + timedelta(seconds=31))
+    assert recovered == 1
+    second_claim = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=32))
+    assert second_claim is not None
+    assert second_claim.work_item_id == item.work_item_id
+
+    with pytest.raises(AuditIntegrityError, match=r"expected lease_owner 'worker-a'.*actual lease_owner 'worker-b'"):
+        _apply_scheduler_transition(
+            repo,
+            transition,
+            work_item_id=item.work_item_id,
+            now=now + timedelta(seconds=33),
+            expected_lease_owner="worker-a",
+        )
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                token_work_items_table.c.work_item_id == item.work_item_id
+            )
+        ).one()
+    assert row == (TokenWorkStatus.LEASED.value, "worker-b")
+
+
 @pytest.mark.parametrize(
     ("row_payload_json", "message"),
     [
@@ -1419,12 +1473,20 @@ def test_scheduler_claim_ready_two_workers_claim_distinct_items() -> None:
     assert {claimed_a.lease_owner, claimed_b.lease_owner} == {"worker-a", "worker-b"}
 
 
-def _apply_scheduler_transition(repo, transition: _SchedulerTransition, *, work_item_id: str, now: datetime):
+def _apply_scheduler_transition(
+    repo,
+    transition: _SchedulerTransition,
+    *,
+    work_item_id: str,
+    now: datetime,
+    expected_lease_owner: str = "worker-a",
+):
     if transition == "waiting":
         return repo.mark_waiting(
             work_item_id=work_item_id,
             available_at=now + timedelta(seconds=10),
             now=now,
+            expected_lease_owner=expected_lease_owner,
         )
     if transition == "blocked":
         return repo.mark_blocked(
@@ -1432,11 +1494,12 @@ def _apply_scheduler_transition(repo, transition: _SchedulerTransition, *, work_
             queue_key="queue:inbound",
             barrier_key="barrier:row-1",
             now=now,
+            expected_lease_owner=expected_lease_owner,
         )
     if transition == "terminal":
-        return repo.mark_terminal(work_item_id=work_item_id, now=now)
+        return repo.mark_terminal(work_item_id=work_item_id, now=now, expected_lease_owner=expected_lease_owner)
     if transition == "failed":
-        return repo.mark_failed(work_item_id=work_item_id, now=now)
+        return repo.mark_failed(work_item_id=work_item_id, now=now, expected_lease_owner=expected_lease_owner)
     raise AssertionError(f"Unhandled scheduler transition {transition!r}")
 
 
@@ -1459,6 +1522,8 @@ def _insert_scheduler_owner_records(
                     settings_json="{}",
                     canonical_version="v1",
                     status="running",
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
         registered_nodes = conn.execute(
@@ -1708,7 +1773,11 @@ def test_scheduler_marks_failed_clears_lease_and_blocks_reclaim() -> None:
     assert claimed.lease_owner == "worker-a"
     assert claimed.lease_expires_at is not None
 
-    failed = repo.mark_failed(work_item_id=item.work_item_id, now=now + timedelta(seconds=1))
+    failed = repo.mark_failed(
+        work_item_id=item.work_item_id,
+        now=now + timedelta(seconds=1),
+        expected_lease_owner="worker-a",
+    )
 
     assert failed.status is TokenWorkStatus.FAILED
     assert failed.lease_owner is None
@@ -1767,6 +1836,7 @@ def test_scheduler_requeues_waits_blocks_and_marks_terminal_with_leased_ownershi
         work_item_id=item.work_item_id,
         available_at=retry_at,
         now=now,
+        expected_lease_owner="worker-a",
     )
     assert waiting.status is TokenWorkStatus.WAITING
     assert waiting.available_at == retry_at
@@ -1782,6 +1852,7 @@ def test_scheduler_requeues_waits_blocks_and_marks_terminal_with_leased_ownershi
         queue_key="queue:inbound",
         barrier_key="barrier:row-1",
         now=retry_at,
+        expected_lease_owner="worker-b",
     )
     assert blocked.status is TokenWorkStatus.BLOCKED
     assert blocked.queue_key == "queue:inbound"
@@ -1815,10 +1886,14 @@ def test_scheduler_requeues_waits_blocks_and_marks_terminal_with_leased_ownershi
     assert claimed_second is not None
     assert claimed_second.work_item_id == second.work_item_id
 
-    terminal = repo.mark_terminal(work_item_id=second.work_item_id, now=retry_at)
+    terminal = repo.mark_terminal(work_item_id=second.work_item_id, now=retry_at, expected_lease_owner="worker-d")
     assert terminal.status is TokenWorkStatus.TERMINAL
     with pytest.raises(AuditIntegrityError, match=f"work_item_id='{second.work_item_id}'"):
-        repo.mark_terminal(work_item_id=second.work_item_id, now=retry_at + timedelta(seconds=1))
+        repo.mark_terminal(
+            work_item_id=second.work_item_id,
+            now=retry_at + timedelta(seconds=1),
+            expected_lease_owner="worker-d",
+        )
     assert repo.claim_ready(run_id="run-1", lease_owner="worker-c", lease_seconds=30, now=retry_at) is None
 
 
@@ -1859,12 +1934,24 @@ def test_scheduler_barrier_completion_only_terminalizes_consumed_tokens() -> Non
     first_claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
     assert first_claimed is not None
     assert first_claimed.work_item_id == first.work_item_id
-    repo.mark_blocked(work_item_id=first.work_item_id, queue_key=None, barrier_key="merge", now=now)
+    repo.mark_blocked(
+        work_item_id=first.work_item_id,
+        queue_key=None,
+        barrier_key="merge",
+        now=now,
+        expected_lease_owner="worker-a",
+    )
 
     second_claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now)
     assert second_claimed is not None
     assert second_claimed.work_item_id == second.work_item_id
-    repo.mark_blocked(work_item_id=second.work_item_id, queue_key=None, barrier_key="merge", now=now)
+    repo.mark_blocked(
+        work_item_id=second.work_item_id,
+        queue_key=None,
+        barrier_key="merge",
+        now=now,
+        expected_lease_owner="worker-b",
+    )
 
     completed = repo.mark_blocked_barrier_terminal(
         run_id="run-1",
@@ -1911,7 +1998,13 @@ def test_scheduler_mark_blocked_rejects_missing_release_keys() -> None:
     assert claimed is not None
 
     with pytest.raises(AuditIntegrityError, match=rf"work_item_id='{item.work_item_id}'.*queue_key.*barrier_key"):
-        repo.mark_blocked(work_item_id=item.work_item_id, queue_key=None, barrier_key=None, now=now)
+        repo.mark_blocked(
+            work_item_id=item.work_item_id,
+            queue_key=None,
+            barrier_key=None,
+            now=now,
+            expected_lease_owner="worker-a",
+        )
 
 
 def _scheduler_work_values(
@@ -2185,7 +2278,13 @@ def test_scheduler_barrier_terminal_raises_when_live_tokens_missing_from_durable
         claimed = repo.claim_ready(run_id="run-1", lease_owner=f"worker-{index}", lease_seconds=30, now=now)
         assert claimed is not None
         assert claimed.work_item_id == item.work_item_id
-        repo.mark_blocked(work_item_id=item.work_item_id, queue_key=None, barrier_key="merge", now=now)
+        repo.mark_blocked(
+            work_item_id=item.work_item_id,
+            queue_key=None,
+            barrier_key="merge",
+            now=now,
+            expected_lease_owner=f"worker-{index}",
+        )
 
     with pytest.raises(AuditIntegrityError, match=r"live consumed 3 token.*durable BLOCKED rows.*2 matching.*missing token_ids.*token-c"):
         repo.mark_blocked_barrier_terminal(
@@ -2236,7 +2335,13 @@ def test_scheduler_barrier_terminal_raises_when_durable_blocked_token_set_is_dis
         claimed = repo.claim_ready(run_id="run-1", lease_owner=f"worker-{index}", lease_seconds=30, now=now)
         assert claimed is not None
         assert claimed.work_item_id == item.work_item_id
-        repo.mark_blocked(work_item_id=item.work_item_id, queue_key=None, barrier_key="merge", now=now)
+        repo.mark_blocked(
+            work_item_id=item.work_item_id,
+            queue_key=None,
+            barrier_key="merge",
+            now=now,
+            expected_lease_owner=f"worker-{index}",
+        )
 
     with pytest.raises(AuditIntegrityError, match=r"live consumed 3 token.*0 matching.*missing token_ids.*live-a"):
         repo.mark_blocked_barrier_terminal(
@@ -2288,7 +2393,13 @@ def test_scheduler_barrier_terminal_rejects_empty_live_token_set() -> None:
         claimed = repo.claim_ready(run_id="run-1", lease_owner=f"worker-{index}", lease_seconds=30, now=now)
         assert claimed is not None
         assert claimed.work_item_id == item.work_item_id
-        repo.mark_blocked(work_item_id=item.work_item_id, queue_key=None, barrier_key="merge", now=now)
+        repo.mark_blocked(
+            work_item_id=item.work_item_id,
+            queue_key=None,
+            barrier_key="merge",
+            now=now,
+            expected_lease_owner=f"worker-{index}",
+        )
 
     with pytest.raises(AuditIntegrityError, match="requires at least one live token_id"):
         repo.mark_blocked_barrier_terminal(

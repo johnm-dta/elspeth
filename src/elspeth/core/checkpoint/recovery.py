@@ -358,7 +358,7 @@ class RecoveryManager:
                     f"Error: {exc}"
                 ) from exc
 
-            if not isinstance(degraded_data, dict):
+            if type(degraded_data) is not dict:
                 raise AuditIntegrityError(
                     f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
                     f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
@@ -459,7 +459,7 @@ class RecoveryManager:
                     f"Error: {exc}"
                 ) from exc
 
-            if not isinstance(degraded_data, dict):
+            if type(degraded_data) is not dict:
                 raise AuditIntegrityError(
                     f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
                     f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"

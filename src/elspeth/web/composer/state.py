@@ -33,6 +33,7 @@ from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.config import (
     _MAX_NODE_NAME_LENGTH,
     _RESERVED_EDGE_LABELS,
+    _VALID_NODE_NAME_RE,
     TriggerConfig,
     _validate_max_length,
     _validate_node_name_chars,
@@ -73,6 +74,26 @@ def validate_composer_source_name(source_name: str) -> None:
         raise ValueError(f"Source name '{source_name}' is reserved. Reserved source/edge labels: {sorted(_RESERVED_EDGE_LABELS)}")
     if source_name.startswith("__"):
         raise ValueError(f"Source name '{source_name}' starts with '__', which is reserved for system edges")
+
+
+def _composer_source_name_validation_message(source_name: str) -> str | None:
+    """Return the runtime-equivalent source-name validation error, if any."""
+    if not source_name or not source_name.strip():
+        return "source_name must be a non-empty string."
+    if source_name != source_name.lower():
+        return f"Source name '{source_name}' must be lowercase. Suggested fix: '{source_name.lower()}'."
+    if len(source_name) > _MAX_NODE_NAME_LENGTH:
+        return f"Source name exceeds max length {_MAX_NODE_NAME_LENGTH} (got {len(source_name)})"
+    if not _VALID_NODE_NAME_RE.match(source_name):
+        return (
+            f"Source name '{source_name}' contains invalid characters. "
+            "Node names must start with a letter and contain only letters, digits, underscores, and hyphens."
+        )
+    if source_name in _RESERVED_EDGE_LABELS:
+        return f"Source name '{source_name}' is reserved. Reserved source/edge labels: {sorted(_RESERVED_EDGE_LABELS)}"
+    if source_name.startswith("__"):
+        return f"Source name '{source_name}' starts with '__', which is reserved for system edges"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,16 +561,8 @@ def _is_static_contract_probe_exception(exc: Exception) -> bool:
         return True
     return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
 
-
-def _coerce_source_mapping(sources: Mapping[str, SourceSpec] | None) -> Mapping[str, SourceSpec]:
-    """Return canonical source mapping for helpers that still support legacy callers."""
-    if sources is None:
-        return {}
-    return sources
-
-
 def _batch_distribution_profile_value_field_entries(
-    sources: Mapping[str, SourceSpec] | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
 ) -> tuple[tuple[ValidationEntry, ...], tuple[ValidationEntry, ...]]:
     """Validate numeric-only batch_distribution_profile value_field contracts."""
@@ -558,10 +571,9 @@ def _batch_distribution_profile_value_field_entries(
     errors: list[ValidationEntry] = []
     warnings: list[ValidationEntry] = []
     node_by_id = {node.id: node for node in nodes}
-    source_map = _coerce_source_mapping(sources)
     resolver = ProducerResolver.build(
         source=None,
-        sources=source_map,
+        sources=sources,
         nodes=nodes,
         sink_names=frozenset(),
     )
@@ -928,7 +940,7 @@ def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:
 
 
 def _check_schema_contracts(
-    sources: Mapping[str, SourceSpec] | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
     outputs: tuple[OutputSpec, ...],
 ) -> tuple[
@@ -947,7 +959,7 @@ def _check_schema_contracts(
     sink_names = {output.name for output in outputs}
     sink_names_frozen = frozenset(sink_names)
     internal_connection_names: set[str] = set()
-    source_map = _coerce_source_mapping(sources)
+    source_map = sources
 
     _err = ValidationEntry
     _warn = ValidationEntry
@@ -2043,7 +2055,7 @@ class CompositionState:
             state == CompositionState.from_dict(state.to_dict())
         """
         source_data = d["source"]
-        raw_sources = d["sources"] if "sources" in d else {}
+        raw_sources = d["sources"] if "sources" in d and d["sources"] is not None else {}
         sources = {name: SourceSpec.from_dict(source) for name, source in raw_sources.items()}
         return cls(
             source=SourceSpec.from_dict(source_data) if source_data is not None else None,
@@ -2070,11 +2082,10 @@ class CompositionState:
         if not self.sources:
             errors.append(_err("source", "No source configured.", "high"))
         for source_name in self.sources:
-            try:
-                validate_composer_source_name(source_name)
-            except ValueError as exc:
+            source_name_error = _composer_source_name_validation_message(source_name)
+            if source_name_error is not None:
                 component = "source" if source_name == "source" else f"source:{source_name}"
-                errors.append(_err(component, str(exc), "high"))
+                errors.append(_err(component, source_name_error, "high"))
 
         # 2. At least one output
         if not self.outputs:

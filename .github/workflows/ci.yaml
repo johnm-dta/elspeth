@@ -334,7 +334,7 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
           apt-get update -q
-          apt-get install -y -q libsqlcipher-dev
+          apt-get install -y -q libsqlcipher-dev jq
 
       - name: Install dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}

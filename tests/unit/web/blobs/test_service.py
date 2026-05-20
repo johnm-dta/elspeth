@@ -1501,6 +1501,17 @@ class TestFinalizeRunOutputBlobsPartialFailure:
             )
         return pending
 
+    @staticmethod
+    def _deny_read_bytes(monkeypatch: pytest.MonkeyPatch, denied_path: Path) -> None:
+        original_read_bytes = Path.read_bytes
+
+        def _read_bytes_or_permission_error(path: Path) -> bytes:
+            if path == denied_path:
+                raise PermissionError(f"Permission denied: '{denied_path}'")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", _read_bytes_or_permission_error)
+
     @pytest.mark.asyncio
     async def test_continues_after_concurrent_deletion(
         self,
@@ -1585,7 +1596,7 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         session_id,
         db_engine,
         run_env,
-        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When file read raises OSError, loop continues to next blob."""
         run_id, _ = run_env
@@ -1593,17 +1604,8 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b1.csv", b"data1")
         b2 = await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b2.csv", b"data2")
 
-        # Make b2's backing file unreadable
-        from pathlib import Path as _Path
-
-        b2_path = _Path(b2.storage_path)
-        b2_path.chmod(0o000)
-
-        try:
-            result = await blob_service.finalize_run_output_blobs(run_id, success=True)
-        finally:
-            # Restore permissions for cleanup
-            b2_path.chmod(0o644)
+        self._deny_read_bytes(monkeypatch, Path(b2.storage_path))
+        result = await blob_service.finalize_run_output_blobs(run_id, success=True)
 
         assert len(result.finalized) == 1
         assert len(result.errors) == 1
@@ -1690,6 +1692,7 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         session_id,
         db_engine,
         run_env,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When per-blob catch fires, the failed blob is set to 'error' status."""
         from elspeth.web.sessions.models import blobs_table as bt
@@ -1699,16 +1702,8 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         b1 = await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b1.csv", b"data1")
         b2 = await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b2.csv", b"data2")
 
-        # Make b1's file unreadable — triggers OSError, caught per-blob
-        from pathlib import Path as _Path
-
-        b1_path = _Path(b1.storage_path)
-        b1_path.chmod(0o000)
-
-        try:
-            result = await blob_service.finalize_run_output_blobs(run_id, success=True)
-        finally:
-            b1_path.chmod(0o644)
+        self._deny_read_bytes(monkeypatch, Path(b1.storage_path))
+        result = await blob_service.finalize_run_output_blobs(run_id, success=True)
 
         # b1 should have been moved to "error" by the best-effort recovery
         with db_engine.connect() as conn:

@@ -1989,79 +1989,79 @@
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "1ba927b7e9881049"
+      "fingerprint": "020d3410712cacf3"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "2d4cc626cb26341c"
+      "fingerprint": "0effe7f19a0f87f5"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "471b1c75bac55f7e"
+      "fingerprint": "39679566a04b0aed"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "4bf1b74c95450844"
+      "fingerprint": "42e670acb12cca45"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "548792d071236b8f"
+      "fingerprint": "5c692f173b8b30a5"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "593fd70372d382bf"
+      "fingerprint": "7d7010037caf93b7"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "694a40f23d4ce1e6"
+      "fingerprint": "95c83fc622da88a0"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "8f551e667b7af3f2"
+      "fingerprint": "95fa168dcab6a78b"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "95b984332ed2f1c9"
+      "fingerprint": "9cdc904d937727ce"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "993328e6f3c3d71b"
+      "fingerprint": "9d6882984c9807ca"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "a62dedabb9321f2b"
+      "fingerprint": "a0afe30ccd6bc65f"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "b37185fb019c35a7"
+      "fingerprint": "a2c26420004fb2ab"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "ca7cd80408f8d4f3"
+      "fingerprint": "b6cc1c8c8df336e3"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "d1b9da6750fcbc5b"
+      "fingerprint": "bb6cb2c6083b0753"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "d94550cad875b20e"
+      "fingerprint": "c4befe7f699e0089"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "d959017e6d28916a"
+      "fingerprint": "cf284aea14fe6c39"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "db88995ea304163f"
+      "fingerprint": "d33c428c41c6e848"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "ddcda373c189a40e"
+      "fingerprint": "e188b845dec5d4e9"
     },
     {
       "file_path": "mcp/server.py",
-      "fingerprint": "f882b2a0bdab1820"
+      "fingerprint": "fcc20281b157d469"
     },
     {
       "file_path": "plugins/infrastructure/batching/mixin.py",
@@ -2357,7 +2357,7 @@
     },
     {
       "file_path": "plugins/sinks/azure_blob_sink.py",
-      "fingerprint": "f872b3213a3640aa"
+      "fingerprint": "a46b952b7c0461a9"
     },
     {
       "file_path": "plugins/sinks/chroma_sink.py",
@@ -2385,19 +2385,19 @@
     },
     {
       "file_path": "plugins/sinks/database_sink.py",
-      "fingerprint": "cf4337b396ed5835"
+      "fingerprint": "21b0805e59d586f2"
     },
     {
       "file_path": "plugins/sinks/database_sink.py",
-      "fingerprint": "d088b7b3fd9ea8b5"
+      "fingerprint": "f42e3ff1c27193b5"
     },
     {
       "file_path": "plugins/sinks/dataverse.py",
-      "fingerprint": "12c4097416d4e84f"
+      "fingerprint": "626f362cc949e6a1"
     },
     {
       "file_path": "plugins/sinks/dataverse.py",
-      "fingerprint": "635b057e06d536fa"
+      "fingerprint": "b8529bd52e04ad3e"
     },
     {
       "file_path": "plugins/sinks/json_sink.py",
@@ -2405,59 +2405,59 @@
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "0aae04fed261134e"
+      "fingerprint": "06c8cb35688214ff"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "0ab7290586414304"
+      "fingerprint": "39664fb9a4cb9fa2"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "17453091b7b8fea0"
+      "fingerprint": "3c529a5cd371be8f"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "1c58e06bcaace816"
+      "fingerprint": "431d28180bca26dd"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "21042d8f5a00bfdc"
+      "fingerprint": "501ead0ca19e6205"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "2ddbaeb134277967"
+      "fingerprint": "72e6ca8223767db9"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "5ac85d0ba56780c1"
+      "fingerprint": "7be036c024aeeefe"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "72eec8c8d199456a"
+      "fingerprint": "97a1ef9c4fc676bd"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "75ea795c9fcfba0a"
+      "fingerprint": "aa46346e001aaf01"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "a91fda5ba94b42b4"
+      "fingerprint": "c861bcabbb4691df"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "b7562ceed72f157c"
+      "fingerprint": "e53a46e32abaefb1"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "d185a47a28ea1849"
+      "fingerprint": "ebcdf378c1b17bc6"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "da16f5a72ba44bc0"
+      "fingerprint": "f7674d7898065886"
     },
     {
       "file_path": "plugins/sources/azure_blob_source.py",
-      "fingerprint": "f2c19314ae89425b"
+      "fingerprint": "feb5a61fc7ca0a29"
     },
     {
       "file_path": "plugins/sources/csv_source.py",
@@ -2497,23 +2497,23 @@
     },
     {
       "file_path": "plugins/sources/dataverse.py",
-      "fingerprint": "73ac857df0dec16c"
+      "fingerprint": "5e69d62057bf8bb7"
     },
     {
       "file_path": "plugins/sources/dataverse.py",
-      "fingerprint": "a6de065ae9935cf0"
+      "fingerprint": "b8ab7237d10474f3"
     },
     {
       "file_path": "plugins/sources/dataverse.py",
-      "fingerprint": "acf214d9e7215093"
+      "fingerprint": "b9db16c1b599becb"
     },
     {
       "file_path": "plugins/sources/dataverse.py",
-      "fingerprint": "cd7faa5198e23f5d"
+      "fingerprint": "d31e59f727e94dff"
     },
     {
       "file_path": "plugins/sources/dataverse.py",
-      "fingerprint": "f84901853ad15db3"
+      "fingerprint": "dfad59c5d97e602a"
     },
     {
       "file_path": "plugins/sources/json_source.py",
@@ -2729,67 +2729,67 @@
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "0bd99ec6e53f37a2"
+      "fingerprint": "0d2aed3487c1af1e"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "0ef1c94821c76429"
+      "fingerprint": "105415662cfb5727"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "27115059a84bc181"
+      "fingerprint": "1bdab2baa18ebf91"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "29a38c4de961d069"
+      "fingerprint": "370644a5de8d67bc"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "4b379c0b66c1a023"
+      "fingerprint": "38d5ff3269b552c1"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "51e0acc5a95e8493"
+      "fingerprint": "39582d22f72c6e98"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "60313f63b4713508"
+      "fingerprint": "5efb581a1e28002d"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "612b24d6d064765b"
+      "fingerprint": "7b698d8b603ae160"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "67863f345d369466"
+      "fingerprint": "8630299f053c4417"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "70d40b01a8856539"
+      "fingerprint": "9cb0b7a3835cf885"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "7950c35289b8ce1c"
+      "fingerprint": "aaf5f87f4f2b8410"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "80fb625453c4f0d1"
+      "fingerprint": "b03393d4fad891e2"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "b6a1876f221aa77a"
+      "fingerprint": "c29115772cd3b6ff"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "ca7e0427eeda92ca"
+      "fingerprint": "cf603f8e6515ac5a"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "d9b8b6d077cc3f2b"
+      "fingerprint": "e3c9353bf52e2735"
     },
     {
       "file_path": "plugins/transforms/llm/providers/openrouter.py",
-      "fingerprint": "edb02bc451a97b35"
+      "fingerprint": "e8bfc4f5de220a91"
     },
     {
       "file_path": "plugins/transforms/llm/templates.py",
@@ -2957,7 +2957,7 @@
     },
     {
       "file_path": "plugins/transforms/rag/config.py",
-      "fingerprint": "ab1b18358607f1ff"
+      "fingerprint": "8dcd5a41a5d0705b"
     },
     {
       "file_path": "plugins/transforms/rag/query.py",

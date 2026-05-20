@@ -508,10 +508,11 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 def _safe_database_descriptor(database_url: str) -> str:
     """Return a database URL descriptor safe enough for MCP-visible errors."""
     from sqlalchemy.engine.url import make_url
+    from sqlalchemy.exc import ArgumentError
 
     try:
         parsed = make_url(database_url)
-    except Exception:
+    except ArgumentError:
         return "<invalid database URL>"
 
     if parsed.drivername.startswith("sqlite"):
@@ -560,6 +561,17 @@ def _status_result(startup_failure: str | None) -> CallToolResult:
     )
 
 
+def _create_analyzer_or_startup_failure(
+    database_url: str,
+    *,
+    passphrase: str | None,
+) -> tuple[LandscapeAnalyzer | None, str | None]:
+    try:
+        return LandscapeAnalyzer(database_url, passphrase=passphrase), None
+    except SchemaCompatibilityError as exc:
+        return None, _format_schema_startup_failure(exc, database_url=database_url)
+
+
 def create_server(database_url: str, *, passphrase: str | None = None) -> Server:
     """Create MCP server with Landscape analysis tools.
 
@@ -570,12 +582,7 @@ def create_server(database_url: str, *, passphrase: str | None = None) -> Server
     Returns:
         Configured MCP Server
     """
-    startup_failure: str | None = None
-    analyzer: LandscapeAnalyzer | None = None
-    try:
-        analyzer = LandscapeAnalyzer(database_url, passphrase=passphrase)
-    except SchemaCompatibilityError as exc:
-        startup_failure = _format_schema_startup_failure(exc, database_url=database_url)
+    analyzer, startup_failure = _create_analyzer_or_startup_failure(database_url, passphrase=passphrase)
 
     server = Server("elspeth-landscape", instructions=startup_failure)
 

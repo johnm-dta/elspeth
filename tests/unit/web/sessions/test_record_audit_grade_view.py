@@ -53,7 +53,7 @@ def session_owned_by_alice(sessions_service: SessionServiceImpl) -> str:
     return session_id
 
 
-def _seed_user_assistant_tool_rows(test_client: TestClient) -> dict[str, str]:
+def _seed_user_assistant_tool_rows(test_client: TestClient, *, assistant_raw_content: str | None = None) -> dict[str, str]:
     session_id = str(uuid4())
     assistant_id = str(uuid4())
     now = datetime.now(UTC)
@@ -81,7 +81,7 @@ def _seed_user_assistant_tool_rows(test_client: TestClient) -> dict[str, str]:
                     "session_id": session_id,
                     "role": "assistant",
                     "content": "Calling a tool",
-                    "raw_content": None,
+                    "raw_content": assistant_raw_content,
                     "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_pipeline_state"}}],
                     "tool_call_id": None,
                     "sequence_no": 2,
@@ -204,6 +204,34 @@ async def test_endpoint_emits_audit_log_when_include_tool_rows_true(test_client:
 
 
 @pytest.mark.asyncio
+async def test_endpoint_emits_audit_log_when_include_llm_audit_true_without_tool_rows(test_client: TestClient) -> None:
+    seeded = _seed_user_assistant_tool_rows(test_client)
+
+    response = await _get(test_client, f"/api/sessions/{seeded['session_id']}/messages?include_llm_audit=true")
+
+    assert response.status_code == 200
+    sessions_service = test_client.app.state.session_service
+    rows = sessions_service.list_audit_access_log(session_id=seeded["session_id"])
+    assert len(rows) == 1
+    assert rows[0].query_args == {"include_llm_audit": "true"}
+
+
+@pytest.mark.asyncio
+async def test_endpoint_emits_audit_log_when_include_raw_content_true_without_tool_rows(test_client: TestClient) -> None:
+    seeded = _seed_user_assistant_tool_rows(test_client, assistant_raw_content="provider final prose")
+
+    response = await _get(test_client, f"/api/sessions/{seeded['session_id']}/messages?include_raw_content=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [message["raw_content"] for message in body] == [None, "provider final prose"]
+    sessions_service = test_client.app.state.session_service
+    rows = sessions_service.list_audit_access_log(session_id=seeded["session_id"])
+    assert len(rows) == 1
+    assert rows[0].query_args == {"include_raw_content": "true"}
+
+
+@pytest.mark.asyncio
 async def test_endpoint_does_not_emit_audit_log_when_include_tool_rows_false(test_client: TestClient) -> None:
     seeded = _seed_user_assistant_tool_rows(test_client)
 
@@ -234,6 +262,30 @@ async def test_endpoint_filters_unallowlisted_query_args_before_audit_writer(
 
 
 @pytest.mark.asyncio
+async def test_endpoint_records_combined_audit_grade_query_args(test_client: TestClient) -> None:
+    seeded = _seed_user_assistant_tool_rows(test_client)
+
+    response = await _get(
+        test_client,
+        (
+            f"/api/sessions/{seeded['session_id']}/messages?"
+            "include_tool_rows=true&include_llm_audit=true&include_raw_content=true&api_key=secret&limit=25"
+        ),
+    )
+
+    assert response.status_code == 200
+    sessions_service = test_client.app.state.session_service
+    rows = sessions_service.list_audit_access_log(session_id=seeded["session_id"])
+    assert len(rows) == 1
+    assert rows[0].query_args == {
+        "include_tool_rows": "true",
+        "include_llm_audit": "true",
+        "include_raw_content": "true",
+        "limit": "25",
+    }
+
+
+@pytest.mark.asyncio
 async def test_endpoint_fails_closed_when_audit_access_log_write_fails(
     test_client: TestClient,
     inject_audit_access_log_write_failure,
@@ -244,6 +296,27 @@ async def test_endpoint_fails_closed_when_audit_access_log_write_fails(
     test_client.raise_server_exceptions = False
 
     response = await _get(test_client, f"/api/sessions/{seeded['session_id']}/messages?include_tool_rows=true")
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body.get("error_type") == "audit_access_log_write_failed"
+    assert "messages" not in body
+    assert observed_value(sessions_service._telemetry.audit_access_log_write_failed_total) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("audit_query", ["include_llm_audit=true", "include_raw_content=true"])
+async def test_endpoint_fails_closed_when_audit_access_log_write_fails_for_non_tool_audit_views(
+    test_client: TestClient,
+    inject_audit_access_log_write_failure,
+    audit_query: str,
+) -> None:
+    seeded = _seed_user_assistant_tool_rows(test_client, assistant_raw_content="provider final prose")
+    sessions_service = test_client.app.state.session_service
+    inject_audit_access_log_write_failure(sessions_service)
+    test_client.raise_server_exceptions = False
+
+    response = await _get(test_client, f"/api/sessions/{seeded['session_id']}/messages?{audit_query}")
 
     assert response.status_code == 500
     body = response.json()

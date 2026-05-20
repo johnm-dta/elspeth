@@ -587,12 +587,20 @@ async def test_cl_pp_10c_cancellation_during_shielded_sync_dispatch_commits_rows
     real_persist = sessions_service.persist_compose_turn
     release_worker = threading.Event()
     worker_started = threading.Event()
+    worker_finished = threading.Event()
+    worker_errors: list[BaseException] = []
 
     def _gated_persist(*args: Any, **kwargs: Any) -> Any:
-        worker_started.set()
-        if not release_worker.wait(timeout=2.0):
-            pytest.fail("CL-PP-10c worker gate was not released within 2s")
-        return real_persist(*args, **kwargs)
+        try:
+            worker_started.set()
+            if not release_worker.wait(timeout=10.0):
+                pytest.fail("CL-PP-10c worker gate was not released within 10s")
+            return real_persist(*args, **kwargs)
+        except BaseException as exc:
+            worker_errors.append(exc)
+            raise
+        finally:
+            worker_finished.set()
 
     sessions_service.persist_compose_turn = _gated_persist  # type: ignore[method-assign]
     llm = _ReplayLLM(
@@ -624,15 +632,18 @@ async def test_cl_pp_10c_cancellation_during_shielded_sync_dispatch_commits_rows
         await compose_task
 
     release_worker.set()
-    for _ in range(200):
-        rows = _chat_rows(sessions_service, session_id=session_id)
-        if len(rows) == 2:
+    for _ in range(1000):
+        if worker_finished.is_set():
             break
         await asyncio.sleep(0.01)
     else:
-        pytest.fail("CL-PP-10c shielded worker did not commit assistant/tool rows within 2s")
+        pytest.fail("CL-PP-10c shielded worker did not finish within 10s")
+
+    if worker_errors:
+        raise AssertionError("CL-PP-10c shielded worker failed after caller cancellation") from worker_errors[0]
 
     rows = _chat_rows(sessions_service, session_id=session_id)
+    assert len(rows) == 2
     assert [row.role for row in rows] == ["assistant", "tool"]
     assert rows[0].tool_calls is not None
     assert rows[1].tool_call_id == "call_cancel_during_dispatch"

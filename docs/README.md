@@ -60,6 +60,7 @@ Tutorials and operator/developer how-to material.
 - [Telemetry Guide](guides/telemetry.md)
 - [Tier-2 Tracing](guides/tier2-tracing.md)
 - [Landscape MCP Analysis](guides/landscape-mcp-analysis.md)
+- [Clarion for Codex Agents](guides/clarion-for-codex-agents.md)
 - [Troubleshooting](guides/troubleshooting.md)
 - [Docker](guides/docker.md)
 

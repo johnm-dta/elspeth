@@ -261,23 +261,7 @@ docs/assets/*.pdf
 
 # Release PDF pipeline source is intentionally tracked; generated
 # outputs and bulky font source trees are not.
-# No its not - John M. 2024-06-03: The pipeline source is tracked, but the generated PDFs and font source trees are not. This allows us to keep the repository size manageable while still ensuring that the necessary files for reproducing the PDF builds are included.
-docs/release/pdf/*
-!docs/release/pdf/
-!docs/release/pdf/*.typ
-!docs/release/pdf/README.md
-!docs/release/pdf/Makefile
-!docs/release/pdf/build.sh
-!docs/release/pdf/versions.lock
-!docs/release/pdf/fonts/
-docs/release/pdf/fonts/*
-!docs/release/pdf/fonts/public-sans/
-docs/release/pdf/fonts/public-sans/*
-!docs/release/pdf/fonts/public-sans/LICENSE.md
-!docs/release/pdf/fonts/public-sans/OFL.txt
-!docs/release/pdf/fonts/public-sans/fonts/
-docs/release/pdf/fonts/public-sans/fonts/*
-!docs/release/pdf/fonts/public-sans/fonts/ttf/
-!docs/release/pdf/fonts/public-sans/fonts/ttf/*.ttf
-docs/release/pdf/out/
-docs/release/pdf/tokens.typ
+docs/release/*
+!docs/release/pdf/output/
+
+clarion

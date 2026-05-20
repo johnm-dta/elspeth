@@ -101,6 +101,16 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("preflight_results", "name"),
     ("preflight_results", "result_json"),
     ("preflight_results", "created_at"),
+    ("run_sources", "run_id"),
+    ("run_sources", "source_node_id"),
+    ("run_sources", "source_name"),
+    ("run_sources", "lifecycle_state"),
+    ("rows", "source_row_index"),
+    ("rows", "ingest_sequence"),
+    ("token_work_items", "work_item_id"),
+    ("token_work_items", "status"),
+    ("token_work_items", "available_at"),
+    ("token_work_items", "row_payload_json"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).

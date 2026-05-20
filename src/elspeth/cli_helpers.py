@@ -32,12 +32,14 @@ class PluginBundle:
 
     source: "SourceProtocol"
     source_settings: "SourceSettings"
+    sources: "Mapping[str, SourceProtocol]"
+    source_settings_map: "Mapping[str, SourceSettings]"
     transforms: "Sequence[WiredTransform]"
     sinks: "Mapping[str, SinkProtocol]"
     aggregations: "Mapping[str, tuple[TransformProtocol, AggregationSettings]]"
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "transforms", "sinks", "aggregations")
+        freeze_fields(self, "sources", "source_settings_map", "transforms", "sinks", "aggregations")
 
 
 def instantiate_plugins_from_config(
@@ -72,11 +74,23 @@ def instantiate_plugins_from_config(
     manager = get_shared_plugin_manager()
 
     with plugin_preflight_mode(preflight_mode):
-        # Instantiate source (raises on unknown plugin)
-        source_cls = manager.get_source_by_name(config.source.plugin)
-        source = source_cls(dict(config.source.options))
-        # Bridge: inject on_success from settings level (lifted from options)
-        source.on_success = config.source.on_success
+        source_settings_by_name = config.sources
+        if len(config.sources) == 1:
+            first_config_name = next(iter(config.sources))
+            if config.source != config.sources[first_config_name]:
+                source_settings_by_name = {first_config_name: config.source}
+
+        # Instantiate sources (raises on unknown plugin). ``source`` remains as
+        # a compatibility view of the first named source while ``sources`` is
+        # the canonical runtime shape.
+        sources = {}
+        for source_name, source_config in source_settings_by_name.items():
+            source_cls = manager.get_source_by_name(source_config.plugin)
+            source_instance = source_cls(dict(source_config.options))
+            # Bridge: inject on_success from settings level (lifted from options)
+            source_instance.on_success = source_config.on_success
+            sources[source_name] = source_instance
+        first_source_name = next(iter(sources))
 
         # Instantiate transforms
         transforms: list[WiredTransform] = []
@@ -120,8 +134,10 @@ def instantiate_plugins_from_config(
             sinks[sink_name]._on_write_failure = sink_config.on_write_failure
 
         bundle = PluginBundle(
-            source=source,
-            source_settings=config.source,
+            source=sources[first_source_name],
+            source_settings=source_settings_by_name[first_source_name],
+            sources=sources,
+            source_settings_map=source_settings_by_name,
             transforms=transforms,
             sinks=sinks,
             aggregations=aggregations,
@@ -318,11 +334,14 @@ def bootstrap_and_run(settings_path: Path) -> "RunResult":
     graph = ExecutionGraph.from_plugin_instances(
         source=plugins.source,
         source_settings=plugins.source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=execution_sinks,
         aggregations=plugins.aggregations,
         gates=list(config.gates),
         coalesce_settings=list(config.coalesce) if config.coalesce else None,
+        queues=config.queues,
     )
     graph.validate()
 

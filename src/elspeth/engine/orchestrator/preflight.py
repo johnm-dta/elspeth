@@ -62,6 +62,7 @@ if TYPE_CHECKING:
 def assemble_and_validate_pipeline_config(
     *,
     source: SourceProtocol,
+    sources: Mapping[str, SourceProtocol] | None = None,
     transforms: Sequence[WiredTransform],
     sinks: Mapping[str, SinkProtocol],
     aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]],
@@ -76,7 +77,8 @@ def assemble_and_validate_pipeline_config(
     ``src/elspeth/engine/orchestrator/core.py``.
 
     Args:
-        source: Instantiated source plugin.
+        source: Instantiated source plugin compatibility view.
+        sources: Named source plugin instances.
         transforms: Wired transforms from ``PluginBundle.transforms``.
         sinks: Sink instances keyed by name from ``PluginBundle.sinks``.
         aggregations: Aggregation transforms + settings keyed by aggregation
@@ -113,6 +115,7 @@ def assemble_and_validate_pipeline_config(
 
     pipeline_config = PipelineConfig(
         source=source,
+        sources=sources or {"source": source},
         transforms=all_transforms,
         sinks=sinks,
         config=resolve_config(settings),
@@ -137,10 +140,11 @@ def assemble_and_validate_pipeline_config(
         available_sinks=available_sinks,
     )
 
-    validate_source_quarantine_destination(
-        source=pipeline_config.source,
-        available_sinks=available_sinks,
-    )
+    for source_instance in pipeline_config.sources.values():
+        validate_source_quarantine_destination(
+            source=source_instance,
+            available_sinks=available_sinks,
+        )
 
     sink_validation_stubs = {name: SimpleNamespace(on_write_failure=sink._on_write_failure) for name, sink in pipeline_config.sinks.items()}
     sink_plugins = {name: sink.name for name, sink in pipeline_config.sinks.items()}

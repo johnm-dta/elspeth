@@ -513,6 +513,7 @@ export interface RunAccountingIntegrity {
 
 export interface RunAccounting {
   source: RunAccountingSource;
+  sources: Record<string, RunAccountingSource>;
   tokens: RunAccountingTokens;
   routing: RunAccountingRouting;
   integrity: RunAccountingIntegrity;

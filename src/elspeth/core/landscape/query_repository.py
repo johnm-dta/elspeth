@@ -86,7 +86,8 @@ class QueryRepository:
         Returns:
             List of Row models, ordered by row_index
         """
-        query = select(rows_table).where(rows_table.c.run_id == run_id).order_by(rows_table.c.row_index)
+        order_column = rows_table.c.ingest_sequence if "ingest_sequence" in rows_table.c else rows_table.c.row_index
+        query = select(rows_table).where(rows_table.c.run_id == run_id).order_by(order_column)
         db_rows = self._ops.execute_fetchall(query)
         return [self._row_loader.load(r) for r in db_rows]
 

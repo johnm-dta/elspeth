@@ -724,7 +724,7 @@ class TestElspethSettingsArchitecture:
 
         errors = exc_info.value.errors()
         missing_fields = {e["loc"][0] for e in errors if e["type"] == "missing"}
-        assert "source" in missing_fields
+        assert "sources" in missing_fields
         assert "sinks" in missing_fields
 
     def test_elspeth_settings_minimal_valid(self) -> None:
@@ -872,8 +872,8 @@ class TestResolveConfig:
         resolved = resolve_config(settings)
 
         assert isinstance(resolved, dict)
-        assert "source" in resolved
-        assert resolved["source"]["plugin"] == "csv"
+        assert "sources" in resolved
+        assert resolved["sources"]["source"]["plugin"] == "csv"
 
     def test_resolve_config_includes_defaults(self) -> None:
         """resolve_config includes default values for audit completeness."""
@@ -2117,9 +2117,9 @@ sinks:
         audit_config = resolve_config(settings)
 
         # API key should be removed in audit copy
-        assert "api_key" not in audit_config["source"]["options"]
+        assert "api_key" not in audit_config["sources"]["source"]["options"]
         # Should have a 64-char hex fingerprint
-        fingerprint = audit_config["source"]["options"].get("api_key_fingerprint")
+        fingerprint = audit_config["sources"]["source"]["options"].get("api_key_fingerprint")
         assert fingerprint is not None
         assert len(fingerprint) == 64
         assert all(c in "0123456789abcdef" for c in fingerprint)
@@ -2172,8 +2172,8 @@ sinks:
         settings = load_settings(config_file)
         audit_config = resolve_config(settings)
 
-        assert "token" not in audit_config["source"]["options"]
-        assert "token_fingerprint" in audit_config["source"]["options"]
+        assert "token" not in audit_config["sources"]["source"]["options"]
+        assert "token_fingerprint" in audit_config["sources"]["source"]["options"]
 
     def test_secret_suffix_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fields ending in _secret should be preserved for runtime."""
@@ -2223,8 +2223,8 @@ sinks:
         settings = load_settings(config_file)
         audit_config = resolve_config(settings)
 
-        assert "database_secret" not in audit_config["source"]["options"]
-        assert "database_secret_fingerprint" in audit_config["source"]["options"]
+        assert "database_secret" not in audit_config["sources"]["source"]["options"]
+        assert "database_secret_fingerprint" in audit_config["sources"]["source"]["options"]
 
     def test_sink_options_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Secret fields in sink options should be preserved for runtime."""

@@ -37,6 +37,7 @@ from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.schema import (
     preflight_results_table,
     run_attributions_table,
+    run_sources_table,
     runs_table,
     secret_resolutions_table,
 )
@@ -437,6 +438,59 @@ class RunLifecycleRepository:
             )
         except AuditIntegrityError:
             raise  # Preserve original error message from execute_update
+
+    def record_run_source(
+        self,
+        *,
+        run_id: str,
+        source_node_id: str,
+        source_name: str,
+        plugin_name: str,
+        config_hash: str,
+        lifecycle_state: str,
+        source_schema_json: str | None = None,
+        schema_contract: SchemaContract | None = None,
+        field_resolution_mapping: Mapping[str, str] | None = None,
+        normalization_version: str | None = None,
+    ) -> None:
+        """Record per-source run metadata keyed by source node.
+
+        Multi-source runs cannot honestly store schema, field resolution, or
+        lifecycle as run-level singleton columns. This table preserves the
+        configuration source name and source node identity for audit queries.
+        """
+        schema_contract_json: str | None = None
+        schema_contract_hash: str | None = None
+        if schema_contract is not None:
+            audit_record = ContractAuditRecord.from_contract(schema_contract)
+            schema_contract_json = audit_record.to_json()
+            schema_contract_hash = schema_contract.version_hash()
+
+        field_resolution_json: str | None = None
+        if field_resolution_mapping is not None:
+            field_resolution_json = canonical_json(
+                {
+                    "resolution_mapping": field_resolution_mapping,
+                    "normalization_version": normalization_version,
+                }
+            )
+
+        self._ops.execute_insert(
+            run_sources_table.insert().values(
+                run_id=run_id,
+                source_node_id=source_node_id,
+                source_name=source_name,
+                plugin_name=plugin_name,
+                config_hash=config_hash,
+                schema_json=source_schema_json,
+                schema_contract_json=schema_contract_json,
+                schema_contract_hash=schema_contract_hash,
+                field_resolution_json=field_resolution_json,
+                lifecycle_state=lifecycle_state,
+                recorded_at=now(),
+            ),
+            context="run_sources",
+        )
 
     def get_source_field_resolution(self, run_id: str) -> dict[str, str] | None:
         """Get source field resolution mapping for a run.

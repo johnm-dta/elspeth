@@ -207,6 +207,7 @@ function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run 
 function makeAccounting(overrides: Partial<RunAccounting> = {}): RunAccounting {
   return {
     source: { rows_processed: 1 },
+    sources: { source: { rows_processed: 1 } },
     tokens: {
       emitted: 9_324,
       terminal: 9_324,

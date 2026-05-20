@@ -72,6 +72,9 @@ class TokenManager:
         source_node_id: str,
         row_index: int,
         source_row: SourceRow,
+        *,
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
     ) -> TokenInfo:
         """Create a token for a source row.
 
@@ -105,6 +108,8 @@ class TokenManager:
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             data=pipeline_row.to_dict(),
         )
 
@@ -124,6 +129,8 @@ class TokenManager:
         row_index: int,
         source_row: SourceRow,
         *,
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
         validation_error_id: str | None = None,
     ) -> TokenInfo:
         """Create a token for a quarantined row.
@@ -177,6 +184,8 @@ class TokenManager:
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             data=pipeline_row.to_dict(),
             quarantined=True,
         )

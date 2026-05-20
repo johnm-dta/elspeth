@@ -14,7 +14,7 @@ from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import token_outcomes_table, tokens_table
+from elspeth.core.landscape.schema import run_sources_table, token_outcomes_table, tokens_table
 from elspeth.web.execution.accounting import (
     load_run_accounting_for_settings,
     load_run_accounting_from_db,
@@ -163,6 +163,75 @@ def test_one_source_row_expands_to_many_tokens_and_closes() -> None:
         assert accounting.integrity.closure == "closed"
         assert accounting.integrity.missing_terminal_outcomes == 0
         assert accounting.integrity.duplicate_terminal_outcomes == 0
+    finally:
+        db.close()
+
+
+def test_source_accounting_projects_named_sources_and_aggregate_total() -> None:
+    db = LandscapeDB.in_memory()
+    try:
+        factory = RecorderFactory(db)
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-multi")
+        for source_name, source_node_id in (("orders", "source-orders"), ("refunds", "source-refunds")):
+            factory.data_flow.register_node(
+                run_id="run-multi",
+                node_id=source_node_id,
+                plugin_name="csv",
+                node_type=NodeType.SOURCE,
+                plugin_version="1.0",
+                config={},
+                schema_config=_OBSERVED_SCHEMA,
+            )
+            with db.connection() as conn:
+                conn.execute(
+                    run_sources_table.insert().values(
+                        run_id="run-multi",
+                        source_node_id=source_node_id,
+                        source_name=source_name,
+                        plugin_name="csv",
+                        lifecycle_state="loaded",
+                        config_hash=f"hash-{source_name}",
+                        schema_json=None,
+                        schema_contract_json=None,
+                        schema_contract_hash=None,
+                        field_resolution_json=None,
+                        recorded_at=_NOW,
+                    )
+                )
+
+        factory.data_flow.create_row(
+            "run-multi",
+            "source-orders",
+            0,
+            {"id": "order-1"},
+            row_id="orders-0",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        factory.data_flow.create_row(
+            "run-multi",
+            "source-orders",
+            1,
+            {"id": "order-2"},
+            row_id="orders-1",
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+        factory.data_flow.create_row(
+            "run-multi",
+            "source-refunds",
+            2,
+            {"id": "refund-1"},
+            row_id="refunds-0",
+            source_row_index=0,
+            ingest_sequence=2,
+        )
+
+        accounting = load_run_accounting_from_db(db, landscape_run_id="run-multi")
+
+        assert accounting.source.rows_processed == 3
+        assert accounting.sources["orders"].rows_processed == 2
+        assert accounting.sources["refunds"].rows_processed == 1
     finally:
         db.close()
 

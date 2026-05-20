@@ -291,6 +291,7 @@ describe("InlineRunResults", () => {
           status: "completed",
           accounting: {
             source: { rows_processed: 3 },
+            sources: { source: { rows_processed: 3 } },
             tokens: {
               emitted: 3,
               terminal: 3,

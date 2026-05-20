@@ -434,11 +434,14 @@ def run(
         graph = ExecutionGraph.from_plugin_instances(
             source=plugins.source,
             source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=execution_sinks,
             aggregations=plugins.aggregations,
             gates=list(config.gates),
             coalesce_settings=list(config.coalesce) if config.coalesce else None,
+            queues=config.queues,
         )
         graph.validate()
     except GraphValidationError as e:
@@ -1195,11 +1198,14 @@ def validate(
         graph = ExecutionGraph.from_plugin_instances(
             source=plugins.source,
             source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=execution_sinks,
             aggregations=plugins.aggregations,
             gates=list(config.gates),
             coalesce_settings=list(config.coalesce) if config.coalesce else None,
+            queues=config.queues,
         )
         graph.validate()
     except GraphValidationError as e:
@@ -1575,11 +1581,14 @@ def _build_resume_graphs(
     validation_graph = ExecutionGraph.from_plugin_instances(
         source=plugins.source,
         source_settings=plugins.source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=plugins.sinks,
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
+        queues=settings_config.queues,
     )
     validation_graph.validate()
 
@@ -1598,6 +1607,7 @@ def _build_resume_graphs(
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
+        queues=settings_config.queues,
     )
     execution_graph.validate()
 

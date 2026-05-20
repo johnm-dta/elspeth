@@ -121,10 +121,8 @@ When a row forks to parallel paths:
 | Trigger | Behavior |
 |---------|----------|
 | Count | Fires when count threshold reached |
-| Timeout | Fires when next row arrives after timeout period* |
+| Timeout | Fires when timeout period elapses, including while the source is idle |
 | End-of-source | Always fires when source exhausted |
-
-*Known limitation: Timeout requires next row arrival. True idle timeout not supported without heartbeat.
 
 ### 2.5 Retry Semantics
 
@@ -273,9 +271,11 @@ ELSPETH records what external systems return, but cannot guarantee:
 
 ### 7.4 True Idle Timeouts
 
-Timeout triggers fire when the next row arrives, not during complete idle periods. If no rows arrive, buffered data waits for:
-- A new row (triggering timeout check)
-- Source completion (triggering end-of-source flush)
+Aggregation timeout triggers are polled while source iteration waits, so buffered
+aggregation batches can flush during complete source idle periods without
+requiring heartbeat rows. Coalesce timeouts are still checked when token flow
+reaches coalesce points or at source completion; they are not general background
+timers.
 
 ---
 

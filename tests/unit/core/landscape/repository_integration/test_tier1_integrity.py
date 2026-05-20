@@ -1,4 +1,4 @@
-# tests/integration/audit/test_tier1_integrity.py
+# tests/unit/core/landscape/repository_integration/test_tier1_integrity.py
 """Tier 1 audit integrity tests for RecorderFactory.
 
 Per the Three-Tier Trust Model, the audit database is FULL TRUST (Tier 1).

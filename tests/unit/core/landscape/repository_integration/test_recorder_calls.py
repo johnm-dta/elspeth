@@ -1,4 +1,4 @@
-# tests/core/landscape/test_recorder_calls.py
+# tests/unit/core/landscape/repository_integration/test_recorder_calls.py
 """Tests for external call recording API.
 
 Tests ExecutionRepository.record_call() and QueryRepository.get_calls() methods.

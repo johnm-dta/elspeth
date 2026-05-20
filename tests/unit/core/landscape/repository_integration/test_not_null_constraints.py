@@ -1,4 +1,4 @@
-# tests/integration/audit/test_not_null_constraints.py
+# tests/unit/core/landscape/repository_integration/test_not_null_constraints.py
 """Integration tests for Bug #7: Schema allows NULL on audit fields.
 
 These tests verify that audit-critical fields in the database schema

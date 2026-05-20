@@ -17,6 +17,7 @@ from unittest.mock import Mock
 
 import pytest
 import sqlalchemy as sa
+from tests.fixtures.landscape import make_recorder_with_run
 
 from elspeth.contracts import TokenInfo, TransformProtocol, TransformResult
 from elspeth.contracts.enums import OutputMode, TerminalOutcome, TerminalPath
@@ -27,7 +28,6 @@ from elspeth.core.config import AggregationSettings, TriggerConfig
 from elspeth.engine.processor import DAGTraversalContext, RowProcessor, _FlushContext
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_contract, make_token_info
-from tests.fixtures.landscape import make_recorder_with_run
 
 
 def _make_processor() -> RowProcessor:

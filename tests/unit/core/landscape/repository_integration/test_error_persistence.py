@@ -1,4 +1,4 @@
-# tests/integration/audit/test_error_persistence.py
+# tests/unit/core/landscape/repository_integration/test_error_persistence.py
 """Integration tests for error event persistence in landscape.
 
 Verifies that validation errors recorded through PluginContext are properly
@@ -9,6 +9,7 @@ SDA-029 implementation for validation error audit trail.
 from datetime import UTC
 
 from sqlalchemy import select
+from tests.fixtures.factories import make_context
 
 from elspeth.contracts.enums import NodeType
 from elspeth.contracts.results import SourceRow
@@ -22,7 +23,6 @@ from elspeth.core.landscape.schema import (
     validation_errors_table,
 )
 from elspeth.engine.tokens import TokenManager
-from tests.fixtures.factories import make_context
 
 # Shared schema config for tests
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})

@@ -1,4 +1,4 @@
-# tests/core/landscape/test_recorder_routing_events.py
+# tests/integration/audit/test_recorder_routing_events.py
 """Tests for RecorderFactory routing event operations."""
 
 from __future__ import annotations

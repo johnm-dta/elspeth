@@ -1,4 +1,4 @@
-# tests/integration/audit/test_recorder_artifacts.py
+# tests/unit/core/landscape/repository_integration/test_recorder_artifacts.py
 """Tests for RecorderFactory artifact operations."""
 
 from __future__ import annotations

@@ -1353,12 +1353,20 @@ async def test_persist_compose_turn_async_caller_cancellation_commits_anyway(ser
     real_persist = service.persist_compose_turn
     release = threading.Event()
     worker_started = threading.Event()
+    worker_finished = threading.Event()
+    worker_errors: list[BaseException] = []
 
     def gated_persist(*args, **kwargs):
-        worker_started.set()
-        if not release.wait(timeout=2.0):
-            pytest.fail("test never released the gated worker within 2s")
-        return real_persist(*args, **kwargs)
+        try:
+            worker_started.set()
+            if not release.wait(timeout=10.0):
+                pytest.fail("test never released the gated worker within 10s")
+            return real_persist(*args, **kwargs)
+        except BaseException as exc:
+            worker_errors.append(exc)
+            raise
+        finally:
+            worker_finished.set()
 
     # SessionServiceImpl is a plain class with no __slots__; bound-method
     # rebinding via attribute assignment is the standard test-time
@@ -1400,17 +1408,22 @@ async def test_persist_compose_turn_async_caller_cancellation_commits_anyway(ser
     # the cancel above only affected the awaiter.
     release.set()
 
-    # Wait until the shielded worker has finished. Polling is fine
-    # because the worker bridge has no public completion signal --
-    # the test only asserts the committed terminal state.
-    for _ in range(200):
-        with service._engine.begin() as conn:
-            count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_cancel'")).scalar()
-        if count == 2:  # assistant + tool
+    # Wait until the shielded worker has finished. The async bridge has
+    # no public completion handle after caller cancellation, so the test
+    # records the monkeypatched worker's terminal state directly.
+    for _ in range(1000):
+        if worker_finished.is_set():
             break
         await asyncio.sleep(0.01)
     else:
-        pytest.fail("shielded worker did not commit within 2s; commit-wins contract is not honoured by the current _run_sync bridge.")
+        pytest.fail("shielded worker did not finish within 10s; commit-wins contract is not honoured by the current _run_sync bridge.")
+
+    if worker_errors:
+        raise AssertionError("shielded worker failed after caller cancellation") from worker_errors[0]
+
+    with service._engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM chat_messages WHERE session_id='s_cancel'")).scalar()
+    assert count == 2  # assistant + tool
 
     # Counter MUST NOT have moved -- there was no IntegrityError, no
     # benign "fabricated Tier-1" event from the cancel path.

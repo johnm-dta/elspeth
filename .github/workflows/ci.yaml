@@ -64,6 +64,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
@@ -324,6 +327,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
@@ -396,6 +402,9 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
       - name: Install system dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |
@@ -453,6 +462,9 @@ jobs:
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
 
       - name: Install system dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
@@ -514,6 +526,9 @@ jobs:
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
 
       - name: Install system dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
@@ -588,6 +603,9 @@ jobs:
         uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
         with:
           version: ${{ env.UV_VERSION }}
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
 
       - name: Install system dependencies
         working-directory: ${{ env.CI_CHECKOUT_PATH }}

@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap, RowProcessorHandle
 
@@ -74,6 +74,28 @@ def _route_to_sink(
             f"Sink '{sink_name}' not in configured sinks. Available: {sorted(pending_tokens.keys())}. Token: {token}"
         )
     pending_tokens[sink_name].append((token, PendingOutcome(outcome=outcome, path=path, error_hash=error_hash)))
+
+
+def _mark_barrier_tokens_terminal(
+    processor: RowProcessorHandle,
+    *,
+    barrier_key: str,
+    consumed_tokens: tuple[TokenInfo, ...],
+) -> None:
+    """Reconcile a live coalesce merge with durable scheduler terminalization."""
+    token_ids = tuple(token.token_id for token in consumed_tokens)
+    if not token_ids:
+        raise AuditIntegrityError(f"Coalesce barrier {barrier_key!r} cannot terminalize scheduler work without live consumed token_ids.")
+    expected_count = len(frozenset(token_ids))
+    if expected_count != len(token_ids):
+        raise AuditIntegrityError(f"Coalesce barrier {barrier_key!r} consumed duplicate token_ids: {token_ids!r}")
+
+    terminalized_count = processor.mark_blocked_barrier_terminal(barrier_key, token_ids)
+    if expected_count and terminalized_count != expected_count:
+        raise AuditIntegrityError(
+            f"Coalesce barrier {barrier_key!r} live consumed {expected_count} token(s), "
+            f"but durable scheduler terminalized {terminalized_count}."
+        )
 
 
 def reconcile_sink_write_diversions(
@@ -409,6 +431,11 @@ def _process_merged_coalesce_outcome(
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
+    )
+    _mark_barrier_tokens_terminal(
+        processor,
+        barrier_key=str(coalesce_name),
+        consumed_tokens=tuple(outcome.consumed_tokens),
     )
     accumulate_row_outcomes(
         continuation_results,

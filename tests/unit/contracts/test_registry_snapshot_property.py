@@ -49,6 +49,8 @@ class _Payload(TypedDict):
 
 
 class _GeneratedViolation(DeclarationContractViolation):
+    """Test-only violation class matching generated property contracts."""
+
     payload_schema = _Payload
 
 

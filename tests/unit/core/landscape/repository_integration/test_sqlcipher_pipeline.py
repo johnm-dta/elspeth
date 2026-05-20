@@ -56,6 +56,8 @@ class TestPipelineWithSQLCipherLandscape:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"customer_id": "C001", "amount": 42.0},
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             # Complete the run

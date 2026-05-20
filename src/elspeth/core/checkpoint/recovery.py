@@ -10,6 +10,7 @@ The actual resume logic (Orchestrator.resume()) is implemented separately.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,7 @@ from elspeth.contracts import (
 from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
 from elspeth.core.checkpoint.serialization import checkpoint_loads
@@ -383,6 +385,99 @@ class RecoveryManager:
                 )
 
             result.append((row_id, row_index, row_data))
+
+        return result
+
+    def get_unprocessed_row_data_by_source(
+        self,
+        run_id: str,
+        payload_store: PayloadStore,
+        *,
+        source_schema_classes: Mapping[NodeID, type[PluginSchema]],
+    ) -> list[tuple[str, int, NodeID, dict[str, Any]]]:
+        """Get unprocessed row data with source-scoped type restoration.
+
+        Multi-source resume cannot validate every persisted payload through a
+        single source schema. Rows carry ``source_node_id`` in Landscape, and
+        this method uses that node identity to select the schema class that
+        originally ingested the row.
+        """
+        row_ids = self.get_unprocessed_rows(run_id)
+        if not row_ids:
+            return []
+
+        row_metadata: dict[str, tuple[int, int, NodeID, str | None]] = {}
+        with self._db.engine.connect() as conn:
+            for i in range(0, len(row_ids), _METADATA_CHUNK_SIZE):
+                chunk = row_ids[i : i + _METADATA_CHUNK_SIZE]
+                rows_result = conn.execute(
+                    select(
+                        rows_table.c.row_id,
+                        rows_table.c.row_index,
+                        rows_table.c.ingest_sequence,
+                        rows_table.c.source_node_id,
+                        rows_table.c.source_data_ref,
+                    ).where(rows_table.c.row_id.in_(chunk))
+                ).fetchall()
+                for r in rows_result:
+                    row_metadata[r.row_id] = (r.row_index, r.ingest_sequence, NodeID(r.source_node_id), r.source_data_ref)
+
+        ordered_row_ids = sorted(
+            row_ids,
+            key=lambda row_id: row_metadata[row_id][1] if row_id in row_metadata else -1,
+        )
+        result: list[tuple[str, int, NodeID, dict[str, Any]]] = []
+        for row_id in ordered_row_ids:
+            if row_id not in row_metadata:
+                raise AuditIntegrityError(f"Row {row_id} not found in database — audit data corruption (Tier 1 violation)")
+
+            row_index, _ingest_sequence, source_node_id, source_data_ref = row_metadata[row_id]
+            if source_node_id not in source_schema_classes:
+                raise AuditIntegrityError(
+                    f"Row {row_id} references source_node_id={source_node_id!r}, but resume has no schema class for that source. "
+                    "Per-source run_sources metadata is incomplete or corrupt."
+                )
+
+            if source_data_ref is None:
+                raise ValueError(
+                    f"Row {row_id} has no source_data_ref — row was recorded without "
+                    f"payload storage, so recovery cannot reconstruct its data. "
+                    f"Re-run the pipeline from scratch instead of resuming."
+                )
+
+            try:
+                payload_bytes = payload_store.retrieve(source_data_ref)
+            except PayloadNotFoundError as exc:
+                raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
+
+            try:
+                degraded_data = json.loads(payload_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise AuditIntegrityError(
+                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                    f"cannot decode persisted row data (Tier 1 violation). "
+                    f"Error: {exc}"
+                ) from exc
+
+            if not isinstance(degraded_data, dict):
+                raise AuditIntegrityError(
+                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                    f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
+                )
+
+            source_schema_class = source_schema_classes[source_node_id]
+            validated = source_schema_class.model_validate(degraded_data)
+            row_data = validated.to_row()
+            if degraded_data and not row_data:
+                raise ValueError(
+                    f"Resume failed for row {row_id}: Schema validation returned empty data "
+                    f"but source had {len(degraded_data)} fields. "
+                    f"Schema class '{source_schema_class.__name__}' appears to have no fields defined. "
+                    f"Cannot resume - this would silently discard all row data. "
+                    f"The source plugin's schema must declare fields matching the stored row structure."
+                )
+
+            result.append((row_id, row_index, source_node_id, row_data))
 
         return result
 

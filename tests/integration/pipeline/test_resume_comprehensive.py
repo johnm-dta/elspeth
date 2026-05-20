@@ -14,13 +14,14 @@ database checkpoint records. Using from_plugin_instances() would generate new
 UUIDs that wouldn't match stored checkpoints, breaking the resume flow.
 """
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import Determinism, NodeType, RoutingMode, RunStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts import Determinism, NodeType, ResumePoint, RoutingMode, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
@@ -33,6 +34,7 @@ from elspeth.core.landscape.schema import (
     edges_table,
     nodes_table,
     rows_table,
+    run_sources_table,
     runs_table,
     tokens_table,
 )
@@ -227,6 +229,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -356,6 +360,145 @@ class TestResumeComprehensive:
         with db.engine.connect() as conn:
             checkpoints_after = conn.execute(select(checkpoints_table).where(checkpoints_table.c.run_id == run_id)).fetchall()
         assert len(checkpoints_after) == 0, "Checkpoints should be deleted after successful completion"
+
+    def test_reconstruct_resume_state_restores_multi_source_rows_with_source_scoped_schemas(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Production resume reconstruction uses run_sources schema/contract per row source."""
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        run_id = "resume-multi-source-schema-test"
+        now = datetime.now(UTC)
+        orders_schema_json = json.dumps({"properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]})
+        refunds_schema_json = json.dumps({"properties": {"refund_id": {"type": "string"}}, "required": ["refund_id"]})
+        orders_contract_json, orders_contract_hash = self._create_schema_contract([("order_id", int)])
+        refunds_contract_json, refunds_contract_hash = self._create_schema_contract([("refund_id", str)])
+
+        graph = ExecutionGraph()
+        graph.add_node("source-orders", node_type=NodeType.SOURCE, plugin_name="null", config={"source_name": "orders"})
+        graph.add_node("source-refunds", node_type=NodeType.SOURCE, plugin_name="null", config={"source_name": "refunds"})
+        graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json", config={"schema": {"mode": "observed"}})
+        graph.add_edge("source-orders", "sink", label="continue")
+        graph.add_edge("source-refunds", "sink", label="continue")
+
+        with db.engine.begin() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="test",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status=RunStatus.FAILED,
+                    source_schema_json=json.dumps({"properties": {}, "required": []}),
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
+                )
+            )
+            for node_id, plugin_name, node_type in [
+                ("source-orders", "null", NodeType.SOURCE),
+                ("source-refunds", "null", NodeType.SOURCE),
+                ("sink", "json", NodeType.SINK),
+            ]:
+                conn.execute(
+                    nodes_table.insert().values(
+                        node_id=node_id,
+                        run_id=run_id,
+                        plugin_name=plugin_name,
+                        node_type=node_type,
+                        plugin_version="1.0.0",
+                        determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
+                        config_hash="test",
+                        config_json="{}",
+                        registered_at=now,
+                    )
+                )
+            for source_node_id, source_name, schema_json, contract_json, contract_hash in [
+                ("source-orders", "orders", orders_schema_json, orders_contract_json, orders_contract_hash),
+                ("source-refunds", "refunds", refunds_schema_json, refunds_contract_json, refunds_contract_hash),
+            ]:
+                conn.execute(
+                    run_sources_table.insert().values(
+                        run_id=run_id,
+                        source_node_id=source_node_id,
+                        source_name=source_name,
+                        plugin_name="null",
+                        lifecycle_state="loaded",
+                        config_hash="test",
+                        schema_json=schema_json,
+                        schema_contract_json=contract_json,
+                        schema_contract_hash=contract_hash,
+                        recorded_at=now,
+                    )
+                )
+            for edge_id, from_node in [("e-orders", "source-orders"), ("e-refunds", "source-refunds")]:
+                conn.execute(
+                    edges_table.insert().values(
+                        edge_id=edge_id,
+                        run_id=run_id,
+                        from_node_id=from_node,
+                        to_node_id="sink",
+                        label="continue",
+                        default_mode=RoutingMode.MOVE,
+                        created_at=now,
+                    )
+                )
+            for row_id, source_node_id, row_index, source_row_index, ingest_sequence, row_data in [
+                ("row-orders", "source-orders", 0, 0, 0, {"order_id": "101"}),
+                ("row-refunds", "source-refunds", 1, 0, 1, {"refund_id": "r-7"}),
+            ]:
+                ref = payload_store.store(json.dumps(row_data).encode())
+                conn.execute(
+                    rows_table.insert().values(
+                        row_id=row_id,
+                        run_id=run_id,
+                        source_node_id=source_node_id,
+                        row_index=row_index,
+                        source_row_index=source_row_index,
+                        ingest_sequence=ingest_sequence,
+                        source_data_hash=f"h-{row_id}",
+                        source_data_ref=ref,
+                        created_at=now,
+                    )
+                )
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="tok-multi-source",
+                    row_id="row-orders",
+                    run_id=run_id,
+                    created_at=now,
+                )
+            )
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="tok-multi-source",
+            node_id="sink",
+            sequence_number=1,
+            graph=graph,
+        )
+        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
+        assert checkpoint is not None
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+
+        state = orchestrator._reconstruct_resume_state(
+            ResumePoint(
+                checkpoint=checkpoint,
+                token_id=checkpoint.token_id,
+                node_id=checkpoint.node_id,
+                sequence_number=checkpoint.sequence_number,
+            ),
+            payload_store,
+        )
+
+        assert state.unprocessed_rows == (
+            ("row-orders", 0, NodeID("source-orders"), {"order_id": 101}),
+            ("row-refunds", 1, NodeID("source-refunds"), {"refund_id": "r-7"}),
+        )
+        assert state.schema_contracts_by_source[NodeID("source-orders")].version_hash() == orders_contract_hash
+        assert state.schema_contracts_by_source[NodeID("source-refunds")].version_hash() == refunds_contract_hash
 
     def test_resume_early_exit_path_no_remaining_rows(
         self,
@@ -598,6 +741,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -820,6 +965,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -1027,6 +1174,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -1236,6 +1385,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -1434,6 +1585,8 @@ class TestResumeComprehensive:
                     run_id=run_id,
                     source_node_id="src",
                     row_index=0,
+                    source_row_index=0,
+                    ingest_sequence=0,
                     source_data_hash="h0",
                     source_data_ref=ref,
                     created_at=now,

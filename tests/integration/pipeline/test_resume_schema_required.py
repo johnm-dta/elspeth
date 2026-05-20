@@ -149,6 +149,8 @@ class TestResumeSchemaRequired:
             source_node_id="source",
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 

@@ -108,6 +108,8 @@ class TestRowProcessorPipelineRow:
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Should have created a row and token via data_flow repository
@@ -142,6 +144,8 @@ class TestRowProcessorPipelineRow:
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Single-token no-transform path should produce exactly one terminal result.

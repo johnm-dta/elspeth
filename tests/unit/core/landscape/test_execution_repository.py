@@ -130,7 +130,7 @@ def _make_repo_with_token(
 ) -> tuple[LandscapeDB, ExecutionRepository, RecorderFactory, str]:
     """Create repo with a token ready for processing."""
     db, repo, factory = _make_repo(run_id=run_id, payload_store=payload_store)
-    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
     return db, repo, factory, "tok-1"
 
@@ -804,7 +804,7 @@ class TestRetryBatch:
     def test_retry_batch_keeps_lineages_distinct_for_multiple_failed_batches(self) -> None:
         """Failed batches on the same aggregation node must not share one retry row."""
         _db, repo, fac, tok = _make_repo_with_token()
-        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2")
+        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         fac.data_flow.create_token("row-2", token_id="tok-2")
 
         batch_a = repo.create_batch("run-1", "agg-1", batch_id="batch-a")

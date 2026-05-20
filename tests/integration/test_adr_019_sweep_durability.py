@@ -62,6 +62,8 @@ def _plant_orphan_fork_parent(
         source_node_id=source.node_id,
         row_index=row_index,
         data={"planted": True},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     factory.data_flow.record_token_outcome(
@@ -102,6 +104,8 @@ def _plant_orphan_batch_consumed(
         source_node_id=source.node_id,
         row_index=row_index,
         data={"planted_i1b": True},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     batch_id = f"batch_durability_{row_index}"
@@ -304,6 +308,8 @@ def _setup_adr019_failed_resume_run(
                     run_id=run_id,
                     source_node_id=source_nid,
                     row_index=i,
+                    source_row_index=i,
+                    ingest_sequence=i,
                     source_data_hash=f"h{i}",
                     source_data_ref=ref,
                     created_at=now,
@@ -482,6 +488,8 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
             source_node_id=source_id,
             row_index=700 if kind == "I1c" else 701,
             data={"corrupt": kind},
+            source_row_index=700 if kind == "I1c" else 701,
+            ingest_sequence=700 if kind == "I1c" else 701,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         captured["token_id"] = token.token_id

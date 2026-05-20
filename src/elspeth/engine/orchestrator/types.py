@@ -82,6 +82,18 @@ class RowProcessorHandle(Protocol):
     def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
+    def active_scheduled_row_ids(self) -> frozenset[str]:
+        """Return row IDs represented by active durable scheduler work."""
+        ...
+
+    def summarize_scheduled_work(self) -> tuple[str, ...]:
+        """Return grouped active scheduler work for invariant diagnostics."""
+        ...
+
+    def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
+        """Mark durable scheduler work consumed by a barrier as terminal."""
+        ...
+
     def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
         raise NotImplementedError
 
@@ -521,7 +533,7 @@ class ResumeState:
     run_id: str
     restored_aggregation_state: Mapping[str, AggregationCheckpointState]
     restored_coalesce_state: CoalesceCheckpointState | None
-    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]]
+    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]]
     schema_contract: SchemaContract
     # F1 fix: incomplete child tokens grouped by row_id — used by the resume loop
     # to dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
@@ -529,6 +541,7 @@ class ResumeState:
     incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
     # RecoveryManager needed by resume loop for reconstruct_token_row.
     recovery_manager: RecoveryManager
+    schema_contracts_by_source: Mapping[NodeID, SchemaContract] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # incomplete_by_row is a dict[str, list[IncompleteTokenSpec]] of frozen specs;
@@ -536,7 +549,7 @@ class ResumeState:
         # The resume loop consumes it via membership (`row_id in incomplete_by_row`) and
         # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
         # recovery_manager is a live service object (not a container) — NOT frozen here.
-        freeze_fields(self, "restored_aggregation_state", "incomplete_by_row")
+        freeze_fields(self, "restored_aggregation_state", "incomplete_by_row", "schema_contracts_by_source")
         # unprocessed_rows contains raw row dicts that PipelineRow expects as
         # plain dict — deep_freeze would convert them to MappingProxyType.
         if not isinstance(self.unprocessed_rows, tuple):

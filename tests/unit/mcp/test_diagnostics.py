@@ -55,6 +55,8 @@ def _create_completed_run_with_quarantine(
         source_node_id=f"source-{run_id}",
         row_index=0,
         data={"col": "bad-value"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = factory.data_flow.create_token(row.row_id)
     factory.data_flow.record_token_outcome(

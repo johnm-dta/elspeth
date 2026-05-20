@@ -46,8 +46,12 @@ def _seed_diagnostics_run(db: LandscapeDB, tmp_path, *, web_run_id: str = "web-r
     _register_node(factory, web_run_id, "extract", NodeType.TRANSFORM, "llm_extract")
     _register_node(factory, web_run_id, "json_out", NodeType.SINK, "json")
 
-    first_row = factory.data_flow.create_row(web_run_id, "source", 0, {"html": "<h1>A</h1>"}, row_id="row-0")
-    second_row = factory.data_flow.create_row(web_run_id, "source", 1, {"html": "<h1>B</h1>"}, row_id="row-1")
+    first_row = factory.data_flow.create_row(
+        web_run_id, "source", 0, {"html": "<h1>A</h1>"}, row_id="row-0", source_row_index=0, ingest_sequence=0
+    )
+    second_row = factory.data_flow.create_row(
+        web_run_id, "source", 1, {"html": "<h1>B</h1>"}, row_id="row-1", source_row_index=1, ingest_sequence=1
+    )
     first_token = factory.data_flow.create_token(first_row.row_id, token_id="token-0")
     second_token = factory.data_flow.create_token(second_row.row_id, token_id="token-1")
 

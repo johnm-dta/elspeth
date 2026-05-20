@@ -41,8 +41,8 @@ def _step(job: dict[str, Any], step_name: str) -> dict[str, Any]:
     raise AssertionError(f"Missing CI step {step_name!r}")
 
 
-def test_python_matrix_ci_uses_xdist_for_remote_test_runtime() -> None:
-    """Remote Python test lanes must leave xdist available instead of disabling it."""
+def test_python_matrix_ci_does_not_hard_disable_xdist() -> None:
+    """Remote Python test lanes must leave xdist available instead of forcing ``-n0``."""
     workflow = _ci_workflow()
     test_job = workflow["jobs"]["test"]
 
@@ -167,9 +167,9 @@ def test_integration_job_runs_on_rc_branch_pushes() -> None:
     assert "startsWith(github.ref, 'refs/heads/RC')" in condition
 
 
-def test_xdist_auto_defaults_to_parallel_in_ci_controller(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CI controllers should get the same xdist default as local runs."""
-    monkeypatch.setenv("CI", "true")
+def test_xdist_auto_defaults_to_parallel_locally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local pytest runs default to xdist when no process count is explicit."""
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     config = SimpleNamespace(option=SimpleNamespace(numprocesses=None))
 
@@ -178,20 +178,20 @@ def test_xdist_auto_defaults_to_parallel_in_ci_controller(monkeypatch: pytest.Mo
     assert config.option.numprocesses == "auto"
 
 
-def test_xdist_auto_preserves_explicit_process_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Explicit pytest ``-n`` choices remain authoritative."""
-    monkeypatch.setenv("CI", "true")
+def test_xdist_auto_noops_in_ci(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI controllers stay sequential for clearer failure output."""
+    monkeypatch.setenv("CI", "1")
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
-    config = SimpleNamespace(option=SimpleNamespace(numprocesses=0))
+    config = SimpleNamespace(option=SimpleNamespace(numprocesses=None))
 
     pytest_cmdline_main(config)  # type: ignore[arg-type]
 
-    assert config.option.numprocesses == 0
+    assert config.option.numprocesses is None
 
 
 def test_xdist_auto_stays_sequential_for_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
     """Coverage jobs stay sequential because pytest-cov owns worker coordination."""
-    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     config = SimpleNamespace(option=SimpleNamespace(cov_source=["src/elspeth"], numprocesses=None))
 
@@ -202,13 +202,24 @@ def test_xdist_auto_stays_sequential_for_coverage(monkeypatch: pytest.MonkeyPatc
 
 def test_xdist_auto_noops_inside_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """Workers must not recursively auto-enable xdist."""
-    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
     config = SimpleNamespace(option=SimpleNamespace(numprocesses=None))
 
     pytest_cmdline_main(config)  # type: ignore[arg-type]
 
     assert config.option.numprocesses is None
+
+
+def test_xdist_auto_preserves_explicit_process_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit pytest ``-n`` choices remain authoritative."""
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+    config = SimpleNamespace(option=SimpleNamespace(numprocesses=4))
+
+    pytest_cmdline_main(config)  # type: ignore[arg-type]
+
+    assert config.option.numprocesses == 4
 
 
 def test_postgres_testcontainer_ci_stays_sequential() -> None:

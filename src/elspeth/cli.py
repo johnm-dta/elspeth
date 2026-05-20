@@ -897,11 +897,13 @@ def _orchestrator_context(
     # Build PipelineConfig
     pipeline_config = _PipelineConfig(
         source=source,
+        sources=plugins.sources,
         transforms=transforms,
         sinks=sinks,
         config=resolve_config(config),
         gates=list(config.gates),
         aggregation_settings=aggregation_settings,
+        coalesce_settings=(list(config.coalesce) if config.coalesce else []),
     )
 
     # EventBus + formatters. Programmatic dependency execution uses the

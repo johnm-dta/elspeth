@@ -222,6 +222,8 @@ class TestTokenOutcomeContractProperties:
             source_node_id=source_node_id,
             row_index=0,
             data={"value": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         return db, factory, run_id, token.token_id
@@ -480,6 +482,8 @@ class TestReferentialIntegrityProperties:
                     source_node_id=source.node_id,
                     row_index=i,
                     data={"i": i},
+                    source_row_index=i,
+                    ingest_sequence=i,
                 )
                 factory.data_flow.create_token(row_id=row.row_id)
 
@@ -519,6 +523,8 @@ class TestReferentialIntegrityProperties:
                     source_node_id=source.node_id,
                     row_index=i,
                     data={"i": i},
+                    source_row_index=i,
+                    ingest_sequence=i,
                 )
 
             # Verify no orphan rows
@@ -556,6 +562,8 @@ class TestReferentialIntegrityProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -591,6 +599,8 @@ class TestReferentialIntegrityProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -624,6 +634,8 @@ class TestReferentialIntegrityProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -719,12 +731,16 @@ class TestRowHashProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data=data,
+                source_row_index=0,
+                ingest_sequence=0,
             )
             row2 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=1,
                 data=data,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
             assert row1.source_data_hash == row2.source_data_hash
@@ -756,12 +772,16 @@ class TestRowHashProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data=data1,
+                source_row_index=0,
+                ingest_sequence=0,
             )
             row2 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=1,
                 data=data2,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
             assert row1.source_data_hash != row2.source_data_hash

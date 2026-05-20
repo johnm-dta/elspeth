@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from elspeth.contracts import (
     ContractAuditRecord,
     ExportStatus,
+    NodeType,
     ReproducibilityGrade,
     Run,
     RunStatus,
@@ -35,6 +37,7 @@ from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.schema import (
+    nodes_table,
     preflight_results_table,
     run_attributions_table,
     run_sources_table,
@@ -44,6 +47,16 @@ from elspeth.core.landscape.schema import (
 
 if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
+
+
+@dataclass(frozen=True, slots=True)
+class RunSourceResumeRecord:
+    """Per-source audit metadata required to replay rows during resume."""
+
+    source_node_id: str
+    source_name: str
+    source_schema_json: str
+    schema_contract: SchemaContract
 
 
 # Phase 2.2 (elspeth-0de989c56d): COMPLETED_WITH_FAILURES and EMPTY join the
@@ -459,6 +472,20 @@ class RunLifecycleRepository:
         lifecycle as run-level singleton columns. This table preserves the
         configuration source name and source node identity for audit queries.
         """
+        source_node = self._ops.execute_fetchone(
+            select(nodes_table.c.node_type).where(nodes_table.c.run_id == run_id).where(nodes_table.c.node_id == source_node_id)
+        )
+        if source_node is None:
+            raise AuditIntegrityError(
+                f"run_sources source_node_id={source_node_id!r} does not exist for run_id={run_id!r}; "
+                "per-source resume metadata must reference a registered graph node."
+            )
+        if source_node.node_type != NodeType.SOURCE.value:
+            raise AuditIntegrityError(
+                f"run_sources source_node_id={source_node_id!r} for run_id={run_id!r} references "
+                f"node_type={source_node.node_type!r}; expected {NodeType.SOURCE.value!r}."
+            )
+
         schema_contract_json: str | None = None
         schema_contract_hash: str | None = None
         if schema_contract is not None:
@@ -475,22 +502,87 @@ class RunLifecycleRepository:
                 }
             )
 
-        self._ops.execute_insert(
-            run_sources_table.insert().values(
-                run_id=run_id,
-                source_node_id=source_node_id,
-                source_name=source_name,
-                plugin_name=plugin_name,
-                config_hash=config_hash,
-                schema_json=source_schema_json,
-                schema_contract_json=schema_contract_json,
-                schema_contract_hash=schema_contract_hash,
-                field_resolution_json=field_resolution_json,
-                lifecycle_state=lifecycle_state,
-                recorded_at=now(),
-            ),
+        values = {
+            "source_name": source_name,
+            "plugin_name": plugin_name,
+            "config_hash": config_hash,
+            "schema_json": source_schema_json,
+            "schema_contract_json": schema_contract_json,
+            "schema_contract_hash": schema_contract_hash,
+            "field_resolution_json": field_resolution_json,
+            "lifecycle_state": lifecycle_state,
+            "recorded_at": now(),
+        }
+        existing = self._ops.execute_fetchone(
+            select(run_sources_table.c.source_node_id)
+            .where(run_sources_table.c.run_id == run_id)
+            .where(run_sources_table.c.source_node_id == source_node_id)
+        )
+        if existing is None:
+            self._ops.execute_insert(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    **values,
+                ),
+                context="run_sources",
+            )
+            return
+
+        self._ops.execute_update(
+            run_sources_table.update()
+            .where(run_sources_table.c.run_id == run_id)
+            .where(run_sources_table.c.source_node_id == source_node_id)
+            .values(**values),
             context="run_sources",
         )
+
+    def get_run_source_resume_records(self, run_id: str) -> dict[str, RunSourceResumeRecord]:
+        """Return per-source schema and contract records for resume.
+
+        The returned mapping is keyed by ``source_node_id`` because rows carry
+        source-node identity. Missing schema or contract data is audit
+        corruption for resume: replaying rows without it would either lose type
+        fidelity or apply the wrong schema contract.
+        """
+        rows = self._ops.execute_fetchall(
+            select(
+                run_sources_table.c.source_node_id,
+                run_sources_table.c.source_name,
+                run_sources_table.c.schema_json,
+                run_sources_table.c.schema_contract_json,
+                run_sources_table.c.schema_contract_hash,
+            ).where(run_sources_table.c.run_id == run_id)
+        )
+        records: dict[str, RunSourceResumeRecord] = {}
+        for row in rows:
+            if row.schema_json is None:
+                raise AuditIntegrityError(
+                    f"Run {run_id} source {row.source_name!r} ({row.source_node_id}) has no source schema stored. "
+                    "Resume cannot preserve type fidelity without per-source schema JSON."
+                )
+            if row.schema_contract_json is None:
+                raise AuditIntegrityError(
+                    f"Run {run_id} source {row.source_name!r} ({row.source_node_id}) has no schema contract stored. "
+                    "Resume cannot safely wrap rows without the source-scoped contract."
+                )
+            if row.schema_contract_hash is None:
+                raise AuditIntegrityError(
+                    f"Run {run_id} source {row.source_name!r} ({row.source_node_id}) has contract JSON but no contract hash."
+                )
+            contract = ContractAuditRecord.from_json(row.schema_contract_json).to_schema_contract()
+            if contract.version_hash() != row.schema_contract_hash:
+                raise AuditIntegrityError(
+                    f"Run {run_id} source {row.source_name!r} ({row.source_node_id}) contract hash mismatch. "
+                    f"Expected {row.schema_contract_hash}, got {contract.version_hash()}."
+                )
+            records[row.source_node_id] = RunSourceResumeRecord(
+                source_node_id=row.source_node_id,
+                source_name=row.source_name,
+                source_schema_json=row.schema_json,
+                schema_contract=contract,
+            )
+        return records
 
     def get_source_field_resolution(self, run_id: str) -> dict[str, str] | None:
         """Get source field resolution mapping for a run.

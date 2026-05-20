@@ -22,30 +22,11 @@ from jinja2 import TemplateSyntaxError, UndefinedError
 from jinja2.exceptions import SecurityError
 
 from elspeth.contracts.errors import TransformErrorReason
+from elspeth.core.regex_worker import run_regex_worker
 from elspeth.plugins.infrastructure.templates import (
     TemplateError,
     create_sandboxed_environment,
 )
-
-
-def _regex_worker(
-    pattern: re.Pattern[str],
-    text: str,
-) -> tuple[bool, str | None, str | None]:
-    """Run regex search in a worker process and return picklable result.
-
-    Returns a 3-tuple: (matched: bool, group0: str | None, group1: str | None).
-    re.Match objects are not picklable, so we extract the data before returning.
-
-    This is a module-level function (not a method or closure) to ensure it is
-    picklable across process boundaries — required by ProcessPoolExecutor.
-    """
-    match = pattern.search(text)
-    if match is None:
-        return (False, None, None)
-    g0 = match.group(0)
-    g1 = match.group(1) if pattern.groups else None
-    return (True, g0, g1)
 
 
 @dataclass(frozen=True)
@@ -151,7 +132,7 @@ class QueryBuilder:
         assert self._compiled_pattern is not None  # guaranteed by build() guard
         assert self._regex_pool is not None  # created when pattern is compiled
 
-        future = self._regex_pool.submit(_regex_worker, self._compiled_pattern, extracted)
+        future = self._regex_pool.submit(run_regex_worker, self._compiled_pattern, extracted)
         try:
             matched, group0, group1 = future.result(timeout=self._regex_timeout)
         except FuturesTimeoutError:
@@ -171,9 +152,10 @@ class QueryBuilder:
             self._regex_pool = ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn"))
             return QueryResult(
                 error=TransformErrorReason(
-                    reason="no_regex_match",
+                    reason="regex_timeout",
                     field=self._query_field,
-                    cause="regex_timeout",
+                    pattern=self._compiled_pattern.pattern,
+                    max_seconds=self._regex_timeout,
                 )
             )
         except TypeError as exc:

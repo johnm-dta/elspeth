@@ -87,7 +87,7 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
             raise ValueError(f"Unknown node_type '{node_type}' for node '{node['id']}'.")
 
     sources = state_dict["sources"]
-    if len(sources) > 1:
+    if len(sources) > 1 or (len(sources) == 1 and "source" not in sources):
         doc["sources"] = {name: _source_entry(source) for name, source in sources.items()}
     else:
         # Legacy single-source YAML remains canonical for one source so existing

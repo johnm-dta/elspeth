@@ -225,6 +225,8 @@ def setup_checkpoint_prerequisites(
                 run_id=run_id,
                 source_node_id="source",
                 row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash="data-hash",
                 created_at=now,
             )

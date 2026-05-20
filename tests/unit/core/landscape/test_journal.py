@@ -817,6 +817,8 @@ class TestPayloadEnrichmentProductionPath:
             source_node_id=node.node_id,
             row_index=0,
             data={"input": "test"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(

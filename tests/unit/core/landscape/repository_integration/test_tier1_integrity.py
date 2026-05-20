@@ -132,6 +132,8 @@ class TestRecorderCrashesOnInvalidEnums:
             source_node_id=source.node_id,
             row_index=0,
             data={"x": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = landscape_factory.data_flow.create_token(row.row_id)
 
@@ -266,6 +268,8 @@ class TestRecorderCrashesOnWrongTypes:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"bad": {1, 2, 3}},  # Sets are not JSON-serializable
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
 
@@ -350,6 +354,8 @@ class TestRecorderPositiveAuditIntegrity:
             source_node_id=source.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Verify returned object
@@ -379,6 +385,8 @@ class TestRecorderPositiveAuditIntegrity:
             source_node_id=source.node_id,
             row_index=0,
             data={"x": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Run timestamp
@@ -465,6 +473,8 @@ class TestRecorderHashIntegrity:
             source_node_id=source.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         expected_hash = stable_hash(data)

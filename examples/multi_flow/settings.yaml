@@ -1,0 +1,63 @@
+# Multi-flow example
+#
+# Two named sources publish different connection names and flow through separate
+# transforms to separate sinks inside the same run.
+
+sources:
+  signups:
+    plugin: csv
+    on_success: signup_rows
+    options:
+      path: examples/multi_flow/input/signups.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
+  tickets:
+    plugin: csv
+    on_success: ticket_rows
+    options:
+      path: examples/multi_flow/input/tickets.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
+
+transforms:
+- name: normalize_signups
+  plugin: passthrough
+  input: signup_rows
+  on_success: signup_events
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+- name: normalize_tickets
+  plugin: passthrough
+  input: ticket_rows
+  on_success: ticket_events
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+
+sinks:
+  signup_events:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/multi_flow/output/signups.jsonl
+      format: jsonl
+      collision_policy: auto_increment
+      schema:
+        mode: observed
+  ticket_events:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/multi_flow/output/tickets.jsonl
+      format: jsonl
+      collision_policy: auto_increment
+      schema:
+        mode: observed
+
+landscape:
+  url: sqlite:///examples/multi_flow/runs/audit.db

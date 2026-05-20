@@ -62,6 +62,8 @@ class TestRecorderFactoryBatches:
             source_node_id=agg_node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -137,6 +139,8 @@ class TestRecorderFactoryBatches:
                 source_node_id=agg_node.node_id,
                 row_index=i,
                 data={"idx": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             factory.execution.add_batch_member(
@@ -371,6 +375,8 @@ class TestBatchRetry:
             source_node_id=source.node_id,
             row_index=0,
             data={"id": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token1 = factory.data_flow.create_token(row_id=row.row_id)
         token2 = factory.data_flow.create_token(row_id=row.row_id)

@@ -184,6 +184,8 @@ class RowLoader:
             run_id=row.run_id,
             source_node_id=row.source_node_id,
             row_index=row.row_index,
+            source_row_index=row.source_row_index,
+            ingest_sequence=row.ingest_sequence,
             source_data_hash=row.source_data_hash,
             created_at=row.created_at,
             source_data_ref=row.source_data_ref,

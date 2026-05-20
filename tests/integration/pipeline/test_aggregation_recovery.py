@@ -114,6 +114,8 @@ class TestAggregationRecoveryIntegration:
                 source_node_id="source",
                 row_index=i,
                 data={"id": i, "value": i * 100},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
@@ -242,6 +244,8 @@ class TestAggregationRecoveryIntegration:
                 source_node_id="source",
                 row_index=i,
                 data={"id": i, "value": i * 10},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
@@ -334,6 +338,8 @@ class TestAggregationRecoveryIntegration:
                 source_node_id="source",
                 row_index=i,
                 data={"seq": i, "data": f"item_{i}"},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
@@ -389,6 +395,8 @@ class TestAggregationRecoveryIntegration:
             source_node_id="source",
             row_index=0,
             data={"id": 0},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -524,6 +532,8 @@ class TestAggregationRecoveryIntegration:
                 source_node_id="source",
                 row_index=i,
                 data={"id": i, "value": i * 100},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row_obj.row_id)
             tokens.append(token)

@@ -142,15 +142,19 @@ class TestRegexMode:
 
     def test_timeout_on_catastrophic_backtracking(self):
         """ReDoS protection: pathological pattern with adversarial input."""
+        pattern = "".join(("(", "a+", ")", "+", "b"))
         builder = QueryBuilder(
             query_field="text",
-            query_pattern="".join(("(", "a+", ")", "+", "b")),
+            query_pattern=pattern,
             regex_timeout=0.1,  # Short timeout for test
         )
         result = builder.build({"text": "a" * 30})
         assert result.error is not None
-        assert result.error["reason"] == "no_regex_match"
-        assert result.error["cause"] == "regex_timeout"
+        assert result.error["reason"] == "regex_timeout"
+        assert result.error["reason"] != "no_regex_match"
+        assert result.error["field"] == "text"
+        assert result.error["pattern"] == pattern
+        assert result.error["max_seconds"] == 0.1
 
 
 # =============================================================================

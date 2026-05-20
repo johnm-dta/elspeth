@@ -601,6 +601,8 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/state.py:CompositionState.from_dict:d"
   - "src/elspeth/web/composer/state.py:CompositionState.with_metadata:patch"
   - "src/elspeth/web/composer/state.py:CompositionState.to_dict:return"
+  - "src/elspeth/web/composer/yaml_generator.py:_source_entry:source"
+  - "src/elspeth/web/composer/yaml_generator.py:_source_entry:return"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — GuidedSession state-machine serialization (Tier 1 audit)

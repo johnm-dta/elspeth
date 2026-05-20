@@ -227,6 +227,28 @@ class TestValidatePipelinePathAllowlist:
         assert _check(result, "path_allowlist").passed is False
         assert any("Path traversal" in e.message for e in result.errors)
 
+    def test_second_named_source_path_outside_blobs_blocked(self) -> None:
+        state = CompositionState(
+            source=None,
+            sources={
+                "orders": _make_source({"path": "/tmp/test_data/blobs/orders.csv"}),
+                "refunds": _make_source({"path": "/etc/passwd"}),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock()
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "path_allowlist").passed is False
+        assert any(error.component_id == "source:refunds" and "refunds" in error.message for error in result.errors)
+
     def test_path_traversal_via_dotdot_blocked(self) -> None:
         state = _make_state(
             source_options={"path": "/tmp/test_data/blobs/../../secret.csv"},
@@ -1085,6 +1107,7 @@ class TestValidatePipelineSuccess:
 
         mock_bundle = MagicMock()
         mock_bundle.source = MagicMock()
+        mock_bundle.sources = {"source": mock_bundle.source}
         mock_bundle.source_settings = MagicMock()
         mock_bundle.transforms = ()
         mock_bundle.sinks = {"primary": MagicMock()}
@@ -1122,6 +1145,7 @@ class TestValidatePipelineSuccess:
         mock_build_graph.assert_called_once()
         mock_graph.validate.assert_called_once()
         mock_assemble.assert_called_once()
+        assert mock_assemble.call_args.kwargs["sources"] == mock_bundle.sources
         mock_graph.validate_edge_compatibility.assert_called_once()
 
 
@@ -1512,6 +1536,36 @@ class TestValidatePipelineSecretRefs:
         # Downstream checks should be skipped
         assert any("Skipped" in c.detail for c in result.checks if c.name == "settings_load")
         assert _check(result, "settings_load").outcome_code == "validation.skipped_after_failure"
+
+    def test_second_named_source_missing_ref_fails_validation(self) -> None:
+        state = CompositionState(
+            source=None,
+            sources={
+                "orders": _make_source({"api_key": {"secret_ref": "ORDERS_KEY"}}),
+                "refunds": _make_source({"api_key": {"secret_ref": "MISSING_REFUNDS_KEY"}}),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        secret_svc = FakeSecretService(available_refs={"ORDERS_KEY"})
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        assert _check(result, "secret_refs").passed is False
+        assert "MISSING_REFUNDS_KEY" in _check(result, "secret_refs").detail
+        assert any("MISSING_REFUNDS_KEY" in error.message for error in result.errors)
 
     def test_all_refs_present_passes(self) -> None:
         """Validation passes when all secret refs are resolvable."""
@@ -2665,7 +2719,9 @@ class TestEdgeContractFailureFormatting:
             outputs=(_make_output(name="results"),),
         )
         graph = MagicMock()
-        graph.get_source.return_value = "source_csv_a1b2c3"
+        graph.get_source.side_effect = AssertionError("exact-one source API must not be called")
+        graph.get_sources.return_value = ["source_csv_a1b2c3"]
+        graph.get_node_info.return_value = MagicMock(config={"source_name": "source"})
         graph.get_transform_id_map.return_value = {0: "transform_split_lines_d4e5f6"}
         graph.get_config_gate_id_map.return_value = {}
         graph.get_aggregation_id_map.return_value = {}
@@ -2678,6 +2734,67 @@ class TestEdgeContractFailureFormatting:
         assert "patch_node_options(node_id='transform_split_lines_d4e5f6'" not in suggestion
         assert "patch_source_options(patch={'schema': {...}})" in suggestion
         assert "patch_node_options(node_id='source_csv_a1b2c3'" not in suggestion
+
+    def test_suggestion_maps_multi_source_dag_ids_to_named_source_patch_tool(self) -> None:
+        exc = self._make_edge_error(
+            from_node_id="source_csv_refunds_a1b2c3",
+            to_node_id="transform_normalize_d4e5f6",
+            missing_fields=("refund_id",),
+        )
+        orders = _make_source({"schema": {"mode": "observed"}})
+        refunds = SourceSpec(
+            plugin="csv",
+            on_success="normalize",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+        state = CompositionState(
+            source=orders,
+            sources={"orders": orders, "refunds": refunds},
+            nodes=(
+                NodeSpec(
+                    id="normalize",
+                    node_type="transform",
+                    plugin="field_mapper",
+                    input="normalize",
+                    on_success="results",
+                    on_error="discard",
+                    options={},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(_make_output(name="results"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        graph = MagicMock()
+        graph.get_source.side_effect = GraphValidationError("Expected exactly 1 source node, found 2")
+        graph.get_sources.return_value = ["source_csv_orders_z9y8x7", "source_csv_refunds_a1b2c3"]
+
+        def node_info(node_id: str) -> MagicMock:
+            source_name = "orders" if node_id == "source_csv_orders_z9y8x7" else "refunds"
+            return MagicMock(config={"source_name": source_name})
+
+        graph.get_node_info.side_effect = node_info
+        graph.get_transform_id_map.return_value = {0: "transform_normalize_d4e5f6"}
+        graph.get_config_gate_id_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        graph.get_coalesce_id_map.return_value = {}
+        graph.get_sink_id_map.return_value = {"results": "sink_results_f7g8h9"}
+
+        suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
+
+        graph.get_source.assert_not_called()
+        assert "source 'refunds' (csv)" in suggestion
+        assert "patch_source_options(source_name='refunds', patch={'schema': {...}})" in suggestion
+        assert "patch_source_options(patch={'schema': {...}})" not in suggestion
+        assert "patch_node_options(node_id='source_csv_refunds_a1b2c3'" not in suggestion
 
     def test_suggestion_maps_dag_sink_ids_to_output_patch_tool(self) -> None:
         exc = self._make_edge_error(
@@ -2707,7 +2824,9 @@ class TestEdgeContractFailureFormatting:
             outputs=(_make_output(name="results"),),
         )
         graph = MagicMock()
-        graph.get_source.return_value = "source_csv_z9y8x7"
+        graph.get_source.side_effect = AssertionError("exact-one source API must not be called")
+        graph.get_sources.return_value = ["source_csv_z9y8x7"]
+        graph.get_node_info.return_value = MagicMock(config={"source_name": "source"})
         graph.get_transform_id_map.return_value = {0: "transform_clean_text_a1b2c3"}
         graph.get_config_gate_id_map.return_value = {}
         graph.get_aggregation_id_map.return_value = {}

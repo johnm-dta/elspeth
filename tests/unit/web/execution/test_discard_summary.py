@@ -17,6 +17,8 @@ def test_discard_summary_counts_completed_discard_path() -> None:
         source_node_id=setup.source_node_id,
         row_index=0,
         data={"id": "drop-me"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = setup.data_flow.create_token(row.row_id)
     setup.data_flow.record_token_outcome(

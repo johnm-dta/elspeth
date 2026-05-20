@@ -3131,12 +3131,12 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
         redacted_source["options"] = redacted_options
         return redacted_source, True
 
-    source = state_dict.get("source")
+    source = state_dict["source"] if "source" in state_dict else None
     redacted_source, source_changed = _redact_one(source)
-    sources = state_dict.get("sources")
+    sources = state_dict["sources"] if "sources" in state_dict else None
     redacted_sources: dict[str, Any] | None = None
     sources_changed = False
-    if isinstance(sources, Mapping):
+    if sources is not None:
         redacted_sources = {}
         for source_name, named_source in sources.items():
             redacted_named_source, changed = _redact_one(named_source)

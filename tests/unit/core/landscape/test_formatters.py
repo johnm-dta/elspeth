@@ -808,6 +808,7 @@ class TestLineageTextFormatter:
                     error_id="val-1",
                     run_id="run-001",
                     node_id="src-node",
+                    row_id="row-456",
                     row_hash="row-hash",
                     error="missing field",
                     schema_mode="fixed",

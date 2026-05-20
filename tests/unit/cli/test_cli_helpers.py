@@ -161,8 +161,12 @@ sinks:
     assert isinstance(bundle.aggregations, Mapping)
     assert len(bundle.aggregations) == 0
 
-    # source_settings is the SourceSettings config object
-    assert bundle.source_settings is config.source
+    # source_settings remains the compatibility view of the canonical source.
+    # Plural-source normalization may copy settings objects, so assert the
+    # contract value and named-source mapping rather than object identity.
+    assert bundle.source_settings == config.source
+    assert bundle.source_settings == config.sources["source"]
+    assert bundle.source_settings is bundle.source_settings_map["source"]
 
 
 def test_plugin_bundle_supports_dataclasses_replace(tmp_path: Path):

@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts import (
     NodeType,
@@ -51,6 +53,7 @@ from elspeth.core.landscape.model_loaders import (
     ValidationErrorLoader,
 )
 from elspeth.core.landscape.schema import (
+    rows_table,
     token_outcomes_table,
     token_parents_table,
     tokens_table,
@@ -121,6 +124,20 @@ def _make_repo(
     return db, repo, factory
 
 
+def _create_test_row(
+    repo: DataFlowRepository,
+    run_id: str,
+    source_node_id: str,
+    row_index: int,
+    data: dict[str, object],
+    **kwargs: Any,
+):
+    """Create a row for tests that deliberately use same source/run indexes."""
+    kwargs.setdefault("source_row_index", row_index)
+    kwargs.setdefault("ingest_sequence", row_index)
+    return repo.create_row(run_id, source_node_id, row_index, data, **kwargs)
+
+
 def _make_repo_with_token(
     *,
     run_id: str = "run-1",
@@ -131,7 +148,7 @@ def _make_repo_with_token(
     Returns (db, repo, factory, row_id, token_id).
     """
     db, repo, factory = _make_repo(run_id=run_id, payload_store=payload_store)
-    row = repo.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    row = _create_test_row(repo, run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
     token = repo.create_token("row-1", token_id="tok-1")
     factory.execution.create_batch(run_id=run_id, aggregation_node_id="transform-1", batch_id="batch-1")
     return db, repo, factory, row.row_id, token.token_id
@@ -216,24 +233,67 @@ class TestCreateRow:
         """create_row hashes data using stable_hash (canonical)."""
         _db, repo, _fac = _make_repo()
         data = {"name": "Alice", "value": 42}
-        row = repo.create_row("run-1", "source-0", 0, data)
+        row = repo.create_row("run-1", "source-0", 0, data, source_row_index=0, ingest_sequence=0)
         assert row.source_data_hash == stable_hash(data)
 
     def test_row_id_is_auto_generated_when_not_supplied(self) -> None:
         _db, repo, _fac = _make_repo()
-        row = repo.create_row("run-1", "source-0", 0, {"x": 1})
+        row = repo.create_row("run-1", "source-0", 0, {"x": 1}, source_row_index=0, ingest_sequence=0)
         assert row.row_id is not None
         assert len(row.row_id) > 0
 
     def test_row_id_is_used_when_supplied(self) -> None:
         _db, repo, _fac = _make_repo()
-        row = repo.create_row("run-1", "source-0", 0, {"x": 1}, row_id="custom-id")
+        row = repo.create_row("run-1", "source-0", 0, {"x": 1}, source_row_index=0, ingest_sequence=0, row_id="custom-id")
         assert row.row_id == "custom-id"
 
     def test_row_index_is_stored(self) -> None:
         _db, repo, _fac = _make_repo()
-        row = repo.create_row("run-1", "source-0", 5, {"x": 1})
+        row = repo.create_row("run-1", "source-0", 5, {"x": 1}, source_row_index=7, ingest_sequence=11)
         assert row.row_index == 5
+
+    def test_create_row_requires_source_scoped_and_ingest_identity(self) -> None:
+        """Caller must provide real row identity instead of relying on row_index fabrication."""
+        _db, repo, _fac = _make_repo()
+
+        with pytest.raises(
+            AuditIntegrityError,
+            match=r"run_id='run-1'.*row_id='row-explicit'.*source_node_id='source-0'.*source_row_index.*ingest_sequence",
+        ):
+            repo.create_row("run-1", "source-0", 5, {"x": 1}, row_id="row-explicit")
+
+    def test_rows_table_insert_with_only_legacy_row_index_raises(self) -> None:
+        """The schema must not copy row_index into source_row_index/ingest_sequence."""
+        db, _repo, _fac = _make_repo()
+        now = datetime.now(UTC)
+
+        with pytest.raises(IntegrityError), db.engine.begin() as conn:
+            conn.execute(
+                rows_table.insert().values(
+                    row_id="row-legacy-only",
+                    run_id="run-1",
+                    source_node_id="source-0",
+                    row_index=5,
+                    source_data_hash="hash",
+                    created_at=now,
+                )
+            )
+
+    def test_rows_table_insert_without_any_row_position_raises(self) -> None:
+        """Missing all row identity fields is database-level corruption."""
+        db, _repo, _fac = _make_repo()
+        now = datetime.now(UTC)
+
+        with pytest.raises(IntegrityError), db.engine.begin() as conn:
+            conn.execute(
+                rows_table.insert().values(
+                    row_id="row-no-position",
+                    run_id="run-1",
+                    source_node_id="source-0",
+                    source_data_hash="hash",
+                    created_at=now,
+                )
+            )
 
 
 class TestCreateToken:
@@ -241,14 +301,14 @@ class TestCreateToken:
 
     def test_creates_token_linked_to_row(self) -> None:
         _db, repo, _fac = _make_repo()
-        row = repo.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        row = _create_test_row(repo, "run-1", "source-0", 0, {"x": 1}, row_id="row-1")
         token = repo.create_token("row-1")
         assert token.row_id == row.row_id
         assert token.token_id is not None
 
     def test_token_id_is_used_when_supplied(self) -> None:
         _db, repo, _fac = _make_repo()
-        repo.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        _create_test_row(repo, "run-1", "source-0", 0, {"x": 1}, row_id="row-1")
         token = repo.create_token("row-1", token_id="custom-tok")
         assert token.token_id == "custom-tok"
 
@@ -434,7 +494,7 @@ class TestRecordTokenOutcomeTwoAxis:
 
     def test_record_failsink_fallback_accepts_shared_batch_artifact_witness(self) -> None:
         _db, repo, fac, _row, first_tok = _make_repo_with_token()
-        second_row = repo.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2")
+        second_row = _create_test_row(repo, "run-1", "source-0", 1, {"name": "second"}, row_id="row-2")
         second_tok = repo.create_token(second_row.row_id, token_id="tok-2")
 
         first_state = fac.execution.begin_node_state(
@@ -848,7 +908,7 @@ class TestLinkValidationErrorToRow:
     def test_relink_to_different_row_crashes(self) -> None:
         """Once linked, attempting to relink to a different row is a Tier-1 crash."""
         _db, repo, _fac, row_id, _tok = _make_repo_with_token()
-        other_row = repo.create_row("run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
+        other_row = _create_test_row(repo, "run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
         error_id = repo.record_validation_error(
             run_id="run-1",
             node_id="source-0",
@@ -883,7 +943,7 @@ class TestLinkValidationErrorToRow:
             node_id="source-B",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        row_b = repo.create_row("run-B", "source-B", 0, {"name": "bob"}, row_id="row-B-1")
+        row_b = _create_test_row(repo, "run-B", "source-B", 0, {"name": "bob"}, row_id="row-B-1")
         error_id = repo.record_validation_error(
             run_id="run-A",
             node_id="source-0",
@@ -1326,28 +1386,28 @@ class TestCreateRowQuarantined:
         """create_row(quarantined=True) uses repr_hash when data contains NaN."""
         _db, repo, _fac = _make_repo()
         data = {"v": float("nan")}
-        row = repo.create_row("run-1", "source-0", 0, data, quarantined=True)
+        row = _create_test_row(repo, "run-1", "source-0", 0, data, quarantined=True)
         assert row.source_data_hash == repr_hash(data)
 
     def test_quarantined_with_infinity_uses_repr_hash(self) -> None:
         """create_row(quarantined=True) uses repr_hash when data contains Infinity."""
         _db, repo, _fac = _make_repo()
         data = {"v": float("inf")}
-        row = repo.create_row("run-1", "source-0", 0, data, quarantined=True)
+        row = _create_test_row(repo, "run-1", "source-0", 0, data, quarantined=True)
         assert row.source_data_hash == repr_hash(data)
 
     def test_quarantined_normal_data_still_uses_canonical_hash(self) -> None:
         """create_row(quarantined=True) with normal data uses stable_hash (not repr)."""
         _db, repo, _fac = _make_repo()
         data = {"v": 42}
-        row = repo.create_row("run-1", "source-0", 0, data, quarantined=True)
+        row = _create_test_row(repo, "run-1", "source-0", 0, data, quarantined=True)
         assert row.source_data_hash == stable_hash(data)
 
     def test_non_quarantined_with_nan_crashes(self) -> None:
         """create_row(quarantined=False) with NaN crashes — Tier 2 guarantee."""
         _db, repo, _fac = _make_repo()
         with pytest.raises(ValueError):
-            repo.create_row("run-1", "source-0", 0, {"v": float("nan")})
+            _create_test_row(repo, "run-1", "source-0", 0, {"v": float("nan")})
 
     def test_quarantined_nan_payload_uses_repr_fallback(self) -> None:
         """create_row(quarantined=True) with payload_store falls back to repr payload for NaN data."""
@@ -1356,7 +1416,7 @@ class TestCreateRowQuarantined:
         _db, repo, _fac = _make_repo(payload_store=mock_store)
 
         data = {"v": float("nan")}
-        row = repo.create_row("run-1", "source-0", 0, data, quarantined=True)
+        row = _create_test_row(repo, "run-1", "source-0", 0, data, quarantined=True)
 
         # Verify payload_store.store() was called with repr fallback bytes
         mock_store.store.assert_called_once()
@@ -1372,7 +1432,7 @@ class TestCreateRowQuarantined:
         _db, repo, _fac = _make_repo(payload_store=mock_store)
 
         data = {"v": 42}
-        repo.create_row("run-1", "source-0", 0, data, quarantined=True)
+        _create_test_row(repo, "run-1", "source-0", 0, data, quarantined=True)
 
         mock_store.store.assert_called_once()
         stored_bytes = mock_store.store.call_args[0][0]
@@ -1451,7 +1511,7 @@ class TestValidateTokenRowOwnership:
     def test_mismatched_row_id_crashes_with_lineage_message(self) -> None:
         """Token bound to row-A, called with row-B → AuditIntegrityError."""
         _db, repo, _fac, row_id, tok = _make_repo_with_token()
-        other_row = repo.create_row("run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
+        other_row = _create_test_row(repo, "run-1", "source-0", 1, {"name": "bob"}, row_id="row-2")
         assert other_row.row_id != row_id  # documents the test premise
 
         with pytest.raises(
@@ -1512,7 +1572,7 @@ class TestValidateTokenRowOwnership:
             node_id="source-B",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        row_b = repo.create_row("run-B", "source-B", 0, {"name": "stranger"}, row_id="row-B-1")
+        row_b = _create_test_row(repo, "run-B", "source-B", 0, {"name": "stranger"}, row_id="row-B-1")
         assert row_b.row_id != row_a  # premise: rows from different runs never collide
 
         with pytest.raises(AuditIntegrityError, match=r"Cross-row lineage corruption prevented"):

@@ -359,6 +359,45 @@ class TestCompositionStateVersioning:
         assert current.is_valid is True
 
     @pytest.mark.asyncio
+    async def test_named_sources_round_trip_through_session_state(self, service) -> None:
+        session = await service.create_session("alice", "Multi-source", "local")
+        sources = {
+            "orders": {
+                "plugin": "csv",
+                "on_success": "orders_out",
+                "options": {"path": "orders.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_out",
+                "options": {"path": "refunds.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+        }
+
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source=sources["orders"],
+                sources=sources,
+                outputs=[
+                    {"name": "orders_out", "plugin": "json", "options": {"path": "orders.jsonl"}, "on_write_failure": "discard"},
+                    {"name": "refunds_out", "plugin": "json", "options": {"path": "refunds.jsonl"}, "on_write_failure": "discard"},
+                ],
+                metadata_={"name": "Multi-source", "description": ""},
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+
+        current = await service.get_current_state(session.id)
+
+        assert current is not None
+        assert current.sources == sources
+        assert current.source == sources["orders"]
+
+    @pytest.mark.asyncio
     async def test_get_current_state_returns_none_when_empty(
         self,
         service,

@@ -62,6 +62,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Purge the payload (simulate retention policy)
@@ -107,6 +109,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Purge the payload
@@ -150,6 +154,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Payload NOT purged
@@ -203,6 +209,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data={"name": "test"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         lineage = factory.query.explain_row(
@@ -244,6 +252,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data={"name": "test"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         lineage = factory.query.explain_row(
@@ -282,6 +292,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data={"name": "test"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Store corrupted (non-JSON) data separately with a valid hash
@@ -329,6 +341,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data={"name": "test"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Store non-object JSON separately with a valid hash
@@ -377,6 +391,8 @@ class TestExplainGracefulDegradation:
             source_node_id=source.node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Try to explain using run2's ID — cross-run mismatch raises AuditIntegrityError

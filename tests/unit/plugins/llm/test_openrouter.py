@@ -245,20 +245,20 @@ class TestOpenRouterConfig:
         )
         assert config.base_url == "https://custom.proxy.com/api/v1"
 
-    def test_config_allows_loopback_http_base_url_for_chaosllm(self) -> None:
-        """Local ChaosLLM endpoints may use HTTP without weakening remote URLs."""
+    @pytest.mark.parametrize("base_url", ["http://127.0.0.1:8199/v1", "http://localhost:8199/v1", "http://[::1]:8199/v1"])
+    def test_config_accepts_loopback_http_base_url_for_local_compatible_servers(self, base_url: str) -> None:
+        """Local OpenAI-compatible test servers may use HTTP loopback."""
         config = OpenRouterConfig.from_dict(
             {
-                "api_key": "REDACTED",
-                "model": "chaosllm/fake-gpt-4",
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
                 "prompt_template": "{{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],
-                "base_url": "http://127.0.0.1:8199/v1",
+                "base_url": base_url,
             }
         )
-
-        assert config.base_url == "http://127.0.0.1:8199/v1"
+        assert config.base_url == base_url
 
     @pytest.mark.parametrize(
         "base_url",

@@ -2969,6 +2969,8 @@ class TestAggregationExecutor:
                 source_node_id=setup.source_node_id,
                 row_index=row_index,
                 data={"value": value},
+                source_row_index=row_index,
+                ingest_sequence=row_index,
             )
             token = setup.data_flow.create_token(row_id=row.row_id)
             persisted_tokens.append((row, token, value))
@@ -4600,7 +4602,9 @@ class TestNodeStateGuard:
 
         setup = make_recorder_with_run(source_node_id="source-0")
         register_test_node(setup.data_flow, setup.run_id, "transform-1")
-        setup.data_flow.create_row(setup.run_id, setup.source_node_id, 0, {"name": "test"}, row_id="row-1")
+        setup.data_flow.create_row(
+            setup.run_id, setup.source_node_id, 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0
+        )
         setup.data_flow.create_token("row-1", token_id="tok-1")
 
         guard = NodeStateGuard(
@@ -4639,7 +4643,9 @@ class TestNodeStateGuard:
 
         setup = make_recorder_with_run(source_node_id="source-0")
         register_test_node(setup.data_flow, setup.run_id, "transform-1")
-        setup.data_flow.create_row(setup.run_id, setup.source_node_id, 0, {"name": "test"}, row_id="row-1")
+        setup.data_flow.create_row(
+            setup.run_id, setup.source_node_id, 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0
+        )
         setup.data_flow.create_token("row-1", token_id="tok-1")
 
         guard = NodeStateGuard(

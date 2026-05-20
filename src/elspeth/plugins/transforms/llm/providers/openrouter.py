@@ -40,6 +40,7 @@ from elspeth.plugins.infrastructure.clients.llm import (
     RateLimitError,
     ServerError,
 )
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
 from elspeth.plugins.transforms.llm.provider import LLMQueryResult, parse_finish_reason
@@ -175,7 +176,7 @@ class OpenRouterConfig(LLMConfig):
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
-        return normalize_openrouter_base_url(_validate_openrouter_base_url(value))
+        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url", allow_http_loopback=True))
 
     # Catalog membership for ``model`` is enforced as a value-source concern,
     # NOT in config construction: the ``CatalogValueSource`` declaration below

@@ -101,7 +101,10 @@ from sqlalchemy.types import JSON
 #   18 → sessions.forked_from_session_id self-referential foreign key constraint
 #        removed to allow physical deletion of parent sessions (no-durable-history
 #        archive path) when child forks exist.
-SESSION_SCHEMA_EPOCH = 18
+#   19 → ``composition_states.sources`` added so named multi-source composer
+#        states survive save/load instead of collapsing to the legacy singular
+#        ``source`` compatibility column.
+SESSION_SCHEMA_EPOCH = 19
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -145,7 +148,6 @@ def _blobs_creating_llm_provenance_check(*, dialect: Literal["sqlite", "postgres
         "creating_provider IS NULL AND creating_composer_skill_hash IS NULL AND "
         "creating_arguments_hash IS NULL)"
     )
-
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -361,6 +363,7 @@ composition_states_table = Table(
     ),
     Column("version", Integer, nullable=False),
     Column("source", JSON, nullable=True),
+    Column("sources", JSON, nullable=True),
     Column("nodes", JSON, nullable=True),
     Column("edges", JSON, nullable=True),
     Column("outputs", JSON, nullable=True),

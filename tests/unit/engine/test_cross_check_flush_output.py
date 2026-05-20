@@ -145,6 +145,8 @@ def _register_tokens(processor: Any, tokens: list[TokenInfo]) -> None:
             row_index=idx,
             data=token.row_data.to_dict(),
             row_id=token.row_id,
+            source_row_index=idx,
+            ingest_sequence=idx,
         )
         processor._data_flow.create_token(
             row_id=token.row_id,

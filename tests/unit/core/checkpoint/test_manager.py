@@ -75,6 +75,8 @@ def _insert_checkpoint_prereqs(
             run_id=run_id,
             source_node_id=node_id,
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             source_data_hash="hash",
             created_at=now,
         )

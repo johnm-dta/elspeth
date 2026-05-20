@@ -27,7 +27,7 @@ def _setup_with_token(
 ) -> tuple[LandscapeDB, RecorderFactory]:
     db, factory = _setup(run_id=run_id)
     register_test_node(factory.data_flow, run_id, "transform-1", node_type=NodeType.TRANSFORM, plugin_name="transform")
-    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
     return db, factory
 
@@ -631,7 +631,7 @@ class TestGetTransformErrorsForToken:
     def test_does_not_return_other_tokens_errors(self):
         _db, factory = _setup_with_token()
         # Create a second token
-        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "other"}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "other"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.data_flow.record_transform_error(
             ref=TokenRef(token_id="tok-1", run_id="run-1"),
@@ -665,7 +665,7 @@ class TestGetTransformErrorsForRun:
 
     def test_returns_all_errors_for_run(self):
         _db, factory = _setup_with_token()
-        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "other"}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "other"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.data_flow.record_transform_error(
             ref=TokenRef(token_id="tok-1", run_id="run-1"),
@@ -706,7 +706,7 @@ class TestGetTransformErrorsForRun:
             schema_config=_DYNAMIC_SCHEMA,
         )
         register_test_node(factory.data_flow, "run-1", "transform-1", node_type=NodeType.TRANSFORM, plugin_name="transform")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"n": "a"}, row_id="row-r1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"n": "a"}, row_id="row-r1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-r1", token_id="tok-r1")
         # Set up run-2
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-2")
@@ -720,7 +720,7 @@ class TestGetTransformErrorsForRun:
             schema_config=_DYNAMIC_SCHEMA,
         )
         register_test_node(factory.data_flow, "run-2", "transform-1", node_type=NodeType.TRANSFORM, plugin_name="transform")
-        factory.data_flow.create_row("run-2", "source-0", 0, {"n": "b"}, row_id="row-r2")
+        factory.data_flow.create_row("run-2", "source-0", 0, {"n": "b"}, row_id="row-r2", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-r2", token_id="tok-r2")
         factory.data_flow.record_transform_error(
             ref=TokenRef(token_id="tok-r1", run_id="run-1"),
@@ -855,7 +855,7 @@ class TestRecordTransformErrorCrossRunPrevention:
         _db, factory = _setup_two_runs_with_transform()
 
         # Create row and token in run-A
-        factory.data_flow.create_row("run-A", "source-0", 0, {"name": "test"}, row_id="row-A")
+        factory.data_flow.create_row("run-A", "source-0", 0, {"name": "test"}, row_id="row-A", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-A", token_id="tok-A")
 
         # Attempt to record error under run-B -- must crash
@@ -908,7 +908,7 @@ class TestRecordTransformErrorCrossRunPrevention:
         _db, factory = _setup_two_runs_with_transform()
 
         # Create row and token in run-A
-        factory.data_flow.create_row("run-A", "source-0", 0, {"name": "test"}, row_id="row-A")
+        factory.data_flow.create_row("run-A", "source-0", 0, {"name": "test"}, row_id="row-A", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-A", token_id="tok-A")
 
         # Try to insert directly into transform_errors with mismatched (token_id, run_id)

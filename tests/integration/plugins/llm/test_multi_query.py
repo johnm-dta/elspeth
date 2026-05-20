@@ -301,6 +301,8 @@ def create_token_in_factory(
         row_index=row_index,
         data=row_data,
         row_id=row_id,
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     factory.data_flow.create_token(row_id=row.row_id, token_id=token_id)
     # Wrap row_data in PipelineRow with contract

@@ -48,6 +48,8 @@ class TestTransformErrorRecording:
             source_node_id="source_test",
             row_index=1,
             data={"id": "test"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         # Create token with specified ID
         from datetime import datetime

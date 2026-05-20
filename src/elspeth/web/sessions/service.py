@@ -19,7 +19,7 @@ from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
 import structlog
-from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, event, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
@@ -1451,10 +1451,10 @@ class SessionServiceImpl:
         """Serialize same-session sequence/version allocators.
 
         PostgreSQL uses the transaction-scoped advisory lock. SQLite uses a
-        process-wide per-session RLock around the whole allocator + insert
-        sequence. Every caller that performs ``SELECT MAX(...) + 1`` for
-        ``chat_messages.sequence_no`` or ``composition_states.version`` MUST
-        wrap that read and every dependent INSERT in this context.
+        process-wide per-session RLock held until the surrounding transaction
+        commits or rolls back. Every caller that performs ``SELECT MAX(...) +
+        1`` for ``chat_messages.sequence_no`` or ``composition_states.version``
+        MUST wrap that read and every dependent INSERT in this context.
         """
         key = (id(conn), session_id)
         held = _SESSION_WRITE_LOCK_HELD.get()
@@ -1462,8 +1462,24 @@ class SessionServiceImpl:
         dialect = self._engine.dialect.name
         try:
             if dialect == "sqlite":
-                with self._sqlite_lock_for_session(session_id):
+                lock = self._sqlite_lock_for_session(session_id)
+                lock.acquire()
+                release_state = {"released": False}
+
+                def _release_sqlite_session_lock(_conn: Connection) -> None:
+                    if release_state["released"]:
+                        return
+                    release_state["released"] = True
+                    lock.release()
+
+                if conn.in_transaction():
+                    event.listen(conn, "commit", _release_sqlite_session_lock, once=True)
+                    event.listen(conn, "rollback", _release_sqlite_session_lock, once=True)
+                try:
                     yield
+                finally:
+                    if not conn.in_transaction():
+                        _release_sqlite_session_lock(conn)
                 return
             if dialect == "postgresql":
                 self._acquire_session_advisory_lock(conn, session_id)
@@ -1725,6 +1741,7 @@ class SessionServiceImpl:
                 session_id=session_id,
                 version=int(next_version),
                 source=_enveloped_state_column(state.source),
+                sources=_enveloped_state_column(state.sources),
                 nodes=_enveloped_state_column(state.nodes),
                 edges=_enveloped_state_column(state.edges),
                 outputs=_enveloped_state_column(state.outputs),
@@ -3917,6 +3934,7 @@ class SessionServiceImpl:
                             session_id=sid,
                             version=version,
                             source=_enveloped_state_column(state.source),
+                            sources=_enveloped_state_column(state.sources),
                             nodes=_enveloped_state_column(state.nodes),
                             edges=_enveloped_state_column(state.edges),
                             outputs=_enveloped_state_column(state.outputs),
@@ -3938,6 +3956,7 @@ class SessionServiceImpl:
             session_id=session_id,
             version=version,
             source=state.source,
+            sources=state.sources,
             nodes=state.nodes,
             edges=state.edges,
             outputs=state.outputs,
@@ -4016,11 +4035,13 @@ class SessionServiceImpl:
         Seam contract A: metadata_ maps DB column metadata_ back to the
         dataclass field. JSON columns are unwrapped from their _version envelope.
         """
+        row_mapping = row._mapping
         return CompositionStateRecord(
             id=UUID(row.id),
             session_id=UUID(row.session_id),
             version=row.version,
             source=self._unwrap_envelope(row.source),
+            sources=self._unwrap_envelope(row_mapping["sources"] if "sources" in row_mapping else None),
             nodes=self._unwrap_envelope(row.nodes),
             edges=self._unwrap_envelope(row.edges),
             outputs=self._unwrap_envelope(row.outputs),

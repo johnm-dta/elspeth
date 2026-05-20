@@ -570,6 +570,51 @@ class TestYamlGeneration:
         assert "csv" in yaml_str
         assert "source:" in yaml_str
 
+    def test_single_default_source_uses_legacy_yaml_shape(self) -> None:
+        source = SourceSpec(
+            plugin="csv",
+            on_success="main",
+            options={"path": "input.csv"},
+            on_validation_failure="quarantine",
+        )
+        state = CompositionState(
+            source=None,
+            sources={"source": source},
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="main", plugin="json", options={"path": "out.json"}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        yaml_str = generate_yaml(state)
+
+        assert "source:" in yaml_str
+        assert "sources:" not in yaml_str
+
+    def test_single_named_source_uses_sources_yaml_shape(self) -> None:
+        source = SourceSpec(
+            plugin="csv",
+            on_success="main",
+            options={"path": "orders.csv"},
+            on_validation_failure="quarantine",
+        )
+        state = CompositionState(
+            source=None,
+            sources={"orders": source},
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="main", plugin="json", options={"path": "out.json"}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        yaml_str = generate_yaml(state)
+
+        assert "sources:" in yaml_str
+        assert "orders:" in yaml_str
+        assert "\nsource:" not in yaml_str
+
     def test_yaml_contains_sink(self) -> None:
         """Generated YAML includes the sink name."""
         state = _make_populated_state()

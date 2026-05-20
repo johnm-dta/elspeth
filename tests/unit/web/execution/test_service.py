@@ -595,7 +595,7 @@ sinks:
             db.close()
 
         settings_json = json.loads(run_row.settings_json)
-        assert settings_json["source"]["plugin"] == "text"
+        assert settings_json["sources"]["source"]["plugin"] == "text"
         assert settings_json["sinks"]["output"]["plugin"] == "json"
         assert attribution_row.initiated_by_user_id == "alice"
         assert attribution_row.auth_provider_type == "local"
@@ -4391,6 +4391,40 @@ class TestRelativePathResolution:
         with patch.object(service, "_run_pipeline"):
             run_id = await service.execute(session_id=uuid4())
         assert isinstance(run_id, UUID)
+
+    @pytest.mark.asyncio
+    async def test_second_named_source_path_outside_allowed_dirs_raises(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Every named source path must pass the direct /execute allowlist."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "orders_out",
+            "options": {"path": "blobs/orders.csv"},
+            "on_validation_failure": "quarantine",
+        }
+        state.sources = {
+            "orders": state.source,
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_out",
+                "options": {"path": "/etc/passwd"},
+                "on_validation_failure": "quarantine",
+            },
+        }
+        state.outputs = None
+        state.nodes = None
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match=r"Source 'refunds'.*resolves outside allowed directories"):
+            await service.execute(session_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_relative_traversal_still_blocked(

@@ -1598,6 +1598,7 @@ async def _state_data_from_composer_state(
     return (
         CompositionStateData(
             source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],

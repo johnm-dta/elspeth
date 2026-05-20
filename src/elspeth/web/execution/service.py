@@ -524,16 +524,19 @@ class ExecutionServiceImpl:
         # checks this, but /execute does not require /validate first. An
         # authenticated user could skip validation and execute a state that
         # reads files outside the allowed directories.
-        if composition_state.source is not None:
+        if composition_state.sources:
             from elspeth.web.paths import allowed_source_directories, resolve_data_path
 
             allowed_dirs = allowed_source_directories(str(self._settings.data_dir))
-            for key in ("path", "file"):
-                value = composition_state.source.options.get(key)
-                if value is not None:
-                    resolved = resolve_data_path(value, str(self._settings.data_dir))
-                    if not any(resolved.is_relative_to(d) for d in allowed_dirs):
-                        raise PathAllowlistViolationError(f"Source {key}='{value}' resolves outside allowed directories")
+            for source_name, source in composition_state.sources.items():
+                for key in ("path", "file"):
+                    value = source.options.get(key)
+                    if value is not None:
+                        resolved = resolve_data_path(value, str(self._settings.data_dir))
+                        if not any(resolved.is_relative_to(d) for d in allowed_dirs):
+                            raise PathAllowlistViolationError(
+                                f"Source '{source_name}' {key}='{value}' resolves outside allowed directories"
+                            )
 
         # Sink path allowlist — prevents arbitrary file writes via sink options.
         # Without this, a client can set sink options.path to any absolute or

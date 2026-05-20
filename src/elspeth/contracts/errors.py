@@ -363,6 +363,7 @@ TransformErrorCategory = Literal[
     "retrieval_failed",
     "no_results",
     "no_regex_match",
+    "regex_timeout",
     # Content filtering
     "blocked_content",
     "content_filtered",
@@ -452,7 +453,7 @@ class TransformErrorReason(TypedDict):
     RAG retrieval context:
         provider: Retrieval provider name (e.g., "azure_search", "chroma")
         cause: Sub-cause within an error category (e.g., "null_value", "empty_query")
-        pattern: Regex pattern string (for no_regex_match errors)
+        pattern: Regex pattern string (for no_regex_match/regex_timeout errors)
         skipped_count: Number of candidate hits rejected before final output
         skipped_reasons: Structured reasons for candidate hits rejected before final output
 
@@ -561,7 +562,7 @@ class TransformErrorReason(TypedDict):
     # RAG retrieval context
     provider: NotRequired[str]  # Retrieval provider name (e.g., "azure_search", "chroma")
     cause: NotRequired[str]  # Sub-cause within error category (e.g., "null_value", "empty_query")
-    pattern: NotRequired[str]  # Regex pattern string (for no_regex_match errors)
+    pattern: NotRequired[str]  # Regex pattern string (for no_regex_match/regex_timeout errors)
     skipped_count: NotRequired[int]  # Candidate hits rejected before final output
     skipped_reasons: NotRequired[list[dict[str, Any]]]  # Structured reasons for rejected candidate hits
 

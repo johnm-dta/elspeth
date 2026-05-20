@@ -129,4 +129,6 @@ class TestProcessorRejectsDuckTypedPlugins:
                 source_row=SourceRow.valid({"value": 1}, contract=create_observed_contract({"value": 1})),
                 transforms=[duck],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )

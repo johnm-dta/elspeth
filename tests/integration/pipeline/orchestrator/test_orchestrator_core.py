@@ -7,17 +7,23 @@ Uses v2 fixtures and production assembly path (BUG-LINEAGE-01).
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
-from elspeth.contracts import Determinism, NodeType, PipelineRow, RoutingMode, RunStatus, SinkName, SourceRow
+from elspeth.contracts import Determinism, NodeID, NodeType, PipelineRow, RoutingMode, RunStatus, SinkName, SourceRow
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.plugin_context import PluginContext
+from elspeth.engine.orchestrator import PipelineConfig
+from elspeth.engine.orchestrator.core import Orchestrator
+from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters, LoopContext
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.testing import make_pipeline_row, make_source_row
 from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
-from tests.fixtures.landscape import make_factory
+from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource, PassTransform
 
@@ -134,6 +140,65 @@ class RuntimePreflightFailingTransform(PassTransform):
 
     def runtime_preflight(self, ctx: Any) -> None:
         raise RuntimeError("pre_flight_failed: provider auth exploded")
+
+
+def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A source generator in flight must keep source node/operation attribution during idle timeout flushes."""
+    orchestrator = Orchestrator(make_landscape_db())
+    source_ctx = PluginContext(
+        run_id="run-idle-context",
+        config={},
+        landscape=None,
+        node_id="source-orders",
+        operation_id="op-source-orders",
+    )
+    timeout_started = threading.Event()
+    source_read = threading.Event()
+    observed_source_identity: list[tuple[str | None, str | None]] = []
+
+    def source_rows() -> Any:
+        assert timeout_started.wait(1.0)
+        observed_source_identity.append((source_ctx.node_id, source_ctx.operation_id))
+        source_read.set()
+        yield make_source_row({"value": 1})
+
+    def fake_check_aggregation_timeouts(**kwargs: Any) -> AggregationFlushResult:
+        timeout_started.set()
+        assert source_read.wait(1.0)
+        return AggregationFlushResult()
+
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.core.check_aggregation_timeouts",
+        fake_check_aggregation_timeouts,
+    )
+    config = PipelineConfig(
+        source=MagicMock(),
+        transforms=(),
+        sinks={"default": MagicMock()},
+    )
+    loop_ctx = LoopContext(
+        counters=ExecutionCounters(),
+        pending_tokens={"default": []},
+        processor=MagicMock(),
+        ctx=source_ctx,
+        config=config,
+        agg_transform_lookup={},
+        coalesce_executor=None,
+        coalesce_node_map={},
+    )
+
+    row = orchestrator._next_source_item_with_idle_timeout_flushes(
+        iter(source_rows()),
+        loop_ctx,
+        agg_transform_lookup={},
+        coalesce_node_map={},
+        source_id=NodeID("source-orders"),
+        source_operation_id="op-source-orders",
+    )
+
+    assert row.row == {"value": 1}
+    assert observed_source_identity == [("source-orders", "op-source-orders")]
+    assert (source_ctx.node_id, source_ctx.operation_id) == ("source-orders", "op-source-orders")
 
 
 # ---------------------------------------------------------------------------
@@ -403,10 +468,10 @@ class TestOrchestrator:
         assert source_id is not None
 
         assign_plugin_node_ids(
-            source=config.source,
+            sources=config.sources,
             transforms=config.transforms,
             sinks=config.sinks,
-            source_id=source_id,
+            source_id_map={"source": source_id},
             transform_id_map=graph.get_transform_id_map(),
             sink_id_map=graph.get_sink_id_map(),
         )
@@ -597,6 +662,7 @@ class TestOrchestratorAcceptsGraph:
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
         mock_source.source_file_hash = None
+        mock_source.config = {}
         mock_source._on_validation_failure = "discard"
 
         source_node_id_setter = PropertyMock()
@@ -688,6 +754,7 @@ class TestOrchestratorAcceptsGraph:
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
         mock_source.source_file_hash = None
+        mock_source.config = {}
         mock_source._on_validation_failure = "discard"
 
         source_node_id_setter = PropertyMock()

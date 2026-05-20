@@ -22,8 +22,8 @@ from typing import TYPE_CHECKING, Any, cast
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
-from elspeth.contracts.freeze import deep_freeze
-from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.freeze import deep_freeze, deep_thaw
+from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, StepResolver
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
@@ -464,11 +464,49 @@ class RowProcessor:
                     unique_states.append(state)
             for state in unique_states:
                 self._aggregation_executor.restore_from_checkpoint(state)
+            if self._scheduler is not None:
+                self._restore_scheduler_blocks_from_aggregation_checkpoint(unique_states)
 
     @property
     def token_manager(self) -> TokenManager:
         """Expose token manager for orchestrator to create tokens for quarantined rows."""
         return self._token_manager
+
+    def _restore_scheduler_blocks_from_aggregation_checkpoint(self, states: Sequence[AggregationCheckpointState]) -> None:
+        """Materialize durable BLOCKED scheduler rows for restored aggregation buffers."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot restore scheduler blocks without a scheduler repository")
+
+        restored_at = datetime.now(UTC)
+        for state in states:
+            for node_id_str, node_checkpoint in state.nodes.items():
+                if not node_checkpoint.tokens:
+                    continue
+                node_id = NodeID(node_id_str)
+                for token_checkpoint in node_checkpoint.tokens:
+                    restored_contract = SchemaContract.from_checkpoint(dict(token_checkpoint.contract))
+                    if token_checkpoint.contract_version != restored_contract.version_hash():
+                        raise AuditIntegrityError(
+                            f"Contract version mismatch for scheduler-restored token {token_checkpoint.token_id}: "
+                            f"expected {restored_contract.version_hash()}, got {token_checkpoint.contract_version}. "
+                            "Checkpoint may be corrupted."
+                        )
+                    row_data = PipelineRow(deep_thaw(token_checkpoint.row_data), restored_contract)
+                    self._scheduler.ensure_blocked_barrier_work_item(
+                        run_id=self._run_id,
+                        token_id=token_checkpoint.token_id,
+                        row_id=token_checkpoint.row_id,
+                        node_id=str(node_id),
+                        step_index=self._scheduler_step_index(node_id),
+                        ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token_checkpoint.row_id),
+                        row_payload_json=self._scheduler.serialize_row_payload(row_data),
+                        barrier_key=str(node_id),
+                        available_at=restored_at,
+                        branch_name=token_checkpoint.branch_name,
+                        fork_group_id=token_checkpoint.fork_group_id,
+                        join_group_id=token_checkpoint.join_group_id,
+                        expand_group_id=token_checkpoint.expand_group_id,
+                    )
 
     @property
     def run_id(self) -> str:
@@ -1391,7 +1429,9 @@ class RowProcessor:
         )
 
         if result.status != "success":
-            return self._handle_flush_error(fctx), []
+            flush_error = self._handle_flush_error(fctx)
+            self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens))
+            return flush_error, []
 
         # ADR-009 §Clause 2: runtime cross-check for passes_through_input
         # transforms on the batch-aware flush path. MUST run BEFORE
@@ -1404,9 +1444,13 @@ class RowProcessor:
             self._emit_transform_completed(token=token, transform=transform, transform_result=result)
 
         if settings.output_mode == OutputMode.PASSTHROUGH:
-            return self._route_passthrough_results(fctx, result)
+            routed = self._route_passthrough_results(fctx, result)
+            self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens))
+            return routed
         if settings.output_mode == OutputMode.TRANSFORM:
-            return self._route_transform_results(fctx, result)
+            routed = self._route_transform_results(fctx, result)
+            self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens))
+            return routed
         raise OrchestrationInvariantError(f"Unknown output_mode: {settings.output_mode}")
 
     def _process_batch_aggregation_node(
@@ -1502,7 +1546,9 @@ class RowProcessor:
             )
 
             if result.status != "success":
-                return self._handle_flush_error(fctx), child_items
+                flush_error = self._handle_flush_error(fctx)
+                self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens), leased_token_id=current_token.token_id)
+                return flush_error, child_items
 
             # ADR-009 §Clause 2: runtime cross-check for passes_through_input
             # transforms on the batch-aware flush path. MUST run BEFORE
@@ -1517,10 +1563,12 @@ class RowProcessor:
             if output_mode == OutputMode.PASSTHROUGH:
                 flush_results, flush_child_items = self._route_passthrough_results(fctx, result)
                 child_items.extend(flush_child_items)
+                self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens), leased_token_id=current_token.token_id)
                 return flush_results, child_items
             if output_mode == OutputMode.TRANSFORM:
                 flush_results, flush_child_items = self._route_transform_results(fctx, result)
                 child_items.extend(flush_child_items)
+                self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens), leased_token_id=current_token.token_id)
                 return flush_results, child_items
             raise OrchestrationInvariantError(f"Unknown output_mode: {output_mode}")
 
@@ -1749,6 +1797,7 @@ class RowProcessor:
         token: TokenInfo,
         input_data: dict[str, object],
         failure: _SourceBoundaryFailure,
+        source_node_id: NodeID | None = None,
     ) -> None:
         """Record terminal audit evidence for a source-boundary failure.
 
@@ -1767,6 +1816,7 @@ class RowProcessor:
         source-boundary audit pair; telemetry failures are logged and never
         outrank the original failure or a recorder failure.
         """
+        effective_source_node_id = source_node_id or self._source_node_id
         audit_context = failure.to_audit_dict() if isinstance(failure, AuditEvidenceBase) else None
         original_label = (
             "violation"
@@ -1780,7 +1830,7 @@ class RowProcessor:
             )
             else "failure"
         )
-        error_hash = hashlib.sha256(f"{type(failure).__name__}:{self._source_node_id}".encode()).hexdigest()[:16]
+        error_hash = hashlib.sha256(f"{type(failure).__name__}:{effective_source_node_id}".encode()).hexdigest()[:16]
         try:
             self._data_flow.record_token_outcome(
                 ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
@@ -1792,7 +1842,7 @@ class RowProcessor:
         except LandscapeRecordError as record_failure:
             raise AuditIntegrityError(
                 f"Failed to record {type(failure).__name__} FAILED outcome for token {token.token_id!r} "
-                f"on source boundary (node={self._source_node_id!r}). Audit trail is INCOMPLETE — "
+                f"on source boundary (node={effective_source_node_id!r}). Audit trail is INCOMPLETE — "
                 f"the FAILED token outcome may be missing. Recorder failure: "
                 f"{type(record_failure).__name__}: {record_failure}. Original {original_label}: {failure!s}"
             ) from record_failure
@@ -1801,6 +1851,7 @@ class RowProcessor:
                 token=token,
                 input_data=input_data,
                 status=NodeStateStatus.FAILED,
+                source_node_id=effective_source_node_id,
                 error=ExecutionError(
                     exception=str(failure),
                     exception_type=type(failure).__name__,
@@ -1811,7 +1862,7 @@ class RowProcessor:
         except LandscapeRecordError as record_failure:
             raise AuditIntegrityError(
                 f"Failed to record FAILED source node state for token {token.token_id!r} "
-                f"on source boundary (node={self._source_node_id!r}). Audit trail is INCOMPLETE — "
+                f"on source boundary (node={effective_source_node_id!r}). Audit trail is INCOMPLETE — "
                 f"the FAILED source node state may be missing. Recorder failure: "
                 f"{type(record_failure).__name__}: {record_failure}. Original {original_label}: {failure!s}"
             ) from record_failure
@@ -1819,7 +1870,7 @@ class RowProcessor:
             "TokenCompleted telemetry after source-boundary FAILED audit",
             run_id=self._run_id,
             token_id=token.token_id,
-            source_node_id=self._source_node_id,
+            source_node_id=effective_source_node_id,
         ):
             self._emit_token_completed(
                 token,
@@ -1835,6 +1886,7 @@ class RowProcessor:
         ctx: PluginContext,
         *,
         source_node_id: NodeID | None = None,
+        source_on_success: str | None = None,
         coalesce_node_id: NodeID | None,
         coalesce_name: CoalesceName | None,
     ) -> list[RowResult]:
@@ -1849,6 +1901,9 @@ class RowProcessor:
             input_data: Row data dict for audit hashing (must be plain dict)
             transforms: List of transform plugins (for invariant check)
             ctx: Plugin context
+            source_on_success: Source-specific terminal sink for rows that do
+                not traverse any processing nodes. Defaults to the processor's
+                configured source sink for single-source callers.
             coalesce_node_id: Node ID at which fork children should coalesce
             coalesce_name: Name of the coalesce point for merging
 
@@ -1863,15 +1918,20 @@ class RowProcessor:
             source_node_id=effective_source_node_id,
         )
 
-        initial_node_id = self._node_to_next.get(effective_source_node_id) or self._first_transform_node_id or effective_source_node_id
+        if effective_source_node_id in self._node_to_next:
+            initial_node_id = self._node_to_next[effective_source_node_id]
+        else:
+            initial_node_id = self._first_transform_node_id or effective_source_node_id
         if transforms and initial_node_id == effective_source_node_id:
             raise OrchestrationInvariantError("Traversal context is missing a source continuation for non-empty transform pipeline")
+        effective_source_on_success = source_on_success if source_on_success is not None else self._source_on_success
         return self._drain_work_queue(
             self._nav.create_work_item(
                 token=token,
                 current_node_id=initial_node_id,
                 coalesce_node_id=coalesce_node_id,
                 coalesce_name=coalesce_name,
+                on_success_sink=effective_source_on_success if initial_node_id is None else None,
             ),
             ctx,
         )
@@ -1887,6 +1947,7 @@ class RowProcessor:
         coalesce_name: CoalesceName | None = None,
         source_node_id: NodeID | None = None,
         source_plugin: SourceProtocol | None = None,
+        source_on_success: str | None = None,
         source_row_index: int | None = None,
         ingest_sequence: int | None = None,
     ) -> list[RowResult]:
@@ -1903,6 +1964,9 @@ class RowProcessor:
             ctx: Plugin context
             coalesce_node_id: Node ID at which fork children should coalesce
             coalesce_name: Name of the coalesce point for merging
+            source_on_success: Source-specific terminal sink. Required by
+                multi-source callers when a source row may terminalize without
+                entering a transform.
 
         Returns:
             List of RowResults, one per terminal token (parent + children)
@@ -1949,6 +2013,7 @@ class RowProcessor:
                     token=token,
                     input_data=source_input,
                     failure=failure,
+                    source_node_id=effective_source_node_id,
                 )
                 raise
         return self._record_source_and_start_traversal(
@@ -1957,6 +2022,7 @@ class RowProcessor:
             transforms=transforms,
             ctx=ctx,
             source_node_id=effective_source_node_id,
+            source_on_success=source_on_success,
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
@@ -1970,6 +2036,8 @@ class RowProcessor:
         *,
         coalesce_node_id: NodeID | None = None,
         coalesce_name: CoalesceName | None = None,
+        source_node_id: NodeID | None = None,
+        source_on_success: str | None = None,
     ) -> list[RowResult]:
         """Process an existing row (row already in database, create new token only).
 
@@ -1992,6 +2060,11 @@ class RowProcessor:
             ctx: Plugin context
             coalesce_node_id: Node ID at which fork children should coalesce
             coalesce_name: Name of the coalesce point for merging
+            source_node_id: Source node that originally ingested this row.
+                Multi-source resume must pass this so replayed source states
+                remain attributable to the correct root.
+            source_on_success: Source-specific terminal sink for rows that do
+                not traverse any processing nodes.
 
         Returns:
             List of RowResults, one per terminal token (parent + children)
@@ -2010,6 +2083,8 @@ class RowProcessor:
             input_data=resumed_input,
             transforms=transforms,
             ctx=ctx,
+            source_node_id=source_node_id,
+            source_on_success=source_on_success,
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
@@ -2421,6 +2496,58 @@ class RowProcessor:
             return False
         return self._scheduler.count_active_work(run_id=self._run_id) > 0
 
+    def active_scheduled_row_ids(self) -> frozenset[str]:
+        """Return row IDs currently represented by active scheduler work."""
+        if self._scheduler is None:
+            return frozenset()
+        return self._scheduler.active_row_ids(run_id=self._run_id)
+
+    def summarize_scheduled_work(self) -> tuple[str, ...]:
+        """Return grouped active scheduler work for invariant diagnostics."""
+        if self._scheduler is None:
+            return ()
+        return self._scheduler.summarize_active_work(run_id=self._run_id)
+
+    def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
+        """Mark durable scheduler work consumed by a barrier as terminal."""
+        expected_count = len(frozenset(token_ids))
+        if not token_ids:
+            raise AuditIntegrityError(f"Scheduler barrier terminalization for barrier_key={barrier_key!r} requires live token_ids.")
+        if expected_count != len(token_ids):
+            raise AuditIntegrityError(
+                f"Scheduler barrier terminalization received duplicate live token_ids for barrier_key={barrier_key!r}: {token_ids!r}"
+            )
+        if self._scheduler is None:
+            return expected_count
+        terminalized_count = self._scheduler.mark_blocked_barrier_terminal(
+            run_id=self._run_id,
+            barrier_key=barrier_key,
+            token_ids=token_ids,
+            now=datetime.now(UTC),
+        )
+        if expected_count and terminalized_count != expected_count:
+            raise AuditIntegrityError(
+                f"Scheduler barrier terminalization mismatch for run_id={self._run_id!r} barrier_key={barrier_key!r}: "
+                f"live consumed {expected_count} token(s), but durable scheduler terminalized {terminalized_count}."
+            )
+        return terminalized_count
+
+    def _mark_buffered_scheduler_work_terminal(
+        self,
+        node_id: NodeID,
+        tokens: Sequence[TokenInfo],
+        *,
+        leased_token_id: str | None = None,
+    ) -> None:
+        """Mark scheduler work for aggregation-buffered tokens consumed by a flush."""
+        blocked_token_ids = tuple(token.token_id for token in tokens if token.token_id != leased_token_id)
+        if not blocked_token_ids:
+            return
+        self.mark_blocked_barrier_terminal(
+            str(node_id),
+            blocked_token_ids,
+        )
+
     def _drain_in_memory_work_queue(
         self,
         initial_item: WorkItem,
@@ -2510,8 +2637,9 @@ class RowProcessor:
                     )
                 break
 
-            item = pending_items.pop(claimed.work_item_id, None)
-            if item is None:
+            if claimed.work_item_id in pending_items:
+                item = pending_items.pop(claimed.work_item_id)
+            else:
                 item = self._work_item_from_scheduler(claimed)
             try:
                 result, child_items = self._process_single_token(
@@ -2535,18 +2663,97 @@ class RowProcessor:
             for child_item in child_items:
                 self._enqueue_scheduler_work_item(child_item, pending_items)
 
-            if result is None and not child_items:
-                self._scheduler.mark_blocked(
-                    work_item_id=claimed.work_item_id,
-                    queue_key=self._queue_key_for_blocked_item(item),
-                    barrier_key=self._barrier_key_for_blocked_item(item),
+            if result is not None and self._is_buffered_scheduler_result(result):
+                self._mark_claimed_scheduler_work_blocked(
+                    claimed,
+                    item,
                     now=datetime.now(UTC),
+                    queue_key=None,
+                    barrier_key=self._barrier_key_for_buffered_scheduler_result(result),
                 )
                 continue
 
-            self._scheduler.mark_terminal(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
+            if result is None and not child_items:
+                self._mark_claimed_scheduler_work_blocked(claimed, item, now=datetime.now(UTC))
+                continue
+
+            if isinstance(result, RowResult) and result.outcome is TerminalOutcome.FAILURE:
+                self._scheduler.mark_failed(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
+            else:
+                self._scheduler.mark_terminal(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
 
         return results
+
+    def _mark_claimed_scheduler_work_blocked(
+        self,
+        claimed: TokenWorkItem,
+        item: WorkItem,
+        *,
+        now: datetime,
+        queue_key: str | None = None,
+        barrier_key: str | None = None,
+    ) -> None:
+        """Persist BLOCKED state only when resume has a durable release key."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot block scheduler work without a scheduler repository")
+        queue_key = self._queue_key_for_blocked_item(item) if queue_key is None and barrier_key is None else queue_key
+        barrier_key = self._barrier_key_for_blocked_item(item) if queue_key is None and barrier_key is None else barrier_key
+        if queue_key is None and barrier_key is None:
+            raise OrchestrationInvariantError(
+                f"Work item {claimed.work_item_id!r} (token={item.token.token_id!r}, node={item.current_node_id!r}) "
+                "produced no result and no children, but has no queue or barrier key; cannot be unblocked. "
+                "This is a processor bug."
+            )
+        self._scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key=queue_key,
+            barrier_key=barrier_key,
+            now=now,
+        )
+
+    def _barrier_key_for_buffered_scheduler_result(self, result: RowResult | tuple[RowResult, ...]) -> str:
+        """Resolve the aggregation barrier that owns a BUFFERED scheduler result."""
+        buffered_results = result if isinstance(result, tuple) else (result,)
+        if not buffered_results:
+            raise AuditIntegrityError("Buffered scheduler result tuple is empty; cannot persist a durable release barrier.")
+
+        barrier_key: str | None = None
+        batch_id: str | None = None
+        for buffered_result in buffered_results:
+            outcome = self._data_flow.get_token_outcome(buffered_result.token.token_id)
+            if outcome is None or outcome.batch_id is None:
+                raise AuditIntegrityError(
+                    f"Buffered scheduler result for token {buffered_result.token.token_id!r} has no recorded batch_id; "
+                    "cannot persist a durable release barrier."
+                )
+            batch = self._execution.get_batch(outcome.batch_id)
+            if batch is None:
+                raise AuditIntegrityError(
+                    f"Buffered scheduler result for token {buffered_result.token.token_id!r} references missing "
+                    f"batch_id={outcome.batch_id!r}; cannot persist a durable release barrier."
+                )
+            if barrier_key is None:
+                barrier_key = batch.aggregation_node_id
+                batch_id = outcome.batch_id
+                continue
+            if batch.aggregation_node_id != barrier_key:
+                raise AuditIntegrityError(
+                    f"Buffered scheduler result mixes aggregation barriers: first batch_id={batch_id!r} "
+                    f"uses barrier_key={barrier_key!r}, but token {buffered_result.token.token_id!r} "
+                    f"batch_id={outcome.batch_id!r} uses barrier_key={batch.aggregation_node_id!r}."
+                )
+        if barrier_key is None:
+            raise AuditIntegrityError("Buffered scheduler result did not resolve an aggregation barrier.")
+        return barrier_key
+
+    @staticmethod
+    def _is_buffered_scheduler_result(result: RowResult | tuple[RowResult, ...] | None) -> bool:
+        """Return whether a scheduler result is an active aggregation buffer."""
+        if result is None:
+            return False
+        if isinstance(result, tuple):
+            return bool(result) and all(item.outcome is None and item.path is TerminalPath.BUFFERED for item in result)
+        return result.outcome is None and result.path is TerminalPath.BUFFERED
 
     def _enqueue_scheduler_work_item(
         self,
@@ -2567,6 +2774,13 @@ class RowProcessor:
             available_at=datetime.now(UTC),
             queue_key=self._queue_key_for_blocked_item(item),
             barrier_key=self._barrier_key_for_blocked_item(item),
+            on_success_sink=item.on_success_sink,
+            branch_name=item.token.branch_name,
+            fork_group_id=item.token.fork_group_id,
+            join_group_id=item.token.join_group_id,
+            expand_group_id=item.token.expand_group_id,
+            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
+            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
         )
         pending_items[scheduled.work_item_id] = item
         return scheduled
@@ -2575,18 +2789,28 @@ class RowProcessor:
         """Rehydrate a scheduler work item from its durable payload snapshot."""
         if self._scheduler is None:
             raise OrchestrationInvariantError("Cannot rehydrate scheduler work without a scheduler repository")
-        current_node_id = None if scheduled.node_id == "__terminal__" else NodeID(scheduled.node_id)
+        current_node_id = None if scheduled.node_id is None or scheduled.node_id == "__terminal__" else NodeID(scheduled.node_id)
         token = TokenInfo(
             row_id=scheduled.row_id,
             token_id=scheduled.token_id,
             row_data=self._scheduler.deserialize_row_payload(scheduled.row_payload_json),
+            branch_name=scheduled.branch_name,
+            fork_group_id=scheduled.fork_group_id,
+            join_group_id=scheduled.join_group_id,
+            expand_group_id=scheduled.expand_group_id,
         )
-        return self._nav.create_work_item(token=token, current_node_id=current_node_id)
+        return self._nav.create_work_item(
+            token=token,
+            current_node_id=current_node_id,
+            coalesce_node_id=NodeID(scheduled.coalesce_node_id) if scheduled.coalesce_node_id is not None else None,
+            coalesce_name=CoalesceName(scheduled.coalesce_name) if scheduled.coalesce_name is not None else None,
+            on_success_sink=scheduled.on_success_sink,
+        )
 
-    def _scheduler_node_id(self, node_id: NodeID | None) -> str:
+    def _scheduler_node_id(self, node_id: NodeID | None) -> str | None:
         """Return the persisted node cursor for a work item."""
         if node_id is None:
-            return "__terminal__"
+            return None
         return str(node_id)
 
     def _scheduler_step_index(self, node_id: NodeID | None) -> int:
@@ -2609,10 +2833,10 @@ class RowProcessor:
 
     def _barrier_key_for_blocked_item(self, item: WorkItem) -> str | None:
         """Return a barrier key for coalesce/aggregation blocking, if applicable."""
-        if item.coalesce_name is not None:
-            return str(item.coalesce_name)
         if item.current_node_id in self._aggregation_settings:
             return str(item.current_node_id)
+        if item.coalesce_name is not None:
+            return str(item.coalesce_name)
         return None
 
     def _handle_transform_node(

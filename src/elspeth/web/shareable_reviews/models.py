@@ -175,6 +175,7 @@ class CompositionStateResponse(_StrictResponse):
     version: int
     metadata: PipelineMetadataResponse
     source: SourceSpecResponse | None
+    sources: dict[str, SourceSpecResponse]
     nodes: list[NodeSpecResponse]
     edges: list[EdgeSpecResponse]
     outputs: list[OutputSpecResponse]

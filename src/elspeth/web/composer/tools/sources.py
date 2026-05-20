@@ -89,10 +89,12 @@ def _handle_set_source(
     context: ToolContext,
 ) -> ToolResult:
     result = _execute_set_source(arguments, state, context)
-    source_name = arguments.get("source_name", "source")
-    source = result.updated_state.sources.get(source_name) if isinstance(source_name, str) else None
-    if source is None:
+    if not result.success:
         return result
+    source_name = SetSourceArgumentsModel.model_validate(arguments).source_name
+    if source_name not in result.updated_state.sources:
+        return result
+    source = result.updated_state.sources[source_name]
     return _attach_post_call_hints(
         result,
         context.catalog,
@@ -744,9 +746,9 @@ def _execute_patch_source_options(
             actual_type=type(exc).__name__,
         ) from exc
     source_name = validated.source_name
-    current_source = state.sources.get(source_name)
-    if current_source is None:
+    if source_name not in state.sources:
         return _failure_result(state, f"No source named '{source_name}' configured to patch.")
+    current_source = state.sources[source_name]
     patch = validated.patch
 
     manual_authoring_error = _reject_manual_source_authoring(patch, tool_name="patch_source_options")
@@ -806,10 +808,12 @@ def _handle_patch_source_options(
     context: ToolContext,
 ) -> ToolResult:
     result = _execute_patch_source_options(arguments, state, context)
-    source_name = arguments.get("source_name", "source")
-    source = result.updated_state.sources.get(source_name) if isinstance(source_name, str) else None
-    if source is None:
+    if not result.success:
         return result
+    source_name = PatchSourceOptionsArgumentsModel.model_validate(arguments).source_name
+    if source_name not in result.updated_state.sources:
+        return result
+    source = result.updated_state.sources[source_name]
     return _attach_post_call_hints(
         result,
         context.catalog,

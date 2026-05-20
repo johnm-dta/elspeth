@@ -263,6 +263,8 @@ class TestRetryAuditTrail:
             source_node_id=source_node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Create the token record

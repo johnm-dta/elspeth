@@ -106,6 +106,8 @@ def _create_row(
             run_id=run_id,
             source_node_id=node_id,
             row_index=row_index,
+            source_row_index=row_index,
+            ingest_sequence=row_index,
             source_data_hash=f"hash-{row_id}",
             source_data_ref=source_data_ref,
             created_at=datetime.now(UTC),

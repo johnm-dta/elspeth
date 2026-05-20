@@ -1481,7 +1481,8 @@ class ElspethSettings(BaseModel):
     @model_validator(mode="after")
     def populate_legacy_source_view(self) -> "ElspethSettings":
         """Populate ``source`` as a read-only compatibility view."""
-        if self.sources and getattr(self, "source", None) is None:
+        current_source = self.__dict__["source"] if "source" in self.__dict__ else None
+        if self.sources and current_source is None:
             object.__setattr__(self, "source", next(iter(self.sources.values())))
         return self
 

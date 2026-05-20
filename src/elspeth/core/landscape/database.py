@@ -123,6 +123,13 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("token_work_items", "status"),
     ("token_work_items", "available_at"),
     ("token_work_items", "row_payload_json"),
+    ("token_work_items", "on_success_sink"),
+    ("token_work_items", "branch_name"),
+    ("token_work_items", "fork_group_id"),
+    ("token_work_items", "join_group_id"),
+    ("token_work_items", "expand_group_id"),
+    ("token_work_items", "coalesce_node_id"),
+    ("token_work_items", "coalesce_name"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
@@ -146,11 +153,15 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("transform_errors", ("transform_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("artifacts", ("produced_by_state_id", "run_id"), "node_states", ("state_id", "run_id")),
     ("artifacts", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("run_sources", ("source_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_state_id", "run_id"), "node_states", ("state_id", "run_id")),
     ("batches", ("retry_of_batch_id", "run_id"), "batches", ("batch_id", "run_id")),
     ("batch_members", ("batch_id", "run_id"), "batches", ("batch_id", "run_id")),
     ("batch_members", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("token_work_items", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("token_work_items", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("token_work_items", ("coalesce_node_id", "run_id"), "nodes", ("node_id", "run_id")),
 )
 
 # Required check constraints for audit integrity.

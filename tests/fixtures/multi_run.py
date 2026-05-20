@@ -173,7 +173,7 @@ def _build_multi_run_landscape() -> MultiRunFixture:
             tok_id = f"tok-{suffix}-{i}"
             state_id = f"st-{suffix}-{i}"
 
-            factory.data_flow.create_row(run_id, src_nid, i, {"val": f"{suffix}-{i}"}, row_id=row_id)
+            factory.data_flow.create_row(run_id, src_nid, i, {"val": f"{suffix}-{i}"}, row_id=row_id, source_row_index=i, ingest_sequence=i)
             factory.data_flow.create_token(row_id, token_id=tok_id)
 
             # begin + complete a node state on the transform node

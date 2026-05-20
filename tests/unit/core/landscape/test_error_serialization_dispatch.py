@@ -51,7 +51,7 @@ def _setup_with_token(
     setup = make_recorder_with_run(run_id=run_id, source_node_id="source-0")
     db, factory, run_id = setup.db, setup.factory, setup.run_id
     register_test_node(factory.data_flow, run_id, "transform-1", node_type=NodeType.TRANSFORM, plugin_name="transform")
-    row = factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    row = factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     token = factory.data_flow.create_token("row-1", token_id="tok-1")
     return db, factory, row.row_id, token.token_id
 

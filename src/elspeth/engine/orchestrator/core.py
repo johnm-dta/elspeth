@@ -66,6 +66,7 @@ from elspeth.contracts.declaration_contracts import (
 )
 from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
+    AuditIntegrityError,
     ExecutionError,
     FrameworkBugError,
     GracefulShutdownError,
@@ -1413,7 +1414,7 @@ class Orchestrator:
         source_id_map: dict[str, NodeID] = {}
         for candidate_source_id in graph.get_sources():
             source_info = graph.get_node_info(candidate_source_id)
-            source_name = str(source_info.config.get("source_name", "source"))
+            source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
             source_id_map[source_name] = candidate_source_id
         source_id = next(iter(source_id_map.values()))
         transform_id_map: dict[int, NodeID] = graph.get_transform_id_map()
@@ -1958,6 +1959,26 @@ class Orchestrator:
         """Return True when a pipeline has time-sensitive aggregation triggers."""
         return any(settings.trigger.has_timeout or settings.trigger.has_condition for settings in config.aggregation_settings.values())
 
+    def _idle_timeout_context(self, source_ctx: PluginContext) -> PluginContext:
+        """Create an isolated context for idle timeout work.
+
+        Source generators may still be executing on a background ``next()``
+        thread while idle timeout checks run on the orchestrator thread. The
+        timeout path must therefore never clear or overwrite the source
+        context's node/operation identity.
+        """
+        return PluginContext(
+            run_id=source_ctx.run_id,
+            config=source_ctx.config,
+            landscape=source_ctx.landscape,
+            payload_store=source_ctx.payload_store,
+            rate_limit_registry=source_ctx.rate_limit_registry,
+            concurrency_config=source_ctx.concurrency_config,
+            shutdown_event=source_ctx.shutdown_event,
+            contract=source_ctx.contract,
+            telemetry_emit=source_ctx.telemetry_emit,
+        )
+
     def _process_idle_timeout_flushes(
         self,
         loop_ctx: LoopContext,
@@ -1968,7 +1989,7 @@ class Orchestrator:
         source_operation_id: str,
     ) -> None:
         """Flush time-sensitive aggregation/coalesce state while no source row is ready."""
-        ctx = loop_ctx.ctx
+        ctx = self._idle_timeout_context(loop_ctx.ctx)
         # Match the existing pre-row timeout path: a source item has not been
         # handed to transforms, so transform state should be established by the
         # transform executor instead of inheriting the source operation id.
@@ -1991,12 +2012,6 @@ class Orchestrator:
                 counters=loop_ctx.counters,
                 pending_tokens=loop_ctx.pending_tokens,
             )
-
-        self._restore_source_iteration_context(
-            ctx,
-            source_id=source_id,
-            source_operation_id=source_operation_id,
-        )
 
     def _next_source_item_with_idle_timeout_flushes(
         self,
@@ -2026,10 +2041,11 @@ class Orchestrator:
                 result_queue.put(("error", exc))
 
         threading.Thread(target=fetch_next, daemon=True).start()
+        receive_source_result = result_queue.get
 
         while True:
             try:
-                kind, payload = result_queue.get(timeout=self._SOURCE_IDLE_POLL_INTERVAL_SECONDS)
+                kind, payload = receive_source_result(timeout=self._SOURCE_IDLE_POLL_INTERVAL_SECONDS)
             except queue.Empty:
                 self._process_idle_timeout_flushes(
                     loop_ctx,
@@ -2105,11 +2121,14 @@ class Orchestrator:
         schema_contract_recorded: bool,
         *,
         interrupted_by_shutdown: bool,
+        flush_end_of_input: bool,
     ) -> None:
         """Post-loop work after source iteration completes or is interrupted.
 
-        Restores operation_id, optionally flushes end-of-source aggregation and
-        coalesce state, and records deferred field resolution / schema contract.
+        Restores operation_id and records source-local deferred field resolution
+        / schema contract. Aggregation and coalesce flushes are run-global
+        end-of-input work: in multi-source runs they must execute only after the
+        last source is exhausted, not after each individual source.
 
         On graceful shutdown we intentionally skip end-of-source flushes. A
         shutdown stops after the current row; it must not synthesize
@@ -2137,8 +2156,10 @@ class Orchestrator:
             source_operation_id=source_operation_id,
         )
 
-        if not interrupted_by_shutdown:
-            # CRITICAL: Flush remaining aggregation buffers only at true end-of-source.
+        if not interrupted_by_shutdown and flush_end_of_input:
+            # CRITICAL: Flush remaining aggregation buffers only at true end-of-input.
+            # Multi-source runs may feed shared downstream queues, aggregations,
+            # and coalesce barriers. Per-source completion is not a global EOF.
             # A graceful shutdown is resumable and must preserve buffered state
             # instead of forcing an END_OF_SOURCE flush.
             if config.aggregation_settings:
@@ -2166,7 +2187,9 @@ class Orchestrator:
                             f"These tokens would never reach a terminal state."
                         )
 
-            # Flush pending coalesce operations only when the source is actually exhausted.
+            # Flush pending coalesce operations only when all configured sources
+            # are exhausted. Per-source flushing would resolve shared barriers
+            # before later source roots have had a chance to contribute.
             if coalesce_executor is not None:
                 flush_coalesce_pending(
                     coalesce_executor=coalesce_executor,
@@ -2237,6 +2260,7 @@ class Orchestrator:
         edge_map: Mapping[tuple[NodeID, str], str],
         *,
         shutdown_event: threading.Event | None = None,
+        flush_end_of_input: bool = True,
     ) -> LoopResult:
         """Run the main processing loop: source iteration, quarantine, transform, flush.
 
@@ -2274,12 +2298,24 @@ class Orchestrator:
             # before each iteration so external calls are attributed to source_load
             source_operation_id = source_op_handle.operation.operation_id
 
-            source_iterator = self._load_source_with_events(config, run_id, ctx)
             self._restore_source_iteration_context(
                 ctx,
                 source_id=source_id,
                 source_operation_id=source_operation_id,
             )
+            source_name = next(iter(config.sources))
+            factory.run_lifecycle.record_run_source(
+                run_id=run_id,
+                source_node_id=source_id,
+                source_name=source_name,
+                plugin_name=config.source.name,
+                config_hash=stable_hash(config.source.config),
+                source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
+                schema_contract=config.source.get_schema_contract(),
+                lifecycle_state="loading",
+            )
+
+            source_iterator = self._load_source_with_events(config, run_id, ctx)
 
             # Deferred recording flags — field resolution after first iteration,
             # schema contract after first VALID row. If begin_run already stored
@@ -2383,6 +2419,7 @@ class Orchestrator:
                         ctx=ctx,
                         source_node_id=source_id,
                         source_plugin=config.source,
+                        source_on_success=config.source.on_success,
                         source_row_index=current_source_row_index,
                         ingest_sequence=ingest_sequence,
                     )
@@ -2429,8 +2466,8 @@ class Orchestrator:
                     field_resolution_recorded,
                     schema_contract_recorded,
                     interrupted_by_shutdown=interrupted_by_shutdown,
+                    flush_end_of_input=flush_end_of_input,
                 )
-                source_name = next(iter(config.sources))
                 field_resolution = config.source.get_field_resolution()
                 resolution_mapping: Mapping[str, str] | None = None
                 normalization_version: str | None = None
@@ -2509,7 +2546,8 @@ class Orchestrator:
         try:
             # 3. Source + Process phase
             loop_result: LoopResult | None = None
-            for source_name, source_id in artifacts.source_id_map.items():
+            source_items = tuple(artifacts.source_id_map.items())
+            for source_ordinal, (source_name, source_id) in enumerate(source_items):
                 source_config = replace(
                     config,
                     source=config.sources[source_name],
@@ -2533,6 +2571,7 @@ class Orchestrator:
                     source_id,
                     artifacts.edge_map,
                     shutdown_event=shutdown_event,
+                    flush_end_of_input=source_ordinal == len(source_items) - 1,
                 )
                 loop_ctx.last_token_id = source_loop_ctx.last_token_id
                 if loop_result.interrupted:
@@ -2540,6 +2579,13 @@ class Orchestrator:
 
             if loop_result is None:
                 raise OrchestrationInvariantError("Pipeline has no sources to process")
+            if not loop_result.interrupted and loop_ctx.processor.has_scheduled_work():
+                active_work = "; ".join(loop_ctx.processor.summarize_scheduled_work()) or "<unknown>"
+                raise OrchestrationInvariantError(
+                    f"Run '{run_ctx.processor.run_id}' left non-terminal scheduler work after final source flush. "
+                    "Blocked, READY, or future WAITING scheduler state must be resolved before run completion. "
+                    f"Active scheduler work: {active_work}."
+                )
 
             # 4. Sink writes — outside source_load track_operation context.
             # Each sink write has its own track_operation (sink_write) in SinkExecutor.
@@ -2660,36 +2706,6 @@ class Orchestrator:
             )
         recovery = RecoveryManager(self._db, self._checkpoint_manager)
 
-        # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
-        # Resume must use the ORIGINAL run's schema, not the current source's schema
-        # This enables proper type coercion (datetime/Decimal) from JSON payload strings
-        source_schema_json = factory.run_lifecycle.get_source_schema(run_id)
-
-        # Deserialize schema and recreate Pydantic model class with full type fidelity
-        # Call module function directly (no wrapper method)
-        schema_dict = json.loads(source_schema_json)
-        source_schema_class = reconstruct_schema_from_json(schema_dict)
-
-        # PIPELINEROW MIGRATION: Retrieve contract from audit trail for row wrapping
-        # During resume, we need to wrap plain dicts in PipelineRow with contract
-        # This ensures type fidelity and maintains the same data structures as main run
-        schema_contract = factory.run_lifecycle.get_run_contract(run_id)
-        if schema_contract is None:
-            # TIER-1 AUDIT INTEGRITY: Crash if contract is missing from audit trail
-            # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
-            # Inferring a contract from row data would:
-            # 1. Mask missing/corrupt audit data (evidence tampering)
-            # 2. Produce incomplete contracts (fields appearing later are omitted)
-            # 3. Violate the NO LEGACY CODE POLICY (no backward compatibility shims)
-            raise OrchestrationInvariantError(
-                f"Cannot resume run '{run_id}': schema contract is missing from audit trail. "
-                f"This indicates either:\n"
-                f"  1. The audit database is corrupt or incomplete\n"
-                f"  2. The run was started with a version that didn't record contracts\n"
-                f"Resume cannot proceed safely without the schema contract. "
-                f"The audit trail must be complete and trustworthy."
-            )
-
         # Resume replays persisted PipelineRow payloads through NullSource rather
         # than re-opening the original source plugin, so source-boundary evidence
         # is inherited from the original run. That is only sound if the current
@@ -2706,7 +2722,59 @@ class Orchestrator:
                 "declaration-contract and Tier-1 registries."
             )
 
-        unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
+        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]]
+        schema_contract: SchemaContract
+        schema_contracts_by_source: dict[NodeID, SchemaContract]
+
+        source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
+        if source_records:
+            source_schema_classes: dict[NodeID, type[Any]] = {}
+            schema_contracts_by_source = {}
+            for raw_source_node_id, source_record in source_records.items():
+                source_node_id = NodeID(str(raw_source_node_id))
+                schema_dict = json.loads(source_record.source_schema_json)
+                source_schema_classes[source_node_id] = reconstruct_schema_from_json(schema_dict)
+                schema_contracts_by_source[source_node_id] = source_record.schema_contract
+
+            unprocessed_rows = recovery.get_unprocessed_row_data_by_source(
+                run_id,
+                payload_store,
+                source_schema_classes=source_schema_classes,
+            )
+            schema_contract = next(iter(schema_contracts_by_source.values()))
+        else:
+            # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
+            # Resume must use the ORIGINAL run's schema, not the current source's schema
+            # This enables proper type coercion (datetime/Decimal) from JSON payload strings
+            source_schema_json = factory.run_lifecycle.get_source_schema(run_id)
+
+            # Deserialize schema and recreate Pydantic model class with full type fidelity
+            # Call module function directly (no wrapper method)
+            schema_dict = json.loads(source_schema_json)
+            source_schema_class = reconstruct_schema_from_json(schema_dict)
+
+            # PIPELINEROW MIGRATION: Retrieve contract from audit trail for row wrapping
+            # During resume, we need to wrap plain dicts in PipelineRow with contract
+            # This ensures type fidelity and maintains the same data structures as main run
+            legacy_schema_contract = factory.run_lifecycle.get_run_contract(run_id)
+            if legacy_schema_contract is None:
+                # TIER-1 AUDIT INTEGRITY: Crash if contract is missing from audit trail
+                # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
+                # Inferring a contract from row data would:
+                # 1. Mask missing/corrupt audit data (evidence tampering)
+                # 2. Produce incomplete contracts (fields appearing later are omitted)
+                # 3. Violate the NO LEGACY CODE POLICY (no backward compatibility shims)
+                raise OrchestrationInvariantError(
+                    f"Cannot resume run '{run_id}': schema contract is missing from audit trail. "
+                    f"This indicates either:\n"
+                    f"  1. The audit database is corrupt or incomplete\n"
+                    f"  2. The run was started with a version that didn't record contracts\n"
+                    f"Resume cannot proceed safely without the schema contract. "
+                    f"The audit trail must be complete and trustworthy."
+                )
+            schema_contract = legacy_schema_contract
+            unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
+            schema_contracts_by_source = {}
 
         # F1 fix: pre-compute incomplete child tokens so the resume loop can dispatch
         # partial-fork/expand/coalesce rows via mid-DAG continuation rather than
@@ -2722,6 +2790,7 @@ class Orchestrator:
             schema_contract=schema_contract,
             incomplete_by_row=incomplete_by_row,
             recovery_manager=recovery,
+            schema_contracts_by_source=schema_contracts_by_source,
         )
 
     def resume(
@@ -2772,6 +2841,7 @@ class Orchestrator:
         if restored_coalesce_state is not None and not restored_coalesce_state.has_resumable_state:
             restored_coalesce_state = None
         schema_contract = state.schema_contract
+        schema_contracts_by_source = state.schema_contracts_by_source
         unprocessed_rows = state.unprocessed_rows
         # F1 fix: pre-computed by _reconstruct_resume_state; forwarded to the loop.
         incomplete_by_row = state.incomplete_by_row
@@ -2848,6 +2918,7 @@ class Orchestrator:
                     incomplete_by_row=incomplete_by_row,
                     recovery_manager=recovery_manager,
                     resume_checkpoint_id=resume_checkpoint_id,
+                    schema_contracts_by_source=schema_contracts_by_source,
                     shutdown_event=active_event,
                 )
 
@@ -3020,7 +3091,7 @@ class Orchestrator:
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
-        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]],
+        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]],
         restored_aggregation_state: Mapping[str, AggregationCheckpointState],
         restored_coalesce_state: CoalesceCheckpointState | None,
         settings: ElspethSettings | None = None,
@@ -3030,6 +3101,7 @@ class Orchestrator:
         incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]],
         recovery_manager: RecoveryManager,
         resume_checkpoint_id: str,
+        schema_contracts_by_source: Mapping[NodeID, SchemaContract] | None = None,
         shutdown_event: threading.Event | None = None,
     ) -> RunResult:
         """Process unprocessed rows during resume.
@@ -3097,6 +3169,10 @@ class Orchestrator:
                 payload_store=payload_store,
                 run_id=run_id,
                 resume_checkpoint_id=resume_checkpoint_id,
+                schema_contracts_by_source=schema_contracts_by_source,
+                source_on_success_by_source={
+                    source_id: config.sources[source_name].on_success for source_name, source_id in artifacts.source_id_map.items()
+                },
                 shutdown_event=shutdown_event,
             )
 

@@ -26,16 +26,6 @@ from sqlalchemy import (
 # Shared metadata for all tables
 metadata = MetaData()
 
-
-def _legacy_row_index_default(context: object) -> int:
-    """Bridge legacy row inserts to canonical source-scoped row identity."""
-    parameters = context.get_current_parameters()  # type: ignore[attr-defined]
-    row_index = parameters.get("row_index")
-    if not isinstance(row_index, int):
-        raise ValueError("source_row_index/ingest_sequence must be provided when row_index is absent")
-    return row_index
-
-
 # Explicit SQLite schema epoch for pre-1.0 compatibility policy.
 # Stored in PRAGMA user_version so future releases can distinguish
 # "intentionally old schema, needs migration" from "runtime-required field".
@@ -72,7 +62,12 @@ def _legacy_row_index_default(context: object) -> int:
 #        marks resume re-drives, so incomplete tokens are reconstructable + attributable.
 #  12 → Multi-source foundation: per-source run records, source-scoped row
 #        indexes, global ingest sequence ordering, and durable token work items.
-SQLITE_SCHEMA_EPOCH = 12
+#  13 → Durable scheduler continuation routing: token_work_items.on_success_sink
+#        preserves sink-bound continuations across resume/recovery.
+#  14 → Durable scheduler resume identity: token_work_items stores token lineage
+#        and coalesce cursor fields so resumed workers do not depend on in-memory
+#        pending_items state.
+SQLITE_SCHEMA_EPOCH = 14
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -171,6 +166,7 @@ run_sources_table = Table(
     Column("recorded_at", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("run_id", "source_node_id"),
     UniqueConstraint("run_id", "source_name"),
+    ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )
 Index("ix_run_sources_run", run_sources_table.c.run_id)
 Index("ix_run_sources_source_name", run_sources_table.c.run_id, run_sources_table.c.source_name)
@@ -232,8 +228,8 @@ rows_table = Table(
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("source_node_id", String(64), nullable=False),
     Column("row_index", Integer),
-    Column("source_row_index", Integer, nullable=False, default=_legacy_row_index_default),
-    Column("ingest_sequence", Integer, nullable=False, default=_legacy_row_index_default),
+    Column("source_row_index", Integer, nullable=False),
+    Column("ingest_sequence", Integer, nullable=False),
     Column("source_data_hash", String(64), nullable=False),
     Column("source_data_ref", String(256)),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -321,13 +317,20 @@ token_work_items_table = Table(
     Column("run_id", String(64), nullable=False, index=True),
     Column("token_id", String(64), nullable=False),
     Column("row_id", String(64), nullable=False),
-    Column("node_id", String(64), nullable=False),
+    Column("node_id", String(64)),
     Column("step_index", Integer, nullable=False),
     Column("ingest_sequence", Integer, nullable=False),
     Column("row_payload_json", Text, nullable=False),
     Column("status", String(32), nullable=False),
     Column("queue_key", String(128)),
     Column("barrier_key", String(128)),
+    Column("on_success_sink", String(128)),
+    Column("branch_name", String(128)),
+    Column("fork_group_id", String(128)),
+    Column("join_group_id", String(128)),
+    Column("expand_group_id", String(128)),
+    Column("coalesce_node_id", String(NODE_ID_COLUMN_LENGTH)),
+    Column("coalesce_name", String(128)),
     Column("attempt", Integer, nullable=False),
     Column("lease_owner", String(128)),
     Column("lease_expires_at", DateTime(timezone=True)),
@@ -335,10 +338,21 @@ token_work_items_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
+    ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+    ForeignKeyConstraint(["coalesce_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )
 Index("ix_token_work_items_ready", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.available_at)
 Index(
     "ix_token_work_items_lease", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.lease_expires_at
+)
+Index(
+    "uq_token_work_items_terminal_identity",
+    token_work_items_table.c.run_id,
+    token_work_items_table.c.token_id,
+    token_work_items_table.c.attempt,
+    unique=True,
+    sqlite_where=token_work_items_table.c.node_id.is_(None),
 )
 
 # === Token Parents (for multi-parent joins) ===

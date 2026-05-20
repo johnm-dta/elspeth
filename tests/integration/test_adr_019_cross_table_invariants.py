@@ -39,6 +39,8 @@ def _build_base_run(factory: RecorderFactory) -> tuple[str, str, str]:
         source_node_id=source.node_id,
         row_index=0,
         data={"x": 1},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     return run.run_id, source.node_id, token.token_id
@@ -224,6 +226,8 @@ class TestI1cFailsinkPaired:
             source_node_id=source_node_id,
             row_index=1,
             data={"x": 2},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         other_token = landscape_factory.data_flow.create_token(row_id=other_row.row_id)
         _other_state_id, wrong_artifact_id = _record_completed_sink_state_with_artifact(

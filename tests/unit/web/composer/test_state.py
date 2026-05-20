@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -118,6 +119,31 @@ class TestCompositionStateNamedSources:
         restored = CompositionState.from_dict(original.to_dict())
 
         assert restored == original
+
+    def test_validation_warnings_and_suggestions_cover_all_named_sources(self) -> None:
+        """Named-source advisory checks must not stop at the compatibility source."""
+        state = CompositionState(
+            source=None,
+            sources={
+                "customers": self._source("csv", "customer_rows"),
+                "orders": SourceSpec(
+                    plugin="json",
+                    on_success="order_rows",
+                    options={"path": "/data/orders.json"},
+                    on_validation_failure="missing_failures",
+                ),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="customer_rows", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = state.validate()
+
+        assert any(w.component == "source:orders" and "on_validation_failure" in w.message for w in result.warnings)
+        assert any(s.component == "source:orders" and "no explicit schema" in s.message for s in result.suggestions)
 
 
 class TestNodeSpec:
@@ -2432,6 +2458,35 @@ class TestWebScrapeAbuseContactValidation:
         assert not result.is_valid
         assert any("abuse_contact" in e.message for e in result.errors)
 
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("abuse_contact", "<OPERATOR_REQUIRED>"),
+            ("abuse_contact", "operator required"),
+            ("scraping_reason", "<OPERATOR_REQUIRED>"),
+            ("scraping_reason", "operator required"),
+        ],
+    )
+    def test_rejects_wire_visible_identity_placeholders(self, field_name: str, value: str) -> None:
+        """Composer validation must block placeholder values before preview/execution."""
+        state = self._state_with_web_scrape("ops@somecompany.gov.au")
+        http = dict(state.nodes[0].options["http"])
+        http[field_name] = value
+        options = dict(state.nodes[0].options)
+        options["http"] = http
+        node = replace(state.nodes[0], options=options)
+        state = replace(state, nodes=(node,))
+
+        messages = self._web_scrape_identity_error_messages(state)
+        assert messages, f"Expected reject for {field_name}={value!r}, got no web_scrape identity error"
+        assert field_name in messages[0]
+        assert "placeholder" in messages[0]
+
+    def test_accepts_real_wire_visible_identity_values(self) -> None:
+        state = self._state_with_web_scrape("ops@somecompany.gov.au")
+        messages = self._web_scrape_identity_error_messages(state)
+        assert not messages
+
 
 class TestSchemaContractValidation:
     """Tests for schema contract validation (pass 9) in CompositionState.validate()."""
@@ -2760,6 +2815,49 @@ class TestSchemaContractValidation:
         assert sink_contract.consumer_requires == ("body",)
         assert sink_contract.satisfied is True
 
+    def test_named_non_first_source_contract_violation_is_reported(self) -> None:
+        """Schema validation must inspect every named source, not only the compatibility source."""
+        state = CompositionState(
+            source=None,
+            sources={
+                "customers": self._make_source(
+                    on_success="customer_rows",
+                    options={"schema": {"mode": "fixed", "fields": ["customer_id: str"]}},
+                    on_validation_failure="discard",
+                ),
+                "orders": self._make_source(
+                    on_success="order_rows",
+                    plugin="json",
+                    options={"schema": {"mode": "fixed", "fields": ["refund_id: str"]}},
+                    on_validation_failure="discard",
+                ),
+            },
+            nodes=(
+                self._make_transform(
+                    "validate_orders",
+                    "order_rows",
+                    "main",
+                    options={"required_input_fields": ["order_id"]},
+                ),
+            ),
+            edges=(),
+            outputs=(self._make_output("main"), self._make_output("customer_rows")),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = state.validate()
+
+        assert not result.is_valid
+        contract = next(edge for edge in result.edge_contracts if edge.to_id == "validate_orders")
+        assert contract.from_id == "source:orders"
+        assert contract.producer_guarantees == ("refund_id",)
+        assert contract.consumer_requires == ("order_id",)
+        assert contract.missing_fields == ("order_id",)
+        assert any(
+            error.component == "source:orders" and "'source:orders' -> 'validate_orders'" in error.message for error in result.errors
+        )
+
     def test_contract_probe_constructor_exception_falls_back_instead_of_crashing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Constructor-time probe failures must not escape Stage 1 validation."""
         state = self._empty_state()
@@ -2952,7 +3050,7 @@ class TestSchemaContractValidation:
         )
 
         with pytest.raises(RuntimeError, match="framework bug inside field_mapper __init__"):
-            _check_schema_contracts(source, (field_mapper_node,), (sink,))
+            _check_schema_contracts({"source": source}, (field_mapper_node,), (sink,))
 
     def test_contract_probe_redacts_exception_detail_from_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression (P2c): the constructor-time exception message is the
@@ -4220,6 +4318,48 @@ class TestSchemaContractValidation:
 
         assert not result.is_valid
         assert any("reserved" in e.message.lower() for e in result.errors)
+
+    def test_node_id_source_namespace_prefix_is_reserved(self) -> None:
+        """Nodes cannot collide with named-source producer ids such as source:orders."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "fixed", "fields": ["text: str"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "source:orders",
+                "t1",
+                "main",
+                options={"required_input_fields": ["text"]},
+            )
+        )
+        state = state.with_output(self._make_output())
+        state = state.with_edge(self._make_edge("e1", "source", "source:orders"))
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any(error.component == "node:source:orders" and "source producer namespace" in error.message for error in result.errors)
+
+    @pytest.mark.parametrize("source_name", ["Orders", "bad name", "continue", "__system", "x" * 39])
+    def test_plural_source_names_follow_runtime_identifier_constraints(self, source_name: str) -> None:
+        """Composer Stage 1 rejects names that runtime settings would reject later."""
+        state = CompositionState(
+            source=None,
+            sources={source_name: self._make_source("main")},
+            nodes=(),
+            edges=(),
+            outputs=(self._make_output("main"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any(error.component in {"source", f"source:{source_name}"} for error in result.errors)
 
     def test_bare_string_required_input_fields_emits_error(self) -> None:
         """Bare-string required_input_fields fails closed."""

@@ -210,6 +210,64 @@ class TestValidateSemanticContracts:
         assert errors == ()
         assert contracts == ()
 
+    def test_named_source_fed_consumer_emits_no_semantic_contract(self):
+        # Named multi-source roots use producer ids such as source:orders.
+        # They carry the same Phase 1 skip semantics as the legacy source id.
+        state = CompositionState(
+            metadata=PipelineMetadata(name="t"),
+            version=1,
+            edges=(),
+            source=None,
+            sources={
+                "orders": SourceSpec(
+                    plugin="csv",
+                    on_success="explode_in",
+                    options={
+                        "path": "orders.csv",
+                        "schema": {"mode": "fixed", "fields": ["content: str"]},
+                    },
+                    on_validation_failure="quarantine",
+                )
+            },
+            nodes=(
+                NodeSpec(
+                    id="explode",
+                    node_type="transform",
+                    plugin="line_explode",
+                    input="explode_in",
+                    on_success="sink",
+                    on_error="errors",
+                    options={
+                        "schema": {"mode": "flexible", "fields": ["content: str"]},
+                        "source_field": "content",
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            outputs=(
+                OutputSpec(
+                    name="sink",
+                    plugin="json",
+                    options={"path": "out.json"},
+                    on_write_failure="discard",
+                ),
+                OutputSpec(
+                    name="errors",
+                    plugin="json",
+                    options={"path": "err.json"},
+                    on_write_failure="discard",
+                ),
+            ),
+        )
+        errors, contracts = validate_semantic_contracts(state)
+        assert errors == ()
+        assert contracts == ()
+
     def test_undeclared_transform_producer_with_fail_policy_emits_error(self):
         # Real registered transform that does NOT declare output_semantics:
         # `passthrough` (src/elspeth/plugins/transforms/passthrough.py:39).

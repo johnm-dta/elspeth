@@ -70,6 +70,8 @@ class TestCSVSinkExecutorAuditChain:
             source_node_id=setup.source_node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         db_token = setup.data_flow.create_token(row_id=row.row_id)
 

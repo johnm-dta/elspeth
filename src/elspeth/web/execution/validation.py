@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from pydantic import ValidationError as PydanticValidationError
@@ -174,9 +174,9 @@ def _unmapped_schema_patch_target(dag_node_id: str, component_type: str | None) 
 def _source_name_for_dag_source(state: CompositionState, graph: Any, dag_source_id: str) -> str | None:
     node_info = graph.get_node_info(dag_source_id)
     config = node_info.config
-    if isinstance(config, Mapping) and "source_name" in config:
-        source_name = config["source_name"]
-        if isinstance(source_name, str) and source_name in state.sources:
+    if "source_name" in config:
+        source_name = cast(str, config["source_name"])
+        if source_name in state.sources:
             return source_name
     if len(state.sources) == 1:
         return next(iter(state.sources))
@@ -973,7 +973,7 @@ def validate_pipeline(
         batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
         if batch_required_error is not None:
             batch_option_errors.append((node.id, batch_required_error))
-    numeric_contract_errors, _numeric_contract_warnings = _batch_distribution_profile_value_field_entries(state.source, state.nodes)
+    numeric_contract_errors, _numeric_contract_warnings = _batch_distribution_profile_value_field_entries(state.sources, state.nodes)
     for entry in numeric_contract_errors:
         batch_option_errors.append((entry.component.removeprefix("node:"), entry.message))
     if batch_option_errors:

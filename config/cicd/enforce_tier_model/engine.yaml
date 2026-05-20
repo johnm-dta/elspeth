@@ -264,7 +264,7 @@ allow_hits:
   safety: Only queue.Empty is caught. Real source exceptions are delivered through
     the error sentinel and re-raised by the orchestrator thread.
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_run_main_processing_loop:fp=d860d04a8623dfd6
+- key: engine/orchestrator/core.py:R6:Orchestrator:_run_main_processing_loop:fp=3617abc39af30e81
   owner: architecture
   reason: StopIteration is the normal source exhaustion signal for both direct source
     iteration and the idle-poll helper; the main processing loop uses it to leave

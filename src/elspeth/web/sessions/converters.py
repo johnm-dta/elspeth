@@ -19,7 +19,6 @@ GuidedSession persistence:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 from elspeth.contracts.freeze import deep_thaw
@@ -45,9 +44,7 @@ def state_from_record(record: CompositionStateRecord) -> CompositionState:
         msg = f"CompositionStateRecord {record.id} has None metadata_ — database corruption or migration gap"
         raise ValueError(msg)
 
-    record_sources = getattr(record, "sources", None)
-    if record_sources is not None and not isinstance(record_sources, Mapping):
-        record_sources = None
+    record_sources = record.sources
 
     state_dict = {
         "version": record.version,

@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-import ipaddress
 from urllib.parse import urlparse
 
 
 def _is_loopback_host(hostname: str) -> bool:
-    if hostname.casefold() == "localhost":
+    normalized = hostname.casefold()
+    if normalized == "localhost":
         return True
-    try:
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
+    if normalized in {"::1", "0:0:0:0:0:0:0:1"}:
+        return True
+    parts = normalized.split(".")
+    if len(parts) != 4 or any(not part.isdecimal() for part in parts):
         return False
+    octets = tuple(int(part) for part in parts)
+    return octets[0] == 127 and all(0 <= octet <= 255 for octet in octets)
 
 
 def validate_credential_safe_https_url(value: str, *, field_name: str, allow_http_loopback: bool = False) -> str:

@@ -3020,7 +3020,7 @@ class TestSchemaContractValidation:
         )
 
         with pytest.raises(RuntimeError, match="framework bug inside field_mapper __init__"):
-            _check_schema_contracts(source, (field_mapper_node,), (sink,))
+            _check_schema_contracts({"source": source}, (field_mapper_node,), (sink,))
 
     def test_contract_probe_redacts_exception_detail_from_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression (P2c): the constructor-time exception message is the

@@ -468,11 +468,15 @@ jobs:
             --no-emit-project \
             --format requirements-txt \
             --output-file requirements-audit.txt
+          # CVE-2025-45768 / PYSEC-2025-183 has no fixed PyJWT release;
+          # the disputed weakness is application-selected HMAC key length.
+          # WebSettings enforces a 32-byte secret_key floor on non-loopback hosts.
           uv run --with "pip-audit>=2.9,<3" pip-audit \
             --strict \
             --requirement requirements-audit.txt \
             --no-deps \
             --disable-pip \
+            --ignore-vuln PYSEC-2025-183 \
             --progress-spinner=off
 
       - name: Check Python dependency licenses

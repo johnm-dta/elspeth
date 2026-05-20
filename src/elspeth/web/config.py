@@ -16,6 +16,7 @@ from elspeth.web.validation import (
 )
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES = 32
 _DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS = 300.0
 _DEFAULT_COMPOSER_TRANSPORT_HEADROOM_SECONDS = 30.0
 # Mechanical link to core retention default: if
@@ -461,11 +462,19 @@ class WebSettings(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_secret_key_in_production(self) -> WebSettings:
-        """Reject the default secret key when host suggests non-local deployment."""
-        if self.secret_key == "change-me-in-production" and self.host not in _LOCAL_HOSTS:
+        """Reject default or undersized JWT HMAC keys on non-loopback hosts."""
+        if self.host in _LOCAL_HOSTS:
+            return self
+        if self.secret_key == "change-me-in-production":
             raise ValueError(
                 "secret_key must be set to a secure value for non-local deployments "
                 "(host is not a loopback address). Set ELSPETH_WEB__SECRET_KEY or pass secret_key explicitly."
+            )
+        secret_key_bytes = self.secret_key.encode("utf-8")
+        if len(secret_key_bytes) < _MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES:
+            raise ValueError(
+                f"secret_key must be at least {_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES} bytes for non-local deployments "
+                "(host is not a loopback address). Generate a high-entropy key for ELSPETH_WEB__SECRET_KEY."
             )
         return self
 

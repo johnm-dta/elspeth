@@ -371,14 +371,38 @@ class TestSecretKeyGuard:
         # Uniform-byte placeholders are rejected by the weak-key validator.
         settings = WebSettings(
             host="0.0.0.0",
-            secret_key="my-real-secret",
+            secret_key="this-non-loopback-secret-is-long-enough",
             composer_max_composition_turns=15,
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
             shareable_link_signing_key=b"\xab\xcd" * 16,
         )
-        assert settings.secret_key == "my-real-secret"
+        assert settings.secret_key == "this-non-loopback-secret-is-long-enough"
+
+    def test_short_secret_key_rejected_on_non_local_host(self) -> None:
+        with pytest.raises(ValidationError, match="secret_key must be at least 32 bytes"):
+            WebSettings(
+                host="0.0.0.0",
+                secret_key="short-secret",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\xab\xcd" * 16,
+            )
+
+    def test_short_secret_key_allowed_on_localhost(self) -> None:
+        settings = WebSettings(
+            host="127.0.0.1",
+            secret_key="short-secret",
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+        assert settings.secret_key == "short-secret"
 
     @pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
     @pytest.mark.parametrize("secret_key", ["", "   "])

@@ -17,12 +17,10 @@ class LandscapeConnectionProvider(Protocol):
     """Connection surface required by database operation helpers."""
 
     def read_only_connection(self) -> AbstractContextManager[Connection]:
-        """Open a read-only database connection."""
-        ...
+        raise NotImplementedError
 
     def connection(self) -> AbstractContextManager[Connection]:
-        """Open a write-capable database connection."""
-        ...
+        raise NotImplementedError
 
 
 class ReadOnlyDatabaseOps:

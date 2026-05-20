@@ -3001,11 +3001,11 @@
     },
     {
       "file_path": "plugins/transforms/web_scrape.py",
-      "fingerprint": "26f7b958a2092a7c"
+      "fingerprint": "922ac0bb4c76376b"
     },
     {
       "file_path": "plugins/transforms/web_scrape.py",
-      "fingerprint": "82e38bfffad2dc7d"
+      "fingerprint": "f919002b3beb8525"
     },
     {
       "file_path": "telemetry/exporters/azure_monitor.py",
@@ -3849,55 +3849,71 @@
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "0b6ab7fdc4a03b19"
+      "fingerprint": "0438e025d4ddc0b3"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "17b6ec72f93a6746"
+      "fingerprint": "0a40378bed99324c"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "32b2a5953161fe53"
+      "fingerprint": "1be9831e03d16765"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "6f44d5c74cf3eae8"
+      "fingerprint": "1c4db9634cd49938"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "775df2ef50a148b3"
+      "fingerprint": "3aff3816428e3590"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "802584977e46b274"
+      "fingerprint": "553d63b88e277081"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "a9087bd477d14430"
+      "fingerprint": "5c3102391a7ef9dc"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "af6ff1edfba4b88c"
+      "fingerprint": "8e9f7b0aaa21d365"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "c1ab924542230479"
+      "fingerprint": "93e6d0f366d473f2"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "db3842952ebf2845"
+      "fingerprint": "976e77012c7cb2f6"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "ddabd2fd2e209be2"
+      "fingerprint": "ad8e4160808d1d4d"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "dfd34948b653ac9e"
+      "fingerprint": "bea652fff29d7051"
     },
     {
       "file_path": "web/composer/state.py",
-      "fingerprint": "f01e353263f25724"
+      "fingerprint": "c09544503f550037"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "cacfb09cb1ee4078"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "d30f04f5c3109e3f"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "d7b50b5c57e5c231"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "f4ef2614439ba941"
     },
     {
       "file_path": "web/composer/telemetry_phase8.py",

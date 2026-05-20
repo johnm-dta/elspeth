@@ -466,9 +466,15 @@ def test_insert_composition_state_allocates_contiguous_versions(service):
 
 
 @pytest.mark.timeout(5)
-def test_session_write_lock_serializes_sqlite_same_session_state_version_allocation(service):
+def test_file_backed_sqlite_lock_serializes_same_session_state_version_allocation(tmp_path):
     """Current 1A state writers also use SELECT MAX(version)+1.
-    Two same-session SQLite writers must not both reserve version 1."""
+
+    Use file-backed SQLite here, not the shared in-memory StaticPool fixture:
+    StaticPool hands both worker threads the same DB-API connection, so
+    concurrent ``engine.begin()`` blocks can interfere before the per-session
+    lock is reached. Staging and production use independently checked-out
+    file-backed connections, matching this proof.
+    """
     import threading
     import time
     from concurrent.futures import ThreadPoolExecutor, wait
@@ -476,15 +482,26 @@ def test_session_write_lock_serializes_sqlite_same_session_state_version_allocat
     from sqlalchemy import select
 
     from elspeth.web.sessions import models
+    from elspeth.web.sessions.engine import create_session_engine
     from elspeth.web.sessions.protocol import CompositionStateData
+    from elspeth.web.sessions.schema import initialize_session_schema
 
+    db_path = tmp_path / "sessions.db"
+    engine = create_session_engine(f"sqlite:///{db_path}")
+    initialize_session_schema(engine)
+    service: SessionServiceImpl = SessionServiceImpl(
+        engine,
+        data_dir=tmp_path,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
     barrier = threading.Barrier(2)
-    with service._engine.begin() as conn:
+    with engine.begin() as conn:
         _make_session(conn, session_id="s4_state_lock")
 
     def _writer(index: int) -> int:
         barrier.wait()
-        with service._engine.begin() as conn:  # noqa: SIM117
+        with engine.begin() as conn:  # noqa: SIM117
             with service._session_write_lock(conn, "s4_state_lock"):
                 state_id = service._insert_composition_state(
                     conn,

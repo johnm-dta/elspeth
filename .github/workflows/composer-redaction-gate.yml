@@ -21,13 +21,6 @@ name: composer-redaction-gate
 on:
   pull_request:
     branches: [main, master, "RC*"]
-    paths:
-      - "src/elspeth/web/composer/redaction.py"
-      - "src/elspeth/web/composer/redaction_telemetry.py"
-      - "src/elspeth/web/composer/tools.py"
-      - "tests/unit/web/composer/redaction_policy_snapshot.json"
-      - "tests/unit/web/composer/test_adequacy_guard.py"
-      - "tests/unit/web/composer/test_walk_model_schema.py"
 
 jobs:
   redaction-gate:

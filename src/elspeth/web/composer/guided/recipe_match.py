@@ -69,7 +69,7 @@ from typing import Any, cast
 from elspeth.contracts.composer_slots import SlotSpec, SlotType
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.state_machine import SinkResolved, SourceResolved
+from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
 from elspeth.web.composer.recipes import get_recipe
 
 # ---------------------------------------------------------------------------

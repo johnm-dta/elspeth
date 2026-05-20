@@ -215,8 +215,15 @@ class ExplainScreen:
         """
         self._selected_node_id = node_id
 
+        if not node_id:
+            self._detail_panel.update_state(None)
+            return
+
         match self._state:
-            case LoadedState(db=db, run_id=run_id) | LoadingFailedState(db=db, run_id=run_id) if node_id:
+            case LoadedState(db=db, run_id=run_id):
+                node_state = self._load_node_state(db, run_id, node_id)
+                self._detail_panel.update_state(node_state)
+            case LoadingFailedState(db=db, run_id=run_id):
                 node_state = self._load_node_state(db, run_id, node_id)
                 self._detail_panel.update_state(node_state)
             case _:
@@ -329,15 +336,12 @@ class ExplainScreen:
         lines.append("")
 
         # Render tree if in loaded state
-        match self._state:
-            case LoadedState(tree=tree):
-                lines.append("--- Lineage Tree ---")
-                for node in tree.get_tree_nodes():
-                    indent = "  " * node["depth"]
-                    lines.append(f"{indent}{node['label']}")
-                lines.append("")
-            case _:
-                pass  # No tree to render
+        if isinstance(self._state, LoadedState):
+            lines.append("--- Lineage Tree ---")
+            for node in self._state.tree.get_tree_nodes():
+                indent = "  " * node["depth"]
+                lines.append(f"{indent}{node['label']}")
+            lines.append("")
 
         lines.append("--- Node Details ---")
         lines.append(self._detail_panel.render_content())

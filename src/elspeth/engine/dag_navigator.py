@@ -14,17 +14,22 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import Protocol
 
-from elspeth.contracts import TransformProtocol
+from elspeth.contracts import TokenInfo, TransformProtocol
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.config import GateSettings
+from elspeth.engine.orchestrator.types import RowPlugin
 
-if TYPE_CHECKING:
-    from elspeth.contracts import TokenInfo
-    from elspeth.engine.orchestrator.types import RowPlugin
-    from elspeth.engine.processor import DAGTraversalContext
+
+class DAGTraversalSnapshot(Protocol):
+    """Traversal fields consumed by DAGNavigator.from_traversal_context()."""
+
+    coalesce_node_map: Mapping[CoalesceName, NodeID]
+    node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings]
+    node_to_next: Mapping[NodeID, NodeID | None]
+    branch_first_node: Mapping[str, NodeID]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +92,7 @@ class DAGNavigator:
     @classmethod
     def from_traversal_context(
         cls,
-        traversal: DAGTraversalContext,
+        traversal: DAGTraversalSnapshot,
         *,
         coalesce_on_success_map: Mapping[CoalesceName, str] | None = None,
         sink_names: frozenset[str] | None = None,

@@ -23,7 +23,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
-    from elspeth.engine.processor import RowProcessor
 
 # Import protocols at runtime (not TYPE_CHECKING) because RowPlugin type alias
 # is used in runtime annotations and isinstance() checks
@@ -54,6 +53,22 @@ PendingTokenMap = dict[str, list[tuple["TokenInfo", "PendingOutcome | None"]]]
 # batch-aware transforms (is_batch_aware=True on TransformProtocol)
 RowPlugin = TransformProtocol
 """Row-processing plugin type for pipeline transforms list."""
+
+
+class RowProcessorHandle(Protocol):
+    """Orchestrator-facing processor contract stored in run/loop contexts."""
+
+    def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
+        """Return serializable aggregation checkpoint state."""
+        ...
+
+    def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
+        """Return serializable coalesce checkpoint state."""
+        ...
+
+    def resolve_sink_step(self) -> int:
+        """Return the audit step index used for sink writes."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,7 +402,7 @@ class RunContext:
     """
 
     ctx: PluginContext
-    processor: RowProcessor
+    processor: RowProcessorHandle
     coalesce_executor: CoalesceExecutor | None
     coalesce_node_map: Mapping[CoalesceName, NodeID]
     agg_transform_lookup: Mapping[str, AggNodeEntry]
@@ -418,7 +433,7 @@ class LoopContext:
     pending_tokens: PendingTokenMap
 
     # --- Read-only after construction (not reassigned) ---
-    processor: RowProcessor
+    processor: RowProcessorHandle
     ctx: PluginContext
     config: PipelineConfig
     agg_transform_lookup: Mapping[str, AggNodeEntry]

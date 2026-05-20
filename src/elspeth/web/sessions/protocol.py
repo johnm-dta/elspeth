@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
@@ -26,15 +26,6 @@ from elspeth.contracts.composer_interpretation import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields, require_int
-
-if TYPE_CHECKING:
-    # TYPE_CHECKING-only import to avoid a runtime circular dependency:
-    # ``_persist_payload`` imports ``CompositionStateData`` from this
-    # module, so this module MUST NOT import ``_persist_payload`` at
-    # runtime. The async dispatcher signature on
-    # ``SessionServiceProtocol.persist_compose_turn_async`` only needs
-    # the names for type-checker resolution.
-    from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
 
 ChatMessageRole = Literal["user", "assistant", "system", "tool", "audit"]
 ComposerTrustMode = Literal["explicit_approve", "auto_commit"]
@@ -1132,12 +1123,12 @@ class SessionServiceProtocol(Protocol):
         assistant_content: str,
         raw_content: str | None = None,
         redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
-        redacted_tool_rows: tuple[RedactedToolRow, ...],
+        redacted_tool_rows: tuple[Any, ...],
         parent_composition_state_id: str | None,
         expected_current_state_id: str | None,
         writer_principal: ChatMessageWriterPrincipal,
         plugin_crash_pending: bool,
-    ) -> AuditOutcome:
+    ) -> Any:
         """Persist one compose turn (assistant + tool rows + per-tool
         composition states) atomically.
 

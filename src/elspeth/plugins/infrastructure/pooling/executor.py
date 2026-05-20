@@ -322,7 +322,7 @@ class PooledExecutor:
                 )
                 self._buffer.complete(buffer_idx, shutdown_result)
                 # Mark remaining contexts as shutdown errors too
-                for _remaining_ctx in contexts[contexts.index(ctx) + 1 :]:
+                for _ in contexts[contexts.index(ctx) + 1 :]:
                     remaining_idx = self._buffer.submit()
                     self._buffer.complete(
                         remaining_idx,

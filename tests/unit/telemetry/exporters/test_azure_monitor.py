@@ -332,15 +332,15 @@ class TestAzureMonitorExporterErrorHandling:
         # Buffer should still be empty (event dropped)
         assert len(exporter._buffer) == 0
 
-    def test_sdk_export_failure_does_not_raise(self, configured_exporter, mock_azure_exporter) -> None:
-        """SDK export failure is logged but doesn't raise."""
+    def test_sdk_export_failure_reports_handled_failure(self, configured_exporter, mock_azure_exporter) -> None:
+        """SDK export transport failures are reported without raising."""
         mock_azure_exporter["instance"].export.side_effect = ConnectionError("SDK transport error")
 
         event = make_run_started()
         configured_exporter._buffer.append(event)
 
-        # Should not raise
-        configured_exporter._flush_batch()
+        result = configured_exporter._flush_batch()
+        assert result is False
 
         # Buffer should be cleared even on failure
         assert len(configured_exporter._buffer) == 0

@@ -680,6 +680,39 @@ class TestExporterFailureIsolation:
         finally:
             manager.close()
 
+    def test_exporter_handled_failure_return_tracked_per_name(self) -> None:
+        class ReportingFailureExporter:
+            _name = "reported-failure"
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, _config: object) -> None:
+                pass
+
+            def export(self, _event: object) -> bool:
+                return False
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        config = MockTelemetryConfig()
+        failing = ReportingFailureExporter()
+        manager = TelemetryManager(config, exporters=[failing])
+        try:
+            manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            metrics = manager.health_metrics
+            assert metrics["events_emitted"] == 0
+            assert metrics["events_dropped"] == 1
+            assert metrics["exporter_failures"].get("reported-failure") == 1
+        finally:
+            manager.close()
+
 
 # =============================================================================
 # Total Exporter Failure

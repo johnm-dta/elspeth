@@ -226,7 +226,19 @@ class TelemetryManager:
                 continue
 
             try:
-                exporter.export(event)
+                result = exporter.export(event)
+                if result is False:
+                    breaker.record_failure()
+                    failures += 1
+                    self._exporter_failures[exporter.name] = self._exporter_failures.get(exporter.name, 0) + 1
+                    logger.warning(
+                        "Telemetry exporter reported handled failure",
+                        exporter=exporter.name,
+                        event_type=type(event).__name__,
+                        circuit_state=breaker.state.name,
+                    )
+                    continue
+
                 breaker.record_success()
                 successes += 1
             except Exception as e:

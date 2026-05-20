@@ -1629,7 +1629,8 @@ class TelemetryExporterError(Exception):
     """Raised when an exporter encounters a configuration or initialization error.
 
     This is raised during exporter setup (configure/initialization), NOT during
-    export operations. Export operations must not raise — they log errors instead.
+    handled export transport failures. Export operations report handled
+    transport failures to TelemetryManager with a False return value.
 
     Attributes:
         exporter_name: Name of the exporter that failed

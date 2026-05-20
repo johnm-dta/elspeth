@@ -304,14 +304,6 @@ allow_hits:
     yet
   safety: Legitimate cleanup pattern in error path
   expires: '2026-07-02'
-- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=4b8cc1b6067415ff
-  owner: bugfix
-  reason: Thread pool may be shut down concurrently during submit(); RuntimeError
-    is translated into deterministic per-row shutdown results so submission-order
-    slots are still completed
-  safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
-    explicit shutdown_requested errors while unrelated exception types still propagate
-  expires: '2026-07-17'
 - key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=5ce04fa54ab80b94
   owner: bugfix
   pattern: union-dispatch
@@ -797,3 +789,11 @@ allow_hits:
   safety: Records schema validation evidence and yields quarantine unless discard;
     programmer errors still propagate.
   expires: '2026-08-17'
+- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=d90958e285a74a8e
+  owner: bugfix
+  reason: Thread pool may be shut down concurrently during submit(); RuntimeError
+    is translated into deterministic per-row shutdown results so submission-order
+    slots are still completed
+  safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
+    explicit shutdown_requested errors while unrelated exception types still propagate
+  expires: '2026-07-17'

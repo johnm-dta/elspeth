@@ -30,6 +30,7 @@ from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.security.web import (
     NetworkError as SSRFNetworkError,
 )
@@ -101,6 +102,11 @@ class WebScrapeHTTPConfig(BaseModel):
     def _reject_empty(cls, v: str, info: Any) -> str:
         if not v.strip():
             raise ValueError(f"{info.field_name} must not be empty")
+        if is_wire_visible_placeholder(v):
+            raise ValueError(
+                f"{info.field_name} must be supplied by the operator or deployment identity; "
+                "placeholder values are not valid for wire-visible HTTP headers"
+            )
         return v
 
     @field_validator("allowed_hosts")

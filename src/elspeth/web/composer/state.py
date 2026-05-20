@@ -29,6 +29,7 @@ from elspeth.contracts.schema import (
     get_raw_sink_required_fields,
     raw_options_have_schema,
 )
+from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.config import TriggerConfig
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
 from elspeth.engine.orchestrator.validation import (
@@ -744,9 +745,7 @@ def _validate_gate_expression(condition: str) -> str | None:
 # to scraped third parties — a Tier-1 audit-integrity defect — regardless of
 # any prose rationale ("placeholder", "internal default") the composer LLM
 # attached to them. Mechanical backstop for the skill-prompt rule in
-# pipeline_composer.md (web_scrape.http section); pairs with the future
-# angle-bracket placeholder rule tracked in elspeth-f1efeed9c2 for layered
-# defence.
+# pipeline_composer.md (web_scrape.http section).
 _RFC_RESERVED_DOMAIN_LABELS: tuple[str, ...] = (
     "example.com",
     "example.org",
@@ -799,6 +798,35 @@ def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> Validatio
                 severity="high",
             )
     return None
+
+
+def _validate_web_scrape_http_identity_not_placeholder(node: NodeSpec) -> tuple[ValidationEntry, ...]:
+    """Reject placeholder values in web_scrape's wire-visible HTTP identity fields."""
+    if node.plugin != "web_scrape":
+        return ()
+    http = node.options.get("http")
+    if not isinstance(http, Mapping):
+        return ()
+
+    errors: list[ValidationEntry] = []
+    for field_name in ("abuse_contact", "scraping_reason"):
+        value = http.get(field_name)
+        if not isinstance(value, str):
+            continue
+        if not is_wire_visible_placeholder(value):
+            continue
+        errors.append(
+            ValidationEntry(
+                component=f"node:{node.id}",
+                message=(
+                    f"web_scrape.http.{field_name} is a placeholder value. This field ships as an HTTP "
+                    "header to the scraped host, so it must be supplied by the operator or deployment "
+                    "identity before the pipeline can be considered valid."
+                ),
+                severity="high",
+            )
+        )
+    return tuple(errors)
 
 
 def _locked_input_field_set(options: Mapping[str, Any], owner: str) -> frozenset[str] | None:
@@ -1939,6 +1967,7 @@ class CompositionState:
             abuse_contact_error = _validate_web_scrape_abuse_contact_not_reserved(node)
             if abuse_contact_error is not None:
                 errors.append(abuse_contact_error)
+            errors.extend(_validate_web_scrape_http_identity_not_placeholder(node))
 
             if node.node_type == "gate":
                 if node.condition is None:

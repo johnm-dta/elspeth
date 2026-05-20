@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import bcrypt
@@ -59,9 +61,19 @@ class LocalAuthProvider:
         """Open a connection to the SQLite database."""
         return sqlite3.connect(str(self._db_path))
 
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a transaction-scoped SQLite connection and always close it."""
+        conn = self._get_conn()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _ensure_schema(self) -> None:
         """Create the users table if it does not exist."""
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -88,7 +100,7 @@ class LocalAuthProvider:
         if not display_name:
             raise ValueError("display_name must not be empty")
         password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             try:
                 conn.execute(
                     "INSERT INTO users (user_id, password_hash, display_name, email) VALUES (?, ?, ?, ?)",
@@ -118,7 +130,7 @@ class LocalAuthProvider:
         if not username or not password:
             raise AuthenticationError("Invalid credentials")
 
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT password_hash FROM users WHERE user_id = ?",
                 (username,),
@@ -170,7 +182,7 @@ class LocalAuthProvider:
         if chain_age_hours > self._max_refresh_chain_hours:
             raise AuthenticationError("Token refresh chain expired — please re-authenticate")
 
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM users WHERE user_id = ?",
                 (user_id,),
@@ -215,7 +227,7 @@ class LocalAuthProvider:
 
     def _user_exists(self, user_id: str) -> bool:
         """Check if a user still exists in auth.db (sync, called via to_thread)."""
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM users WHERE user_id = ?",
                 (user_id,),
@@ -224,7 +236,7 @@ class LocalAuthProvider:
 
     def _query_user(self, user_id: str) -> tuple[str, str | None] | None:
         """Synchronous DB lookup — called via run_sync_in_worker."""
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row: tuple[str, str | None] | None = conn.execute(
                 "SELECT display_name, email FROM users WHERE user_id = ?",
                 (user_id,),

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
+from contextlib import closing
 from typing import Any
 
 import jwt as pyjwt
@@ -25,6 +27,12 @@ def provider(tmp_path):
 def _signed_local_token(provider: LocalAuthProvider, claims: dict[str, Any]) -> str:
     """Create a signed local JWT for boundary-shape tests."""
     return pyjwt.encode(claims, provider._secret_key, algorithm="HS256")
+
+
+def _delete_user(provider: LocalAuthProvider, user_id: str) -> None:
+    """Delete a test user without leaking sqlite3's transaction-only context manager."""
+    with closing(sqlite3.connect(str(provider._db_path))) as conn, conn:
+        conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
 
 
 class TestCreateUser:
@@ -119,14 +127,11 @@ class TestAuthenticate:
     @pytest.mark.asyncio
     async def test_authenticate_deleted_user_rejected(self, provider) -> None:
         """A deleted user's JWT must be rejected by authenticate()."""
-        import sqlite3
-
         provider.create_user("alice", "pw", display_name="Alice")
         token = await provider.login("alice", "pw")
 
         # Delete the user behind the provider's back
-        with sqlite3.connect(str(provider._db_path)) as conn:
-            conn.execute("DELETE FROM users WHERE user_id = ?", ("alice",))
+        _delete_user(provider, "alice")
 
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await provider.authenticate(token)
@@ -247,10 +252,7 @@ class TestGetUserInfo:
         token = await provider.login("alice", "pw")
 
         # Access _db_path directly — no public API to delete users by design
-        import sqlite3
-
-        with sqlite3.connect(str(provider._db_path)) as conn:
-            conn.execute("DELETE FROM users WHERE user_id = ?", ("alice",))
+        _delete_user(provider, "alice")
 
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await provider.get_user_info(token)
@@ -301,12 +303,9 @@ class TestRefresh:
     @pytest.mark.asyncio
     async def test_refresh_deleted_user_raises(self, provider) -> None:
         """A deleted user cannot obtain fresh tokens via refresh."""
-        import sqlite3
-
         provider.create_user("alice", "pw", display_name="Alice")
         # Access _db_path directly — no public API to delete users by design
-        with sqlite3.connect(str(provider._db_path)) as conn:
-            conn.execute("DELETE FROM users WHERE user_id = ?", ("alice",))
+        _delete_user(provider, "alice")
         with pytest.raises(AuthenticationError, match="User not found"):
             await provider.refresh("alice", "alice", original_iat=int(time.time()))
 

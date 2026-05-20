@@ -8,6 +8,7 @@ import errno
 import json
 import os
 import sys
+import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +23,7 @@ from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.sdk.metrics import MeterProvider
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ValidationError, field_validator
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
@@ -97,6 +99,11 @@ _RETRYABLE_STORAGE_ERRNOS: frozenset[int] = frozenset(
         errno.EIO,
     }
 )
+
+
+def _dispose_session_engine(engine: Engine) -> None:
+    """Dispose the sessions DB pool for app instances that never run lifespan."""
+    engine.dispose()
 
 
 class _AuthorizationEndpointDiscoveryDocument(BaseModel):
@@ -331,16 +338,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     )
 
-    yield
+    try:
+        yield
+    finally:
+        # Cancel periodic cleanup before shutting down the executor
+        orphan_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await orphan_task
 
-    # Cancel periodic cleanup before shutting down the executor
-    orphan_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await orphan_task
-
-    # Shutdown execution service thread pool without blocking the loop:
-    # worker cleanup still schedules terminal-state writes back onto it.
-    await execution_service.shutdown()
+        # Shutdown execution service thread pool without blocking the loop:
+        # worker cleanup still schedules terminal-state writes back onto it.
+        await execution_service.shutdown()
+        app.state.session_engine.dispose()
 
 
 # Fields that accept JSON-encoded collection values from environment variables.
@@ -633,6 +642,10 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     session_db_url = settings.get_session_db_url()
     session_engine = create_session_engine(session_db_url)
     initialize_session_schema(session_engine)
+    session_db_path = session_engine.url.database
+    if session_engine.dialect.name == "sqlite" and session_db_path not in (None, ":memory:"):
+        session_engine.dispose()
+    weakref.finalize(app, _dispose_session_engine, session_engine)
 
     # Build the sessions-telemetry container ONCE per process and share it
     # across every consumer (SessionServiceImpl, ExecutionServiceImpl, and

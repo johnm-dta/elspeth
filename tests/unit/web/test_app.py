@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import sys
+import weakref
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -131,6 +133,26 @@ class TestCreateApp:
         app = create_app(settings)
 
         assert app is not None
+
+    def test_abandoned_app_disposes_session_engine(self, tmp_path, monkeypatch) -> None:
+        """Unit tests often instantiate ``create_app`` without running lifespan."""
+        app = create_app(_settings(tmp_path))
+        disposed = False
+        original_dispose = app.state.session_engine.dispose
+
+        def dispose() -> None:
+            nonlocal disposed
+            disposed = True
+            original_dispose()
+
+        monkeypatch.setattr(app.state.session_engine, "dispose", dispose)
+        app_ref = weakref.ref(app)
+
+        del app
+        gc.collect()
+
+        assert app_ref() is None
+        assert disposed
 
 
 class TestHealthEndpoint:
